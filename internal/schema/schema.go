@@ -26,6 +26,7 @@ type Table struct {
     ForeignKeys []*ForeignKey  `yaml:"-"`
     Triggers   []*Trigger      `yaml:"-"`
     ColumnOrder []string       `yaml:"-"`
+    DependsOn []string         `yaml:"dependsOn"`
 }
 
 type Column struct {
@@ -61,6 +62,7 @@ type Trigger struct {
 type Extension struct {
     Name        string `yaml:"name"`
     IfNotExists bool   `yaml:"ifNotExists"`
+    DependsOn   []string `yaml:"dependsOn"`
 }
 
 type TypeDef struct {
@@ -69,6 +71,7 @@ type TypeDef struct {
     Kind   string   // enum|composite
     Labels []string // enum
     Attributes map[string]string // composite: name->type
+    DependsOn []string `yaml:"dependsOn"`
 }
 
 type Function struct {
@@ -82,6 +85,7 @@ type Function struct {
     Strict bool
     Set map[string]string
     Body string
+    DependsOn []string `yaml:"dependsOn"`
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -161,6 +165,9 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                     if name == "" { continue }
                     ext := &Extension{Name: name}
                     if b, ok := m["ifNotExists"].(bool); ok { ext.IfNotExists = b }
+                    if dep, ok := m["dependsOn"]; ok {
+                        ext.DependsOn = parseStringListFromNode(dep)
+                    }
                     out.Extensions = append(out.Extensions, ext)
                 }
             }
@@ -251,6 +258,9 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if trgRaw, ok := inner["triggers"]; ok {
                     t.Triggers = parseTriggers(trgRaw)
+                }
+                if dep, ok := inner["dependsOn"]; ok {
+                    t.DependsOn = parseStringListFromNode(dep)
                 }
             }
             db.Tables[fq] = t
@@ -405,6 +415,9 @@ func parseFunction(schemaName, key string, body any) *Function {
         }
     }
     if b, ok := m["body"].(string); ok { fn.Body = b }
+    if dep, ok := m["dependsOn"]; ok {
+        fn.DependsOn = parseStringListFromNode(dep)
+    }
     return fn
 }
 
@@ -424,6 +437,9 @@ func parseType(schemaName, key string, body any) *TypeDef {
                 if t, ok := mm["type"].(string); ok { td.Attributes[k] = t }
             }
         }
+    }
+    if dep, ok := m["dependsOn"]; ok {
+        td.DependsOn = parseStringListFromNode(dep)
     }
     return td
 }
@@ -474,6 +490,175 @@ func SortedTableNames(d *Database) []string {
     }
     sort.Strings(out)
     return out
+}
+
+// Entity represents any orderable entity (extension, type, function, table)
+type Entity struct {
+    Key      string   // fully qualified name
+    Kind     string   // "extension", "type", "function", "table"
+    DependsOn []string // dependencies as written in YAML
+}
+
+// TopologicalSort returns all entities in dependency order
+func TopologicalSort(d *Database) ([]Entity, error) {
+    entities := []Entity{}
+    entityMap := map[string]Entity{}
+    
+    // Collect all entities
+    for _, ext := range d.Extensions {
+        if ext == nil { continue }
+        key := ext.Name
+        e := Entity{Key: key, Kind: "extension", DependsOn: ext.DependsOn}
+        entities = append(entities, e)
+        entityMap[key] = e
+    }
+    for k, td := range d.Types {
+        if td == nil { continue }
+        e := Entity{Key: k, Kind: "type", DependsOn: td.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
+    for k, fn := range d.Functions {
+        if fn == nil { continue }
+        e := Entity{Key: k, Kind: "function", DependsOn: fn.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
+    for k, t := range d.Tables {
+        if t == nil { continue }
+        e := Entity{Key: k, Kind: "table", DependsOn: t.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
+    
+    // Resolve dependencies: convert "table private.account" -> "private.account"
+    // Build dependency graph
+    graph := map[string][]string{} // node -> list of dependencies
+    for _, e := range entities {
+        graph[e.Key] = []string{}
+        for _, rawDep := range e.DependsOn {
+            resolvedKey := resolveDependency(rawDep, d)
+            if resolvedKey != "" {
+                graph[e.Key] = append(graph[e.Key], resolvedKey)
+            }
+        }
+    }
+    
+    // Topological sort (Kahn's algorithm)
+    inDegree := map[string]int{}
+    for k := range graph {
+        inDegree[k] = 0
+    }
+    for k, deps := range graph {
+        for _, dep := range deps {
+            if _, exists := graph[dep]; exists {
+                inDegree[k]++
+            }
+        }
+    }
+    
+    queue := []string{}
+    for k, deg := range inDegree {
+        if deg == 0 {
+            queue = append(queue, k)
+        }
+    }
+    
+    result := []Entity{}
+    visited := map[string]bool{}
+    
+    for len(queue) > 0 {
+        node := queue[0]
+        queue = queue[1:]
+        if visited[node] { continue }
+        visited[node] = true
+        if e, ok := entityMap[node]; ok {
+            result = append(result, e)
+        }
+        // Find nodes that depend on this one
+        for k, deps := range graph {
+            if visited[k] { continue }
+            for _, dep := range deps {
+                if dep == node {
+                    inDegree[k]--
+                    if inDegree[k] == 0 {
+                        queue = append(queue, k)
+                    }
+                }
+            }
+        }
+    }
+    
+    // Add any remaining nodes (cycles or missing deps)
+    for k, e := range entityMap {
+        if !visited[k] {
+            result = append(result, e)
+        }
+    }
+    
+    return result, nil
+}
+
+// resolveDependency converts raw dependency strings like "table private.account" or "schema private"
+// to the actual entity key
+func resolveDependency(raw string, d *Database) string {
+    raw = strings.TrimSpace(raw)
+    if raw == "" { return "" }
+    
+    // Handle "schema <name>"
+    if strings.HasPrefix(raw, "schema ") {
+        // Schema dependencies are not currently resolved to specific entities
+        // In practice, we might want to track schema dependencies separately
+        return ""
+    }
+    
+    // Handle "table <name>"
+    if strings.HasPrefix(raw, "table ") {
+        tableName := strings.TrimSpace(strings.TrimPrefix(raw, "table "))
+        if !strings.Contains(tableName, ".") {
+            tableName = "public." + tableName
+        }
+        if _, ok := d.Tables[tableName]; ok {
+            return tableName
+        }
+        return ""
+    }
+    
+    // Handle "function <name>(args)"
+    if strings.HasPrefix(raw, "function ") {
+        fnSig := strings.TrimSpace(strings.TrimPrefix(raw, "function "))
+        for k := range d.Functions {
+            if strings.Contains(k, fnSig) || strings.HasPrefix(k, fnSig) {
+                return k
+            }
+        }
+        return ""
+    }
+    
+    // Handle "type <name>"
+    if strings.HasPrefix(raw, "type ") {
+        typeName := strings.TrimSpace(strings.TrimPrefix(raw, "type "))
+        if !strings.Contains(typeName, ".") {
+            typeName = "public." + typeName
+        }
+        if _, ok := d.Types[typeName]; ok {
+            return typeName
+        }
+        return ""
+    }
+    
+    // Direct name match
+    if _, ok := d.Tables[raw]; ok { return raw }
+    if _, ok := d.Types[raw]; ok { return raw }
+    if _, ok := d.Functions[raw]; ok { return raw }
+    
+    // Try with public schema
+    pub := "public." + raw
+    if _, ok := d.Tables[pub]; ok { return pub }
+    if _, ok := d.Types[pub]; ok { return pub }
+    if _, ok := d.Functions[pub]; ok { return pub }
+    
+    return ""
 }
 
 func errorsIsNotExist(err error) bool {
