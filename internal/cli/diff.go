@@ -30,7 +30,13 @@ func cmdDiff() *cobra.Command {
                 if !fromEmpty {
                     return fmt.Errorf("--dsn or PGY_DSN is required (or use --from-empty)")
                 }
-                live = &diff.Live{Schemas: map[string]bool{}, Tables: map[string]*diff.LiveTable{}}
+                live = &diff.Live{
+                    Schemas: map[string]bool{}, 
+                    Tables: map[string]*diff.LiveTable{},
+                    Types: map[string]bool{},
+                    Functions: map[string]bool{},
+                    Extensions: map[string]bool{},
+                }
             } else {
                 pool, err2 := db.Connect(ctx, cfg.DSN)
                 if err2 != nil {

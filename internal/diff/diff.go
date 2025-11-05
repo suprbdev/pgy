@@ -13,6 +13,9 @@ import (
 type Live struct{
     Schemas map[string]bool
     Tables map[string]*LiveTable
+    Types map[string]bool
+    Functions map[string]bool
+    Extensions map[string]bool
 }
 type LiveTable struct{
     Columns map[string]*LiveColumn
@@ -24,7 +27,13 @@ type LiveColumn struct{
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
-    l := &Live{Schemas: map[string]bool{}, Tables: map[string]*LiveTable{}}
+    l := &Live{
+        Schemas: map[string]bool{}, 
+        Tables: map[string]*LiveTable{},
+        Types: map[string]bool{},
+        Functions: map[string]bool{},
+        Extensions: map[string]bool{},
+    }
     
     // Query existing schemas
     schemaQ := `
@@ -44,7 +53,27 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     schemaRows.Close()
     
-    // Query tables
+    // Query all tables (not just those with columns)
+    tableQ := `
+        select table_schema, table_name
+        from information_schema.tables
+        where table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and table_type = 'BASE TABLE'
+    `
+    tableRows, err := pool.Query(ctx, tableQ)
+    if err != nil { return nil, err }
+    for tableRows.Next() {
+        var schemaName, tableName string
+        if err := tableRows.Scan(&schemaName, &tableName); err != nil {
+            tableRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}}
+    }
+    tableRows.Close()
+    
+    // Query columns to enrich table info
     const q = `
         select table_schema, table_name, column_name, data_type, is_nullable, coalesce(column_default, '')
         from information_schema.columns
@@ -62,7 +91,64 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def}
     }
-    return l, rows.Err()
+    if err := rows.Err(); err != nil { return nil, err }
+    
+    // Query existing types
+    typeQ := `
+        select n.nspname, t.typname
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and t.typtype in ('e', 'c')
+    `
+    typeRows, err := pool.Query(ctx, typeQ)
+    if err != nil { return nil, err }
+    for typeRows.Next() {
+        var schemaName, typeName string
+        if err := typeRows.Scan(&schemaName, &typeName); err != nil {
+            typeRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, typeName)
+        l.Types[key] = true
+    }
+    typeRows.Close()
+    
+    // Query existing functions
+    funcQ := `
+        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    funcRows, err := pool.Query(ctx, funcQ)
+    if err != nil { return nil, err }
+    for funcRows.Next() {
+        var schemaName, funcName, args string
+        if err := funcRows.Scan(&schemaName, &funcName, &args); err != nil {
+            funcRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
+        l.Functions[key] = true
+    }
+    funcRows.Close()
+    
+    // Query existing extensions
+    extQ := `select extname from pg_extension`
+    extRows, err := pool.Query(ctx, extQ)
+    if err != nil { return nil, err }
+    for extRows.Next() {
+        var extName string
+        if err := extRows.Scan(&extName); err != nil {
+            extRows.Close()
+            return nil, err
+        }
+        l.Extensions[extName] = true
+    }
+    extRows.Close()
+    
+    return l, nil
 }
 
 type PlanDiff struct{
@@ -125,7 +211,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     extNames := make([]string, 0, len(desired.Extensions))
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Name != "" {
-            extNames = append(extNames, ext.Name)
+            if !live.Extensions[ext.Name] {
+                extNames = append(extNames, ext.Name)
+            }
         }
     }
     sort.Strings(extNames)
@@ -154,6 +242,8 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         case "type":
             td, ok := desired.Types[e.Key]
             if !ok || td == nil { continue }
+            // Check if type already exists
+            if live.Types[e.Key] { continue }
             if td.Kind == "enum" {
                 labels := make([]string, 0, len(td.Labels))
                 for _, l := range td.Labels { labels = append(labels, quoteString(l)) }
@@ -169,6 +259,19 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         case "function":
             f, ok := desired.Functions[e.Key]
             if !ok || f == nil { continue }
+            // Check if function already exists - normalize signature for comparison
+            // ArgsSig already includes parentheses, e.g., "(key text, default_value jsonb default null)"
+            desiredSig := e.Key + f.ArgsSig
+            normalizedDesired := normalizeFunctionSignature(desiredSig)
+            found := false
+            for liveSig := range live.Functions {
+                normalizedLive := normalizeFunctionSignature(liveSig)
+                if normalizedLive == normalizedDesired {
+                    found = true
+                    break
+                }
+            }
+            if found { continue }
             setClauses := ""
             if len(f.Set) > 0 {
                 keys := make([]string, 0, len(f.Set))
@@ -311,6 +414,123 @@ func findExtension(db *schema.Database, name string) *schema.Extension {
         }
     }
     return nil
+}
+
+// normalizeFunctionSignature normalizes function signatures for comparison
+// Removes default values and normalizes whitespace and type names
+// Input formats: "schema.func(args)" or "schema.func (args)"
+// Args may contain defaults like "key text, val jsonb default null"
+func normalizeFunctionSignature(sig string) string {
+    // Find the opening parenthesis
+    parenIdx := strings.Index(sig, "(")
+    if parenIdx < 0 {
+        // No args, return normalized name only
+        return strings.ToLower(strings.TrimSpace(sig))
+    }
+    
+    funcPart := strings.TrimSpace(sig[:parenIdx])
+    argsPart := strings.TrimSpace(sig[parenIdx+1:])
+    // Remove closing paren if present
+    argsPart = strings.TrimSuffix(argsPart, ")")
+    
+    // Normalize function name (lowercase, remove extra spaces)
+    funcPart = strings.ToLower(strings.ReplaceAll(funcPart, " ", ""))
+    
+    // Parse and normalize arguments
+    // Split by comma, but be careful of nested structures
+    args := []string{}
+    current := ""
+    depth := 0
+    for _, r := range argsPart {
+        switch r {
+        case '(':
+            depth++
+            current += string(r)
+        case ')':
+            depth--
+            current += string(r)
+        case ',':
+            if depth == 0 {
+                arg := normalizeArg(strings.TrimSpace(current))
+                if arg != "" {
+                    args = append(args, arg)
+                }
+                current = ""
+            } else {
+                current += string(r)
+            }
+        default:
+            current += string(r)
+        }
+    }
+    if current != "" {
+        arg := normalizeArg(strings.TrimSpace(current))
+        if arg != "" {
+            args = append(args, arg)
+        }
+    }
+    
+    // Reconstruct normalized signature with consistent spacing
+    normalizedArgs := strings.Join(args, ", ")
+    return fmt.Sprintf("%s(%s)", funcPart, normalizedArgs)
+}
+
+// normalizeArg removes default values from a function argument and normalizes types
+// e.g., "key text default null" -> "key text"
+// Format is typically: "param_name type_name" or "param_name type_name default value"
+func normalizeArg(arg string) string {
+    // Remove default clauses (case insensitive)
+    arg = strings.TrimSpace(arg)
+    
+    // Find where "default" keyword starts (case insensitive)
+    defaultIdx := -1
+    words := strings.Fields(arg)
+    for i, word := range words {
+        if strings.EqualFold(word, "default") {
+            defaultIdx = i
+            break
+        }
+    }
+    
+    if defaultIdx < 0 {
+        // No default clause, normalize what we have
+        return normalizeArgNoDefault(arg)
+    }
+    
+    // Take everything before "default"
+    beforeDefault := strings.Join(words[:defaultIdx], " ")
+    return normalizeArgNoDefault(beforeDefault)
+}
+
+// normalizeArgNoDefault normalizes an argument without default clause
+func normalizeArgNoDefault(arg string) string {
+    // Format: "param_name type_name" or "param_name schema.type_name"
+    // Normalize whitespace and type names
+    words := strings.Fields(arg)
+    if len(words) < 2 {
+        return strings.ToLower(strings.TrimSpace(arg))
+    }
+    
+    // Parameter name (first word) - lowercase for comparison
+    paramName := strings.ToLower(words[0])
+    
+    // Type name (rest) - normalize to lowercase
+    typeName := strings.ToLower(strings.Join(words[1:], " "))
+    
+    // Normalize common PostgreSQL type aliases and variations to canonical forms
+    // Order matters - do longer matches first
+    typeName = strings.ReplaceAll(typeName, "character varying", "varchar")
+    typeName = strings.ReplaceAll(typeName, "double precision", "float8")
+    typeName = strings.ReplaceAll(typeName, "integer", "int")
+    typeName = strings.ReplaceAll(typeName, "int4", "int")
+    typeName = strings.ReplaceAll(typeName, "int8", "bigint")
+    typeName = strings.ReplaceAll(typeName, "boolean", "bool")
+    typeName = strings.ReplaceAll(typeName, "character", "char")
+    
+    // Normalize whitespace (multiple spaces to single)
+    typeName = strings.Join(strings.Fields(typeName), " ")
+    
+    return paramName + " " + typeName
 }
 
 
