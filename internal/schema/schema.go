@@ -16,6 +16,15 @@ type Database struct {
     Extensions []*Extension `yaml:"extensions"`
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
+    Views map[string]*View `yaml:"-"`
+}
+
+type View struct {
+    Schema       string
+    Name         string
+    Query        string
+    Materialized bool
+    DependsOn    []string `yaml:"dependsOn"`
 }
 
 type Table struct {
@@ -139,6 +148,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
             if merged.Functions == nil { merged.Functions = map[string]*Function{} }
             for k, v := range d.Functions { merged.Functions[k] = v }
         }
+        // merge views
+        if len(d.Views) > 0 {
+            if merged.Views == nil { merged.Views = map[string]*View{} }
+            for k, v := range d.Views { merged.Views[k] = v }
+        }
     }
     return merged, nil
 }
@@ -159,6 +173,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out := &Database{Tables: map[string]*Table{}}
     out.Types = map[string]*TypeDef{}
     out.Functions = map[string]*Function{}
+    out.Views = map[string]*View{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
@@ -316,6 +331,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if td != nil {
                 full := qualify(schemaName, td.Name)
                 db.Types[full] = td
+            }
+        } else if strings.HasPrefix(key, "view ") || strings.HasPrefix(key, "materialized view ") {
+            vw := parseView(schemaName, key, body)
+            if vw != nil {
+                full := qualify(schemaName, vw.Name)
+                db.Views[full] = vw
             }
         }
     }
@@ -588,6 +609,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, vw := range d.Views {
+        if vw == nil { continue }
+        e := Entity{Key: k, Kind: "view", DependsOn: vw.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     
     // Resolve dependencies: convert "table private.account" -> "private.account"
     // Build dependency graph
@@ -705,18 +732,54 @@ func resolveDependency(raw string, d *Database) string {
         return ""
     }
     
+    // Handle "view <name>"
+    if strings.HasPrefix(raw, "view ") || strings.HasPrefix(raw, "materialized view ") {
+        viewName := raw
+        if strings.HasPrefix(raw, "view ") {
+            viewName = strings.TrimSpace(strings.TrimPrefix(raw, "view "))
+        } else {
+            viewName = strings.TrimSpace(strings.TrimPrefix(raw, "materialized view "))
+        }
+        if !strings.Contains(viewName, ".") {
+            viewName = "public." + viewName
+        }
+        if _, ok := d.Views[viewName]; ok {
+            return viewName
+        }
+        return ""
+    }
+
     // Direct name match
     if _, ok := d.Tables[raw]; ok { return raw }
     if _, ok := d.Types[raw]; ok { return raw }
     if _, ok := d.Functions[raw]; ok { return raw }
-    
+    if _, ok := d.Views[raw]; ok { return raw }
+
     // Try with public schema
     pub := "public." + raw
     if _, ok := d.Tables[pub]; ok { return pub }
     if _, ok := d.Types[pub]; ok { return pub }
     if _, ok := d.Functions[pub]; ok { return pub }
-    
+    if _, ok := d.Views[pub]; ok { return pub }
+
     return ""
+}
+
+func parseView(schemaName, key string, body any) *View {
+    materialized := strings.HasPrefix(key, "materialized view ")
+    prefix := "view "
+    if materialized {
+        prefix = "materialized view "
+    }
+    name := strings.TrimSpace(strings.TrimPrefix(key, prefix))
+    vw := &View{Schema: schemaName, Name: name, Materialized: materialized}
+    m, ok := body.(map[string]any)
+    if !ok { return vw }
+    if q, ok := m["query"].(string); ok { vw.Query = q }
+    if dep, ok := m["dependsOn"]; ok {
+        vw.DependsOn = parseStringListFromNode(dep)
+    }
+    return vw
 }
 
 func errorsIsNotExist(err error) bool {

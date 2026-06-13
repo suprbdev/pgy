@@ -16,6 +16,8 @@ func emptyLive() *Live {
 		Types:      map[string]bool{},
 		Functions:  map[string]bool{},
 		Extensions: map[string]bool{},
+		Views:      map[string]bool{},
+		MatViews:   map[string]bool{},
 	}
 }
 
@@ -615,5 +617,58 @@ func TestPlanDiffSummary(t *testing.T) {
 	s := p.Summary()
 	if s["creates"] != 2 || s["alters"] != 1 || s["drops"] != 0 {
 		t.Errorf("unexpected summary: %v", s)
+	}
+}
+
+// --- views ---
+
+func viewDesired(key, query string, materialized bool) *schema.Database {
+	return &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Views: map[string]*schema.View{
+			key: {Schema: "public", Name: key, Query: query, Materialized: materialized},
+		},
+	}
+}
+
+func TestViewCreate(t *testing.T) {
+	desired := viewDesired("public.active_users", "select id from users where active", false)
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "create or replace view") {
+		t.Errorf("expected create or replace view, creates=%v", p.Creates)
+	}
+	if !findCreate(p, "active_users") {
+		t.Error("expected active_users in create")
+	}
+}
+
+func TestViewSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Views["public.active_users"] = true
+	desired := viewDesired("public.active_users", "select id from users", false)
+	p := Plan(live, desired, false)
+	if findCreate(p, "active_users") {
+		t.Error("should skip view that already exists")
+	}
+}
+
+func TestMaterializedViewCreate(t *testing.T) {
+	desired := viewDesired("public.user_stats", "select count(*) from users", true)
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "create materialized view if not exists") {
+		t.Errorf("expected create materialized view, creates=%v", p.Creates)
+	}
+	if !findCreate(p, "user_stats") {
+		t.Error("expected user_stats in create")
+	}
+}
+
+func TestMaterializedViewSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.MatViews["public.user_stats"] = true
+	desired := viewDesired("public.user_stats", "select count(*) from users", true)
+	p := Plan(live, desired, false)
+	if findCreate(p, "user_stats") {
+		t.Error("should skip materialized view that already exists")
 	}
 }

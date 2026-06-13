@@ -4,7 +4,7 @@ This document describes the structure and format of the YAML schema files used i
 
 ## Overview
 
-Schema files define the structure and validation rules for database objects including tables, columns, types, functions, and extensions. They use a hierarchical YAML format with specific conventions for defining these elements.
+Schema files define the structure and validation rules for database objects including tables, columns, types, functions, extensions, views, and materialized views. They use a hierarchical YAML format with specific conventions for defining these elements.
 
 ## Basic Structure
 
@@ -36,6 +36,18 @@ schemas:
         returns: <return_type>
         language: <language>
         # Function properties...
+    
+```
+
+Views and materialized views are defined inside `schema <name>:` blocks:
+
+```yaml
+schema <name>:
+  view <view_name>:
+    query: <select_statement>
+  
+  materialized view <view_name>:
+    query: <select_statement>
 ```
 
 ## Schema Structure
@@ -164,6 +176,35 @@ functions:
     dependsOn:
       - <dependency>
 ```
+
+## View Definitions
+
+Views are defined inside `schema <name>:` blocks using `view <name>:` keys.
+
+```yaml
+schema public:
+  view active_users:
+    query: "select id, email from users where active = true"
+    dependsOn:
+      - table public.users
+```
+
+### Materialized Views
+
+Materialized views use the `materialized view <name>:` key. They are created with `CREATE MATERIALIZED VIEW IF NOT EXISTS` and are skipped on subsequent runs (no refresh support yet).
+
+```yaml
+schema public:
+  materialized view user_stats:
+    query: "select count(*) as total, status from users group by status"
+    dependsOn:
+      - table public.users
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `query` | string | The `SELECT` statement defining the view |
+| `dependsOn` | list | Dependencies resolved before this view is created |
 
 ## Example Schema
 
@@ -318,6 +359,12 @@ schemas:
         dependsOn:
           - extension citext
           - table app.person
+
+  public:
+    view person_summary:
+      query: "select id, display_name, created_at from app.person"
+      dependsOn:
+        - table app.person
 ```
 
 ## Validation Rules
@@ -340,9 +387,11 @@ All values are validated against their specified types. Invalid types will cause
 
 Schemas can reference other database objects using the `dependsOn` property. Dependencies include:
 - Tables: `table <schema>.<table>`
-- Extensions: `extension <extension_name>` 
+- Extensions: `extension <extension_name>`
 - Types: `type <schema>.<type>`
 - Functions: `function <schema>.<function>(args)`
+- Views: `view <schema>.<view>`
+- Materialized views: `materialized view <schema>.<view>`
 - Schemas: `schema <schema_name>`
 
 ## Best Practices

@@ -716,3 +716,67 @@ func TestQualify(t *testing.T) {
 		}
 	}
 }
+
+// --- views ---
+
+func TestParseView(t *testing.T) {
+	yml := `
+schema public:
+  view active_users:
+    query: "select id, email from users where active = true"
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vw, ok := db.Views["public.active_users"]
+	if !ok {
+		t.Fatal("expected public.active_users view")
+	}
+	if vw.Materialized {
+		t.Error("should not be materialized")
+	}
+	if vw.Query == "" {
+		t.Error("query should be set")
+	}
+}
+
+func TestParseMaterializedView(t *testing.T) {
+	yml := `
+schema public:
+  materialized view user_stats:
+    query: "select count(*) as cnt from users"
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vw, ok := db.Views["public.user_stats"]
+	if !ok {
+		t.Fatal("expected public.user_stats view")
+	}
+	if !vw.Materialized {
+		t.Error("should be materialized")
+	}
+}
+
+func TestParseViewDependsOn(t *testing.T) {
+	yml := `
+schema public:
+  view summary:
+    query: "select * from orders"
+    dependsOn:
+      - table public.orders
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vw, ok := db.Views["public.summary"]
+	if !ok {
+		t.Fatal("expected public.summary view")
+	}
+	if len(vw.DependsOn) != 1 {
+		t.Errorf("want 1 dependsOn, got %d", len(vw.DependsOn))
+	}
+}

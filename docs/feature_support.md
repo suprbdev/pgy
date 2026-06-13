@@ -26,8 +26,8 @@ Features that encapsulate business logic, complex data structures, or procedural
 - [x] **Extensions** (`CREATE EXTENSION`)
 - [x] **Functions** (PL/pgSQL, etc.)
 - [x] **Triggers**
-- [ ] **Views** (Standard `CREATE VIEW`)
-- [ ] **Materialized Views**
+- [x] **Views** (Standard `CREATE VIEW`)
+- [x] **Materialized Views**
 - [ ] **Domains** (Types with optional constraints)
 - [ ] **Procedures** (`CREATE PROCEDURE`, distinct from functions)
 
@@ -69,8 +69,8 @@ Every checked feature above has at least one unit test. Coverage areas:
 
 | Package | What's tested |
 |---------|---------------|
-| `internal/schema` | Map/list/schema-block YAML formats; column attributes (nullable, notNull, default, unique, primaryKey); primary keys; foreign keys; indexes; check/unique/exclude constraints; triggers; extensions; enum types; composite types; functions (security, volatility, strict); `dependsOn`; topological sort; `LoadAndMerge` including missing-file tolerance; `qualify` helper |
-| `internal/diff` | CREATE TABLE SQL; column order preservation; primary key (table-level and column-level); foreign keys with ON DELETE; unique/non-unique indexes; auto-named indexes; check/unique/exclude constraints; triggers; extension create/skip-if-exists; enum/composite type create/skip-if-exists; function create/skip-if-exists with security+volatility; custom schema creation; public schema not created; add column; drop column (safe vs unsafe); `Render`; `pqIdent`; `normalizeFunctionSignature`; `PlanDiff.Summary` |
+| `internal/schema` | Map/list/schema-block YAML formats; column attributes (nullable, notNull, default, unique, primaryKey); primary keys; foreign keys; indexes; check/unique/exclude constraints; triggers; extensions; enum types; composite types; functions (security, volatility, strict); views; materialized views; `dependsOn`; topological sort; `LoadAndMerge` including missing-file tolerance; `qualify` helper |
+| `internal/diff` | CREATE TABLE SQL; column order preservation; primary key (table-level and column-level); foreign keys with ON DELETE; unique/non-unique indexes; auto-named indexes; check/unique/exclude constraints; triggers; extension create/skip-if-exists; enum/composite type create/skip-if-exists; function create/skip-if-exists with security+volatility; view create/skip-if-exists; materialized view create/skip-if-exists; custom schema creation; public schema not created; add column; drop column (safe vs unsafe); `Render`; `pqIdent`; `normalizeFunctionSignature`; `PlanDiff.Summary` |
 | `internal/cli` | `slugify`; `nextMigrationNumber`; checksum parse and body |
 
 *Note: When building out unsupported features, ensure both the YAML model in `schema.go` and the introspection/diffing logic in `diff.go` are updated, and add corresponding tests.*

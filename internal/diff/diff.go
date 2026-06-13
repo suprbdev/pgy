@@ -16,6 +16,8 @@ type Live struct{
     Types map[string]bool
     Functions map[string]bool
     Extensions map[string]bool
+    Views map[string]bool
+    MatViews map[string]bool
 }
 type LiveTable struct{
     Columns map[string]*LiveColumn
@@ -28,11 +30,13 @@ type LiveColumn struct{
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     l := &Live{
-        Schemas: map[string]bool{}, 
+        Schemas: map[string]bool{},
         Tables: map[string]*LiveTable{},
         Types: map[string]bool{},
         Functions: map[string]bool{},
         Extensions: map[string]bool{},
+        Views: map[string]bool{},
+        MatViews: map[string]bool{},
     }
     
     // Query existing schemas
@@ -147,7 +151,43 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         l.Extensions[extName] = true
     }
     extRows.Close()
-    
+
+    // Query existing views
+    viewQ := `
+        select table_schema, table_name
+        from information_schema.views
+        where table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    viewRows, err := pool.Query(ctx, viewQ)
+    if err != nil { return nil, err }
+    for viewRows.Next() {
+        var schemaName, viewName string
+        if err := viewRows.Scan(&schemaName, &viewName); err != nil {
+            viewRows.Close()
+            return nil, err
+        }
+        l.Views[fmt.Sprintf("%s.%s", schemaName, viewName)] = true
+    }
+    viewRows.Close()
+
+    // Query existing materialized views
+    matViewQ := `
+        select schemaname, matviewname
+        from pg_matviews
+        where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    matViewRows, err := pool.Query(ctx, matViewQ)
+    if err != nil { return nil, err }
+    for matViewRows.Next() {
+        var schemaName, viewName string
+        if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
+            matViewRows.Close()
+            return nil, err
+        }
+        l.MatViews[fmt.Sprintf("%s.%s", schemaName, viewName)] = true
+    }
+    matViewRows.Close()
+
     return l, nil
 }
 
@@ -186,6 +226,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         }
     }
     for k := range desired.Tables {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
+            neededSchemas[parts[0]] = true
+        } else {
+            neededSchemas["public"] = true
+        }
+    }
+    for k := range desired.Views {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -290,6 +337,16 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             body := f.Body
             stmt := fmt.Sprintf("create function %s%s returns %s language %s%s as $$\n%s\n$$;", pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
             plan.Creates = append(plan.Creates, stmt)
+        case "view":
+            vw, ok := desired.Views[e.Key]
+            if !ok || vw == nil || vw.Query == "" { continue }
+            if vw.Materialized {
+                if live.MatViews[e.Key] { continue }
+                plan.Creates = append(plan.Creates, fmt.Sprintf("create materialized view if not exists %s as %s;", pqIdent(e.Key), vw.Query))
+            } else {
+                if live.Views[e.Key] { continue }
+                plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s as %s;", pqIdent(e.Key), vw.Query))
+            }
         case "table":
             // Handle tables in dependency order
             dt, ok := desired.Tables[e.Key]
