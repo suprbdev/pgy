@@ -465,6 +465,23 @@ func TestFunctionVolatility(t *testing.T) {
 	}
 }
 
+func TestFunctionImmutable(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.fn": {
+				Name: "fn", Schema: "public", ArgsSig: "()",
+				Returns: "int", Language: "sql",
+				Volatility: "immutable", Body: "select 1",
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, " immutable") {
+		t.Errorf("expected immutable volatility; creates: %v", p.Creates)
+	}
+}
+
 // --- schemas ---
 
 func TestCustomSchemaCreate(t *testing.T) {

@@ -486,6 +486,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     if s, ok := m["security"].(string); ok { fn.Security = s }
     if _, ok := m["stable"].(bool); ok { fn.Volatility = "stable" }
     if _, ok := m["volatile"].(bool); ok { fn.Volatility = "volatile" }
+    if _, ok := m["immutable"].(bool); ok { fn.Volatility = "immutable" }
     if st, ok := m["strict"].(bool); ok { fn.Strict = st }
     if set, ok := m["set"].(map[string]any); ok {
         fn.Set = map[string]string{}

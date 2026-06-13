@@ -535,6 +535,28 @@ schema public:
 	t.Fatal("no function parsed")
 }
 
+func TestFunctionImmutable(t *testing.T) {
+	yaml := `
+schema public:
+  function add(a int, b int):
+    returns: int
+    language: sql
+    immutable: true
+    body: "select a + b"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range db.Functions {
+		if f.Volatility != "immutable" {
+			t.Errorf("volatility: got %q want \"immutable\"", f.Volatility)
+		}
+		return
+	}
+	t.Fatal("no function parsed")
+}
+
 // --- dependsOn ---
 
 func TestDependsOnTable(t *testing.T) {

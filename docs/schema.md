@@ -267,12 +267,12 @@ schema public:
 | `security` | string | `definer` or `invoker` |
 | `stable` | boolean | Marks function `STABLE` |
 | `volatile` | boolean | Marks function `VOLATILE` |
+| `immutable` | boolean | Marks function `IMMUTABLE` |
 | `strict` | boolean | Adds `STRICT` attribute |
 | `set` | map | `SET` configuration options (e.g. `search_path`) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
-> **Note:** `immutable` volatility is not yet supported.
 
 ---
 
