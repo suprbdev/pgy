@@ -83,6 +83,11 @@ schemas:
             events: [<insert/update/delete>]
             level: <row/statement>
             procedure: <procedure_name>
+        constraints:
+          <constraint_name>:
+            type: <check/unique/exclude>
+            expression: <expression> # Used for check or exclude
+            columns: [<column1>]     # Used for unique
         dependsOn:
           - <dependency>
 ```
@@ -327,6 +332,8 @@ All values are validated against their specified types. Invalid types will cause
 - Primary key constraints ensure uniqueness of primary key columns
 - Unique constraints ensure column values are unique  
 - Foreign key constraints validate referential integrity
+- Check constraints ensure data satisfies a boolean expression
+- Exclude constraints guarantee that rows do not overlap based on a specified index method
 - Indexes can be defined for performance optimization
 
 ## Schema Inheritance and Dependencies

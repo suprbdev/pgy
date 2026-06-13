@@ -344,6 +344,20 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     if name == "" { name = strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s(%s);", uniq, pqIdent(name), pqIdent(fq), joinIdentList(ix.Columns)))
                 }
+                for _, ct := range dt.Constraints {
+                    if ct == nil || ct.Type == "" { continue }
+                    typ := strings.ToLower(ct.Type)
+                    stmt := fmt.Sprintf("alter table %s add constraint %s ", pqIdent(fq), pqIdent(ct.Name))
+                    switch typ {
+                    case "check":
+                        stmt += fmt.Sprintf("check (%s);", ct.Expression)
+                    case "unique":
+                        stmt += fmt.Sprintf("unique (%s);", joinIdentList(ct.Columns))
+                    case "exclude":
+                        stmt += fmt.Sprintf("exclude %s;", ct.Expression)
+                    }
+                    plan.Alters = append(plan.Alters, stmt)
+                }
                 for _, tr := range dt.Triggers {
                     if tr == nil || tr.Procedure == "" { continue }
                     events := strings.ToUpper(strings.Join(tr.Events, " or "))

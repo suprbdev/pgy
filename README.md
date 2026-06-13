@@ -110,7 +110,16 @@ tables:
       email:
         type: text
         nullable: false
+    constraints:
+      email_unique:
+        type: unique
+        columns: [email]
+      age_check:
+        type: check
+        expression: "id > 0"  # Example check constraint
 ```
+
+*Note: In addition to `primaryKey`, `foreignKeys`, and `indexes`, table `constraints` (such as `check`, `unique`, and `exclude`) are fully supported and will be emitted when creating new tables.*
 
 Diff behavior (current minimal version):
 - Creates missing tables with columns.

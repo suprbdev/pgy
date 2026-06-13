@@ -25,8 +25,16 @@ type Table struct {
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
     Triggers   []*Trigger      `yaml:"-"`
+    Constraints []*Constraint  `yaml:"-"`
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
+}
+
+type Constraint struct {
+    Name       string
+    Type       string   // check, unique, exclude
+    Expression string   // for check or exclude
+    Columns    []string // for unique
 }
 
 type Column struct {
@@ -140,11 +148,6 @@ func LoadAndMerge(paths []string) (*Database, error) {
 // 2) { tables: [ { name: t, schema: public, columns: [ {name: c, type:...} ] } ] }
 // 3) { schemas: { public: { tables: {... or [...] } } } }
 func parseFlexibleDatabase(b []byte) (*Database, error) {
-    // First try direct mapping to Database
-    var direct Database
-    if err := yaml.Unmarshal(b, &direct); err == nil && len(direct.Tables) > 0 {
-        return &direct, nil
-    }
     // Generic map for flexible parsing
     var root map[string]any
     if err := yaml.Unmarshal(b, &root); err != nil {
@@ -205,9 +208,26 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             fq := qualify(defaultSchema, tname)
             t := &Table{Name: fq, Columns: map[string]*Column{}}
             if m, ok := tv.(map[string]any); ok {
-                // columns can be under "columns"
                 if cRaw, ok := m["columns"]; ok {
                     t.Columns = parseColumns(cRaw)
+                }
+                if pkRaw, ok := m["primaryKey"]; ok {
+                    t.PrimaryKey = parseStringListFromNode(pkRaw)
+                }
+                if idxRaw, ok := m["indexes"]; ok {
+                    t.Indexes = parseIndexes(idxRaw)
+                }
+                if fkRaw, ok := m["foreignKeys"]; ok {
+                    t.ForeignKeys = parseForeignKeys(fkRaw)
+                }
+                if trgRaw, ok := m["triggers"]; ok {
+                    t.Triggers = parseTriggers(trgRaw)
+                }
+                if conRaw, ok := m["constraints"]; ok {
+                    t.Constraints = parseConstraints(conRaw)
+                }
+                if dep, ok := m["dependsOn"]; ok {
+                    t.DependsOn = parseStringListFromNode(dep)
                 }
             }
             db.Tables[fq] = t
@@ -224,6 +244,24 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             fq := qualify(schemaName, name)
             t := &Table{Name: fq, Columns: parseColumns(m["columns"]) }
+            if pkRaw, ok := m["primaryKey"]; ok {
+                t.PrimaryKey = parseStringListFromNode(pkRaw)
+            }
+            if idxRaw, ok := m["indexes"]; ok {
+                t.Indexes = parseIndexes(idxRaw)
+            }
+            if fkRaw, ok := m["foreignKeys"]; ok {
+                t.ForeignKeys = parseForeignKeys(fkRaw)
+            }
+            if trgRaw, ok := m["triggers"]; ok {
+                t.Triggers = parseTriggers(trgRaw)
+            }
+            if conRaw, ok := m["constraints"]; ok {
+                t.Constraints = parseConstraints(conRaw)
+            }
+            if dep, ok := m["dependsOn"]; ok {
+                t.DependsOn = parseStringListFromNode(dep)
+            }
             db.Tables[fq] = t
         }
     }
@@ -258,6 +296,9 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if trgRaw, ok := inner["triggers"]; ok {
                     t.Triggers = parseTriggers(trgRaw)
+                }
+                if conRaw, ok := inner["constraints"]; ok {
+                    t.Constraints = parseConstraints(conRaw)
                 }
                 if dep, ok := inner["dependsOn"]; ok {
                     t.DependsOn = parseStringListFromNode(dep)
@@ -384,6 +425,23 @@ func parseTriggers(v any) []*Trigger {
                 if p, ok := dm["procedure"].(string); ok { tr.Procedure = p }
             }
             out = append(out, tr)
+        }
+    }
+    return out
+}
+
+func parseConstraints(v any) []*Constraint {
+    out := []*Constraint{}
+    if m, ok := v.(map[string]any); ok {
+        for name, def := range m {
+            c := &Constraint{Name: name}
+            if dm, ok := def.(map[string]any); ok {
+                if t, ok := dm["type"].(string); ok { c.Type = t }
+                if e, ok := dm["expression"].(string); ok { c.Expression = e }
+                if e, ok := dm["def"].(string); ok { c.Expression = e } // alias
+                if cols, ok := dm["columns"]; ok { c.Columns = parseStringListFromNode(cols) }
+            }
+            out = append(out, c)
         }
     }
     return out
