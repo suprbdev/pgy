@@ -53,4 +53,24 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 - [ ] **Tablespaces** (Physical storage mapping)
 
 ---
-*Note: When building out unsupported features, ensure both the YAML model in `schema.go` and the introspection/diffing logic in `diff.go` are updated.*
+
+## Test Coverage
+
+Unit tests live in `internal/schema/schema_test.go` and `internal/diff/diff_test.go`. Run with:
+
+```sh
+make test
+# or targeted:
+go test ./internal/schema/...
+go test ./internal/diff/...
+```
+
+Every checked feature above has at least one unit test. Coverage areas:
+
+| Package | What's tested |
+|---------|---------------|
+| `internal/schema` | Map/list/schema-block YAML formats; column attributes (nullable, notNull, default, unique, primaryKey); primary keys; foreign keys; indexes; check/unique/exclude constraints; triggers; extensions; enum types; composite types; functions (security, volatility, strict); `dependsOn`; topological sort; `LoadAndMerge` including missing-file tolerance; `qualify` helper |
+| `internal/diff` | CREATE TABLE SQL; column order preservation; primary key (table-level and column-level); foreign keys with ON DELETE; unique/non-unique indexes; auto-named indexes; check/unique/exclude constraints; triggers; extension create/skip-if-exists; enum/composite type create/skip-if-exists; function create/skip-if-exists with security+volatility; custom schema creation; public schema not created; add column; drop column (safe vs unsafe); `Render`; `pqIdent`; `normalizeFunctionSignature`; `PlanDiff.Summary` |
+| `internal/cli` | `slugify`; `nextMigrationNumber`; checksum parse and body |
+
+*Note: When building out unsupported features, ensure both the YAML model in `schema.go` and the introspection/diffing logic in `diff.go` are updated, and add corresponding tests.*
