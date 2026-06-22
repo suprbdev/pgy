@@ -608,10 +608,7 @@ func TestIntegrationCustomSchemaCreated(t *testing.T) {
 	ctx := context.Background()
 
 	// use a schema name unlikely to exist
-	sch := "pgytest_newschema_" + strings.ReplaceAll(t.Name(), "/", "_")
-	if len(sch) > 63 {
-		sch = sch[:63]
-	}
+	sch := "pgytest_newschema_itest"
 
 	// ensure clean state
 	pool.Exec(ctx, fmt.Sprintf("drop schema if exists %q cascade", sch)) //nolint
@@ -645,5 +642,687 @@ func TestIntegrationCustomSchemaCreated(t *testing.T) {
 	}
 	if sCount != 1 {
 		t.Errorf("expected schema %s to be created, got count=%d", sch, sCount)
+	}
+}
+
+// --- Primary key on existing table ---
+
+func TestIntegrationPKOnExistingTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.t (id bigint not null)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:       "t",
+				Columns:    map[string]*schema.Column{"id": {Type: "bigint", Nullable: false}},
+				PrimaryKey: []string{"id"},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var pkCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.table_constraints
+		where table_schema=$1 and table_name='t' and constraint_type='PRIMARY KEY'
+	`, sch).Scan(&pkCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkCount != 1 {
+		t.Errorf("expected PK constraint, got count=%d", pkCount)
+	}
+}
+
+func TestIntegrationPKSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.t (id bigint primary key)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:       "t",
+				Columns:    map[string]*schema.Column{"id": {Type: "bigint", Nullable: false}},
+				PrimaryKey: []string{"id"},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	if len(p.Alters) != 0 {
+		t.Errorf("PK already exists, expected no alters; got %v", p.Alters)
+	}
+}
+
+// --- Foreign key on existing table ---
+
+func TestIntegrationFKOnExistingTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.users (id bigint primary key);
+		create table %q.orders (id bigint primary key, user_id bigint);
+	`, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".users": {
+				Name:       "users",
+				Columns:    map[string]*schema.Column{"id": {Type: "bigint"}},
+				PrimaryKey: []string{"id"},
+			},
+			sch + ".orders": {
+				Name: "orders",
+				Columns: map[string]*schema.Column{
+					"id":      {Type: "bigint"},
+					"user_id": {Type: "bigint"},
+				},
+				PrimaryKey: []string{"id"},
+				ForeignKeys: []*schema.ForeignKey{
+					{Name: "fk_ord_user", Columns: []string{"user_id"}, RefTable: sch + ".users", RefColumns: []string{"id"}, OnDelete: "restrict"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var fkCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.referential_constraints
+		where constraint_schema=$1 and constraint_name='fk_ord_user'
+	`, sch).Scan(&fkCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fkCount != 1 {
+		t.Errorf("expected fk_ord_user, got count=%d", fkCount)
+	}
+}
+
+func TestIntegrationFKSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.users (id bigint primary key);
+		create table %q.orders (id bigint primary key, user_id bigint,
+			constraint fk_ord_user foreign key (user_id) references %q.users(id));
+	`, sch, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".users": {
+				Name:    "users",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+			},
+			sch + ".orders": {
+				Name: "orders",
+				Columns: map[string]*schema.Column{
+					"id":      {Type: "bigint"},
+					"user_id": {Type: "bigint"},
+				},
+				ForeignKeys: []*schema.ForeignKey{
+					{Name: "fk_ord_user", Columns: []string{"user_id"}, RefTable: sch + ".users", RefColumns: []string{"id"}},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Alters {
+		if strings.Contains(s, "fk_ord_user") {
+			t.Errorf("FK already live, should not re-add; alters: %v", p.Alters)
+		}
+	}
+}
+
+// --- Check constraint on existing table ---
+
+func TestIntegrationCheckConstraintOnExistingTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.products (id bigint, price numeric)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".products": {
+				Name: "products",
+				Columns: map[string]*schema.Column{
+					"id":    {Type: "bigint"},
+					"price": {Type: "numeric"},
+				},
+				Constraints: []*schema.Constraint{
+					{Name: "chk_price_pos", Type: "check", Expression: "price > 0"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var ctCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.check_constraints
+		where constraint_schema=$1 and constraint_name='chk_price_pos'
+	`, sch).Scan(&ctCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctCount != 1 {
+		t.Errorf("expected chk_price_pos, got count=%d", ctCount)
+	}
+}
+
+func TestIntegrationCheckConstraintSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.products (id bigint, price numeric,
+			constraint chk_price_pos check (price > 0))
+	`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".products": {
+				Name: "products",
+				Columns: map[string]*schema.Column{
+					"id":    {Type: "bigint"},
+					"price": {Type: "numeric"},
+				},
+				Constraints: []*schema.Constraint{
+					{Name: "chk_price_pos", Type: "check", Expression: "price > 0"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Alters {
+		if strings.Contains(s, "chk_price_pos") {
+			t.Errorf("constraint already live, should not re-add; alters: %v", p.Alters)
+		}
+	}
+}
+
+// --- Unique index on existing table ---
+
+func TestIntegrationUniqueIndexOnExistingTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.users (id bigint, email text)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".users": {
+				Name: "users",
+				Columns: map[string]*schema.Column{
+					"id":    {Type: "bigint"},
+					"email": {Type: "text"},
+				},
+				Indexes: []*schema.Index{
+					{Name: "idx_users_email_uniq", Columns: []string{"email"}, Unique: true},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var idxCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from pg_indexes
+		where schemaname=$1 and tablename='users' and indexname='idx_users_email_uniq'
+	`, sch).Scan(&idxCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idxCount != 1 {
+		t.Errorf("expected idx_users_email_uniq, got count=%d", idxCount)
+	}
+}
+
+func TestIntegrationIndexSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.users (id bigint, email text);
+		create unique index idx_users_email_skip on %q.users(email);
+	`, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".users": {
+				Name: "users",
+				Columns: map[string]*schema.Column{
+					"id":    {Type: "bigint"},
+					"email": {Type: "text"},
+				},
+				Indexes: []*schema.Index{
+					{Name: "idx_users_email_skip", Columns: []string{"email"}, Unique: true},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "idx_users_email_skip") {
+			t.Errorf("index already live, should not re-create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Enum type skip-if-live ---
+
+func TestIntegrationEnumTypeSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create type %q.status as enum ('active', 'inactive')`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			sch + ".status": {Name: "status", Schema: sch, Kind: "enum", Labels: []string{"active", "inactive"}},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "create type") {
+			t.Errorf("enum type already live, should not create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Composite type create and skip ---
+
+func TestIntegrationCompositeTypeCreate(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			sch + ".address": {
+				Name: "address", Schema: sch, Kind: "composite",
+				Attributes: map[string]string{"street": "text", "city": "text"},
+			},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var typCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from pg_type t
+		join pg_namespace n on n.oid = t.typnamespace
+		where n.nspname=$1 and t.typname='address' and t.typtype='c'
+	`, sch).Scan(&typCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typCount != 1 {
+		t.Errorf("expected address composite type, got count=%d", typCount)
+	}
+}
+
+func TestIntegrationCompositeTypeSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create type %q.address as (street text, city text)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			sch + ".address": {
+				Name: "address", Schema: sch, Kind: "composite",
+				Attributes: map[string]string{"street": "text", "city": "text"},
+			},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "create type") {
+			t.Errorf("composite type already live, should not create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Function skip-if-live ---
+
+func TestIntegrationFunctionSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create function %q.add_nums(a integer, b integer) returns integer
+		language sql immutable as $$ select a + b $$
+	`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			sch + ".add_nums": {
+				Name: "add_nums", Schema: sch,
+				ArgsSig: "(a integer, b integer)", Returns: "integer",
+				Language: "sql", Volatility: "immutable",
+				Body: "select a + b",
+			},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "create function") {
+			t.Errorf("function already live, should not create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- View skip-if-live ---
+
+func TestIntegrationViewSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.items (id bigint, active boolean);
+		create view %q.active_items as select id from %q.items where active = true;
+	`, sch, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Views: map[string]*schema.View{
+			sch + ".active_items": {
+				Schema: sch, Name: "active_items",
+				Query:        fmt.Sprintf(`select id from %q.items where active = true`, sch),
+				Materialized: false,
+			},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "active_items") {
+			t.Errorf("view already live, should not create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Materialized view skip-if-live ---
+
+func TestIntegrationMatViewSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.sales (id bigint, amount numeric);
+		create materialized view %q.sales_summary as select count(*) as cnt from %q.sales;
+	`, sch, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Schemas[sch] = true
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Views: map[string]*schema.View{
+			sch + ".sales_summary": {
+				Schema: sch, Name: "sales_summary",
+				Query:        fmt.Sprintf(`select count(*) as cnt from %q.sales`, sch),
+				Materialized: true,
+			},
+		},
+	}
+
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "sales_summary") {
+			t.Errorf("matview already live, should not create; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Drop column safe (no drop) ---
+
+func TestIntegrationDropColumnSafe(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.t (id bigint, junk text)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:    "t",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false) // safe mode
+	for _, s := range p.Drops {
+		if strings.Contains(s, "junk") {
+			t.Errorf("safe mode must not drop columns; drops: %v", p.Drops)
+		}
+	}
+
+	// column must still be there
+	var colCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.columns
+		where table_schema=$1 and table_name='t' and column_name='junk'
+	`, sch).Scan(&colCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if colCount != 1 {
+		t.Errorf("junk column should still exist in safe mode, got count=%d", colCount)
+	}
+}
+
+// --- Public schema not created ---
+
+func TestIntegrationPublicSchemaNotCreated(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "create schema") && strings.Contains(s, "public") {
+			t.Errorf("must not create public schema; creates: %v", p.Creates)
+		}
+	}
+}
+
+// --- Column unique flag ---
+
+func TestIntegrationColumnUniqueFlag(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".users": {
+				Name: "users",
+				Columns: map[string]*schema.Column{
+					"id":    {Type: "bigint"},
+					"email": {Type: "text", Unique: true},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var ctCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.table_constraints
+		where table_schema=$1 and table_name='users' and constraint_type='UNIQUE'
+	`, sch).Scan(&ctCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctCount != 1 {
+		t.Errorf("expected UNIQUE constraint from column.Unique, got count=%d", ctCount)
 	}
 }

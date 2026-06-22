@@ -23,7 +23,17 @@ func emptyLive() *Live {
 
 func liveWithTable(fq string, cols map[string]*LiveColumn) *Live {
 	l := emptyLive()
-	l.Tables[fq] = &LiveTable{Columns: cols}
+	l.Tables[fq] = &LiveTable{
+		Columns:     cols,
+		Constraints: map[string]bool{},
+		Indexes:     map[string]bool{},
+	}
+	return l
+}
+
+func liveWithTablePK(fq string, cols map[string]*LiveColumn) *Live {
+	l := liveWithTable(fq, cols)
+	l.Tables[fq].HasPK = true
 	return l
 }
 
@@ -795,5 +805,252 @@ func TestMaterializedViewSkippedIfExists(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findCreate(p, "user_stats") {
 		t.Error("should skip materialized view that already exists")
+	}
+}
+
+// --- primary key on existing table ---
+
+func TestPrimaryKeyTableLevelOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}, PrimaryKey: []string{"id"}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "primary key") {
+		t.Errorf("expected PK alter on existing table; alters: %v", p.Alters)
+	}
+}
+
+func TestPrimaryKeyColumnLevelOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int", PrimaryKey: true}}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "primary key") {
+		t.Errorf("expected PK alter on existing table; alters: %v", p.Alters)
+	}
+}
+
+func TestPrimaryKeySkippedIfAlreadyLive(t *testing.T) {
+	live := liveWithTablePK("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}, PrimaryKey: []string{"id"}},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "primary key") {
+		t.Errorf("PK already live, should not re-add; alters: %v", p.Alters)
+	}
+}
+
+// --- foreign key on existing table ---
+
+func TestForeignKeyOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.orders", map[string]*LiveColumn{"user_id": {Type: "int"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.orders": {
+			Name:    "orders",
+			Columns: map[string]*schema.Column{"user_id": {Type: "int"}},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_user", Columns: []string{"user_id"}, RefTable: "public.users", RefColumns: []string{"id"}, OnDelete: "cascade"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "foreign key") {
+		t.Errorf("expected FK on existing table; alters: %v", p.Alters)
+	}
+	if !findAlter(p, "on delete cascade") {
+		t.Errorf("expected on delete cascade; alters: %v", p.Alters)
+	}
+}
+
+func TestForeignKeySkippedIfAlreadyLive(t *testing.T) {
+	live := liveWithTable("public.orders", map[string]*LiveColumn{"user_id": {Type: "int"}})
+	live.Tables["public.orders"].Constraints["fk_user"] = true
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.orders": {
+			Name:    "orders",
+			Columns: map[string]*schema.Column{"user_id": {Type: "int"}},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_user", Columns: []string{"user_id"}, RefTable: "public.users", RefColumns: []string{"id"}},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "fk_user") {
+		t.Errorf("FK already live, should not re-add; alters: %v", p.Alters)
+	}
+}
+
+// --- unique constraint on existing table ---
+
+func TestUniqueConstraintOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"a": {Type: "text"}, "b": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"a": {Type: "text"}, "b": {Type: "text"}},
+			Constraints: []*schema.Constraint{
+				{Name: "uq_ab", Type: "unique", Columns: []string{"a", "b"}},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "uq_ab") {
+		t.Errorf("expected unique constraint on existing table; alters: %v", p.Alters)
+	}
+}
+
+// --- exclude constraint on existing table ---
+
+func TestExcludeConstraintOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"range": {Type: "tstzrange"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"range": {Type: "tstzrange"}},
+			Constraints: []*schema.Constraint{
+				{Name: "excl_r", Type: "exclude", Expression: "using gist (range with &&)"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "excl_r") {
+		t.Errorf("expected exclude constraint on existing table; alters: %v", p.Alters)
+	}
+}
+
+// --- trigger on existing table ---
+
+func TestTriggerOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_audit", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: "audit_fn()"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "trg_audit") {
+		t.Errorf("expected trigger create on existing table; creates: %v", p.Creates)
+	}
+}
+
+// --- column unique flag on existing table ---
+
+func TestColumnUniqueOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"email": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"email": {Type: "text", Unique: true}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "unique") {
+		t.Errorf("expected unique constraint from column.Unique on existing table; alters: %v", p.Alters)
+	}
+	if !findAlter(p, "email") {
+		t.Errorf("expected email in unique constraint; alters: %v", p.Alters)
+	}
+}
+
+func TestColumnUniqueSkippedIfAlreadyLive(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"email": {Type: "text"}})
+	live.Tables["public.t"].Constraints["public_t_email_key"] = true
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"email": {Type: "text", Unique: true}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "public_t_email_key") {
+		t.Errorf("unique constraint already live, should not re-add; alters: %v", p.Alters)
+	}
+}
+
+// --- composite type skip-if-live ---
+
+func TestCompositeTypeSkippedIfExists(t *testing.T) {
+	l := emptyLive()
+	l.Types["public.address"] = true
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			"public.address": {Name: "address", Schema: "public", Kind: "composite", Attributes: map[string]string{"street": "text"}},
+		},
+	}
+	p := Plan(l, desired, false)
+	if findCreate(p, "create type") {
+		t.Error("composite type already live, should not create")
+	}
+}
+
+// --- index auto-name on existing table ---
+
+func TestIndexAutoNameOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"col": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"col": {Type: "text"}},
+			Indexes: []*schema.Index{{Columns: []string{"col"}}}, // no name
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "public_t_col") {
+		t.Errorf("expected auto-named index on existing table; creates: %v", p.Creates)
+	}
+}
+
+// --- non-unique index on existing table ---
+
+func TestNonUniqueIndexOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{{Name: "idx_name", Columns: []string{"name"}, Unique: false}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "idx_name") {
+		t.Errorf("expected non-unique index on existing table; creates: %v", p.Creates)
+	}
+}
+
+// --- drop column safe (no drop) ---
+
+func TestDropColumnSafeOnExistingTable(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"id":   {Type: "int"},
+		"junk": {Type: "text"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+	}}
+	p := Plan(live, desired, false)
+	if findDrop(p, "junk") {
+		t.Error("safe mode must not drop columns")
+	}
+}
+
+// --- custom schema not recreated if already live ---
+
+func TestCustomSchemaSkippedIfAlreadyLive(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["private"] = true
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"private.accounts": {Name: "accounts", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "create schema") {
+		t.Errorf("schema already live, should not re-create; creates: %v", p.Creates)
 	}
 }
