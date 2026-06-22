@@ -637,6 +637,114 @@ func TestPlanDiffSummary(t *testing.T) {
 	}
 }
 
+// --- column unique flag ---
+
+func TestColumnUniqueEmitsConstraint(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name:    "users",
+			Columns: map[string]*schema.Column{"email": {Type: "text", Unique: true}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, "unique") {
+		t.Errorf("expected unique constraint from column.Unique; alters: %v", p.Alters)
+	}
+	if !findAlter(p, "email") {
+		t.Errorf("expected email in unique constraint; alters: %v", p.Alters)
+	}
+}
+
+// --- constraints/indexes on existing tables ---
+
+func TestConstraintsAppliedToExistingTable(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id":    {Type: "int"},
+		"email": {Type: "text"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "int"},
+				"email": {Type: "text"},
+			},
+			Constraints: []*schema.Constraint{
+				{Name: "chk_email_nonempty", Type: "check", Expression: "email <> ''"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "chk_email_nonempty") {
+		t.Errorf("expected check constraint on existing table; alters: %v", p.Alters)
+	}
+}
+
+func TestIndexAppliedToExistingTable(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id":    {Type: "int"},
+		"email": {Type: "text"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "int"},
+				"email": {Type: "text"},
+			},
+			Indexes: []*schema.Index{
+				{Name: "idx_email", Columns: []string{"email"}, Unique: true},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "idx_email") {
+		t.Errorf("expected index on existing table; creates: %v", p.Creates)
+	}
+}
+
+func TestConstraintSkippedIfAlreadyLive(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id":    {Type: "int"},
+		"email": {Type: "text"},
+	})
+	live.Tables["public.users"].Constraints = map[string]bool{"chk_email_nonempty": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "int"},
+				"email": {Type: "text"},
+			},
+			Constraints: []*schema.Constraint{
+				{Name: "chk_email_nonempty", Type: "check", Expression: "email <> ''"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "chk_email_nonempty") {
+		t.Errorf("constraint already live, should not re-add; alters: %v", p.Alters)
+	}
+}
+
+func TestIndexSkippedIfAlreadyLive(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"email": {Type: "text"},
+	})
+	live.Tables["public.users"].Indexes = map[string]bool{"idx_email": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name:    "users",
+			Columns: map[string]*schema.Column{"email": {Type: "text"}},
+			Indexes: []*schema.Index{{Name: "idx_email", Columns: []string{"email"}}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "idx_email") {
+		t.Errorf("index already live, should not re-create; creates: %v", p.Creates)
+	}
+}
+
 // --- views ---
 
 func viewDesired(key, query string, materialized bool) *schema.Database {

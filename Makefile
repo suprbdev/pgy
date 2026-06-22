@@ -5,7 +5,7 @@ BUILDTIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X $(PKG)/internal/cli.version=$(VERSION)
 PREFIX ?= /usr/local
 
-.PHONY: all build test clean install
+.PHONY: all build test test-integration test-integration-up test-integration-down clean install
 
 all: build
 
@@ -14,6 +14,16 @@ build:
 
 test:
 	go test ./...
+
+test-integration-up:
+	docker compose up -d --wait
+
+test-integration-down:
+	docker compose down -v
+
+test-integration: test-integration-up
+	PGY_TEST_DSN=postgres://pgy:pgy@localhost:5433/pgytest go test ./internal/integration/... -v -count=1
+	$(MAKE) test-integration-down
 
 clean:
 	rm -rf bin

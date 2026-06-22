@@ -11,21 +11,24 @@ import (
 )
 
 type Live struct{
-    Schemas map[string]bool
-    Tables map[string]*LiveTable
-    Types map[string]bool
-    Functions map[string]bool
+    Schemas    map[string]bool
+    Tables     map[string]*LiveTable
+    Types      map[string]bool
+    Functions  map[string]bool
     Extensions map[string]bool
-    Views map[string]bool
-    MatViews map[string]bool
+    Views      map[string]bool
+    MatViews   map[string]bool
 }
 type LiveTable struct{
-    Columns map[string]*LiveColumn
+    Columns     map[string]*LiveColumn
+    Constraints map[string]bool // constraint name -> exists
+    Indexes     map[string]bool // index name -> exists
+    HasPK       bool            // whether a primary key constraint exists
 }
 type LiveColumn struct{
-    Type string
+    Type     string
     Nullable bool
-    Default string
+    Default  string
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -73,7 +76,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}}
     }
     tableRows.Close()
     
@@ -92,10 +95,55 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def}
     }
     if err := rows.Err(); err != nil { return nil, err }
+
+    // Query existing table constraints (pk, fk, check, unique, exclude)
+    conQ := `
+        select tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type
+        from information_schema.table_constraints tc
+        where tc.table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    conRows, err := pool.Query(ctx, conQ)
+    if err != nil { return nil, err }
+    for conRows.Next() {
+        var schemaName, tableName, conName, conType string
+        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType); err != nil {
+            conRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.Constraints[conName] = true
+            if conType == "PRIMARY KEY" {
+                t.HasPK = true
+            }
+        }
+    }
+    conRows.Close()
+
+    // Query existing indexes
+    idxQ := `
+        select schemaname, tablename, indexname
+        from pg_indexes
+        where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    idxRows, err := pool.Query(ctx, idxQ)
+    if err != nil { return nil, err }
+    for idxRows.Next() {
+        var schemaName, tableName, idxName string
+        if err := idxRows.Scan(&schemaName, &tableName, &idxName); err != nil {
+            idxRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.Indexes[idxName] = true
+        }
+    }
+    idxRows.Close()
     
     // Query existing types
     typeQ := `
@@ -374,53 +422,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     sort.Strings(cols)
                 }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s (%s);", pqIdent(fq), strings.Join(cols, ", ")))
-                // constraints and indexes and triggers
-                if len(dt.PrimaryKey) > 0 {
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(dt.PrimaryKey)))
-                } else {
-                    // derive from column PrimaryKey flags
-                    pkCols := []string{}
-                    for cn, c := range dt.Columns { if c.PrimaryKey { pkCols = append(pkCols, cn) } }
-                    sort.Strings(pkCols)
-                    if len(pkCols) > 0 {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(pkCols)))
-                    }
-                }
-                for _, fk := range dt.ForeignKeys {
-                    if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
-                    stmt := fmt.Sprintf("alter table %s add constraint %s foreign key (%s) references %s(%s)", pqIdent(fq), pqIdent(fk.Name), joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
-                    if fk.OnDelete != "" { stmt += " on delete " + strings.ToLower(fk.OnDelete) }
-                    stmt += ";"
-                    plan.Alters = append(plan.Alters, stmt)
-                }
-                for _, ix := range dt.Indexes {
-                    if ix == nil || len(ix.Columns) == 0 { continue }
-                    uniq := ""
-                    if ix.Unique { uniq = " unique" }
-                    name := ix.Name
-                    if name == "" { name = strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
-                    plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s(%s);", uniq, pqIdent(name), pqIdent(fq), joinIdentList(ix.Columns)))
-                }
-                for _, ct := range dt.Constraints {
-                    if ct == nil || ct.Type == "" { continue }
-                    typ := strings.ToLower(ct.Type)
-                    stmt := fmt.Sprintf("alter table %s add constraint %s ", pqIdent(fq), pqIdent(ct.Name))
-                    switch typ {
-                    case "check":
-                        stmt += fmt.Sprintf("check (%s);", ct.Expression)
-                    case "unique":
-                        stmt += fmt.Sprintf("unique (%s);", joinIdentList(ct.Columns))
-                    case "exclude":
-                        stmt += fmt.Sprintf("exclude %s;", ct.Expression)
-                    }
-                    plan.Alters = append(plan.Alters, stmt)
-                }
-                for _, tr := range dt.Triggers {
-                    if tr == nil || tr.Procedure == "" { continue }
-                    events := strings.ToUpper(strings.Join(tr.Events, " or "))
-                    stmt := fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
-                    plan.Creates = append(plan.Creates, stmt)
-                }
+                applyTableConstraints(plan, fq, dt, nil)
             } else {
                 // existing table: add missing columns
                 for cn, c := range dt.Columns {
@@ -428,6 +430,8 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
                     }
                 }
+                // apply any missing constraints, indexes, triggers
+                applyTableConstraints(plan, fq, dt, lt)
                 // drops
                 if unsafe {
                     for cn := range lt.Columns {
@@ -440,6 +444,90 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         }
     }
     return plan
+}
+
+// applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
+// on a table. lt is the live table state (nil for new tables — skip existence checks).
+func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable) {
+    liveConstraints := map[string]bool{}
+    liveIndexes := map[string]bool{}
+    livePK := false
+    if lt != nil {
+        liveConstraints = lt.Constraints
+        liveIndexes = lt.Indexes
+        livePK = lt.HasPK
+    }
+
+    // Primary key — check by type, not name (Postgres auto-names it tablename_pkey)
+    if !livePK {
+        if len(dt.PrimaryKey) > 0 {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(dt.PrimaryKey)))
+        } else {
+            // derive from column PrimaryKey flags
+            pkCols := []string{}
+            for cn, c := range dt.Columns { if c.PrimaryKey { pkCols = append(pkCols, cn) } }
+            sort.Strings(pkCols)
+            if len(pkCols) > 0 {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(pkCols)))
+            }
+        }
+    }
+
+    // Foreign keys
+    for _, fk := range dt.ForeignKeys {
+        if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
+        if liveConstraints[fk.Name] { continue }
+        stmt := fmt.Sprintf("alter table %s add constraint %s foreign key (%s) references %s(%s)", pqIdent(fq), pqIdent(fk.Name), joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
+        if fk.OnDelete != "" { stmt += " on delete " + strings.ToLower(fk.OnDelete) }
+        stmt += ";"
+        plan.Alters = append(plan.Alters, stmt)
+    }
+
+    // Indexes (always use IF NOT EXISTS)
+    for _, ix := range dt.Indexes {
+        if ix == nil || len(ix.Columns) == 0 { continue }
+        name := ix.Name
+        if name == "" { name = strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
+        if liveIndexes[name] { continue }
+        uniq := ""
+        if ix.Unique { uniq = " unique" }
+        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s(%s);", uniq, pqIdent(name), pqIdent(fq), joinIdentList(ix.Columns)))
+    }
+
+    // Named constraints (check, unique, exclude)
+    for _, ct := range dt.Constraints {
+        if ct == nil || ct.Type == "" { continue }
+        if liveConstraints[ct.Name] { continue }
+        typ := strings.ToLower(ct.Type)
+        stmt := fmt.Sprintf("alter table %s add constraint %s ", pqIdent(fq), pqIdent(ct.Name))
+        switch typ {
+        case "check":
+            stmt += fmt.Sprintf("check (%s);", ct.Expression)
+        case "unique":
+            stmt += fmt.Sprintf("unique (%s);", joinIdentList(ct.Columns))
+        case "exclude":
+            stmt += fmt.Sprintf("exclude %s;", ct.Expression)
+        default:
+            continue
+        }
+        plan.Alters = append(plan.Alters, stmt)
+    }
+
+    // Column-level unique flags — emit as named unique constraints
+    for cn, c := range dt.Columns {
+        if !c.Unique { continue }
+        name := strings.ReplaceAll(fq+"_"+cn, ".", "_") + "_key"
+        if liveConstraints[name] { continue }
+        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), pqIdent(name), pqIdent(cn)))
+    }
+
+    // Triggers
+    for _, tr := range dt.Triggers {
+        if tr == nil || tr.Procedure == "" { continue }
+        events := strings.ToUpper(strings.Join(tr.Events, " or "))
+        stmt := fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
+        plan.Creates = append(plan.Creates, stmt)
+    }
 }
 
 func Render(p *PlanDiff) string {
