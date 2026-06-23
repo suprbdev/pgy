@@ -26,6 +26,12 @@ func cmdMigrate() *cobra.Command {
     c := &cobra.Command{
         Use:   "migrate",
         Short: "Apply pending migrations",
+        Long: `Apply pending migrations to the database.
+
+Exit codes:
+  0  No pending migrations (already up to date)
+  2  Migrations were applied, or --dry-run found pending migrations (not an error)
+  1  Unexpected error`,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)

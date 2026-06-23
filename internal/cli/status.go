@@ -14,6 +14,12 @@ func cmdStatus() *cobra.Command {
     c := &cobra.Command{
         Use:   "status",
         Short: "Show migration status",
+        Long: `Show migration status (applied vs pending).
+
+Exit codes:
+  0  All migrations applied (nothing pending)
+  2  Pending migrations exist (not an error)
+  1  Unexpected error`,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)

@@ -20,6 +20,12 @@ func cmdDiff() *cobra.Command {
     c := &cobra.Command{
         Use:   "diff",
         Short: "Generate SQL diff between YAML schema and live DB",
+        Long: `Generate SQL diff between YAML schema and live DB.
+
+Exit codes:
+  0  No changes detected (schema matches live DB)
+  2  Changes detected and written to buffer file (not an error)
+  1  Unexpected error`,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)
