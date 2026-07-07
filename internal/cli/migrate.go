@@ -29,8 +29,8 @@ func cmdMigrate() *cobra.Command {
         Long: `Apply pending migrations to the database.
 
 Exit codes:
-  0  No pending migrations (already up to date)
-  2  Migrations were applied, or --dry-run found pending migrations (not an error)
+  0  Success (migrations applied, or already up to date)
+  2  --dry-run only: pending migrations exist
   1  Unexpected error`,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
@@ -86,7 +86,6 @@ Exit codes:
                 return nil
             })
             if err != nil { return err }
-            if len(toApply) > 0 { return &exitCodeError{code: 2} }
             return nil
         },
     }

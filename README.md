@@ -76,7 +76,7 @@ pgy commit users_and_auth   # creates ./migrations/0001_users_and_auth.sql
 - Apply pending migrations (each in its own transaction):
 
 ```
-pgy migrate --dsn "$PG_DSN"                  # apply all pending
+pgy migrate --dsn "$PG_DSN"                  # apply all pending (exit 0 on success)
 pgy migrate --dsn "$PG_DSN" --dry-run        # show what would run (exit 2 if pending)
 pgy migrate --dsn "$PG_DSN" --until 0003     # apply up to migration 0003*
 pgy migrate --dsn "$PG_DSN" --limit 1        # apply only one
