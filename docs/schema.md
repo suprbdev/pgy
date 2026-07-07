@@ -366,6 +366,7 @@ Behavior:
 
 - Policies are matched **by name only** — changes to an existing policy's expressions are not detected. Rename the policy to replace it.
 - A present `policies:` block is authoritative: live policies not listed are dropped. Tables without a `policies:` block are unmanaged.
+- `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` are emitted after all object creates/alters, so policy expressions may freely reference functions created in the same plan.
 
 ## Grants
 

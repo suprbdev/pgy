@@ -520,8 +520,8 @@ func TestPolicyCreate(t *testing.T) {
 	})}}
 	p := Plan(emptyLive(), desired, false)
 	want := `create policy "member_select" on "public"."t" for select to "kickly_member" using (member_id = current_setting('app.member_id')::bigint);`
-	if !findCreate(p, want) {
-		t.Errorf("expected %s; creates: %v", want, p.Creates)
+	if !findAlter(p, want) {
+		t.Errorf("expected %s; alters: %v", want, p.Alters)
 	}
 }
 
@@ -530,8 +530,8 @@ func TestPolicyWithCheck(t *testing.T) {
 		{Name: "member_insert", For: "insert", WithCheck: "member_id = 1"},
 	})}}
 	p := Plan(emptyLive(), desired, false)
-	if !findCreate(p, `create policy "member_insert" on "public"."t" for insert with check (member_id = 1);`) {
-		t.Errorf("expected with check policy; creates: %v", p.Creates)
+	if !findAlter(p, `create policy "member_insert" on "public"."t" for insert with check (member_id = 1);`) {
+		t.Errorf("expected with check policy; alters: %v", p.Alters)
 	}
 }
 
@@ -543,8 +543,50 @@ func TestPolicySkippedIfExists(t *testing.T) {
 		{Name: "member_select", For: "select", Using: "true"},
 	})}}
 	p := Plan(live, desired, false)
+	if findCreate(p, "create policy") || findAlter(p, "create policy") {
+		t.Errorf("policy already live, should not re-create; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
+
+// Regression: existing live table + new policy referencing a function created in
+// the same plan. Policy must come after the function create (previously the
+// policy was emitted at the table's position in Creates -> SQLSTATE 42883).
+func TestPolicyAfterFunctionCreate(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"public.t": {
+				Name:             "t",
+				Columns:          map[string]*schema.Column{"id": {Type: "bigint"}},
+				RowLevelSecurity: true,
+				Policies: []*schema.Policy{
+					{Name: "admin_all", Using: "public.is_organisation_admin(id)"},
+				},
+			},
+		},
+		Functions: map[string]*schema.Function{
+			"public.is_organisation_admin": {
+				Schema: "public", Name: "is_organisation_admin", ArgsSig: "(org uuid)",
+				Returns: "boolean", Language: "sql", Body: "select true",
+			},
+		},
+	}
+	p := Plan(live, desired, false)
 	if findCreate(p, "create policy") {
-		t.Errorf("policy already live, should not re-create; creates: %v", p.Creates)
+		t.Errorf("policy must not be in Creates; creates: %v", p.Creates)
+	}
+	if !findAlter(p, "create policy") {
+		t.Fatalf("expected policy in Alters; alters: %v", p.Alters)
+	}
+	if !findCreate(p, "create function") {
+		t.Fatalf("expected function create; creates: %v", p.Creates)
+	}
+	// Render order: all Creates (function) precede all Alters (policy)
+	rendered := Render(p)
+	fnIdx := strings.Index(rendered, "create function")
+	polIdx := strings.Index(rendered, "create policy")
+	if fnIdx == -1 || polIdx == -1 || polIdx < fnIdx {
+		t.Errorf("policy must come after function create; rendered:\n%s", rendered)
 	}
 }
 

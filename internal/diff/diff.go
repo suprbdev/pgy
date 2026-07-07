@@ -827,6 +827,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         }
     }
     plan.Alters = append(plan.Alters, deferredFKs...)
+    planPolicies(plan, live, desired)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired)...)
     return plan
@@ -1125,39 +1126,55 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         plan.Creates = append(plan.Creates, stmt)
     }
 
-    // Row level security (enable only — forward-only tool, never disables)
-    if dt.RowLevelSecurity && (lt == nil || !lt.RLSEnabled) {
-        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
-    }
+}
 
-    // Policies — a present policies block is authoritative by name:
-    // missing policies are created, live policies not listed are dropped.
-    livePolicies := map[string]bool{}
-    if lt != nil { livePolicies = lt.Policies }
-    desiredPolicies := map[string]bool{}
-    for _, pol := range dt.Policies {
-        if pol == nil || pol.Name == "" { continue }
-        desiredPolicies[pol.Name] = true
-        if livePolicies[pol.Name] { continue }
-        stmt := fmt.Sprintf("create policy %s on %s", pqIdent(pol.Name), pqIdent(fq))
-        if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
-        if len(pol.To) > 0 {
-            roles := make([]string, 0, len(pol.To))
-            for _, r := range pol.To { roles = append(roles, grantRole(r)) }
-            stmt += " to " + strings.Join(roles, ", ")
+// planPolicies emits ENABLE ROW LEVEL SECURITY and policy create/drop for all
+// tables. Runs after every object create/alter (policies may reference
+// functions created later in the same plan than their table — dependsOn cannot
+// order this when the table itself is skipped as already live).
+func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database) {
+    tableNames := make([]string, 0, len(desired.Tables))
+    for k := range desired.Tables { tableNames = append(tableNames, k) }
+    sort.Strings(tableNames)
+    for _, fq := range tableNames {
+        dt := desired.Tables[fq]
+        if dt == nil { continue }
+        lt := live.Tables[fq]
+
+        // Row level security (enable only — forward-only tool, never disables)
+        if dt.RowLevelSecurity && (lt == nil || !lt.RLSEnabled) {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
         }
-        if pol.Using != "" { stmt += fmt.Sprintf(" using (%s)", pol.Using) }
-        if pol.WithCheck != "" { stmt += fmt.Sprintf(" with check (%s)", pol.WithCheck) }
-        plan.Creates = append(plan.Creates, stmt+";")
-    }
-    if dt.Policies != nil {
-        removed := []string{}
-        for name := range livePolicies {
-            if !desiredPolicies[name] { removed = append(removed, name) }
+
+        // Policies — a present policies block is authoritative by name:
+        // missing policies are created, live policies not listed are dropped.
+        livePolicies := map[string]bool{}
+        if lt != nil { livePolicies = lt.Policies }
+        desiredPolicies := map[string]bool{}
+        for _, pol := range dt.Policies {
+            if pol == nil || pol.Name == "" { continue }
+            desiredPolicies[pol.Name] = true
+            if livePolicies[pol.Name] { continue }
+            stmt := fmt.Sprintf("create policy %s on %s", pqIdent(pol.Name), pqIdent(fq))
+            if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
+            if len(pol.To) > 0 {
+                roles := make([]string, 0, len(pol.To))
+                for _, r := range pol.To { roles = append(roles, grantRole(r)) }
+                stmt += " to " + strings.Join(roles, ", ")
+            }
+            if pol.Using != "" { stmt += fmt.Sprintf(" using (%s)", pol.Using) }
+            if pol.WithCheck != "" { stmt += fmt.Sprintf(" with check (%s)", pol.WithCheck) }
+            plan.Alters = append(plan.Alters, stmt+";")
         }
-        sort.Strings(removed)
-        for _, name := range removed {
-            plan.Drops = append(plan.Drops, fmt.Sprintf("drop policy %s on %s;", pqIdent(name), pqIdent(fq)))
+        if dt.Policies != nil {
+            removed := []string{}
+            for name := range livePolicies {
+                if !desiredPolicies[name] { removed = append(removed, name) }
+            }
+            sort.Strings(removed)
+            for _, name := range removed {
+                plan.Drops = append(plan.Drops, fmt.Sprintf("drop policy %s on %s;", pqIdent(name), pqIdent(fq)))
+            }
         }
     }
 }

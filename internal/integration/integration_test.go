@@ -2036,3 +2036,56 @@ func TestIntegrationDeferredConstraintTrigger(t *testing.T) {
 		t.Errorf("expected empty second plan; creates=%v alters=%v", p.Creates, p.Alters)
 	}
 }
+
+// Regression: policy on already-live table referencing a function created in
+// the same plan previously failed with SQLSTATE 42883.
+func TestIntegrationPolicyReferencingNewFunction(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create table %q.t (id uuid)`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:             "t",
+				Columns:          map[string]*schema.Column{"id": {Type: "uuid"}},
+				RowLevelSecurity: true,
+				Policies: []*schema.Policy{
+					{Name: "admin_all", Using: fmt.Sprintf("%q.is_organisation_admin(id)", sch)},
+				},
+			},
+		},
+		Functions: map[string]*schema.Function{
+			sch + ".is_organisation_admin": {
+				Schema: sch, Name: "is_organisation_admin", ArgsSig: "(org uuid)",
+				Returns: "boolean", Language: "sql", Volatility: "stable", Body: "select true",
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p) // previously failed: function did not exist yet
+
+	var polCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from pg_policy pol
+		join pg_class c on c.oid = pol.polrelid
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 't' and pol.polname = 'admin_all'
+	`, sch).Scan(&polCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polCount != 1 {
+		t.Errorf("expected admin_all policy, got count=%d", polCount)
+	}
+}
