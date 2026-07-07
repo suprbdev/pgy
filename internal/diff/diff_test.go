@@ -18,6 +18,10 @@ func emptyLive() *Live {
 		Extensions: map[string]bool{},
 		Views:      map[string]bool{},
 		MatViews:   map[string]bool{},
+		TableGrants:        map[string]map[string]map[string]bool{},
+		FunctionGrants:     map[string]map[string]map[string]bool{},
+		SchemaGrants:       map[string]map[string]map[string]bool{},
+		FunctionPublicExec: map[string]bool{},
 	}
 }
 
@@ -311,6 +315,170 @@ func TestTrigger(t *testing.T) {
 	}
 	if !findCreate(p, "INSERT OR UPDATE") {
 		t.Errorf("expected INSERT OR UPDATE events; creates: %v", p.Creates)
+	}
+}
+
+// --- grants ---
+
+func TestGrantTableCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"kickly_member": {"insert", "select"}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant insert, select on table "public"."t" to "kickly_member";`) {
+		t.Errorf("expected table grant; alters: %v", p.Alters)
+	}
+}
+
+func TestGrantSkippedIfLive(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"kickly_member": {"select": true, "insert": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"kickly_member": {"insert", "select"}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "grant") {
+		t.Errorf("grants already live, should not re-grant; alters: %v", p.Alters)
+	}
+}
+
+func TestGrantPartialMissing(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"kickly_member": {"select": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"kickly_member": {"insert", "select"}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `grant insert on table "public"."t" to "kickly_member";`) {
+		t.Errorf("expected grant of only missing priv; alters: %v", p.Alters)
+	}
+}
+
+func TestGrantRevokeOnRemoval(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"kickly_member": {"select": true, "delete": true},
+		"old_role":      {"select": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"kickly_member": {"select"}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `revoke delete on table "public"."t" from "kickly_member";`) {
+		t.Errorf("expected revoke of removed priv; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `revoke select on table "public"."t" from "old_role";`) {
+		t.Errorf("expected revoke of removed role; alters: %v", p.Alters)
+	}
+}
+
+func TestGrantNoRevokeWithoutGrantsBlock(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"some_role": {"select": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "revoke") {
+		t.Errorf("no grants block, grants unmanaged, should not revoke; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionRevokePublicNewFunction(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.secret_fn": {
+				Schema: "public", Name: "secret_fn", ArgsSig: "()",
+				Returns: "int", Language: "sql", Security: "definer",
+				Body:         "select 1",
+				RevokePublic: true,
+				Grants:       map[string][]string{"kickly_member": {"execute"}},
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `revoke all on function "public"."secret_fn"() from public;`) {
+		t.Errorf("expected revoke public on new function; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `grant execute on function "public"."secret_fn"() to "kickly_member";`) {
+		t.Errorf("expected execute grant; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionRevokePublicSkippedIfAlreadyRevoked(t *testing.T) {
+	live := emptyLive()
+	live.Functions["public.secret_fn()"] = true
+	// FunctionPublicExec absent -> PUBLIC execute already revoked
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.secret_fn": {
+				Schema: "public", Name: "secret_fn", ArgsSig: "()",
+				Returns: "int", Language: "sql", Body: "select 1",
+				RevokePublic: true,
+			},
+		},
+	}
+	p := Plan(live, desired, false)
+	if findAlter(p, "revoke all") {
+		t.Errorf("PUBLIC execute already revoked, should not re-revoke; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionGrantSigStripsDefaults(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.get_setting": {
+				Schema: "public", Name: "get_setting",
+				ArgsSig: "(key text, default_value jsonb default null)",
+				Returns: "jsonb", Language: "sql", Body: "select null::jsonb",
+				Grants: map[string][]string{"app": {"execute"}},
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant execute on function "public"."get_setting"(key text, default_value jsonb) to "app";`) {
+		t.Errorf("expected grant with defaults stripped from signature; alters: %v", p.Alters)
+	}
+}
+
+func TestSchemaGrant(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		SchemaGrants: map[string]map[string][]string{
+			"app": {"kickly_member": {"usage"}},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant usage on schema "app" to "kickly_member";`) {
+		t.Errorf("expected schema grant; alters: %v", p.Alters)
 	}
 }
 

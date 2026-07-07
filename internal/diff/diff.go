@@ -18,6 +18,13 @@ type Live struct{
     Extensions map[string]bool
     Views      map[string]bool
     MatViews   map[string]bool
+    // Grants: object key -> role -> privilege -> exists. Object owners excluded.
+    TableGrants    map[string]map[string]map[string]bool // key "schema.table"
+    FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
+    SchemaGrants   map[string]map[string]map[string]bool // key schema name
+    // FunctionPublicExec: normalized signature -> PUBLIC still has EXECUTE
+    // (true when proacl is NULL, i.e. default privileges, or PUBLIC=X entry present).
+    FunctionPublicExec map[string]bool
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -41,6 +48,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Extensions: map[string]bool{},
         Views: map[string]bool{},
         MatViews: map[string]bool{},
+        TableGrants: map[string]map[string]map[string]bool{},
+        FunctionGrants: map[string]map[string]map[string]bool{},
+        SchemaGrants: map[string]map[string]map[string]bool{},
+        FunctionPublicExec: map[string]bool{},
     }
     
     // Query existing schemas
@@ -261,7 +272,91 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     matViewRows.Close()
 
+    // Query table grants (explicit ACL entries, owner excluded)
+    tgQ := `
+        select n.nspname, c.relname,
+               case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
+               lower(a.privilege_type)
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        cross join lateral aclexplode(c.relacl) a
+        where c.relkind in ('r', 'p')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and a.grantee <> c.relowner
+    `
+    tgRows, err := pool.Query(ctx, tgQ)
+    if err != nil { return nil, err }
+    for tgRows.Next() {
+        var schemaName, tableName, role, priv string
+        if err := tgRows.Scan(&schemaName, &tableName, &role, &priv); err != nil {
+            tgRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        addLiveGrant(l.TableGrants, key, role, priv)
+    }
+    tgRows.Close()
+
+    // Query function grants; left join keeps NULL-acl functions (default privileges,
+    // meaning PUBLIC still has EXECUTE) visible for FunctionPublicExec.
+    fgQ := `
+        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
+               coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
+               coalesce(lower(a.privilege_type), ''),
+               p.proacl is null,
+               coalesce(a.grantee = p.proowner, false)
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        left join lateral aclexplode(p.proacl) a on true
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    fgRows, err := pool.Query(ctx, fgQ)
+    if err != nil { return nil, err }
+    for fgRows.Next() {
+        var schemaName, funcName, args, role, priv string
+        var aclNull, isOwner bool
+        if err := fgRows.Scan(&schemaName, &funcName, &args, &role, &priv, &aclNull, &isOwner); err != nil {
+            fgRows.Close()
+            return nil, err
+        }
+        key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+        if aclNull || (role == "public" && priv == "execute") {
+            l.FunctionPublicExec[key] = true
+        }
+        if role == "" || isOwner { continue }
+        addLiveGrant(l.FunctionGrants, key, role, priv)
+    }
+    fgRows.Close()
+
+    // Query schema grants (owner excluded)
+    sgQ := `
+        select n.nspname,
+               case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
+               lower(a.privilege_type)
+        from pg_namespace n
+        cross join lateral aclexplode(n.nspacl) a
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and a.grantee <> n.nspowner
+    `
+    sgRows, err := pool.Query(ctx, sgQ)
+    if err != nil { return nil, err }
+    for sgRows.Next() {
+        var schemaName, role, priv string
+        if err := sgRows.Scan(&schemaName, &role, &priv); err != nil {
+            sgRows.Close()
+            return nil, err
+        }
+        addLiveGrant(l.SchemaGrants, schemaName, role, priv)
+    }
+    sgRows.Close()
+
     return l, nil
+}
+
+func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv string) {
+    if m[key] == nil { m[key] = map[string]map[string]bool{} }
+    if m[key][role] == nil { m[key][role] = map[string]bool{} }
+    m[key][role][priv] = true
 }
 
 type PlanDiff struct{
@@ -473,7 +568,132 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         }
     }
     plan.Alters = append(plan.Alters, deferredFKs...)
+    plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     return plan
+}
+
+// planGrants reconciles desired grants against live ACLs for schemas, tables,
+// and functions. A present grants block is authoritative: missing privileges
+// are granted, live privileges absent from the block are revoked. PUBLIC is
+// never auto-revoked; for functions use revokePublic.
+func planGrants(live *Live, desired *schema.Database) []string {
+    stmts := []string{}
+
+    schemaNames := make([]string, 0, len(desired.SchemaGrants))
+    for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
+    sort.Strings(schemaNames)
+    for _, s := range schemaNames {
+        stmts = append(stmts, grantDiffStmts("schema "+pqIdent(s), desired.SchemaGrants[s], live.SchemaGrants[s])...)
+    }
+
+    tableNames := make([]string, 0, len(desired.Tables))
+    for k := range desired.Tables { tableNames = append(tableNames, k) }
+    sort.Strings(tableNames)
+    for _, k := range tableNames {
+        dt := desired.Tables[k]
+        if dt == nil || dt.Grants == nil { continue }
+        stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k])...)
+    }
+
+    funcNames := make([]string, 0, len(desired.Functions))
+    for k := range desired.Functions { funcNames = append(funcNames, k) }
+    sort.Strings(funcNames)
+    for _, k := range funcNames {
+        f := desired.Functions[k]
+        if f == nil { continue }
+        norm := normalizeFunctionSignature(k + f.ArgsSig)
+        target := "function " + pqIdent(k) + grantFuncArgs(f.ArgsSig)
+        if f.RevokePublic {
+            // new function (not live yet) has default PUBLIC execute
+            liveExists := false
+            for liveSig := range live.Functions {
+                if normalizeFunctionSignature(liveSig) == norm { liveExists = true; break }
+            }
+            if !liveExists || live.FunctionPublicExec[norm] {
+                stmts = append(stmts, fmt.Sprintf("revoke all on %s from public;", target))
+            }
+        }
+        if f.Grants != nil {
+            stmts = append(stmts, grantDiffStmts(target, f.Grants, live.FunctionGrants[norm])...)
+        }
+    }
+    return stmts
+}
+
+// grantDiffStmts returns grant/revoke statements reconciling desired role->privs
+// against live role->priv->exists for one target ("table X", "schema Y", ...).
+func grantDiffStmts(target string, desired map[string][]string, liveG map[string]map[string]bool) []string {
+    out := []string{}
+    roles := make([]string, 0, len(desired))
+    for r := range desired { roles = append(roles, r) }
+    sort.Strings(roles)
+    for _, role := range roles {
+        missing := []string{}
+        for _, priv := range desired[role] {
+            p := strings.ToLower(priv)
+            if !liveG[role][p] { missing = append(missing, p) }
+        }
+        if len(missing) > 0 {
+            sort.Strings(missing)
+            out = append(out, fmt.Sprintf("grant %s on %s to %s;", strings.Join(missing, ", "), target, grantRole(role)))
+        }
+    }
+    liveRoles := make([]string, 0, len(liveG))
+    for r := range liveG { liveRoles = append(liveRoles, r) }
+    sort.Strings(liveRoles)
+    for _, role := range liveRoles {
+        if role == "public" { continue } // PUBLIC managed only via revokePublic
+        want := map[string]bool{}
+        for _, priv := range desired[role] { want[strings.ToLower(priv)] = true }
+        extra := []string{}
+        for priv := range liveG[role] {
+            if !want[priv] { extra = append(extra, priv) }
+        }
+        if len(extra) > 0 {
+            sort.Strings(extra)
+            out = append(out, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(extra, ", "), target, grantRole(role)))
+        }
+    }
+    return out
+}
+
+// grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.
+func grantRole(role string) string {
+    if strings.EqualFold(role, "public") { return "public" }
+    return `"` + role + `"`
+}
+
+// grantFuncArgs strips default clauses from an args signature — GRANT/REVOKE
+// ON FUNCTION accepts identity arguments only.
+func grantFuncArgs(argsSig string) string {
+    inner := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(argsSig), "("), ")")
+    if strings.TrimSpace(inner) == "" { return "()" }
+    args := []string{}
+    current := ""
+    depth := 0
+    flush := func() {
+        a := strings.TrimSpace(current)
+        if lo := strings.Index(strings.ToLower(a), " default "); lo >= 0 { a = strings.TrimSpace(a[:lo]) }
+        if eq := strings.Index(a, "="); eq >= 0 { a = strings.TrimSpace(a[:eq]) }
+        if a != "" { args = append(args, a) }
+        current = ""
+    }
+    for _, r := range inner {
+        switch r {
+        case '(':
+            depth++
+            current += string(r)
+        case ')':
+            depth--
+            current += string(r)
+        case ',':
+            if depth == 0 { flush() } else { current += string(r) }
+        default:
+            current += string(r)
+        }
+    }
+    flush()
+    return "(" + strings.Join(args, ", ") + ")"
 }
 
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers

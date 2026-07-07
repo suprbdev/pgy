@@ -17,6 +17,7 @@ type Database struct {
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
     Views map[string]*View `yaml:"-"`
+    SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
 }
 
 type View struct {
@@ -37,6 +38,7 @@ type Table struct {
     Constraints []*Constraint  `yaml:"-"`
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
+    Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
 }
 
 type Constraint struct {
@@ -103,6 +105,8 @@ type Function struct {
     Set map[string]string
     Body string
     DependsOn []string `yaml:"dependsOn"`
+    Grants map[string][]string // role -> privileges; nil means unmanaged
+    RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -130,6 +134,9 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 for cn, c := range t.Columns {
                     existing.Columns[cn] = c
                 }
+                if t.Grants != nil {
+                    existing.Grants = t.Grants
+                }
             } else {
                 merged.Tables[name] = t
             }
@@ -152,6 +159,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
         if len(d.Views) > 0 {
             if merged.Views == nil { merged.Views = map[string]*View{} }
             for k, v := range d.Views { merged.Views[k] = v }
+        }
+        // merge schema grants
+        if len(d.SchemaGrants) > 0 {
+            if merged.SchemaGrants == nil { merged.SchemaGrants = map[string]map[string][]string{} }
+            for k, v := range d.SchemaGrants { merged.SchemaGrants[k] = v }
         }
     }
     return merged, nil
@@ -195,6 +207,16 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     if schRaw, ok := root["schemas"]; ok {
         if m, ok := schRaw.(map[string]any); ok {
             for schemaName, v := range m {
+                // intercept schema-level grants so they are not parsed as a table named "grants"
+                if inner, ok := v.(map[string]any); ok {
+                    if gRaw, ok := inner["grants"]; ok {
+                        if g := parseGrants(gRaw); g != nil {
+                            if out.SchemaGrants == nil { out.SchemaGrants = map[string]map[string][]string{} }
+                            out.SchemaGrants[schemaName] = g
+                            delete(inner, "grants")
+                        }
+                    }
+                }
                 mergeTablesInto(out, schemaName, v)
             }
         }
@@ -244,6 +266,9 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if dep, ok := m["dependsOn"]; ok {
                     t.DependsOn = parseStringListFromNode(dep)
                 }
+                if gRaw, ok := m["grants"]; ok {
+                    t.Grants = parseGrants(gRaw)
+                }
             }
             db.Tables[fq] = t
         }
@@ -276,6 +301,9 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             if dep, ok := m["dependsOn"]; ok {
                 t.DependsOn = parseStringListFromNode(dep)
+            }
+            if gRaw, ok := m["grants"]; ok {
+                t.Grants = parseGrants(gRaw)
             }
             db.Tables[fq] = t
         }
@@ -318,6 +346,9 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if dep, ok := inner["dependsOn"]; ok {
                     t.DependsOn = parseStringListFromNode(dep)
                 }
+                if gRaw, ok := inner["grants"]; ok {
+                    t.Grants = parseGrants(gRaw)
+                }
             }
             db.Tables[fq] = t
         } else if strings.HasPrefix(key, "function ") {
@@ -337,6 +368,11 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if vw != nil {
                 full := qualify(schemaName, vw.Name)
                 db.Views[full] = vw
+            }
+        } else if key == "grants" {
+            if g := parseGrants(body); g != nil {
+                if db.SchemaGrants == nil { db.SchemaGrants = map[string]map[string][]string{} }
+                db.SchemaGrants[schemaName] = g
             }
         }
     }
@@ -383,6 +419,23 @@ func defaultToString(v any) string {
         return fmt.Sprintf("%v", x)
     }
     return ""
+}
+
+// parseGrants parses { role: [priv, ...], ... }. Privileges are lowercased.
+// Returns nil (unmanaged) if the value has no valid role -> list entries.
+func parseGrants(v any) map[string][]string {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    out := map[string][]string{}
+    for role, privs := range m {
+        list := parseStringListFromNode(privs)
+        if len(list) == 0 { continue }
+        for i := range list { list[i] = strings.ToLower(strings.TrimSpace(list[i])) }
+        sort.Strings(list)
+        out[role] = list
+    }
+    if len(out) == 0 { return nil }
+    return out
 }
 
 func qualify(schemaName, tableName string) string {
@@ -510,6 +563,8 @@ func parseFunction(schemaName, key string, body any) *Function {
     if dep, ok := m["dependsOn"]; ok {
         fn.DependsOn = parseStringListFromNode(dep)
     }
+    if gRaw, ok := m["grants"]; ok { fn.Grants = parseGrants(gRaw) }
+    if rp, ok := m["revokePublic"].(bool); ok { fn.RevokePublic = rp }
     return fn
 }
 

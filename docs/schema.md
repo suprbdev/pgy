@@ -271,8 +271,49 @@ schema public:
 | `strict` | boolean | Adds `STRICT` attribute |
 | `set` | map | `SET` configuration options (e.g. `search_path`) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
+| `grants` | map | Role → privilege list. See [Grants](#grants) |
+| `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
+
+---
+
+## Grants
+
+Tables, functions, and schemas accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles must already exist (pgy does not manage roles).
+
+```yaml
+schema app:
+  grants:
+    kickly_member: [usage]
+  table orders:
+    columns:
+      id:
+        type: bigint
+    grants:
+      kickly_member: [select, insert]
+      kickly_admin: [select, insert, update, delete]
+  function secret_fn():
+    returns: int
+    language: sql
+    security: definer
+    revokePublic: true
+    grants:
+      kickly_member: [execute]
+    body: select 1
+```
+
+Behavior:
+
+- A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched.
+- Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
+- `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute.
+- Grant/revoke statements are emitted after all object creation and FK alters.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `grants` | map | Role name → list of privileges (e.g. `select`, `insert`, `execute`, `usage`, `create`) |
+| `revokePublic` | boolean | Functions only. Revoke default `PUBLIC` execute |
 
 ---
 

@@ -1465,3 +1465,201 @@ func TestIntegrationCircularFK(t *testing.T) {
 		t.Errorf("expected both circular FKs, got count=%d", fkCount)
 	}
 }
+
+// --- Grants ---
+
+// freshRole creates a unique role for a test and drops it on cleanup.
+func freshRole(t *testing.T, pool *pgxpool.Pool, suffix string) string {
+	t.Helper()
+	name := "pgyrole_" + strings.ReplaceAll(strings.ToLower(t.Name()), "/", "_") + "_" + suffix
+	if len(name) > 63 {
+		name = name[:63]
+	}
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, fmt.Sprintf("drop role if exists %q", name)); err != nil {
+		t.Fatalf("drop role: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf("create role %q", name)); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		pool.Exec(ctx, fmt.Sprintf("drop owned by %q", name)) //nolint
+		pool.Exec(ctx, fmt.Sprintf("drop role if exists %q", name)) //nolint
+	})
+	return name
+}
+
+func TestIntegrationTableGrants(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "m")
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:    "t",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+				Grants:  map[string][]string{role: {"select", "insert"}},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var privs int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.role_table_grants
+		where table_schema=$1 and table_name='t' and grantee=$2
+		and privilege_type in ('SELECT','INSERT')
+	`, sch, role).Scan(&privs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privs != 2 {
+		t.Errorf("expected 2 privileges granted, got %d", privs)
+	}
+
+	// second plan must be empty (idempotent)
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	for _, s := range p.Alters {
+		if strings.Contains(s, "grant") || strings.Contains(s, "revoke") {
+			t.Errorf("expected no grant churn on second plan; alters: %v", p.Alters)
+		}
+	}
+
+	// remove insert from desired -> revoke emitted and applied
+	desired.Tables[sch+".t"].Grants = map[string][]string{role: {"select"}}
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.role_table_grants
+		where table_schema=$1 and table_name='t' and grantee=$2 and privilege_type='INSERT'
+	`, sch, role).Scan(&privs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privs != 0 {
+		t.Error("expected INSERT revoked after removal from grants block")
+	}
+}
+
+func TestIntegrationFunctionRevokePublic(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "m")
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			sch + ".secret_fn": {
+				Schema: sch, Name: "secret_fn", ArgsSig: "()",
+				Returns: "int", Language: "sql", Security: "definer",
+				Body:         "select 1",
+				RevokePublic: true,
+				Grants:       map[string][]string{role: {"execute"}},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var roleExec bool
+	err = pool.QueryRow(ctx,
+		`select has_function_privilege($1, ($2 || '.secret_fn()')::text, 'execute')`,
+		role, fmt.Sprintf("%q", sch)).Scan(&roleExec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PUBLIC must not have execute: no grantee=0 EXECUTE entry in the acl
+	var publicHas bool
+	err = pool.QueryRow(ctx,
+		`select coalesce(bool_or(a.grantee = 0), false)
+		 from pg_proc p
+		 join pg_namespace n on n.oid = p.pronamespace
+		 cross join lateral aclexplode(p.proacl) a
+		 where n.nspname = $1 and p.proname = 'secret_fn' and a.privilege_type = 'EXECUTE'`,
+		sch).Scan(&publicHas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publicHas {
+		t.Error("expected PUBLIC execute revoked")
+	}
+	if !roleExec {
+		t.Error("expected role granted execute")
+	}
+
+	// second plan idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	for _, s := range p.Alters {
+		if strings.Contains(s, "grant") || strings.Contains(s, "revoke") {
+			t.Errorf("expected no grant churn on second plan; alters: %v", p.Alters)
+		}
+	}
+}
+
+func TestIntegrationSchemaGrants(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "m")
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables:       map[string]*schema.Table{},
+		SchemaGrants: map[string]map[string][]string{sch: {role: {"usage"}}},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var hasUsage bool
+	err = pool.QueryRow(ctx, `select has_schema_privilege($1, $2, 'usage')`, role, sch).Scan(&hasUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasUsage {
+		t.Error("expected usage granted on schema")
+	}
+
+	// second plan idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	for _, s := range p.Alters {
+		if strings.Contains(s, "grant") || strings.Contains(s, "revoke") {
+			t.Errorf("expected no grant churn on second plan; alters: %v", p.Alters)
+		}
+	}
+}

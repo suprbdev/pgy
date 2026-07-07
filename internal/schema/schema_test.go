@@ -209,6 +209,111 @@ tables:
 	}
 }
 
+func TestTableGrantsParse(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      id:
+        type: int
+    grants:
+      kickly_member: [select, insert]
+      kickly_admin: [select, insert, update, delete]
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := db.Tables["public.t"].Grants
+	if g == nil {
+		t.Fatal("expected grants parsed")
+	}
+	if len(g["kickly_member"]) != 2 || g["kickly_member"][0] != "insert" || g["kickly_member"][1] != "select" {
+		t.Errorf("want [insert select], got %v", g["kickly_member"])
+	}
+	if len(g["kickly_admin"]) != 4 {
+		t.Errorf("want 4 privs for kickly_admin, got %v", g["kickly_admin"])
+	}
+}
+
+func TestFunctionGrantsParse(t *testing.T) {
+	yaml := `
+schema public:
+  function secret_fn():
+    returns: int
+    language: sql
+    security: definer
+    revokePublic: true
+    grants:
+      kickly_member: [execute]
+    body: select 1
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := db.Functions["public.secret_fn"]
+	if fn == nil {
+		t.Fatal("expected function parsed")
+	}
+	if !fn.RevokePublic {
+		t.Error("want RevokePublic true")
+	}
+	if len(fn.Grants["kickly_member"]) != 1 || fn.Grants["kickly_member"][0] != "execute" {
+		t.Errorf("want [execute], got %v", fn.Grants["kickly_member"])
+	}
+}
+
+func TestSchemaGrantsParseBlock(t *testing.T) {
+	yaml := `
+schema app:
+  grants:
+    kickly_member: [usage]
+  table t:
+    columns:
+      id:
+        type: int
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := db.SchemaGrants["app"]
+	if g == nil || len(g["kickly_member"]) != 1 || g["kickly_member"][0] != "usage" {
+		t.Errorf("want schema grants usage, got %v", g)
+	}
+	if _, ok := db.Tables["app.t"]; !ok {
+		t.Error("table t should still parse alongside grants")
+	}
+}
+
+func TestSchemaGrantsParseSchemasForm(t *testing.T) {
+	yaml := `
+schemas:
+  app:
+    grants:
+      kickly_member: [usage, create]
+    accounts:
+      columns:
+        id:
+          type: int
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := db.SchemaGrants["app"]
+	if g == nil || len(g["kickly_member"]) != 2 {
+		t.Errorf("want schema grants [create usage], got %v", g)
+	}
+	if _, ok := db.Tables["app.grants"]; ok {
+		t.Error("grants key must not become a table")
+	}
+	if _, ok := db.Tables["app.accounts"]; !ok {
+		t.Error("expected app.accounts table")
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:
