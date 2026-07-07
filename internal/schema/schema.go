@@ -28,6 +28,7 @@ type View struct {
     Materialized bool
     DependsOn    []string `yaml:"dependsOn"`
     Comment      string
+    Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
 }
 
 type Table struct {
@@ -937,6 +938,7 @@ func parseView(schemaName, key string, body any) *View {
         vw.DependsOn = parseStringListFromNode(dep)
     }
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
+    if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
     return vw
 }
 

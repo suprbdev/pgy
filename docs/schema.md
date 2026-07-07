@@ -220,6 +220,8 @@ schema public:
       - <dependency>
 ```
 
+For an existing enum, new labels are added with `ALTER TYPE ... ADD VALUE`, positioned `BEFORE` the next label that already exists so the declared order is preserved. Removing or reordering existing labels is not supported (postgres cannot drop enum values) and is silently ignored. Note: an added enum value cannot be used in the same transaction that adds it.
+
 ### Composite
 
 ```yaml
@@ -272,6 +274,7 @@ schema public:
 | `set` | map | `SET` configuration options (e.g. `search_path`) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition (body via `prosrc`, volatility, security, strict). On change, `CREATE OR REPLACE FUNCTION` is emitted. Signature or return type changes are not supported — rename the function instead |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -386,12 +389,13 @@ Behavior:
 
 ## View Definitions
 
-Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW` and skipped if already present in the live database.
+Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW` and skipped if already present in the live database. Set `replace: true` to always emit `CREATE OR REPLACE VIEW` (live view definitions cannot be reliably text-compared because postgres rewrites the stored query, so replacement is opt-in).
 
 ```yaml
 schema public:
   view active_users:
     query: "select id, email from users where active = true"
+    replace: true   # re-emit CREATE OR REPLACE on every diff
     dependsOn:
       - table public.users
 ```
@@ -411,6 +415,7 @@ schema public:
 | Property | Type | Description |
 |----------|------|-------------|
 | `query` | string | The `SELECT` statement defining the view |
+| `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
 ---

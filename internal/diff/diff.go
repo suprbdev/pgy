@@ -30,6 +30,17 @@ type Live struct{
     FunctionComments map[string]string // normalized "schema.name(args)" -> comment
     TypeComments     map[string]string // "schema.type" -> comment
     SchemaComments   map[string]string // schema name -> comment
+    // FunctionDefs: normalized signature -> live definition, for replace-on-change
+    FunctionDefs map[string]*LiveFunction
+    // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
+    EnumLabels map[string][]string
+}
+
+type LiveFunction struct{
+    Body       string
+    Volatility string // volatile|stable|immutable
+    Security   string // definer|invoker
+    Strict     bool
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -64,6 +75,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         FunctionComments: map[string]string{},
         TypeComments: map[string]string{},
         SchemaComments: map[string]string{},
+        FunctionDefs: map[string]*LiveFunction{},
+        EnumLabels: map[string][]string{},
     }
     
     // Query existing schemas
@@ -261,9 +274,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     typeRows.Close()
     
-    // Query existing functions
+    // Query existing functions with definition details for replace-on-change
     funcQ := `
-        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args
+        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
+               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -271,15 +285,45 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     funcRows, err := pool.Query(ctx, funcQ)
     if err != nil { return nil, err }
     for funcRows.Next() {
-        var schemaName, funcName, args string
-        if err := funcRows.Scan(&schemaName, &funcName, &args); err != nil {
+        var schemaName, funcName, args, src, vol string
+        var secdef, strict bool
+        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict); err != nil {
             funcRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
         l.Functions[key] = true
+        lf := &LiveFunction{Body: src, Strict: strict, Security: "invoker", Volatility: "volatile"}
+        if secdef { lf.Security = "definer" }
+        switch vol {
+        case "i": lf.Volatility = "immutable"
+        case "s": lf.Volatility = "stable"
+        }
+        l.FunctionDefs[normalizeFunctionSignature(key)] = lf
     }
     funcRows.Close()
+
+    // Query enum labels in sort order
+    enumQ := `
+        select n.nspname, t.typname, e.enumlabel
+        from pg_enum e
+        join pg_type t on t.oid = e.enumtypid
+        join pg_namespace n on n.oid = t.typnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        order by t.oid, e.enumsortorder
+    `
+    enumRows, err := pool.Query(ctx, enumQ)
+    if err != nil { return nil, err }
+    for enumRows.Next() {
+        var schemaName, typeName, label string
+        if err := enumRows.Scan(&schemaName, &typeName, &label); err != nil {
+            enumRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, typeName)
+        l.EnumLabels[key] = append(l.EnumLabels[key], label)
+    }
+    enumRows.Close()
     
     // Query existing extensions
     extQ := `select extname from pg_extension`
@@ -522,6 +566,39 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     return l, nil
 }
 
+// functionChanged reports whether a live function's definition differs from
+// desired. Volatility/security are compared only when the YAML sets them;
+// body comparison is whitespace-trimmed (prosrc stores the body verbatim).
+func functionChanged(f *schema.Function, lf *LiveFunction) bool {
+    if strings.TrimSpace(f.Body) != strings.TrimSpace(lf.Body) { return true }
+    if f.Volatility != "" && strings.ToLower(f.Volatility) != lf.Volatility { return true }
+    if f.Security != "" && strings.ToLower(f.Security) != lf.Security { return true }
+    if f.Strict != lf.Strict { return true }
+    return false
+}
+
+// enumAddValueStmts emits ALTER TYPE ... ADD VALUE for desired labels missing
+// from live, positioned BEFORE the next desired label that already exists so
+// desired order is preserved. Removed/reordered labels are ignored (postgres
+// cannot drop enum values).
+func enumAddValueStmts(key string, desired, liveLabels []string) []string {
+    liveSet := map[string]bool{}
+    for _, l := range liveLabels { liveSet[l] = true }
+    out := []string{}
+    for i, lbl := range desired {
+        if liveSet[lbl] { continue }
+        pos := ""
+        for j := i + 1; j < len(desired); j++ {
+            if liveSet[desired[j]] {
+                pos = " before " + quoteString(desired[j])
+                break
+            }
+        }
+        out = append(out, fmt.Sprintf("alter type %s add value %s%s;", pqIdent(key), quoteString(lbl), pos))
+    }
+    return out
+}
+
 func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv string) {
     if m[key] == nil { m[key] = map[string]map[string]bool{} }
     if m[key][role] == nil { m[key][role] = map[string]bool{} }
@@ -630,8 +707,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         case "type":
             td, ok := desired.Types[e.Key]
             if !ok || td == nil { continue }
-            // Check if type already exists
-            if live.Types[e.Key] { continue }
+            // Existing enum: add missing labels (removal/reorder unsupported by postgres)
+            if live.Types[e.Key] {
+                if td.Kind == "enum" {
+                    plan.Alters = append(plan.Alters, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
+                }
+                continue
+            }
             if td.Kind == "enum" {
                 labels := make([]string, 0, len(td.Labels))
                 for _, l := range td.Labels { labels = append(labels, quoteString(l)) }
@@ -659,7 +741,11 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     break
                 }
             }
-            if found { continue }
+            if found {
+                lf := live.FunctionDefs[normalizedDesired]
+                if lf == nil || !functionChanged(f, lf) { continue }
+                // fall through: definition changed, emit CREATE OR REPLACE
+            }
             setClauses := ""
             if len(f.Set) > 0 {
                 keys := make([]string, 0, len(f.Set))
@@ -676,7 +762,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             attrsStr := strings.Join(attrs, " ")
             if attrsStr != "" { attrsStr = " " + attrsStr }
             body := f.Body
-            stmt := fmt.Sprintf("create function %s%s returns %s language %s%s as $$\n%s\n$$;", pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
+            verb := "create function"
+            if found { verb = "create or replace function" }
+            stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
             plan.Creates = append(plan.Creates, stmt)
         case "view":
             vw, ok := desired.Views[e.Key]
@@ -685,7 +773,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 if live.MatViews[e.Key] { continue }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create materialized view if not exists %s as %s;", pqIdent(e.Key), vw.Query))
             } else {
-                if live.Views[e.Key] { continue }
+                // live view definitions can't be reliably text-compared (pg_get_viewdef
+                // rewrites the query), so replacement is opt-in via `replace: true`
+                if live.Views[e.Key] && !vw.Replace { continue }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s as %s;", pqIdent(e.Key), vw.Query))
             }
         case "table":

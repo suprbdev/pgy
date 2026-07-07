@@ -1825,3 +1825,122 @@ func TestIntegrationComments(t *testing.T) {
 		t.Errorf("expected comment update; alters: %v", p.Alters)
 	}
 }
+
+// --- Replace on change ---
+
+func TestIntegrationFunctionReplaceOnBodyChange(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	mkDesired := func(body string) *schema.Database {
+		return &schema.Database{
+			Tables: map[string]*schema.Table{},
+			Functions: map[string]*schema.Function{
+				sch + ".login": {
+					Schema: sch, Name: "login", ArgsSig: "(email text)",
+					Returns: "int", Language: "sql", Body: body,
+				},
+			},
+		}
+	}
+
+	// phase 1: create
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, mkDesired("select 1"), false)
+	applyPlan(t, pool, p)
+
+	// same body -> empty plan
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, mkDesired("select 1"), false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("unchanged body, expected empty plan; creates=%v", p.Creates)
+	}
+
+	// phase 2: iterate body -> replaced
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, mkDesired("select 2"), false)
+	if len(p.Creates) != 1 || !strings.Contains(p.Creates[0], "create or replace function") {
+		t.Fatalf("expected create or replace; creates: %v", p.Creates)
+	}
+	applyPlan(t, pool, p)
+
+	var result int
+	err = pool.QueryRow(ctx, fmt.Sprintf(`select %q.login('x')`, sch)).Scan(&result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != 2 {
+		t.Errorf("expected new body active (2), got %d", result)
+	}
+}
+
+func TestIntegrationEnumAddValue(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`create type %q.status as enum ('active', 'closed')`, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			sch + ".status": {Schema: sch, Name: "status", Kind: "enum",
+				Labels: []string{"active", "pending", "closed", "archived"}},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	rows, err := pool.Query(ctx, `
+		select e.enumlabel
+		from pg_enum e
+		join pg_type t on t.oid = e.enumtypid
+		join pg_namespace n on n.oid = t.typnamespace
+		where n.nspname = $1 and t.typname = 'status'
+		order by e.enumsortorder
+	`, sch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := []string{}
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			t.Fatal(err)
+		}
+		labels = append(labels, l)
+	}
+	rows.Close()
+	want := "active,pending,closed,archived"
+	if strings.Join(labels, ",") != want {
+		t.Errorf("want labels %s, got %s", want, strings.Join(labels, ","))
+	}
+
+	// second plan idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Alters) != 0 {
+		t.Errorf("labels in sync, expected no alters; got %v", p.Alters)
+	}
+}

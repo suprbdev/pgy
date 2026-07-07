@@ -22,6 +22,8 @@ func emptyLive() *Live {
 		FunctionGrants:     map[string]map[string]map[string]bool{},
 		SchemaGrants:       map[string]map[string]map[string]bool{},
 		FunctionPublicExec: map[string]bool{},
+		FunctionDefs:       map[string]*LiveFunction{},
+		EnumLabels:         map[string][]string{},
 	}
 }
 
@@ -572,6 +574,137 @@ func TestPolicyNoDropWithoutPoliciesBlock(t *testing.T) {
 	p := Plan(live, desired, false)
 	if len(p.Drops) != 0 {
 		t.Errorf("no policies block, policies unmanaged, should not drop; drops: %v", p.Drops)
+	}
+}
+
+// --- replace-on-change ---
+
+func loginFn(body string) *schema.Function {
+	return &schema.Function{
+		Schema: "public", Name: "login", ArgsSig: "(email text)",
+		Returns: "int", Language: "sql", Body: body,
+	}
+}
+
+func liveWithLoginFn(body string) *Live {
+	l := emptyLive()
+	l.Functions["public.login(email text)"] = true
+	l.FunctionDefs[normalizeFunctionSignature("public.login(email text)")] = &LiveFunction{
+		Body: body, Volatility: "volatile", Security: "invoker",
+	}
+	return l
+}
+
+func TestFunctionReplaceOnBodyChange(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": loginFn("select 2")},
+	}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace function") {
+		t.Errorf("expected CREATE OR REPLACE on body change; creates: %v", p.Creates)
+	}
+	if !findCreate(p, "select 2") {
+		t.Errorf("expected new body; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionSkippedIfBodySame(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": loginFn("select 1")},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") {
+		t.Errorf("body unchanged, should skip; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionBodyCompareTrimsWhitespace(t *testing.T) {
+	live := liveWithLoginFn("\nselect 1\n")
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": loginFn("select 1")},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") {
+		t.Errorf("whitespace-only diff, should skip; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionReplaceOnVolatilityChange(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	f := loginFn("select 1")
+	f.Volatility = "stable"
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace function") {
+		t.Errorf("expected replace on volatility change; creates: %v", p.Creates)
+	}
+}
+
+func TestViewReplaceFlag(t *testing.T) {
+	live := emptyLive()
+	live.Views["public.v"] = true
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Views: map[string]*schema.View{
+			"public.v": {Schema: "public", Name: "v", Query: "select 2", Replace: true},
+		},
+	}
+	p := Plan(live, desired, false)
+	if !findCreate(p, `create or replace view "public"."v" as select 2;`) {
+		t.Errorf("expected replace with flag; creates: %v", p.Creates)
+	}
+	// without flag: skipped
+	desired.Views["public.v"].Replace = false
+	p = Plan(live, desired, false)
+	if findCreate(p, "view") {
+		t.Errorf("no replace flag, should skip; creates: %v", p.Creates)
+	}
+}
+
+func TestEnumAddValue(t *testing.T) {
+	live := emptyLive()
+	live.Types["public.status"] = true
+	live.EnumLabels["public.status"] = []string{"active", "closed"}
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			"public.status": {Schema: "public", Name: "status", Kind: "enum",
+				Labels: []string{"active", "pending", "closed", "archived"}},
+		},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter type "public"."status" add value 'pending' before 'closed';`) {
+		t.Errorf("expected positioned add value; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `alter type "public"."status" add value 'archived';`) {
+		t.Errorf("expected appended add value; alters: %v", p.Alters)
+	}
+	if findCreate(p, "create type") {
+		t.Errorf("type exists, should not re-create; creates: %v", p.Creates)
+	}
+}
+
+func TestEnumSkippedIfSame(t *testing.T) {
+	live := emptyLive()
+	live.Types["public.status"] = true
+	live.EnumLabels["public.status"] = []string{"a", "b"}
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			"public.status": {Schema: "public", Name: "status", Kind: "enum", Labels: []string{"a", "b"}},
+		},
+	}
+	p := Plan(live, desired, false)
+	if len(p.Alters) != 0 {
+		t.Errorf("labels unchanged, expected no alters; got %v", p.Alters)
 	}
 }
 

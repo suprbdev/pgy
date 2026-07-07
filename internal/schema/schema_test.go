@@ -991,6 +991,22 @@ schema public:
 	}
 }
 
+func TestParseViewReplaceFlag(t *testing.T) {
+	yml := `
+schema public:
+  view active_users:
+    query: "select id from users"
+    replace: true
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.Views["public.active_users"].Replace {
+		t.Error("want Replace true")
+	}
+}
+
 func TestParseMaterializedView(t *testing.T) {
 	yml := `
 schema public:
