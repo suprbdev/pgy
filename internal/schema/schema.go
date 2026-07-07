@@ -91,6 +91,9 @@ type Trigger struct {
     Events  []string
     Level   string // row/statement
     Procedure string
+    Constraint bool        // CREATE CONSTRAINT TRIGGER (must be AFTER ... FOR EACH ROW)
+    Deferrable bool
+    InitiallyDeferred bool // implies deferrable
 }
 
 type Extension struct {
@@ -597,6 +600,9 @@ func parseTriggers(v any) []*Trigger {
                 tr.Events = parseStringListFromNode(dm["events"])
                 if l, ok := dm["level"].(string); ok { tr.Level = l }
                 if p, ok := dm["procedure"].(string); ok { tr.Procedure = p }
+                if c, ok := dm["constraint"].(bool); ok { tr.Constraint = c }
+                if d, ok := dm["deferrable"].(bool); ok { tr.Deferrable = d }
+                if id, ok := dm["initiallyDeferred"].(bool); ok { tr.InitiallyDeferred = id }
             }
             out = append(out, tr)
         }

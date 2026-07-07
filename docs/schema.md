@@ -189,6 +189,25 @@ triggers:
     procedure: public.set_updated_at()
 ```
 
+#### Constraint Triggers
+
+Set `constraint: true` for `CREATE CONSTRAINT TRIGGER`. Constraint triggers are always emitted as `AFTER ... FOR EACH ROW` (`timing`/`level` are ignored). `initiallyDeferred: true` implies `DEFERRABLE` — use it to defer enforcement to commit time, e.g. inserting a row and its required junction rows in one transaction:
+
+```yaml
+triggers:
+  trg_check_requirements:
+    constraint: true
+    initiallyDeferred: true    # DEFERRABLE INITIALLY DEFERRED
+    events: [insert, update]
+    procedure: app.check_entry_requirements()
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `constraint` | boolean | Emit `CREATE CONSTRAINT TRIGGER` |
+| `deferrable` | boolean | `DEFERRABLE` (initially immediate) |
+| `initiallyDeferred` | boolean | `DEFERRABLE INITIALLY DEFERRED`; check runs at commit |
+
 ### Constraints
 
 ```yaml

@@ -26,7 +26,7 @@ Features that encapsulate business logic, complex data structures, or procedural
 - [x] **Composite Types**
 - [x] **Extensions** (`CREATE EXTENSION`)
 - [x] **Functions** (PL/pgSQL, etc.; replace-on-change via body/attribute diff → `CREATE OR REPLACE`)
-- [x] **Triggers**
+- [x] **Triggers** (Including `CREATE CONSTRAINT TRIGGER` with `deferrable`/`initiallyDeferred`)
 - [x] **Views** (Standard `CREATE VIEW`; opt-in `replace: true` for `CREATE OR REPLACE` on every diff)
 - [x] **Materialized Views**
 - [ ] **Domains** (Types with optional constraints)
@@ -71,7 +71,7 @@ Every checked feature above has at least one unit test. Coverage areas:
 | Package | What's tested |
 |---------|---------------|
 | `internal/schema` | Map/list/schema-block YAML formats; column attributes (nullable, notNull, default, unique, primaryKey); primary keys; foreign keys; indexes; check/unique/exclude constraints; triggers; extensions; enum types; composite types; functions (security, volatility, strict); views; materialized views; grants (table/function/schema, `revokePublic`); RLS + policies; comments (all object types); `dependsOn`; topological sort; `LoadAndMerge` including missing-file tolerance; `qualify` helper |
-| `internal/diff` | CREATE TABLE SQL; column order preservation; primary key (table-level and column-level); foreign keys with ON DELETE; unique/non-unique indexes; auto-named indexes; check/unique/exclude constraints; trigger create/skip-if-exists; extension create/skip-if-exists; enum/composite type create/skip-if-exists; function create/skip-if-exists/replace-on-change (body, volatility) with security+volatility; enum add-value (positioned + appended, skip-if-same); view create/skip-if-exists/replace-flag; materialized view create/skip-if-exists; grants (grant missing, revoke removed, skip live, `revokePublic`); RLS enable/skip; policy create/skip/drop-on-removal; comments (emit/skip-if-same/update-if-changed, quote escaping); custom schema creation; public schema not created; add column; drop column (safe vs unsafe); `Render`; `pqIdent`; `normalizeFunctionSignature`; `PlanDiff.Summary` |
+| `internal/diff` | CREATE TABLE SQL; column order preservation; primary key (table-level and column-level); foreign keys with ON DELETE; unique/non-unique indexes; auto-named indexes; check/unique/exclude constraints; trigger create/skip-if-exists incl. deferred constraint triggers; extension create/skip-if-exists; enum/composite type create/skip-if-exists; function create/skip-if-exists/replace-on-change (body, volatility) with security+volatility; enum add-value (positioned + appended, skip-if-same); view create/skip-if-exists/replace-flag; materialized view create/skip-if-exists; grants (grant missing, revoke removed, skip live, `revokePublic`); RLS enable/skip; policy create/skip/drop-on-removal; comments (emit/skip-if-same/update-if-changed, quote escaping); custom schema creation; public schema not created; add column; drop column (safe vs unsafe); `Render`; `pqIdent`; `normalizeFunctionSignature`; `PlanDiff.Summary` |
 | `internal/cli` | `slugify`; `nextMigrationNumber`; checksum parse and body |
 
 *Note: When building out unsupported features, ensure both the YAML model in `schema.go` and the introspection/diffing logic in `diff.go` are updated, and add corresponding tests.*

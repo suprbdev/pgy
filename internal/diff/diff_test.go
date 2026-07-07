@@ -849,6 +849,60 @@ func TestCircularFKAltersAfterAllPKs(t *testing.T) {
 	}
 }
 
+func TestConstraintTriggerCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"app.entry": {
+			Name:    "entry",
+			Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_check", Constraint: true, InitiallyDeferred: true,
+					Events: []string{"insert", "update"}, Procedure: "app.check_entry_requirements()"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create constraint trigger "trg_check" AFTER INSERT OR UPDATE on "app"."entry" deferrable initially deferred for each row execute procedure app.check_entry_requirements();`
+	if !findCreate(p, want) {
+		t.Errorf("expected %s; creates: %v", want, p.Creates)
+	}
+}
+
+func TestConstraintTriggerDeferrableOnly(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"app.entry": {
+			Name:    "entry",
+			Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_check", Constraint: true, Deferrable: true,
+					Events: []string{"insert"}, Procedure: "f()"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `on "app"."entry" deferrable for each row`) {
+		t.Errorf("expected deferrable without initially deferred; creates: %v", p.Creates)
+	}
+}
+
+func TestConstraintTriggerSkippedIfExists(t *testing.T) {
+	live := liveWithTable("app.entry", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["app.entry"].Triggers = map[string]bool{"trg_check": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"app.entry": {
+			Name:    "entry",
+			Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_check", Constraint: true, InitiallyDeferred: true,
+					Events: []string{"insert"}, Procedure: "f()"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "trg_check") {
+		t.Errorf("constraint trigger already live, should skip; creates: %v", p.Creates)
+	}
+}
+
 // --- extensions ---
 
 func TestExtensionCreate(t *testing.T) {

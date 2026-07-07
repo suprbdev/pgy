@@ -1109,7 +1109,19 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if tr == nil || tr.Procedure == "" { continue }
         if liveTriggers[tr.Name] { continue }
         events := strings.ToUpper(strings.Join(tr.Events, " or "))
-        stmt := fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
+        var stmt string
+        if tr.Constraint {
+            // constraint triggers are always AFTER ... FOR EACH ROW
+            deferral := ""
+            if tr.InitiallyDeferred {
+                deferral = " deferrable initially deferred"
+            } else if tr.Deferrable {
+                deferral = " deferrable"
+            }
+            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row execute procedure %s;", pqIdent(tr.Name), events, pqIdent(fq), deferral, tr.Procedure)
+        } else {
+            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
+        }
         plan.Creates = append(plan.Creates, stmt)
     }
 

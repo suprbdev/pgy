@@ -1944,3 +1944,95 @@ func TestIntegrationEnumAddValue(t *testing.T) {
 		t.Errorf("labels in sync, expected no alters; got %v", p.Alters)
 	}
 }
+
+// --- Constraint triggers ---
+
+func TestIntegrationDeferredConstraintTrigger(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	// enforcement function: every entry must have at least one tag by commit time
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.entry (id bigint primary key);
+		create table %q.entry_tag (entry_id bigint, tag text);
+		create function %q.check_entry_requirements() returns trigger language plpgsql as $fn$
+		begin
+			if not exists (select 1 from %q.entry_tag where entry_id = new.id) then
+				raise exception 'entry %% has no tags', new.id;
+			end if;
+			return new;
+		end
+		$fn$;
+	`, sch, sch, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".entry": {
+				Name:    "entry",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+				Triggers: []*schema.Trigger{
+					{Name: "trg_check_requirements", Constraint: true, InitiallyDeferred: true,
+						Events: []string{"insert"}, Procedure: fmt.Sprintf("%q.check_entry_requirements()", sch)},
+				},
+			},
+			sch + ".entry_tag": {
+				Name: "entry_tag",
+				Columns: map[string]*schema.Column{
+					"entry_id": {Type: "bigint"},
+					"tag":      {Type: "text"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	// entry + junction insert in ONE transaction must commit (check deferred to commit)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry values (1)`, sch)); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("entry insert should not fire check immediately: %v", err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry_tag values (1, 'music')`, sch)); err != nil {
+		tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit should succeed with tag present: %v", err)
+	}
+
+	// entry without tag must fail at commit
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry values (2)`, sch)); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("insert itself should succeed (deferred): %v", err)
+	}
+	if err := tx.Commit(ctx); err == nil {
+		t.Error("commit without tag should fail via deferred constraint trigger")
+	}
+
+	// second plan idempotent (constraint trigger introspected, not re-created)
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty second plan; creates=%v alters=%v", p.Creates, p.Alters)
+	}
+}

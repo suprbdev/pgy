@@ -406,6 +406,38 @@ schema app:
 	}
 }
 
+func TestConstraintTriggerParse(t *testing.T) {
+	yaml := `
+tables:
+  app.entry:
+    columns:
+      id:
+        type: bigint
+    triggers:
+      trg_check_requirements:
+        constraint: true
+        deferrable: true
+        initiallyDeferred: true
+        events: [insert, update]
+        procedure: app.check_entry_requirements()
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trs := db.Tables["app.entry"].Triggers
+	if len(trs) != 1 {
+		t.Fatalf("want 1 trigger, got %d", len(trs))
+	}
+	tr := trs[0]
+	if !tr.Constraint || !tr.Deferrable || !tr.InitiallyDeferred {
+		t.Errorf("want constraint+deferrable+initiallyDeferred, got %+v", tr)
+	}
+	if tr.Procedure != "app.check_entry_requirements()" {
+		t.Errorf("procedure: %q", tr.Procedure)
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:
