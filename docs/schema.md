@@ -141,7 +141,7 @@ extensions:
 | `type` | string | PostgreSQL data type (e.g. `text`, `uuid`, `int`, `jsonb`) |
 | `nullable` | boolean | `true` allows NULL. Default: `false` (NOT NULL) |
 | `notNull` | boolean | `true` means NOT NULL. Inverse alias for `nullable` |
-| `default` | string | SQL default expression (e.g. `NOW()`, `uuid_generate_v4()`) |
+| `default` | string, boolean, or number | SQL default expression (e.g. `NOW()`, `uuid_generate_v4()`). Bare YAML scalars like `false` or `0` are coerced to their SQL literal form |
 | `unique` | boolean | Adds a UNIQUE constraint on this column |
 | `primaryKey` | boolean | Marks column as part of the primary key |
 

@@ -314,6 +314,21 @@ func TestTrigger(t *testing.T) {
 	}
 }
 
+// --- column defaults ---
+
+func TestColumnDefaultBoolRendered(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"active": {Type: "boolean", Default: "false"}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "default false") {
+		t.Errorf("expected default false in CREATE TABLE; creates: %v", p.Creates)
+	}
+}
+
 // --- FK ordering ---
 
 func TestCircularFKAltersAfterAllPKs(t *testing.T) {

@@ -366,11 +366,23 @@ func parseColumnSpec(spec any) *Column {
         if t, ok := m["type"].(string); ok { c.Type = t }
         if n, ok := m["nullable"].(bool); ok { c.Nullable = n }
         if nn, ok := m["notNull"].(bool); ok { c.Nullable = !nn }
-        if d, ok := m["default"].(string); ok { c.Default = d }
+        if d, ok := m["default"]; ok { c.Default = defaultToString(d) }
         if u, ok := m["unique"].(bool); ok { c.Unique = u }
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }
     }
     return c
+}
+
+// defaultToString coerces a YAML scalar default (bool, int, float) to its SQL
+// literal form so `default: false` is not silently dropped.
+func defaultToString(v any) string {
+    switch x := v.(type) {
+    case string:
+        return x
+    case bool, int, int64, uint64, float64:
+        return fmt.Sprintf("%v", x)
+    }
+    return ""
 }
 
 func qualify(schemaName, tableName string) string {

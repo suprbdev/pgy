@@ -178,6 +178,37 @@ tables:
 	}
 }
 
+func TestColumnDefaultNonString(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      active:
+        type: boolean
+        default: false
+      count:
+        type: int
+        default: 0
+      ratio:
+        type: numeric
+        default: 0.5
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := db.Tables["public.t"].Columns
+	if cols["active"].Default != "false" {
+		t.Errorf("want default false, got %q", cols["active"].Default)
+	}
+	if cols["count"].Default != "0" {
+		t.Errorf("want default 0, got %q", cols["count"].Default)
+	}
+	if cols["ratio"].Default != "0.5" {
+		t.Errorf("want default 0.5, got %q", cols["ratio"].Default)
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:
