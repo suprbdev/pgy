@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/suprbdev/pgy/internal/db"
 	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/schema"
 )
@@ -2087,5 +2088,37 @@ func TestIntegrationPolicyReferencingNewFunction(t *testing.T) {
 	}
 	if polCount != 1 {
 		t.Errorf("expected admin_all policy, got count=%d", polCount)
+	}
+}
+
+// --- Statement splitter through the real migrate path ---
+
+// Regression: comment text containing ';' was split mid-string ->
+// "unterminated quoted string".
+func TestIntegrationApplyInTxSemicolonInComment(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	sql := fmt.Sprintf(`create table %q.t (id bigint);
+comment on table %q.t is '@behavior +list; @name entries';
+comment on column %q.t.id is 'it''s the id; primary';
+`, sch, sch, sch)
+
+	if err := db.ApplyInTx(ctx, pool, sql); err != nil {
+		t.Fatalf("apply with semicolons in comments: %v", err)
+	}
+
+	var tblComment string
+	err := pool.QueryRow(ctx, `
+		select coalesce(obj_description(c.oid, 'pg_class'), '')
+		from pg_class c join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 't'
+	`, sch).Scan(&tblComment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tblComment != "@behavior +list; @name entries" {
+		t.Errorf("comment mangled: %q", tblComment)
 	}
 }

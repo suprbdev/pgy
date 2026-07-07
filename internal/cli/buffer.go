@@ -3,9 +3,9 @@ package cli
 import (
     "fmt"
     "os"
-    "strings"
 
     "github.com/spf13/cobra"
+    "github.com/suprbdev/pgy/internal/db"
 )
 
 func cmdBuffer() *cobra.Command {
@@ -32,11 +32,7 @@ func cmdBuffer() *cobra.Command {
                 return err
             }
             if stat {
-                content := string(b)
-                n := 0
-                for _, s := range strings.Split(content, ";") {
-                    if strings.TrimSpace(s) != "" { n++ }
-                }
+                n := len(db.SplitSQLStatements(string(b)))
                 fmt.Printf("%s: %d bytes, %d statements\n", cfg.BufferPath, len(b), n)
                 return nil
             }

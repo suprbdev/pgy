@@ -31,7 +31,7 @@ func ApplyInTx(ctx context.Context, pool *PoolShim, sql string) error {
     if err != nil { return err }
     defer func() { _ = tx.Rollback(ctx) }()
     
-    statements := splitSQLStatements(sql)
+    statements := SplitSQLStatements(sql)
     for _, stmt := range statements {
         if strings.TrimSpace(stmt) == "" { continue }
         if _, err := tx.Exec(ctx, stmt); err != nil { return err }
@@ -39,81 +39,112 @@ func ApplyInTx(ctx context.Context, pool *PoolShim, sql string) error {
     return tx.Commit(ctx)
 }
 
-// splitSQLStatements splits SQL on semicolons while respecting dollar-quoted strings
-func splitSQLStatements(sql string) []string {
+// SplitSQLStatements splits SQL on semicolons while respecting single-quoted
+// strings ('' escape), double-quoted identifiers ("" escape), dollar-quoted
+// strings ($$ or $tag$), line comments (--) and nested block comments (/* */).
+// E'...' backslash-escape strings are not supported.
+func SplitSQLStatements(sql string) []string {
     var statements []string
     var current strings.Builder
-    inDollarQuote := false
-    dollarTag := ""
+    n := len(sql)
     i := 0
-    
-    for i < len(sql) {
-        if !inDollarQuote {
-            // Look for dollar-quote start: $tag$ or $$
-            if sql[i] == '$' {
-                // Find the matching closing $
-                tagEnd := i + 1
-                // Handle $$ (empty tag)
-                if tagEnd < len(sql) && sql[tagEnd] == '$' {
-                    dollarTag = "$$"
-                    inDollarQuote = true
-                    current.WriteString(dollarTag)
-                    i = tagEnd + 1
-                    continue
-                }
-                // Handle $tag$ (non-empty tag)
-                for tagEnd < len(sql) && sql[tagEnd] != '$' {
-                    tagEnd++
-                }
-                if tagEnd < len(sql) {
-                    dollarTag = sql[i : tagEnd+1] // includes both $ chars
-                    inDollarQuote = true
-                    current.WriteString(dollarTag)
-                    i = tagEnd + 1
-                    continue
-                }
-            }
-            // Check for statement terminator
-            if sql[i] == ';' {
-                stmt := strings.TrimSpace(current.String())
-                if stmt != "" {
-                    statements = append(statements, stmt)
-                }
-                current.Reset()
-                i++
-                continue
-            }
+
+    flush := func() {
+        stmt := strings.TrimSpace(current.String())
+        if stmt != "" {
+            statements = append(statements, stmt)
+        }
+        current.Reset()
+    }
+    // consumeQuoted copies a quote-delimited region where a doubled delimiter
+    // is an escape (covers both '...''...' and "..."".."").
+    consumeQuoted := func(q byte) {
+        current.WriteByte(sql[i]) // opening delimiter
+        i++
+        for i < n {
             current.WriteByte(sql[i])
+            if sql[i] == q {
+                if i+1 < n && sql[i+1] == q {
+                    current.WriteByte(sql[i+1])
+                    i += 2
+                    continue
+                }
+                i++
+                return
+            }
             i++
-        } else {
-            // Inside dollar-quoted string - look for closing tag
-            if i+len(dollarTag)-1 < len(sql) {
-                if sql[i:i+len(dollarTag)] == dollarTag {
-                    // Found closing tag
-                    current.WriteString(dollarTag)
-                    i += len(dollarTag)
-                    inDollarQuote = false
-                    dollarTag = ""
+        }
+    }
+
+    for i < n {
+        c := sql[i]
+        switch {
+        case c == '\'':
+            consumeQuoted('\'')
+        case c == '"':
+            consumeQuoted('"')
+        case c == '-' && i+1 < n && sql[i+1] == '-':
+            for i < n && sql[i] != '\n' {
+                current.WriteByte(sql[i])
+                i++
+            }
+        case c == '/' && i+1 < n && sql[i+1] == '*':
+            depth := 0
+            for i < n {
+                if i+1 < n && sql[i] == '/' && sql[i+1] == '*' {
+                    depth++
+                    current.WriteString("/*")
+                    i += 2
+                } else if i+1 < n && sql[i] == '*' && sql[i+1] == '/' {
+                    depth--
+                    current.WriteString("*/")
+                    i += 2
+                    if depth == 0 { break }
                 } else {
                     current.WriteByte(sql[i])
                     i++
                 }
-            } else {
-                // End of input while in quote - treat rest as part of quote
+            }
+        case c == '$':
+            // dollar quote only if $tag$ with a valid tag (identifier chars,
+            // not starting with a digit) — avoids matching positional params ($1)
+            j := i + 1
+            for j < n && isDollarTagChar(sql[j]) { j++ }
+            validTag := j < n && sql[j] == '$' && (j == i+1 || !isDigit(sql[i+1]))
+            if !validTag {
+                current.WriteByte(c)
+                i++
+                continue
+            }
+            tag := sql[i : j+1]
+            current.WriteString(tag)
+            i = j + 1
+            for i < n {
+                if i+len(tag) <= n && sql[i:i+len(tag)] == tag {
+                    current.WriteString(tag)
+                    i += len(tag)
+                    break
+                }
                 current.WriteByte(sql[i])
                 i++
             }
+        case c == ';':
+            flush()
+            i++
+        default:
+            current.WriteByte(c)
+            i++
         }
     }
-    
-    // Add final statement if any
-    stmt := strings.TrimSpace(current.String())
-    if stmt != "" {
-        statements = append(statements, stmt)
-    }
-    
+    flush()
     return statements
 }
+
+func isDollarTagChar(c byte) bool {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func RecordApplied(ctx context.Context, pool *PoolShim, schema, table, name, checksum string, appliedAt time.Time) error {
     // version is parsed from filename prefix
