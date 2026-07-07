@@ -1326,3 +1326,88 @@ func TestIntegrationColumnUniqueFlag(t *testing.T) {
 		t.Errorf("expected UNIQUE constraint from column.Unique, got count=%d", ctCount)
 	}
 }
+
+// --- Triggers ---
+
+func TestIntegrationTriggerOnExistingTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.t (id bigint primary key);
+		create function %q.audit_fn() returns trigger language plpgsql as 'begin return new; end';
+	`, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:    "t",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+				Triggers: []*schema.Trigger{
+					{Name: "trg_audit", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: fmt.Sprintf("%q.audit_fn()", sch)},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var trgCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.triggers
+		where trigger_schema=$1 and trigger_name='trg_audit'
+	`, sch).Scan(&trgCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trgCount == 0 {
+		t.Error("expected trg_audit to exist")
+	}
+}
+
+func TestIntegrationTriggerSkippedIfAlreadyLive(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
+		create table %q.t (id bigint primary key);
+		create function %q.audit_fn() returns trigger language plpgsql as 'begin return new; end';
+		create trigger trg_audit after insert on %q.t for each row execute procedure %q.audit_fn();
+	`, sch, sch, sch, sch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".t": {
+				Name:    "t",
+				Columns: map[string]*schema.Column{"id": {Type: "bigint"}},
+				Triggers: []*schema.Trigger{
+					{Name: "trg_audit", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: fmt.Sprintf("%q.audit_fn()", sch)},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	for _, s := range p.Creates {
+		if strings.Contains(s, "trg_audit") {
+			t.Errorf("trigger already live, should not re-create; creates: %v", p.Creates)
+		}
+	}
+}

@@ -27,6 +27,7 @@ func liveWithTable(fq string, cols map[string]*LiveColumn) *Live {
 		Columns:     cols,
 		Constraints: map[string]bool{},
 		Indexes:     map[string]bool{},
+		Triggers:    map[string]bool{},
 	}
 	return l
 }
@@ -937,6 +938,24 @@ func TestTriggerOnExistingTable(t *testing.T) {
 	p := Plan(live, desired, false)
 	if !findCreate(p, "trg_audit") {
 		t.Errorf("expected trigger create on existing table; creates: %v", p.Creates)
+	}
+}
+
+func TestTriggerSkippedIfExists(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.Tables["public.t"].Triggers["trg_audit"] = true
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_audit", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: "audit_fn()"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "trg_audit") {
+		t.Errorf("trigger already live, should not create; creates: %v", p.Creates)
 	}
 }
 

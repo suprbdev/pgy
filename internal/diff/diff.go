@@ -23,6 +23,7 @@ type LiveTable struct{
     Columns     map[string]*LiveColumn
     Constraints map[string]bool // constraint name -> exists
     Indexes     map[string]bool // index name -> exists
+    Triggers    map[string]bool // trigger name -> exists
     HasPK       bool            // whether a primary key constraint exists
 }
 type LiveColumn struct{
@@ -76,7 +77,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}}
     }
     tableRows.Close()
     
@@ -95,7 +96,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -144,7 +145,31 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
     }
     idxRows.Close()
-    
+
+    // Query existing triggers (skip internal triggers, e.g. FK enforcement)
+    trgQ := `
+        select n.nspname, c.relname, t.tgname
+        from pg_trigger t
+        join pg_class c on c.oid = t.tgrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where not t.tgisinternal
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    trgRows, err := pool.Query(ctx, trgQ)
+    if err != nil { return nil, err }
+    for trgRows.Next() {
+        var schemaName, tableName, trgName string
+        if err := trgRows.Scan(&schemaName, &tableName, &trgName); err != nil {
+            trgRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.Triggers[trgName] = true
+        }
+    }
+    trgRows.Close()
+
     // Query existing types
     typeQ := `
         select n.nspname, t.typname
@@ -451,10 +476,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable) {
     liveConstraints := map[string]bool{}
     liveIndexes := map[string]bool{}
+    liveTriggers := map[string]bool{}
     livePK := false
     if lt != nil {
         liveConstraints = lt.Constraints
         liveIndexes = lt.Indexes
+        liveTriggers = lt.Triggers
         livePK = lt.HasPK
     }
 
@@ -524,6 +551,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Triggers
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
+        if liveTriggers[tr.Name] { continue }
         events := strings.ToUpper(strings.Join(tr.Events, " or "))
         stmt := fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
         plan.Creates = append(plan.Creates, stmt)
