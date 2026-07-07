@@ -279,6 +279,10 @@ func (p *PlanDiff) Summary() map[string]int {
 }
 
 func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
+    // Foreign key alters are deferred until all tables are processed so that
+    // every PK/unique constraint exists before any FK references it
+    // (required for circular FK pairs, which topological sort cannot order).
+    deferredFKs := []string{}
     plan := &PlanDiff{}
     
     // Collect all schemas needed from desired entities
@@ -447,7 +451,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     sort.Strings(cols)
                 }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s (%s);", pqIdent(fq), strings.Join(cols, ", ")))
-                applyTableConstraints(plan, fq, dt, nil)
+                applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
             } else {
                 // existing table: add missing columns
                 for cn, c := range dt.Columns {
@@ -456,7 +460,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     }
                 }
                 // apply any missing constraints, indexes, triggers
-                applyTableConstraints(plan, fq, dt, lt)
+                applyTableConstraints(plan, fq, dt, lt, &deferredFKs)
                 // drops
                 if unsafe {
                     for cn := range lt.Columns {
@@ -468,12 +472,14 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             }
         }
     }
+    plan.Alters = append(plan.Alters, deferredFKs...)
     return plan
 }
 
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
 // on a table. lt is the live table state (nil for new tables — skip existence checks).
-func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable) {
+// FK statements go to deferredFKs so the caller can emit them after all PK/unique alters.
+func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable, deferredFKs *[]string) {
     liveConstraints := map[string]bool{}
     liveIndexes := map[string]bool{}
     liveTriggers := map[string]bool{}
@@ -507,7 +513,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         stmt := fmt.Sprintf("alter table %s add constraint %s foreign key (%s) references %s(%s)", pqIdent(fq), pqIdent(fk.Name), joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
         if fk.OnDelete != "" { stmt += " on delete " + strings.ToLower(fk.OnDelete) }
         stmt += ";"
-        plan.Alters = append(plan.Alters, stmt)
+        *deferredFKs = append(*deferredFKs, stmt)
     }
 
     // Indexes (always use IF NOT EXISTS)

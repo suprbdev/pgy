@@ -314,6 +314,45 @@ func TestTrigger(t *testing.T) {
 	}
 }
 
+// --- FK ordering ---
+
+func TestCircularFKAltersAfterAllPKs(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.person": {
+			Name:       "person",
+			Columns:    map[string]*schema.Column{"id": {Type: "bigint"}, "asset_id": {Type: "bigint"}},
+			PrimaryKey: []string{"id"},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_person_asset", Columns: []string{"asset_id"}, RefTable: "public.asset", RefColumns: []string{"id"}},
+			},
+		},
+		"public.asset": {
+			Name:       "asset",
+			Columns:    map[string]*schema.Column{"id": {Type: "bigint"}, "owner_id": {Type: "bigint"}},
+			PrimaryKey: []string{"id"},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_asset_owner", Columns: []string{"owner_id"}, RefTable: "public.person", RefColumns: []string{"id"}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	lastPK, firstFK := -1, -1
+	for i, s := range p.Alters {
+		if strings.Contains(s, "add primary key") && i > lastPK {
+			lastPK = i
+		}
+		if strings.Contains(s, "foreign key") && firstFK == -1 {
+			firstFK = i
+		}
+	}
+	if lastPK == -1 || firstFK == -1 {
+		t.Fatalf("expected both PK and FK alters; alters: %v", p.Alters)
+	}
+	if firstFK < lastPK {
+		t.Errorf("FK alter at %d precedes PK alter at %d; alters: %v", firstFK, lastPK, p.Alters)
+	}
+}
+
 // --- extensions ---
 
 func TestExtensionCreate(t *testing.T) {

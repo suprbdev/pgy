@@ -1411,3 +1411,57 @@ func TestIntegrationTriggerSkippedIfAlreadyLive(t *testing.T) {
 		}
 	}
 }
+
+// --- Circular FK pair (person <-> asset) ---
+
+func TestIntegrationCircularFK(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".person": {
+				Name: "person",
+				Columns: map[string]*schema.Column{
+					"id":       {Type: "bigint"},
+					"asset_id": {Type: "bigint"},
+				},
+				PrimaryKey: []string{"id"},
+				ForeignKeys: []*schema.ForeignKey{
+					{Name: "fk_person_asset", Columns: []string{"asset_id"}, RefTable: sch + ".asset", RefColumns: []string{"id"}},
+				},
+			},
+			sch + ".asset": {
+				Name: "asset",
+				Columns: map[string]*schema.Column{
+					"id":       {Type: "bigint"},
+					"owner_id": {Type: "bigint"},
+				},
+				PrimaryKey: []string{"id"},
+				ForeignKeys: []*schema.ForeignKey{
+					{Name: "fk_asset_owner", Columns: []string{"owner_id"}, RefTable: sch + ".person", RefColumns: []string{"id"}},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var fkCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from information_schema.referential_constraints
+		where constraint_schema=$1 and constraint_name in ('fk_person_asset','fk_asset_owner')
+	`, sch).Scan(&fkCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fkCount != 2 {
+		t.Errorf("expected both circular FKs, got count=%d", fkCount)
+	}
+}
