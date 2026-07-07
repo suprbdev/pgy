@@ -482,6 +482,99 @@ func TestSchemaGrant(t *testing.T) {
 	}
 }
 
+// --- row level security ---
+
+func rlsTable(policies []*schema.Policy) *schema.Table {
+	return &schema.Table{
+		Name:             "t",
+		Columns:          map[string]*schema.Column{"id": {Type: "bigint"}},
+		RowLevelSecurity: true,
+		Policies:         policies,
+	}
+}
+
+func TestRLSEnable(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable(nil)}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `alter table "public"."t" enable row level security;`) {
+		t.Errorf("expected enable RLS; alters: %v", p.Alters)
+	}
+}
+
+func TestRLSSkippedIfEnabled(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable(nil)}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "row level security") {
+		t.Errorf("RLS already enabled, should not re-enable; alters: %v", p.Alters)
+	}
+}
+
+func TestPolicyCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_select", For: "select", To: []string{"kickly_member"},
+			Using: "member_id = current_setting('app.member_id')::bigint"},
+	})}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create policy "member_select" on "public"."t" for select to "kickly_member" using (member_id = current_setting('app.member_id')::bigint);`
+	if !findCreate(p, want) {
+		t.Errorf("expected %s; creates: %v", want, p.Creates)
+	}
+}
+
+func TestPolicyWithCheck(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_insert", For: "insert", WithCheck: "member_id = 1"},
+	})}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create policy "member_insert" on "public"."t" for insert with check (member_id = 1);`) {
+		t.Errorf("expected with check policy; creates: %v", p.Creates)
+	}
+}
+
+func TestPolicySkippedIfExists(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	live.Tables["public.t"].Policies = map[string]bool{"member_select": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_select", For: "select", Using: "true"},
+	})}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "create policy") {
+		t.Errorf("policy already live, should not re-create; creates: %v", p.Creates)
+	}
+}
+
+func TestPolicyDroppedOnRemoval(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	live.Tables["public.t"].Policies = map[string]bool{"old_policy": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_select", For: "select", Using: "true"},
+	})}}
+	p := Plan(live, desired, false)
+	found := false
+	for _, s := range p.Drops {
+		if s == `drop policy "old_policy" on "public"."t";` { found = true }
+	}
+	if !found {
+		t.Errorf("expected drop of removed policy; drops: %v", p.Drops)
+	}
+}
+
+func TestPolicyNoDropWithoutPoliciesBlock(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].Policies = map[string]bool{"some_policy": true}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "bigint"}}},
+	}}
+	p := Plan(live, desired, false)
+	if len(p.Drops) != 0 {
+		t.Errorf("no policies block, policies unmanaged, should not drop; drops: %v", p.Drops)
+	}
+}
+
 // --- column defaults ---
 
 func TestColumnDefaultBoolRendered(t *testing.T) {

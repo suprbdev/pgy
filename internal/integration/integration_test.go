@@ -1663,3 +1663,92 @@ func TestIntegrationSchemaGrants(t *testing.T) {
 		}
 	}
 }
+
+// --- Row level security ---
+
+func TestIntegrationRLSAndPolicies(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "m")
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".orders": {
+				Name:             "orders",
+				Columns:          map[string]*schema.Column{"id": {Type: "bigint"}, "member_id": {Type: "bigint"}},
+				RowLevelSecurity: true,
+				Policies: []*schema.Policy{
+					{Name: "member_select", For: "select", To: []string{role},
+						Using: "member_id = current_setting('app.member_id')::bigint"},
+					{Name: "member_insert", For: "insert", To: []string{role},
+						WithCheck: "member_id = current_setting('app.member_id')::bigint"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var rlsEnabled bool
+	err = pool.QueryRow(ctx, `
+		select c.relrowsecurity from pg_class c
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 'orders'
+	`, sch).Scan(&rlsEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rlsEnabled {
+		t.Error("expected RLS enabled")
+	}
+	var polCount int
+	err = pool.QueryRow(ctx, `
+		select count(*) from pg_policy pol
+		join pg_class c on c.oid = pol.polrelid
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 'orders'
+	`, sch).Scan(&polCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polCount != 2 {
+		t.Errorf("expected 2 policies, got %d", polCount)
+	}
+
+	// second plan idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty second plan; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
+	}
+
+	// remove one policy -> dropped
+	desired.Tables[sch+".orders"].Policies = desired.Tables[sch+".orders"].Policies[:1]
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+	err = pool.QueryRow(ctx, `
+		select count(*) from pg_policy pol
+		join pg_class c on c.oid = pol.polrelid
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 'orders'
+	`, sch).Scan(&polCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if polCount != 1 {
+		t.Errorf("expected 1 policy after removal, got %d", polCount)
+	}
+}

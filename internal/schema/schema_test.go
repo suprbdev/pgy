@@ -314,6 +314,48 @@ schemas:
 	}
 }
 
+func TestRLSPoliciesParse(t *testing.T) {
+	yaml := `
+tables:
+  public.orders:
+    columns:
+      id:
+        type: bigint
+    rowLevelSecurity: true
+    policies:
+      member_select:
+        for: select
+        to: [kickly_member]
+        using: "member_id = current_setting('app.member_id')::bigint"
+      member_insert:
+        for: insert
+        to: kickly_member
+        withCheck: "member_id = current_setting('app.member_id')::bigint"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["public.orders"]
+	if !tbl.RowLevelSecurity {
+		t.Error("want RowLevelSecurity true")
+	}
+	if len(tbl.Policies) != 2 {
+		t.Fatalf("want 2 policies, got %d", len(tbl.Policies))
+	}
+	// sorted by name: member_insert, member_select
+	ins, sel := tbl.Policies[0], tbl.Policies[1]
+	if ins.Name != "member_insert" || sel.Name != "member_select" {
+		t.Fatalf("want sorted [member_insert member_select], got [%s %s]", ins.Name, sel.Name)
+	}
+	if sel.For != "select" || len(sel.To) != 1 || sel.To[0] != "kickly_member" || sel.Using == "" {
+		t.Errorf("select policy fields wrong: %+v", sel)
+	}
+	if ins.For != "insert" || len(ins.To) != 1 || ins.WithCheck == "" || ins.Using != "" {
+		t.Errorf("insert policy fields wrong: %+v", ins)
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:

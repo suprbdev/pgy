@@ -31,7 +31,9 @@ type LiveTable struct{
     Constraints map[string]bool // constraint name -> exists
     Indexes     map[string]bool // index name -> exists
     Triggers    map[string]bool // trigger name -> exists
+    Policies    map[string]bool // policy name -> exists
     HasPK       bool            // whether a primary key constraint exists
+    RLSEnabled  bool            // row level security enabled
 }
 type LiveColumn struct{
     Type     string
@@ -88,7 +90,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}
     }
     tableRows.Close()
     
@@ -107,7 +109,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -180,6 +182,53 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
     }
     trgRows.Close()
+
+    // Query row level security state
+    rlsQ := `
+        select n.nspname, c.relname, c.relrowsecurity
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind in ('r', 'p')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    rlsRows, err := pool.Query(ctx, rlsQ)
+    if err != nil { return nil, err }
+    for rlsRows.Next() {
+        var schemaName, tableName string
+        var enabled bool
+        if err := rlsRows.Scan(&schemaName, &tableName, &enabled); err != nil {
+            rlsRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.RLSEnabled = enabled
+        }
+    }
+    rlsRows.Close()
+
+    // Query existing policies
+    polQ := `
+        select n.nspname, c.relname, pol.polname
+        from pg_policy pol
+        join pg_class c on c.oid = pol.polrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    polRows, err := pool.Query(ctx, polQ)
+    if err != nil { return nil, err }
+    for polRows.Next() {
+        var schemaName, tableName, polName string
+        if err := polRows.Scan(&schemaName, &tableName, &polName); err != nil {
+            polRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.Policies[polName] = true
+        }
+    }
+    polRows.Close()
 
     // Query existing types
     typeQ := `
@@ -781,6 +830,42 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         events := strings.ToUpper(strings.Join(tr.Events, " or "))
         stmt := fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
         plan.Creates = append(plan.Creates, stmt)
+    }
+
+    // Row level security (enable only — forward-only tool, never disables)
+    if dt.RowLevelSecurity && (lt == nil || !lt.RLSEnabled) {
+        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
+    }
+
+    // Policies — a present policies block is authoritative by name:
+    // missing policies are created, live policies not listed are dropped.
+    livePolicies := map[string]bool{}
+    if lt != nil { livePolicies = lt.Policies }
+    desiredPolicies := map[string]bool{}
+    for _, pol := range dt.Policies {
+        if pol == nil || pol.Name == "" { continue }
+        desiredPolicies[pol.Name] = true
+        if livePolicies[pol.Name] { continue }
+        stmt := fmt.Sprintf("create policy %s on %s", pqIdent(pol.Name), pqIdent(fq))
+        if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
+        if len(pol.To) > 0 {
+            roles := make([]string, 0, len(pol.To))
+            for _, r := range pol.To { roles = append(roles, grantRole(r)) }
+            stmt += " to " + strings.Join(roles, ", ")
+        }
+        if pol.Using != "" { stmt += fmt.Sprintf(" using (%s)", pol.Using) }
+        if pol.WithCheck != "" { stmt += fmt.Sprintf(" with check (%s)", pol.WithCheck) }
+        plan.Creates = append(plan.Creates, stmt+";")
+    }
+    if dt.Policies != nil {
+        removed := []string{}
+        for name := range livePolicies {
+            if !desiredPolicies[name] { removed = append(removed, name) }
+        }
+        sort.Strings(removed)
+        for _, name := range removed {
+            plan.Drops = append(plan.Drops, fmt.Sprintf("drop policy %s on %s;", pqIdent(name), pqIdent(fq)))
+        }
     }
 }
 

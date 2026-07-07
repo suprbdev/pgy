@@ -39,6 +39,16 @@ type Table struct {
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
     Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
+    RowLevelSecurity bool      `yaml:"-"`
+    Policies []*Policy         `yaml:"-"` // nil means unmanaged
+}
+
+type Policy struct {
+    Name      string
+    For       string   // select|insert|update|delete|all (empty = all)
+    To        []string // roles (empty = all roles)
+    Using     string
+    WithCheck string
 }
 
 type Constraint struct {
@@ -136,6 +146,12 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 }
                 if t.Grants != nil {
                     existing.Grants = t.Grants
+                }
+                if t.RowLevelSecurity {
+                    existing.RowLevelSecurity = true
+                }
+                if t.Policies != nil {
+                    existing.Policies = t.Policies
                 }
             } else {
                 merged.Tables[name] = t
@@ -269,6 +285,12 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if gRaw, ok := m["grants"]; ok {
                     t.Grants = parseGrants(gRaw)
                 }
+                if rls, ok := m["rowLevelSecurity"].(bool); ok {
+                    t.RowLevelSecurity = rls
+                }
+                if polRaw, ok := m["policies"]; ok {
+                    t.Policies = parsePolicies(polRaw)
+                }
             }
             db.Tables[fq] = t
         }
@@ -304,6 +326,12 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             if gRaw, ok := m["grants"]; ok {
                 t.Grants = parseGrants(gRaw)
+            }
+            if rls, ok := m["rowLevelSecurity"].(bool); ok {
+                t.RowLevelSecurity = rls
+            }
+            if polRaw, ok := m["policies"]; ok {
+                t.Policies = parsePolicies(polRaw)
             }
             db.Tables[fq] = t
         }
@@ -348,6 +376,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if gRaw, ok := inner["grants"]; ok {
                     t.Grants = parseGrants(gRaw)
+                }
+                if rls, ok := inner["rowLevelSecurity"].(bool); ok {
+                    t.RowLevelSecurity = rls
+                }
+                if polRaw, ok := inner["policies"]; ok {
+                    t.Policies = parsePolicies(polRaw)
                 }
             }
             db.Tables[fq] = t
@@ -419,6 +453,29 @@ func defaultToString(v any) string {
         return fmt.Sprintf("%v", x)
     }
     return ""
+}
+
+// parsePolicies parses { name: {for, to, using, withCheck}, ... } sorted by name.
+func parsePolicies(v any) []*Policy {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    out := []*Policy{}
+    for name, def := range m {
+        p := &Policy{Name: name}
+        if dm, ok := def.(map[string]any); ok {
+            if f, ok := dm["for"].(string); ok { p.For = strings.ToLower(f) }
+            if to, ok := dm["to"].(string); ok {
+                p.To = []string{to}
+            } else if to, ok := dm["to"]; ok {
+                p.To = parseStringListFromNode(to)
+            }
+            if u, ok := dm["using"].(string); ok { p.Using = u }
+            if wc, ok := dm["withCheck"].(string); ok { p.WithCheck = wc }
+        }
+        out = append(out, p)
+    }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+    return out
 }
 
 // parseGrants parses { role: [priv, ...], ... }. Privileges are lowercased.

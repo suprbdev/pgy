@@ -278,6 +278,43 @@ schema public:
 
 ---
 
+## Row Level Security
+
+Tables accept `rowLevelSecurity: true` and a `policies:` map of policy name → spec.
+
+```yaml
+schema app:
+  table orders:
+    columns:
+      id:
+        type: bigint
+      member_id:
+        type: bigint
+    rowLevelSecurity: true
+    policies:
+      member_select:
+        for: select
+        to: [kickly_member]
+        using: "member_id = current_setting('app.member_id')::bigint"
+      member_insert:
+        for: insert
+        to: kickly_member
+        withCheck: "member_id = current_setting('app.member_id')::bigint"
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `rowLevelSecurity` | boolean | Emits `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` when not already enabled. Never disables (forward-only) |
+| `policies.<name>.for` | string | `select` \| `insert` \| `update` \| `delete` \| `all`. Omit for `ALL` |
+| `policies.<name>.to` | string or list | Role(s). Omit for all roles |
+| `policies.<name>.using` | string | `USING` expression |
+| `policies.<name>.withCheck` | string | `WITH CHECK` expression |
+
+Behavior:
+
+- Policies are matched **by name only** — changes to an existing policy's expressions are not detected. Rename the policy to replace it.
+- A present `policies:` block is authoritative: live policies not listed are dropped. Tables without a `policies:` block are unmanaged.
+
 ## Grants
 
 Tables, functions, and schemas accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles must already exist (pgy does not manage roles).
