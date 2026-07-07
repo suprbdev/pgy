@@ -18,6 +18,7 @@ type Database struct {
     Functions map[string]*Function `yaml:"-"`
     Views map[string]*View `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
+    SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
 }
 
 type View struct {
@@ -26,6 +27,7 @@ type View struct {
     Query        string
     Materialized bool
     DependsOn    []string `yaml:"dependsOn"`
+    Comment      string
 }
 
 type Table struct {
@@ -41,6 +43,7 @@ type Table struct {
     Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
     RowLevelSecurity bool      `yaml:"-"`
     Policies []*Policy         `yaml:"-"` // nil means unmanaged
+    Comment string             `yaml:"-"` // empty means unmanaged
 }
 
 type Policy struct {
@@ -64,6 +67,7 @@ type Column struct {
     Default  string `yaml:"default"`
     Unique   bool   `yaml:"unique"`
     PrimaryKey bool `yaml:"primaryKey"`
+    Comment  string `yaml:"comment"`
 }
 
 type Index struct {
@@ -101,6 +105,7 @@ type TypeDef struct {
     Labels []string // enum
     Attributes map[string]string // composite: name->type
     DependsOn []string `yaml:"dependsOn"`
+    Comment string
 }
 
 type Function struct {
@@ -117,6 +122,7 @@ type Function struct {
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
     RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
+    Comment string             // empty means unmanaged
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -153,6 +159,9 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 if t.Policies != nil {
                     existing.Policies = t.Policies
                 }
+                if t.Comment != "" {
+                    existing.Comment = t.Comment
+                }
             } else {
                 merged.Tables[name] = t
             }
@@ -180,6 +189,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
         if len(d.SchemaGrants) > 0 {
             if merged.SchemaGrants == nil { merged.SchemaGrants = map[string]map[string][]string{} }
             for k, v := range d.SchemaGrants { merged.SchemaGrants[k] = v }
+        }
+        // merge schema comments
+        if len(d.SchemaComments) > 0 {
+            if merged.SchemaComments == nil { merged.SchemaComments = map[string]string{} }
+            for k, v := range d.SchemaComments { merged.SchemaComments[k] = v }
         }
     }
     return merged, nil
@@ -223,7 +237,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     if schRaw, ok := root["schemas"]; ok {
         if m, ok := schRaw.(map[string]any); ok {
             for schemaName, v := range m {
-                // intercept schema-level grants so they are not parsed as a table named "grants"
+                // intercept schema-level grants/comment so they are not parsed as tables
                 if inner, ok := v.(map[string]any); ok {
                     if gRaw, ok := inner["grants"]; ok {
                         if g := parseGrants(gRaw); g != nil {
@@ -231,6 +245,13 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                             out.SchemaGrants[schemaName] = g
                             delete(inner, "grants")
                         }
+                    }
+                    if cm, ok := inner["comment"].(string); ok {
+                        if cm != "" {
+                            if out.SchemaComments == nil { out.SchemaComments = map[string]string{} }
+                            out.SchemaComments[schemaName] = cm
+                        }
+                        delete(inner, "comment")
                     }
                 }
                 mergeTablesInto(out, schemaName, v)
@@ -291,6 +312,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if polRaw, ok := m["policies"]; ok {
                     t.Policies = parsePolicies(polRaw)
                 }
+                if cm, ok := m["comment"].(string); ok { t.Comment = cm }
             }
             db.Tables[fq] = t
         }
@@ -333,6 +355,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             if polRaw, ok := m["policies"]; ok {
                 t.Policies = parsePolicies(polRaw)
             }
+            if cm, ok := m["comment"].(string); ok { t.Comment = cm }
             db.Tables[fq] = t
         }
     }
@@ -383,6 +406,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if polRaw, ok := inner["policies"]; ok {
                     t.Policies = parsePolicies(polRaw)
                 }
+                if cm, ok := inner["comment"].(string); ok { t.Comment = cm }
             }
             db.Tables[fq] = t
         } else if strings.HasPrefix(key, "function ") {
@@ -407,6 +431,11 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if g := parseGrants(body); g != nil {
                 if db.SchemaGrants == nil { db.SchemaGrants = map[string]map[string][]string{} }
                 db.SchemaGrants[schemaName] = g
+            }
+        } else if key == "comment" {
+            if cm, ok := body.(string); ok && cm != "" {
+                if db.SchemaComments == nil { db.SchemaComments = map[string]string{} }
+                db.SchemaComments[schemaName] = cm
             }
         }
     }
@@ -439,6 +468,7 @@ func parseColumnSpec(spec any) *Column {
         if d, ok := m["default"]; ok { c.Default = defaultToString(d) }
         if u, ok := m["unique"].(bool); ok { c.Unique = u }
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }
+        if cm, ok := m["comment"].(string); ok { c.Comment = cm }
     }
     return c
 }
@@ -622,6 +652,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     }
     if gRaw, ok := m["grants"]; ok { fn.Grants = parseGrants(gRaw) }
     if rp, ok := m["revokePublic"].(bool); ok { fn.RevokePublic = rp }
+    if cm, ok := m["comment"].(string); ok { fn.Comment = cm }
     return fn
 }
 
@@ -645,6 +676,7 @@ func parseType(schemaName, key string, body any) *TypeDef {
     if dep, ok := m["dependsOn"]; ok {
         td.DependsOn = parseStringListFromNode(dep)
     }
+    if cm, ok := m["comment"].(string); ok { td.Comment = cm }
     return td
 }
 
@@ -904,6 +936,7 @@ func parseView(schemaName, key string, body any) *View {
     if dep, ok := m["dependsOn"]; ok {
         vw.DependsOn = parseStringListFromNode(dep)
     }
+    if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     return vw
 }
 

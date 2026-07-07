@@ -356,6 +356,56 @@ tables:
 	}
 }
 
+func TestCommentsParse(t *testing.T) {
+	yaml := `
+schema app:
+  comment: "application schema"
+  table orders:
+    comment: |-
+      @behavior +list
+      Customer orders.
+    columns:
+      id:
+        type: bigint
+        comment: "@name orderId"
+  function fn():
+    returns: int
+    language: sql
+    comment: "computes"
+    body: select 1
+  type status:
+    type: enum
+    labels: [a, b]
+    comment: "status enum"
+  view v:
+    query: select 1
+    comment: "@name simpleView"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.SchemaComments["app"] != "application schema" {
+		t.Errorf("schema comment: %q", db.SchemaComments["app"])
+	}
+	tbl := db.Tables["app.orders"]
+	if tbl.Comment != "@behavior +list\nCustomer orders." {
+		t.Errorf("table comment: %q", tbl.Comment)
+	}
+	if tbl.Columns["id"].Comment != "@name orderId" {
+		t.Errorf("column comment: %q", tbl.Columns["id"].Comment)
+	}
+	if db.Functions["app.fn"].Comment != "computes" {
+		t.Errorf("function comment: %q", db.Functions["app.fn"].Comment)
+	}
+	if db.Types["app.status"].Comment != "status enum" {
+		t.Errorf("type comment: %q", db.Types["app.status"].Comment)
+	}
+	if db.Views["app.v"].Comment != "@name simpleView" {
+		t.Errorf("view comment: %q", db.Views["app.v"].Comment)
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:

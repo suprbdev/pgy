@@ -25,6 +25,11 @@ type Live struct{
     // FunctionPublicExec: normalized signature -> PUBLIC still has EXECUTE
     // (true when proacl is NULL, i.e. default privileges, or PUBLIC=X entry present).
     FunctionPublicExec map[string]bool
+    // Comments: current COMMENT ON values (absent key = no comment)
+    RelComments      map[string]string // "schema.rel" -> comment (tables, views, matviews)
+    FunctionComments map[string]string // normalized "schema.name(args)" -> comment
+    TypeComments     map[string]string // "schema.type" -> comment
+    SchemaComments   map[string]string // schema name -> comment
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -39,6 +44,7 @@ type LiveColumn struct{
     Type     string
     Nullable bool
     Default  string
+    Comment  string
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -54,6 +60,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         FunctionGrants: map[string]map[string]map[string]bool{},
         SchemaGrants: map[string]map[string]map[string]bool{},
         FunctionPublicExec: map[string]bool{},
+        RelComments: map[string]string{},
+        FunctionComments: map[string]string{},
+        TypeComments: map[string]string{},
+        SchemaComments: map[string]string{},
     }
     
     // Query existing schemas
@@ -399,6 +409,116 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     sgRows.Close()
 
+    // Query comments on relations (tables, views, matviews)
+    rcQ := `
+        select n.nspname, c.relname, d.description
+        from pg_description d
+        join pg_class c on c.oid = d.objoid
+        join pg_namespace n on n.oid = c.relnamespace
+        where d.classoid = 'pg_class'::regclass and d.objsubid = 0
+        and c.relkind in ('r', 'p', 'v', 'm')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    rcRows, err := pool.Query(ctx, rcQ)
+    if err != nil { return nil, err }
+    for rcRows.Next() {
+        var schemaName, relName, comment string
+        if err := rcRows.Scan(&schemaName, &relName, &comment); err != nil {
+            rcRows.Close()
+            return nil, err
+        }
+        l.RelComments[fmt.Sprintf("%s.%s", schemaName, relName)] = comment
+    }
+    rcRows.Close()
+
+    // Query column comments
+    ccQ := `
+        select n.nspname, c.relname, a.attname, d.description
+        from pg_description d
+        join pg_class c on c.oid = d.objoid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = c.oid and a.attnum = d.objsubid
+        where d.classoid = 'pg_class'::regclass and d.objsubid > 0
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    ccRows, err := pool.Query(ctx, ccQ)
+    if err != nil { return nil, err }
+    for ccRows.Next() {
+        var schemaName, relName, colName, comment string
+        if err := ccRows.Scan(&schemaName, &relName, &colName, &comment); err != nil {
+            ccRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, relName)
+        if t := l.Tables[key]; t != nil {
+            if c := t.Columns[colName]; c != nil { c.Comment = comment }
+        }
+    }
+    ccRows.Close()
+
+    // Query function comments
+    fcQ := `
+        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), d.description
+        from pg_description d
+        join pg_proc p on p.oid = d.objoid
+        join pg_namespace n on n.oid = p.pronamespace
+        where d.classoid = 'pg_proc'::regclass
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    fcRows, err := pool.Query(ctx, fcQ)
+    if err != nil { return nil, err }
+    for fcRows.Next() {
+        var schemaName, funcName, args, comment string
+        if err := fcRows.Scan(&schemaName, &funcName, &args, &comment); err != nil {
+            fcRows.Close()
+            return nil, err
+        }
+        key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+        l.FunctionComments[key] = comment
+    }
+    fcRows.Close()
+
+    // Query type comments
+    tcQ := `
+        select n.nspname, t.typname, d.description
+        from pg_description d
+        join pg_type t on t.oid = d.objoid
+        join pg_namespace n on n.oid = t.typnamespace
+        where d.classoid = 'pg_type'::regclass
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    tcRows, err := pool.Query(ctx, tcQ)
+    if err != nil { return nil, err }
+    for tcRows.Next() {
+        var schemaName, typeName, comment string
+        if err := tcRows.Scan(&schemaName, &typeName, &comment); err != nil {
+            tcRows.Close()
+            return nil, err
+        }
+        l.TypeComments[fmt.Sprintf("%s.%s", schemaName, typeName)] = comment
+    }
+    tcRows.Close()
+
+    // Query schema comments
+    scQ := `
+        select n.nspname, d.description
+        from pg_description d
+        join pg_namespace n on n.oid = d.objoid
+        where d.classoid = 'pg_namespace'::regclass
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    scRows, err := pool.Query(ctx, scQ)
+    if err != nil { return nil, err }
+    for scRows.Next() {
+        var schemaName, comment string
+        if err := scRows.Scan(&schemaName, &comment); err != nil {
+            scRows.Close()
+            return nil, err
+        }
+        l.SchemaComments[schemaName] = comment
+    }
+    scRows.Close()
+
     return l, nil
 }
 
@@ -618,7 +738,78 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     }
     plan.Alters = append(plan.Alters, deferredFKs...)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
+    plan.Alters = append(plan.Alters, planComments(live, desired)...)
     return plan
+}
+
+// planComments emits COMMENT ON for objects whose desired comment is set and
+// differs from live. Empty desired comment = unmanaged (never cleared).
+func planComments(live *Live, desired *schema.Database) []string {
+    stmts := []string{}
+    comment := func(target, want, have string) {
+        if want != "" && want != have {
+            stmts = append(stmts, fmt.Sprintf("comment on %s is %s;", target, quoteString(want)))
+        }
+    }
+
+    schemaNames := make([]string, 0, len(desired.SchemaComments))
+    for s := range desired.SchemaComments { schemaNames = append(schemaNames, s) }
+    sort.Strings(schemaNames)
+    for _, s := range schemaNames {
+        comment("schema "+pqIdent(s), desired.SchemaComments[s], live.SchemaComments[s])
+    }
+
+    typeNames := make([]string, 0, len(desired.Types))
+    for k := range desired.Types { typeNames = append(typeNames, k) }
+    sort.Strings(typeNames)
+    for _, k := range typeNames {
+        td := desired.Types[k]
+        if td == nil { continue }
+        comment("type "+pqIdent(k), td.Comment, live.TypeComments[k])
+    }
+
+    tableNames := make([]string, 0, len(desired.Tables))
+    for k := range desired.Tables { tableNames = append(tableNames, k) }
+    sort.Strings(tableNames)
+    for _, k := range tableNames {
+        dt := desired.Tables[k]
+        if dt == nil { continue }
+        comment("table "+pqIdent(k), dt.Comment, live.RelComments[k])
+        colNames := make([]string, 0, len(dt.Columns))
+        for cn := range dt.Columns { colNames = append(colNames, cn) }
+        sort.Strings(colNames)
+        for _, cn := range colNames {
+            c := dt.Columns[cn]
+            if c == nil || c.Comment == "" { continue }
+            have := ""
+            if lt := live.Tables[k]; lt != nil {
+                if lc := lt.Columns[cn]; lc != nil { have = lc.Comment }
+            }
+            comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(cn)), c.Comment, have)
+        }
+    }
+
+    viewNames := make([]string, 0, len(desired.Views))
+    for k := range desired.Views { viewNames = append(viewNames, k) }
+    sort.Strings(viewNames)
+    for _, k := range viewNames {
+        vw := desired.Views[k]
+        if vw == nil { continue }
+        kind := "view "
+        if vw.Materialized { kind = "materialized view " }
+        comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
+    }
+
+    funcNames := make([]string, 0, len(desired.Functions))
+    for k := range desired.Functions { funcNames = append(funcNames, k) }
+    sort.Strings(funcNames)
+    for _, k := range funcNames {
+        f := desired.Functions[k]
+        if f == nil { continue }
+        norm := normalizeFunctionSignature(k + f.ArgsSig)
+        comment("function "+pqIdent(k)+grantFuncArgs(f.ArgsSig), f.Comment, live.FunctionComments[norm])
+    }
+    return stmts
 }
 
 // planGrants reconciles desired grants against live ACLs for schemas, tables,

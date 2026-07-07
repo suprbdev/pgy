@@ -575,6 +575,93 @@ func TestPolicyNoDropWithoutPoliciesBlock(t *testing.T) {
 	}
 }
 
+// --- comments ---
+
+func TestCommentTableAndColumn(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Comment: "@behavior +list",
+			Columns: map[string]*schema.Column{"id": {Type: "bigint", Comment: "@name theId"}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on table "public"."t" is '@behavior +list';`) {
+		t.Errorf("expected table comment; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `comment on column "public"."t"."id" is '@name theId';`) {
+		t.Errorf("expected column comment; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentSkippedIfSame(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint", Comment: "same"}})
+	live.RelComments = map[string]string{"public.t": "tbl"}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Comment: "tbl",
+			Columns: map[string]*schema.Column{"id": {Type: "bigint", Comment: "same"}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on") {
+		t.Errorf("comments unchanged, should not re-emit; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentUpdatedIfChanged(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.RelComments = map[string]string{"public.t": "old"}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Comment: "new", Columns: map[string]*schema.Column{"id": {Type: "bigint"}}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `comment on table "public"."t" is 'new';`) {
+		t.Errorf("expected updated comment; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentEscapesQuotes(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Comment: "it's quoted", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on table "public"."t" is 'it''s quoted';`) {
+		t.Errorf("expected escaped quote; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentFunctionViewSchemaType(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.fn": {Schema: "public", Name: "fn", ArgsSig: "(a int default 0)",
+				Returns: "int", Language: "sql", Body: "select a", Comment: "fn doc"},
+		},
+		Views: map[string]*schema.View{
+			"public.v":  {Schema: "public", Name: "v", Query: "select 1", Comment: "view doc"},
+			"public.mv": {Schema: "public", Name: "mv", Query: "select 1", Materialized: true, Comment: "mv doc"},
+		},
+		Types: map[string]*schema.TypeDef{
+			"public.status": {Schema: "public", Name: "status", Kind: "enum", Labels: []string{"a"}, Comment: "type doc"},
+		},
+		SchemaComments: map[string]string{"public": "schema doc"},
+	}
+	p := Plan(emptyLive(), desired, false)
+	for _, want := range []string{
+		`comment on function "public"."fn"(a int) is 'fn doc';`,
+		`comment on view "public"."v" is 'view doc';`,
+		`comment on materialized view "public"."mv" is 'mv doc';`,
+		`comment on type "public"."status" is 'type doc';`,
+		`comment on schema "public" is 'schema doc';`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %s; alters: %v", want, p.Alters)
+		}
+	}
+}
+
 // --- column defaults ---
 
 func TestColumnDefaultBoolRendered(t *testing.T) {

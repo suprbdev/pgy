@@ -1752,3 +1752,76 @@ func TestIntegrationRLSAndPolicies(t *testing.T) {
 		t.Errorf("expected 1 policy after removal, got %d", polCount)
 	}
 }
+
+// --- Comments ---
+
+func TestIntegrationComments(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			sch + ".orders": {
+				Name:    "orders",
+				Comment: "@behavior +list\nCustomer orders.",
+				Columns: map[string]*schema.Column{
+					"id": {Type: "bigint", Comment: "@name orderId"},
+				},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	var tblComment, colComment string
+	err = pool.QueryRow(ctx, `
+		select coalesce(obj_description(c.oid, 'pg_class'), ''),
+		       coalesce(col_description(c.oid, a.attnum), '')
+		from pg_class c
+		join pg_namespace n on n.oid = c.relnamespace
+		join pg_attribute a on a.attrelid = c.oid and a.attname = 'id'
+		where n.nspname = $1 and c.relname = 'orders'
+	`, sch).Scan(&tblComment, &colComment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tblComment != "@behavior +list\nCustomer orders." {
+		t.Errorf("table comment: %q", tblComment)
+	}
+	if colComment != "@name orderId" {
+		t.Errorf("column comment: %q", colComment)
+	}
+
+	// second plan idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty second plan; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
+	}
+
+	// change comment -> re-emitted
+	desired.Tables[sch+".orders"].Comment = "@behavior -list"
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	found := false
+	for _, s := range p.Alters {
+		if strings.Contains(s, "@behavior -list") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected comment update; alters: %v", p.Alters)
+	}
+}

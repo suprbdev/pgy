@@ -278,6 +278,36 @@ schema public:
 
 ---
 
+## Comments
+
+All object types accept a `comment:` key emitted as `COMMENT ON`. Comment text is preserved exactly (multi-line included), so PostGraphile smart tags (`@behavior`, `@name`, ...) work as-is.
+
+```yaml
+schema app:
+  comment: "application schema"
+  table orders:
+    comment: |-
+      @behavior +list
+      Customer orders.
+    columns:
+      id:
+        type: bigint
+        comment: "@name orderId"
+  function fn():
+    returns: int
+    language: sql
+    comment: "computes things"
+    body: select 1
+```
+
+Supported on: schemas, tables, columns, types, functions, views, materialized views.
+
+Behavior:
+
+- Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
+- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
+- Single quotes are escaped automatically.
+
 ## Row Level Security
 
 Tables accept `rowLevelSecurity: true` and a `policies:` map of policy name → spec.
