@@ -438,6 +438,38 @@ tables:
 	}
 }
 
+func TestCompositeAttributeOrderPreserved(t *testing.T) {
+	yaml := `
+schema public:
+  type jwt:
+    type: composite
+    attributes:
+      role:
+        type: text
+      person_id:
+        type: uuid
+      exp:
+        type: bigint
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	td := db.Types["public.jwt"]
+	if td == nil {
+		t.Fatal("expected public.jwt type")
+	}
+	want := []string{"role", "person_id", "exp"}
+	if len(td.AttributeOrder) != 3 {
+		t.Fatalf("want AttributeOrder %v, got %v", want, td.AttributeOrder)
+	}
+	for i, n := range want {
+		if td.AttributeOrder[i] != n {
+			t.Fatalf("want AttributeOrder %v, got %v", want, td.AttributeOrder)
+		}
+	}
+}
+
 func TestColumnUnique(t *testing.T) {
 	yaml := `
 tables:

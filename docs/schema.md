@@ -256,6 +256,8 @@ schema public:
       - type public.auth_role
 ```
 
+Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts).
+
 ---
 
 ## Function Definitions

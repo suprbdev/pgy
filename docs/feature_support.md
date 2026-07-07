@@ -23,7 +23,7 @@ These are the foundational elements required for almost any relational database 
 Features that encapsulate business logic, complex data structures, or procedural code.
 
 - [x] **ENUM Types** (Including `ALTER TYPE ... ADD VALUE` for new labels, order-preserving)
-- [x] **Composite Types**
+- [x] **Composite Types** (Attribute order preserved from YAML declaration)
 - [x] **Extensions** (`CREATE EXTENSION`)
 - [x] **Functions** (PL/pgSQL, etc.; replace-on-change via body/attribute diff → `CREATE OR REPLACE`)
 - [x] **Triggers** (Including `CREATE CONSTRAINT TRIGGER` with `deferrable`/`initiallyDeferred`)

@@ -1033,6 +1033,39 @@ func TestCompositeTypeCreate(t *testing.T) {
 	}
 }
 
+func TestCompositeTypeAttributeOrder(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			"public.jwt": {
+				Name: "jwt", Schema: "public", Kind: "composite",
+				Attributes:     map[string]string{"role": "text", "person_id": "uuid", "exp": "bigint"},
+				AttributeOrder: []string{"role", "person_id", "exp"},
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create type "public"."jwt" as ("role" text, "person_id" uuid, "exp" bigint);`) {
+		t.Errorf("expected YAML-ordered attributes; creates: %v", p.Creates)
+	}
+}
+
+func TestCompositeTypeAttributeOrderFallbackSorted(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			"public.jwt": {
+				Name: "jwt", Schema: "public", Kind: "composite",
+				Attributes: map[string]string{"role": "text", "exp": "bigint"},
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `as ("exp" bigint, "role" text);`) {
+		t.Errorf("expected sorted fallback without order info; creates: %v", p.Creates)
+	}
+}
+
 // --- functions ---
 
 func TestFunctionCreate(t *testing.T) {

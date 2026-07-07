@@ -2122,3 +2122,64 @@ comment on column %q.t.id is 'it''s the id; primary';
 		t.Errorf("comment mangled: %q", tblComment)
 	}
 }
+
+// --- Composite type attribute order ---
+
+func TestIntegrationCompositeAttributeOrder(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Types: map[string]*schema.TypeDef{
+			sch + ".jwt": {
+				Name: "jwt", Schema: sch, Kind: "composite",
+				Attributes:     map[string]string{"role": "text", "person_id": "uuid", "exp": "bigint"},
+				AttributeOrder: []string{"role", "person_id", "exp"},
+			},
+		},
+	}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	applyPlan(t, pool, p)
+
+	rows, err := pool.Query(ctx, `
+		select a.attname
+		from pg_attribute a
+		join pg_type t on t.typrelid = a.attrelid
+		join pg_namespace n on n.oid = t.typnamespace
+		where n.nspname = $1 and t.typname = 'jwt' and a.attnum > 0
+		order by a.attnum
+	`, sch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := []string{}
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			t.Fatal(err)
+		}
+		attrs = append(attrs, a)
+	}
+	rows.Close()
+	if strings.Join(attrs, ",") != "role,person_id,exp" {
+		t.Errorf("want role,person_id,exp got %s", strings.Join(attrs, ","))
+	}
+
+	// positional ROW cast must line up with declared order
+	var role string
+	err = pool.QueryRow(ctx, fmt.Sprintf(
+		`select (ROW('admin', '00000000-0000-0000-0000-000000000000'::uuid, 123)::%q.jwt).role`, sch)).Scan(&role)
+	if err != nil {
+		t.Fatalf("positional ROW cast: %v", err)
+	}
+	if role != "admin" {
+		t.Errorf("want admin, got %q", role)
+	}
+}

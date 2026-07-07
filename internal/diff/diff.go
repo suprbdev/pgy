@@ -719,9 +719,18 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 for _, l := range td.Labels { labels = append(labels, quoteString(l)) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as enum (%s);", pqIdent(e.Key), strings.Join(labels, ", ")))
             } else if td.Kind == "composite" {
+                // preserve YAML declaration order (positional ROW(...)::type casts
+                // depend on it); attributes missing from the order list follow sorted
                 attrs := []string{}
+                emitted := map[string]bool{}
+                for _, an := range td.AttributeOrder {
+                    if at, ok := td.Attributes[an]; ok && !emitted[an] {
+                        attrs = append(attrs, fmt.Sprintf("%s %s", pqIdent(an), at))
+                        emitted[an] = true
+                    }
+                }
                 keys := make([]string, 0, len(td.Attributes))
-                for k := range td.Attributes { keys = append(keys, k) }
+                for k := range td.Attributes { if !emitted[k] { keys = append(keys, k) } }
                 sort.Strings(keys)
                 for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s", pqIdent(an), td.Attributes[an])) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as (%s);", pqIdent(e.Key), strings.Join(attrs, ", ")))

@@ -108,6 +108,7 @@ type TypeDef struct {
     Kind   string   // enum|composite
     Labels []string // enum
     Attributes map[string]string // composite: name->type
+    AttributeOrder []string      // composite: YAML declaration order (filled from node tree)
     DependsOn []string `yaml:"dependsOn"`
     Comment string
 }
@@ -717,6 +718,23 @@ func fillColumnOrderFromNode(root *yaml.Node, db *Database, schemaName string) {
                             }
                             if t, ok := db.Tables[fq]; ok {
                                 t.ColumnOrder = order
+                            }
+                        }
+                    }
+                }
+                if strings.HasPrefix(tk.Value, "type ") && tv.Kind == yaml.MappingNode {
+                    tname := strings.TrimSpace(strings.TrimPrefix(tk.Value, "type "))
+                    fq := qualify(schemaName, tname)
+                    for k2 := 0; k2+1 < len(tv.Content); k2 += 2 {
+                        ak := tv.Content[k2]
+                        av := tv.Content[k2+1]
+                        if ak.Value == "attributes" && av.Kind == yaml.MappingNode {
+                            order := []string{}
+                            for x := 0; x+1 < len(av.Content); x += 2 {
+                                order = append(order, av.Content[x].Value)
+                            }
+                            if td, ok := db.Types[fq]; ok {
+                                td.AttributeOrder = order
                             }
                         }
                     }
