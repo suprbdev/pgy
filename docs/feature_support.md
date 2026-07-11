@@ -17,6 +17,8 @@ These are the foundational elements required for almost any relational database 
 - [x] **CHECK Constraints**
 - [x] **NOT NULL Constraints** (Via column `nullable` property)
 - [x] **EXCLUDE Constraints**
+- [ ] **Column Alterations** (`ALTER COLUMN ... TYPE / SET DEFAULT / DROP DEFAULT / SET NOT NULL / DROP NOT NULL` for existing columns. Introspection already captures type/nullable/default/identity per column, but the plan only checks column existence — attribute changes are silently ignored. Implementation notes: type comparison needs normalization, since `information_schema` reports canonical names like `character varying` while YAML typically says `varchar(255)`; default comparison likewise — live defaults come back as `nextval('...')` or `'x'::text` with casts. Type changes can rewrite tables or fail on cast, so they should be gated behind `--unsafe` and/or support a `USING` clause)
+- [ ] **Constraint Alterations** (Detect changed definitions of existing FK/check/unique/exclude constraints. Currently matched by name existence only, so a redefined constraint emits no SQL. Implementation notes: requires introspecting constraint definitions — e.g. `pg_get_constraintdef()` — instead of the current name-only `Constraints map[string]bool`; a change is a `DROP CONSTRAINT` + `ADD CONSTRAINT`, which is destructive-adjacent and should likely be gated behind `--unsafe`)
 - [x] **Comments** (`COMMENT ON` schemas, tables, columns, types, functions, views; diffed against live, PostGraphile smart tags safe)
 
 ## Level 2: Advanced Types & Logic
