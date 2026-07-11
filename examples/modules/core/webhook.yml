@@ -1,0 +1,89 @@
+# Module: webhook — outbound webhook endpoints and delivery attempts.
+# Standalone: no other module required.
+schema public:
+  type webhook_delivery_status:
+    type: enum
+    labels:
+      - pending
+      - delivered
+      - failed
+
+  table webhook:
+    comment: "Outbound webhook endpoint subscription."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      url:
+        type: text
+        notNull: true
+      secret:
+        type: text
+        notNull: true
+      events:
+        type: text[]
+        notNull: true
+        default: "'{}'"
+      active:
+        type: boolean
+        notNull: true
+        default: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    constraints:
+      webhook_url_check:
+        type: check
+        expression: "url ~ '^https?://'"
+
+  table webhook_delivery:
+    comment: "Single delivery attempt of an event to a webhook endpoint."
+    columns:
+      id:
+        type: bigint
+        identity: always
+        primaryKey: true
+      webhook_id:
+        type: uuid
+        notNull: true
+      event:
+        type: text
+        notNull: true
+      payload:
+        type: jsonb
+        notNull: true
+      status:
+        type: public.webhook_delivery_status
+        notNull: true
+        default: "'pending'"
+      response_code:
+        type: int
+        nullable: true
+      attempts:
+        type: int
+        notNull: true
+        default: 0
+      next_attempt_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      webhook_delivery_webhook_id_fkey:
+        columns: [webhook_id]
+        references:
+          table: public.webhook
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      webhook_delivery_webhook_id_idx:
+        columns: [webhook_id]
+      webhook_delivery_status_next_attempt_idx:
+        columns: [status, next_attempt_at]
+    dependsOn:
+      - table public.webhook
+      - type public.webhook_delivery_status

@@ -1,0 +1,52 @@
+# Module: organization — companies / teams / workspaces (multi-tenant root).
+# Standalone: no other module required.
+# Combine with: links/membership.yml (users in organizations),
+#               links/organization_owner.yml.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  table organization:
+    comment: "Tenant root: a company, team, or workspace."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      slug:
+        type: text
+        notNull: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      organization_slug_key:
+        columns: [slug]
+        unique: true
+    constraints:
+      organization_slug_check:
+        type: check
+        expression: "slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'"
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - function public.set_updated_at

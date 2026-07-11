@@ -1,0 +1,87 @@
+# Module: product — sellable products.
+# Standalone: no other module required.
+# Combine with: links/product_category.yml, links/product_tag.yml,
+#               links/order_product.yml, links/cart_product.yml,
+#               links/review_product.yml, links/stock_product.yml.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  type product_status:
+    type: enum
+    labels:
+      - draft
+      - active
+      - archived
+
+  table product:
+    comment: "Sellable product; prices stored in minor units (cents)."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      sku:
+        type: text
+        notNull: true
+      name:
+        type: text
+        notNull: true
+      slug:
+        type: text
+        notNull: true
+      description:
+        type: text
+        nullable: true
+      price_cents:
+        type: bigint
+        notNull: true
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      status:
+        type: public.product_status
+        notNull: true
+        default: "'draft'"
+      attributes:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      product_sku_key:
+        columns: [sku]
+        unique: true
+      product_slug_key:
+        columns: [slug]
+        unique: true
+      product_status_idx:
+        columns: [status]
+    constraints:
+      product_price_cents_check:
+        type: check
+        expression: "price_cents >= 0"
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - type public.product_status
+      - function public.set_updated_at

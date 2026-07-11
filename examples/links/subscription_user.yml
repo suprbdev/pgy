@@ -1,0 +1,20 @@
+# Link: subscription → user (subscriber).
+# Requires: modules/billing/subscription.yml, modules/core/user.yml.
+schema public:
+  table subscription:
+    columns:
+      user_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      subscription_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      subscription_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

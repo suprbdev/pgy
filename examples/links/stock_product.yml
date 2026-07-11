@@ -1,0 +1,21 @@
+# Link: stock → product, with one stock row per (warehouse, product).
+# Requires: modules/commerce/inventory.yml, modules/commerce/product.yml.
+schema public:
+  table stock:
+    columns:
+      product_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      stock_product_id_fkey:
+        columns: [product_id]
+        references:
+          table: public.product
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      stock_warehouse_product_key:
+        columns: [warehouse_id, product_id]
+        unique: true
+    dependsOn:
+      - table public.product

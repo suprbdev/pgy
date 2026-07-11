@@ -1,0 +1,26 @@
+# Link: order → address (shipping and billing).
+# Requires: modules/commerce/order.yml, modules/core/address.yml.
+schema public:
+  table order:
+    columns:
+      shipping_address_id:
+        type: uuid
+        nullable: true
+      billing_address_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      order_shipping_address_id_fkey:
+        columns: [shipping_address_id]
+        references:
+          table: public.address
+          columns: [id]
+        onDelete: set null
+      order_billing_address_id_fkey:
+        columns: [billing_address_id]
+        references:
+          table: public.address
+          columns: [id]
+        onDelete: set null
+    dependsOn:
+      - table public.address

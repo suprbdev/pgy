@@ -1,0 +1,32 @@
+# Module: review — star ratings with text reviews.
+# Standalone: subject and author references are added by link files.
+# Combine with: links/review_product.yml, links/review_author.yml.
+schema public:
+  table review:
+    comment: "Star rating (1-5) with optional text."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      rating:
+        type: int
+        notNull: true
+      title:
+        type: text
+        nullable: true
+      body:
+        type: text
+        nullable: true
+      verified:
+        type: boolean
+        notNull: true
+        default: false
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    constraints:
+      review_rating_check:
+        type: check
+        expression: "rating BETWEEN 1 AND 5"

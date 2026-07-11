@@ -1,0 +1,42 @@
+# Link: user ↔ organization (many-to-many with a role).
+# Requires: modules/core/user.yml, modules/core/organization.yml.
+schema public:
+  table membership:
+    comment: "User's membership in an organization."
+    columns:
+      user_id:
+        type: uuid
+        notNull: true
+      organization_id:
+        type: uuid
+        notNull: true
+      role:
+        type: text
+        notNull: true
+        default: "'member'"
+      joined_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    primaryKey:
+      membership_pkey:
+        columns: [user_id, organization_id]
+    foreignKeys:
+      membership_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+      membership_organization_id_fkey:
+        columns: [organization_id]
+        references:
+          table: public.organization
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      membership_organization_id_idx:
+        columns: [organization_id]
+    dependsOn:
+      - table public.user
+      - table public.organization

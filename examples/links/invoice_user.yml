@@ -1,0 +1,20 @@
+# Link: invoice → user (customer).
+# Requires: modules/billing/invoice.yml, modules/core/user.yml.
+schema public:
+  table invoice:
+    columns:
+      customer_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      invoice_customer_id_fkey:
+        columns: [customer_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      invoice_customer_id_idx:
+        columns: [customer_id]
+    dependsOn:
+      - table public.user

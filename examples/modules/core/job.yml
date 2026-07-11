@@ -1,0 +1,61 @@
+# Module: job — database-backed background job queue.
+# Standalone: no other module required.
+schema public:
+  type job_status:
+    type: enum
+    labels:
+      - queued
+      - running
+      - succeeded
+      - failed
+      - canceled
+
+  table job:
+    comment: "Background job; poll with FOR UPDATE SKIP LOCKED."
+    columns:
+      id:
+        type: bigint
+        identity: always
+        primaryKey: true
+      queue:
+        type: text
+        notNull: true
+        default: "'default'"
+      kind:
+        type: text
+        notNull: true
+      payload:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      status:
+        type: public.job_status
+        notNull: true
+        default: "'queued'"
+      run_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      attempts:
+        type: int
+        notNull: true
+        default: 0
+      max_attempts:
+        type: int
+        notNull: true
+        default: 25
+      last_error:
+        type: text
+        nullable: true
+      finished_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      job_poll_idx:
+        columns: [queue, status, run_at]
+    dependsOn:
+      - type public.job_status

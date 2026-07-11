@@ -1,0 +1,20 @@
+# Link: address → user (address book owner).
+# Requires: modules/core/address.yml, modules/core/user.yml.
+schema public:
+  table address:
+    columns:
+      user_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      address_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      address_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

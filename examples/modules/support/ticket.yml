@@ -1,0 +1,78 @@
+# Module: ticket — support/helpdesk tickets.
+# Standalone: requester/assignee references are added by the link file.
+# Combine with: links/ticket_user.yml.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  type ticket_status:
+    type: enum
+    labels:
+      - open
+      - pending
+      - resolved
+      - closed
+
+  type ticket_priority:
+    type: enum
+    labels:
+      - low
+      - normal
+      - high
+      - urgent
+
+  table ticket:
+    comment: "Support ticket."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      subject:
+        type: text
+        notNull: true
+      body:
+        type: text
+        notNull: true
+      status:
+        type: public.ticket_status
+        notNull: true
+        default: "'open'"
+      priority:
+        type: public.ticket_priority
+        notNull: true
+        default: "'normal'"
+      requester_email:
+        type: text
+        nullable: true
+      resolved_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      ticket_status_priority_idx:
+        columns: [status, priority]
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - type public.ticket_status
+      - type public.ticket_priority
+      - function public.set_updated_at

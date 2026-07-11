@@ -1,0 +1,36 @@
+# Module: session — server-side auth sessions / refresh tokens.
+# Standalone: works as an anonymous session store.
+# Combine with: links/session_user.yml (tie sessions to user accounts).
+schema public:
+  table session:
+    comment: "Server-side session; store only a hash of the token."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      token_hash:
+        type: text
+        notNull: true
+      ip_address:
+        type: inet
+        nullable: true
+      user_agent:
+        type: text
+        nullable: true
+      expires_at:
+        type: timestamptz
+        notNull: true
+      revoked_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      session_token_hash_key:
+        columns: [token_hash]
+        unique: true
+      session_expires_at_idx:
+        columns: [expires_at]

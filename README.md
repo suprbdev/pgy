@@ -121,6 +121,10 @@ tables:
 
 *Note: In addition to `primaryKey`, `foreignKeys`, and `indexes`, table `constraints` (such as `check`, `unique`, and `exclude`) are fully supported and will be emitted when creating new tables.*
 
+See `docs/schema.md` for the full YAML reference, and `examples/` for a
+library of composable starter modules (users, orgs, e-commerce, billing, CRM,
+messaging, and more) plus link files that wire them together.
+
 Diff behavior (current minimal version):
 - Creates missing tables with columns.
 - Adds missing columns to existing tables.

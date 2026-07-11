@@ -1,0 +1,56 @@
+# Module: coupon — discount codes.
+# Standalone: no other module required.
+schema public:
+  type coupon_kind:
+    type: enum
+    labels:
+      - percent
+      - fixed
+
+  table coupon:
+    comment: "Discount code; value is percent (0-100) or minor units by kind."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      code:
+        type: text
+        notNull: true
+      kind:
+        type: public.coupon_kind
+        notNull: true
+      value:
+        type: bigint
+        notNull: true
+      starts_at:
+        type: timestamptz
+        nullable: true
+      expires_at:
+        type: timestamptz
+        nullable: true
+      max_redemptions:
+        type: int
+        nullable: true
+      redeemed_count:
+        type: int
+        notNull: true
+        default: 0
+      active:
+        type: boolean
+        notNull: true
+        default: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      coupon_code_key:
+        columns: [code]
+        unique: true
+    constraints:
+      coupon_value_check:
+        type: check
+        expression: "value > 0 AND (kind <> 'percent' OR value <= 100)"
+    dependsOn:
+      - type public.coupon_kind

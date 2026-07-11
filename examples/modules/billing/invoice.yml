@@ -1,0 +1,105 @@
+# Module: invoice — invoices with line items.
+# Standalone: customer/subscription references are added by link files.
+# Combine with: links/invoice_user.yml, links/invoice_subscription.yml,
+#               links/payment_invoice.yml.
+schema public:
+  type invoice_status:
+    type: enum
+    labels:
+      - draft
+      - open
+      - paid
+      - void
+      - uncollectible
+
+  sequence invoice_number_seq:
+    as: bigint
+    start: 1000
+    comment: "Human-facing invoice number allocator."
+
+  table invoice:
+    comment: "Invoice; amounts stored in minor units (cents)."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      number:
+        type: bigint
+        notNull: true
+        default: nextval('public.invoice_number_seq')
+      status:
+        type: public.invoice_status
+        notNull: true
+        default: "'draft'"
+      amount_due_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      amount_paid_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      issued_at:
+        type: timestamptz
+        nullable: true
+      due_at:
+        type: timestamptz
+        nullable: true
+      paid_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      invoice_number_key:
+        columns: [number]
+        unique: true
+      invoice_status_idx:
+        columns: [status]
+    dependsOn:
+      - type public.invoice_status
+      - sequence public.invoice_number_seq
+
+  table invoice_line:
+    comment: "Invoice line item."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      invoice_id:
+        type: uuid
+        notNull: true
+      description:
+        type: text
+        notNull: true
+      quantity:
+        type: int
+        notNull: true
+        default: 1
+      amount_cents:
+        type: bigint
+        notNull: true
+    foreignKeys:
+      invoice_line_invoice_id_fkey:
+        columns: [invoice_id]
+        references:
+          table: public.invoice
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      invoice_line_invoice_id_idx:
+        columns: [invoice_id]
+    constraints:
+      invoice_line_quantity_check:
+        type: check
+        expression: "quantity > 0"
+    dependsOn:
+      - table public.invoice

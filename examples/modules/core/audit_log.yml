@@ -1,0 +1,33 @@
+# Module: audit_log — append-only audit trail.
+# Standalone: actor reference is added by the link file.
+# Combine with: links/audit_log_user.yml (actor).
+schema public:
+  table audit_log:
+    comment: "Append-only audit trail of entity changes."
+    columns:
+      id:
+        type: bigint
+        identity: always
+        primaryKey: true
+      action:
+        type: text
+        notNull: true
+      entity_type:
+        type: text
+        notNull: true
+      entity_id:
+        type: text
+        notNull: true
+      changes:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      audit_log_entity_idx:
+        columns: [entity_type, entity_id]
+      audit_log_created_at_idx:
+        columns: [created_at]

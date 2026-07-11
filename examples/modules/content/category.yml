@@ -1,0 +1,41 @@
+# Module: category — hierarchical categories.
+# Standalone: no other module required.
+# Combine with: links/post_category.yml, links/product_category.yml.
+schema public:
+  table category:
+    comment: "Hierarchical category; parent_id builds the tree."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      parent_id:
+        type: uuid
+        nullable: true
+      name:
+        type: text
+        notNull: true
+      slug:
+        type: text
+        notNull: true
+      position:
+        type: int
+        notNull: true
+        default: 0
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      category_parent_id_fkey:
+        columns: [parent_id]
+        references:
+          table: public.category
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      category_slug_key:
+        columns: [slug]
+        unique: true
+      category_parent_id_idx:
+        columns: [parent_id]

@@ -1,0 +1,48 @@
+# Module: activity — high-volume event/analytics tracking, range-partitioned
+# by month of occurrence. Add partitions as time advances; the default
+# partition catches anything outside declared ranges.
+# Standalone: actor is tracked by id without a foreign key on purpose —
+# analytics writes should never fail because a user row went away.
+schema public:
+  table activity:
+    comment: "Analytics event stream, partitioned by occurred_at."
+    columns:
+      id:
+        type: bigint
+        identity: always
+      name:
+        type: text
+        notNull: true
+      actor_id:
+        type: uuid
+        nullable: true
+      properties:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      occurred_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    partitionBy:
+      type: range
+      columns: [occurred_at]
+    indexes:
+      activity_name_occurred_at_idx:
+        columns: [name, occurred_at]
+
+  table activity_y2026h2:
+    partitionOf: activity
+    forValues:
+      from: ["2026-07-01"]
+      to: ["2027-01-01"]
+
+  table activity_y2027h1:
+    partitionOf: activity
+    forValues:
+      from: ["2027-01-01"]
+      to: ["2027-07-01"]
+
+  table activity_default:
+    partitionOf: activity
+    default: true

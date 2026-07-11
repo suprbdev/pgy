@@ -1,0 +1,32 @@
+# Module: company — CRM companies/accounts.
+# Standalone: no other module required.
+# Combine with: links/contact_company.yml, links/deal_company.yml.
+schema public:
+  table company:
+    comment: "CRM company/account record."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      domain:
+        type: text
+        nullable: true
+      industry:
+        type: text
+        nullable: true
+      employee_count:
+        type: int
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      company_domain_idx:
+        columns: [domain]
+      company_name_idx:
+        columns: [name]

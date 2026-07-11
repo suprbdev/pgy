@@ -1,0 +1,20 @@
+# Link: booking → user (who booked).
+# Requires: modules/scheduling/booking.yml, modules/core/user.yml.
+schema public:
+  table booking:
+    columns:
+      user_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      booking_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      booking_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

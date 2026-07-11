@@ -1,0 +1,20 @@
+# Link: cart → user (cart owner). Nullable to keep anonymous carts working.
+# Requires: modules/commerce/cart.yml, modules/core/user.yml.
+schema public:
+  table cart:
+    columns:
+      user_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      cart_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      cart_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

@@ -1,0 +1,20 @@
+# Link: deal → contact (primary contact).
+# Requires: modules/crm/deal.yml, modules/crm/contact.yml.
+schema public:
+  table deal:
+    columns:
+      contact_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      deal_contact_id_fkey:
+        columns: [contact_id]
+        references:
+          table: public.contact
+          columns: [id]
+        onDelete: set null
+    indexes:
+      deal_contact_id_idx:
+        columns: [contact_id]
+    dependsOn:
+      - table public.contact

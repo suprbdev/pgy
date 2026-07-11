@@ -16,7 +16,6 @@ bin/
 # pgy artifacts
 .pgy.buffer.sql
 migrations/*.lock
-examples/
 
 # Modules
 vendor/

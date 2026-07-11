@@ -1,0 +1,33 @@
+# Module: contact — CRM contacts/people.
+# Standalone: company reference is added by the link file.
+# Combine with: links/contact_company.yml, links/deal_contact.yml.
+schema public:
+  table contact:
+    comment: "CRM contact/person record."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      first_name:
+        type: text
+        notNull: true
+      last_name:
+        type: text
+        nullable: true
+      email:
+        type: text
+        nullable: true
+      phone:
+        type: text
+        nullable: true
+      notes:
+        type: text
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      contact_email_idx:
+        columns: [email]

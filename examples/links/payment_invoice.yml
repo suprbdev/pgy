@@ -1,0 +1,21 @@
+# Link: payment → invoice. Nullable so payment can also (or instead) link to
+# an order via links/payment_order.yml.
+# Requires: modules/commerce/payment.yml, modules/billing/invoice.yml.
+schema public:
+  table payment:
+    columns:
+      invoice_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      payment_invoice_id_fkey:
+        columns: [invoice_id]
+        references:
+          table: public.invoice
+          columns: [id]
+        onDelete: restrict
+    indexes:
+      payment_invoice_id_idx:
+        columns: [invoice_id]
+    dependsOn:
+      - table public.invoice

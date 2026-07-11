@@ -1,0 +1,20 @@
+# Link: organization → user (owner).
+# Requires: modules/core/organization.yml, modules/core/user.yml.
+schema public:
+  table organization:
+    columns:
+      owner_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      organization_owner_id_fkey:
+        columns: [owner_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      organization_owner_id_idx:
+        columns: [owner_id]
+    dependsOn:
+      - table public.user

@@ -1,0 +1,34 @@
+# Module: notification — in-app notifications.
+# Standalone: recipient reference is added by the link file.
+# Combine with: links/notification_user.yml (recipient).
+schema public:
+  table notification:
+    comment: "In-app notification; payload carries type-specific data."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      kind:
+        type: text
+        notNull: true
+      title:
+        type: text
+        notNull: true
+      body:
+        type: text
+        nullable: true
+      payload:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      read_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      notification_created_at_idx:
+        columns: [created_at]

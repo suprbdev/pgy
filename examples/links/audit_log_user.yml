@@ -1,0 +1,20 @@
+# Link: audit_log → user (actor).
+# Requires: modules/core/audit_log.yml, modules/core/user.yml.
+schema public:
+  table audit_log:
+    columns:
+      actor_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      audit_log_actor_id_fkey:
+        columns: [actor_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      audit_log_actor_id_idx:
+        columns: [actor_id]
+    dependsOn:
+      - table public.user

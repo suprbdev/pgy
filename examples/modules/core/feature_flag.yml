@@ -1,0 +1,42 @@
+# Module: feature_flag — runtime feature toggles.
+# Standalone: no other module required.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  table feature_flag:
+    comment: "Runtime feature toggle; rules holds targeting config."
+    columns:
+      key:
+        type: text
+        primaryKey: true
+      description:
+        type: text
+        nullable: true
+      enabled:
+        type: boolean
+        notNull: true
+        default: false
+      rules:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - function public.set_updated_at

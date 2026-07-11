@@ -1,0 +1,20 @@
+# Link: post → user (author).
+# Requires: modules/content/post.yml, modules/core/user.yml.
+schema public:
+  table post:
+    columns:
+      author_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      post_author_id_fkey:
+        columns: [author_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      post_author_id_idx:
+        columns: [author_id]
+    dependsOn:
+      - table public.user

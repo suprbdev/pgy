@@ -1,0 +1,52 @@
+# Module: subscription — recurring subscriptions.
+# Standalone: subscriber and plan references are added by link files.
+# Combine with: links/subscription_user.yml, links/subscription_plan.yml,
+#               links/invoice_subscription.yml.
+schema public:
+  type subscription_status:
+    type: enum
+    labels:
+      - trialing
+      - active
+      - past_due
+      - canceled
+      - expired
+
+  table subscription:
+    comment: "Recurring subscription with billing period tracking."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      status:
+        type: public.subscription_status
+        notNull: true
+        default: "'active'"
+      current_period_start:
+        type: timestamptz
+        notNull: true
+        default: now()
+      current_period_end:
+        type: timestamptz
+        notNull: true
+      cancel_at_period_end:
+        type: boolean
+        notNull: true
+        default: false
+      canceled_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      subscription_status_idx:
+        columns: [status]
+    constraints:
+      subscription_period_check:
+        type: check
+        expression: "current_period_end > current_period_start"
+    dependsOn:
+      - type public.subscription_status

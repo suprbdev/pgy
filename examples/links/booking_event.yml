@@ -1,0 +1,20 @@
+# Link: booking → event (what is booked).
+# Requires: modules/scheduling/booking.yml, modules/scheduling/event.yml.
+schema public:
+  table booking:
+    columns:
+      event_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      booking_event_id_fkey:
+        columns: [event_id]
+        references:
+          table: public.event
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      booking_event_id_idx:
+        columns: [event_id]
+    dependsOn:
+      - table public.event

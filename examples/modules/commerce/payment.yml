@@ -1,0 +1,56 @@
+# Module: payment — payment attempts/records from any provider.
+# Standalone: order/invoice references are added by link files.
+# Combine with: links/payment_order.yml, links/payment_invoice.yml.
+schema public:
+  type payment_status:
+    type: enum
+    labels:
+      - pending
+      - authorized
+      - captured
+      - failed
+      - refunded
+
+  table payment:
+    comment: "Payment record; provider_ref is the PSP's transaction id."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      amount_cents:
+        type: bigint
+        notNull: true
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      status:
+        type: public.payment_status
+        notNull: true
+        default: "'pending'"
+      provider:
+        type: text
+        notNull: true
+      provider_ref:
+        type: text
+        nullable: true
+      failure_reason:
+        type: text
+        nullable: true
+      paid_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      payment_provider_ref_idx:
+        columns: [provider, provider_ref]
+    constraints:
+      payment_amount_cents_check:
+        type: check
+        expression: "amount_cents > 0"
+    dependsOn:
+      - type public.payment_status

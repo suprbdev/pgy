@@ -1,0 +1,34 @@
+# Link: product ↔ tag (many-to-many junction).
+# Requires: modules/commerce/product.yml, modules/core/tag.yml.
+schema public:
+  table product_tag:
+    comment: "Tags applied to a product."
+    columns:
+      product_id:
+        type: uuid
+        notNull: true
+      tag_id:
+        type: uuid
+        notNull: true
+    primaryKey:
+      product_tag_pkey:
+        columns: [product_id, tag_id]
+    foreignKeys:
+      product_tag_product_id_fkey:
+        columns: [product_id]
+        references:
+          table: public.product
+          columns: [id]
+        onDelete: cascade
+      product_tag_tag_id_fkey:
+        columns: [tag_id]
+        references:
+          table: public.tag
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      product_tag_tag_id_idx:
+        columns: [tag_id]
+    dependsOn:
+      - table public.product
+      - table public.tag

@@ -1,0 +1,20 @@
+# Link: comment → user (author).
+# Requires: modules/content/comment.yml, modules/core/user.yml.
+schema public:
+  table comment:
+    columns:
+      author_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      comment_author_id_fkey:
+        columns: [author_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      comment_author_id_idx:
+        columns: [author_id]
+    dependsOn:
+      - table public.user

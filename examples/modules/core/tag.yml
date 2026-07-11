@@ -1,0 +1,29 @@
+# Module: tag — free-form labels usable across any entity.
+# Standalone: no other module required.
+# Combine with: links/post_tag.yml, links/product_tag.yml (junctions).
+schema public:
+  table tag:
+    comment: "Free-form label; attach via junction tables."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      slug:
+        type: text
+        notNull: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      tag_slug_key:
+        columns: [slug]
+        unique: true
+    constraints:
+      tag_slug_check:
+        type: check
+        expression: "slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'"

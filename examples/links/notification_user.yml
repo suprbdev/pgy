@@ -1,0 +1,20 @@
+# Link: notification → user (recipient).
+# Requires: modules/core/notification.yml, modules/core/user.yml.
+schema public:
+  table notification:
+    columns:
+      recipient_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      notification_recipient_id_fkey:
+        columns: [recipient_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      notification_recipient_read_idx:
+        columns: [recipient_id, read_at]
+    dependsOn:
+      - table public.user

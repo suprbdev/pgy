@@ -1,0 +1,43 @@
+# Module: api_key — programmatic access keys.
+# Standalone: no other module required.
+# Combine with: links/api_key_user.yml (key ownership).
+schema public:
+  table api_key:
+    comment: "API key; store only a hash, expose the prefix for identification."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      key_prefix:
+        type: text
+        notNull: true
+      key_hash:
+        type: text
+        notNull: true
+      scopes:
+        type: text[]
+        notNull: true
+        default: "'{}'"
+      last_used_at:
+        type: timestamptz
+        nullable: true
+      expires_at:
+        type: timestamptz
+        nullable: true
+      revoked_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      api_key_key_hash_key:
+        columns: [key_hash]
+        unique: true
+      api_key_key_prefix_idx:
+        columns: [key_prefix]

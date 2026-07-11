@@ -1,0 +1,20 @@
+# Link: review → product (what is reviewed).
+# Requires: modules/commerce/review.yml, modules/commerce/product.yml.
+schema public:
+  table review:
+    columns:
+      product_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      review_product_id_fkey:
+        columns: [product_id]
+        references:
+          table: public.product
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      review_product_id_idx:
+        columns: [product_id]
+    dependsOn:
+      - table public.product

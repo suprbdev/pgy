@@ -1,0 +1,20 @@
+# Link: contact → company (employer).
+# Requires: modules/crm/contact.yml, modules/crm/company.yml.
+schema public:
+  table contact:
+    columns:
+      company_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      contact_company_id_fkey:
+        columns: [company_id]
+        references:
+          table: public.company
+          columns: [id]
+        onDelete: set null
+    indexes:
+      contact_company_id_idx:
+        columns: [company_id]
+    dependsOn:
+      - table public.company

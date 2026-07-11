@@ -1,0 +1,20 @@
+# Link: file → user (uploader).
+# Requires: modules/core/file.yml, modules/core/user.yml.
+schema public:
+  table file:
+    columns:
+      uploaded_by:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      file_uploaded_by_fkey:
+        columns: [uploaded_by]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      file_uploaded_by_idx:
+        columns: [uploaded_by]
+    dependsOn:
+      - table public.user

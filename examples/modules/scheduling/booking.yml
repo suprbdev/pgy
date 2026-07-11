@@ -1,0 +1,47 @@
+# Module: booking — reservations/attendance records.
+# Standalone: event and attendee references are added by link files.
+# Combine with: links/booking_event.yml, links/booking_user.yml.
+schema public:
+  type booking_status:
+    type: enum
+    labels:
+      - pending
+      - confirmed
+      - canceled
+      - attended
+      - no_show
+
+  table booking:
+    comment: "Reservation for an event or slot."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      status:
+        type: public.booking_status
+        notNull: true
+        default: "'pending'"
+      party_size:
+        type: int
+        notNull: true
+        default: 1
+      note:
+        type: text
+        nullable: true
+      confirmed_at:
+        type: timestamptz
+        nullable: true
+      canceled_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    constraints:
+      booking_party_size_check:
+        type: check
+        expression: "party_size > 0"
+    dependsOn:
+      - type public.booking_status

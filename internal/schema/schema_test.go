@@ -953,6 +953,48 @@ schema public:
 	}
 }
 
+func TestTopologicalSortFunctionDepWithParens(t *testing.T) {
+	// The table name sorts before the function name alphabetically, so
+	// without the resolved dependency the table would be emitted first.
+	yaml := `
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    body: |
+      BEGIN RETURN NEW; END;
+  table setting:
+    dependsOn: ["function public.set_updated_at()"]
+    columns:
+      key:
+        type: text
+        primaryKey: true
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fnIdx, tableIdx := -1, -1
+	for i, e := range sorted {
+		if e.Kind == "function" && e.Key == "public.set_updated_at" {
+			fnIdx = i
+		}
+		if e.Kind == "table" && e.Key == "public.setting" {
+			tableIdx = i
+		}
+	}
+	if fnIdx == -1 || tableIdx == -1 {
+		t.Fatalf("missing entities: %v", sorted)
+	}
+	if fnIdx >= tableIdx {
+		t.Errorf("function (idx %d) must precede table (idx %d)", fnIdx, tableIdx)
+	}
+}
+
 // --- LoadAndMerge ---
 
 func TestLoadAndMerge(t *testing.T) {
@@ -992,6 +1034,143 @@ tables:
 	}
 	if _, ok := db.Tables["public.orders"]; !ok {
 		t.Error("expected public.orders")
+	}
+}
+
+func TestLoadAndMergeLinkFileAddsForeignKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	f1 := filepath.Join(dir, "post.yaml")
+	f2 := filepath.Join(dir, "post_user.yaml")
+	os.WriteFile(f1, []byte(`
+schema public:
+  table post:
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+      title:
+        type: text
+    indexes:
+      post_title_idx:
+        columns: [title]
+    dependsOn:
+      - extension pgcrypto
+`), 0o644)
+	os.WriteFile(f2, []byte(`
+schema public:
+  table post:
+    columns:
+      author_id:
+        type: uuid
+    foreignKeys:
+      post_author_fkey:
+        columns: [author_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      post_author_idx:
+        columns: [author_id]
+    dependsOn:
+      - table public.user
+`), 0o644)
+
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := db.Tables["public.post"]
+	if post == nil {
+		t.Fatal("expected public.post")
+	}
+	if len(post.Columns) != 3 {
+		t.Errorf("expected 3 merged cols, got %d", len(post.Columns))
+	}
+	if len(post.ForeignKeys) != 1 || post.ForeignKeys[0].Name != "post_author_fkey" {
+		t.Fatalf("expected merged FK post_author_fkey, got %+v", post.ForeignKeys)
+	}
+	if post.ForeignKeys[0].RefTable != "public.user" {
+		t.Errorf("FK refTable = %q", post.ForeignKeys[0].RefTable)
+	}
+	if len(post.Indexes) != 2 {
+		t.Errorf("expected 2 merged indexes, got %d", len(post.Indexes))
+	}
+	want := []string{"extension pgcrypto", "table public.user"}
+	if len(post.DependsOn) != 2 || post.DependsOn[0] != want[0] || post.DependsOn[1] != want[1] {
+		t.Errorf("dependsOn = %v, want %v", post.DependsOn, want)
+	}
+}
+
+func TestLoadAndMergeNamedEntryReplacedByLaterFile(t *testing.T) {
+	dir := t.TempDir()
+
+	f1 := filepath.Join(dir, "a.yaml")
+	f2 := filepath.Join(dir, "b.yaml")
+	os.WriteFile(f1, []byte(`
+schema public:
+  table item:
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+      qty:
+        type: int
+    constraints:
+      item_qty_check:
+        type: check
+        expression: "qty > 0"
+`), 0o644)
+	os.WriteFile(f2, []byte(`
+schema public:
+  table item:
+    constraints:
+      item_qty_check:
+        type: check
+        expression: "qty >= 0"
+`), 0o644)
+
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := db.Tables["public.item"]
+	if item == nil {
+		t.Fatal("expected public.item")
+	}
+	if len(item.Constraints) != 1 {
+		t.Fatalf("expected 1 constraint after same-name merge, got %d", len(item.Constraints))
+	}
+	if item.Constraints[0].Expression != "qty >= 0" {
+		t.Errorf("expected later file to win, got %q", item.Constraints[0].Expression)
+	}
+}
+
+func TestLoadAndMergeExtensionDedupe(t *testing.T) {
+	dir := t.TempDir()
+
+	f1 := filepath.Join(dir, "a.yaml")
+	f2 := filepath.Join(dir, "b.yaml")
+	os.WriteFile(f1, []byte(`
+extensions:
+  - name: citext
+    ifNotExists: true
+`), 0o644)
+	os.WriteFile(f2, []byte(`
+extensions:
+  - name: citext
+    ifNotExists: true
+  - name: pgcrypto
+    ifNotExists: true
+`), 0o644)
+
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Extensions) != 2 {
+		t.Fatalf("expected 2 deduped extensions, got %d", len(db.Extensions))
 	}
 }
 

@@ -270,13 +270,28 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 if t.Partition != nil {
                     existing.Partition = t.Partition
                 }
+                if len(existing.PrimaryKey) == 0 {
+                    existing.PrimaryKey = t.PrimaryKey
+                }
+                existing.Indexes = mergeNamed(existing.Indexes, t.Indexes, func(x *Index) string { return x.Name })
+                existing.ForeignKeys = mergeNamed(existing.ForeignKeys, t.ForeignKeys, func(x *ForeignKey) string { return x.Name })
+                existing.Constraints = mergeNamed(existing.Constraints, t.Constraints, func(x *Constraint) string { return x.Name })
+                existing.Triggers = mergeNamed(existing.Triggers, t.Triggers, func(x *Trigger) string { return x.Name })
+                existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
                 merged.Tables[name] = t
             }
         }
-        // merge extensions
-        if len(d.Extensions) > 0 {
-            merged.Extensions = append(merged.Extensions, d.Extensions...)
+        // merge extensions (dedupe by name; first declaration wins)
+        for _, ext := range d.Extensions {
+            if ext == nil { continue }
+            dup := false
+            for _, e := range merged.Extensions {
+                if e != nil && e.Name == ext.Name { dup = true; break }
+            }
+            if !dup {
+                merged.Extensions = append(merged.Extensions, ext)
+            }
         }
         // merge types
         if len(d.Types) > 0 {
@@ -409,6 +424,45 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
         }
     }
     return out, nil
+}
+
+// mergeNamed appends items from add to base, replacing base entries whose
+// name matches (later files win). Unnamed entries are always appended.
+func mergeNamed[T any](base, add []T, name func(T) string) []T {
+    for _, a := range add {
+        n := name(a)
+        replaced := false
+        if n != "" {
+            for i, b := range base {
+                if name(b) == n {
+                    base[i] = a
+                    replaced = true
+                    break
+                }
+            }
+        }
+        if !replaced {
+            base = append(base, a)
+        }
+    }
+    return base
+}
+
+// appendUnique appends items from add that are not already in base.
+func appendUnique(base, add []string) []string {
+    for _, a := range add {
+        found := false
+        for _, b := range base {
+            if b == a {
+                found = true
+                break
+            }
+        }
+        if !found {
+            base = append(base, a)
+        }
+    }
+    return base
 }
 
 func mergeTablesInto(db *Database, defaultSchema string, v any) {
@@ -1229,6 +1283,14 @@ func resolveDependency(raw string, d *Database) string {
     // Handle "function <name>(args)"
     if strings.HasPrefix(raw, "function ") {
         fnSig := strings.TrimSpace(strings.TrimPrefix(raw, "function "))
+        // Function map keys carry no argument list; strip "(...)" so both
+        // "function public.fn" and "function public.fn(int)" resolve.
+        if i := strings.Index(fnSig, "("); i >= 0 {
+            fnSig = fnSig[:i]
+        }
+        if _, ok := d.Functions[fnSig]; ok {
+            return fnSig
+        }
         for k := range d.Functions {
             if strings.Contains(k, fnSig) || strings.HasPrefix(k, fnSig) {
                 return k
@@ -1236,10 +1298,16 @@ func resolveDependency(raw string, d *Database) string {
         }
         return ""
     }
-    
+
     // Handle "procedure <name>(args)"
     if strings.HasPrefix(raw, "procedure ") {
         prSig := strings.TrimSpace(strings.TrimPrefix(raw, "procedure "))
+        if i := strings.Index(prSig, "("); i >= 0 {
+            prSig = prSig[:i]
+        }
+        if _, ok := d.Procedures[prSig]; ok {
+            return prSig
+        }
         for k := range d.Procedures {
             if strings.Contains(k, prSig) || strings.HasPrefix(k, prSig) {
                 return k

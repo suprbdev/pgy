@@ -1,0 +1,55 @@
+# Module: conversation — direct/group messaging threads.
+# Standalone: participants and senders are added by link files.
+# Combine with: links/participant.yml (who is in a conversation),
+#               links/message_sender.yml (who sent a message).
+schema public:
+  table conversation:
+    comment: "Messaging thread."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      subject:
+        type: text
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      last_message_at:
+        type: timestamptz
+        nullable: true
+
+  table message:
+    comment: "Single message inside a conversation."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      conversation_id:
+        type: uuid
+        notNull: true
+      body:
+        type: text
+        notNull: true
+      edited_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      message_conversation_id_fkey:
+        columns: [conversation_id]
+        references:
+          table: public.conversation
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      message_conversation_id_created_at_idx:
+        columns: [conversation_id, created_at]
+    dependsOn:
+      - table public.conversation

@@ -1,0 +1,20 @@
+# Link: api_key → user (key owner).
+# Requires: modules/core/api_key.yml, modules/core/user.yml.
+schema public:
+  table api_key:
+    columns:
+      user_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      api_key_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      api_key_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

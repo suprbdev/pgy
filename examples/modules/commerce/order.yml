@@ -1,0 +1,133 @@
+# Module: order — customer orders with line items.
+# Standalone: customer/product/address references are added by link files.
+# Combine with: links/order_customer.yml, links/order_product.yml,
+#               links/order_address.yml, links/payment_order.yml.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  type order_status:
+    type: enum
+    labels:
+      - pending
+      - paid
+      - shipped
+      - delivered
+      - canceled
+      - refunded
+
+  sequence order_number_seq:
+    as: bigint
+    start: 1000
+    comment: "Human-facing order number allocator."
+
+  table order:
+    comment: "Customer order; totals stored in minor units (cents)."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      number:
+        type: bigint
+        notNull: true
+        default: nextval('public.order_number_seq')
+      status:
+        type: public.order_status
+        notNull: true
+        default: "'pending'"
+      subtotal_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      tax_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      shipping_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      total_cents:
+        type: bigint
+        notNull: true
+        default: 0
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      placed_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      order_number_key:
+        columns: [number]
+        unique: true
+      order_status_idx:
+        columns: [status]
+    constraints:
+      order_total_cents_check:
+        type: check
+        expression: "total_cents >= 0"
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - type public.order_status
+      - sequence public.order_number_seq
+      - function public.set_updated_at
+
+  table order_item:
+    comment: "Order line item; name and price are copied at purchase time."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      order_id:
+        type: uuid
+        notNull: true
+      name:
+        type: text
+        notNull: true
+      quantity:
+        type: int
+        notNull: true
+        default: 1
+      unit_price_cents:
+        type: bigint
+        notNull: true
+    foreignKeys:
+      order_item_order_id_fkey:
+        columns: [order_id]
+        references:
+          table: public.order
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      order_item_order_id_idx:
+        columns: [order_id]
+    constraints:
+      order_item_quantity_check:
+        type: check
+        expression: "quantity > 0"
+    dependsOn:
+      - table public.order

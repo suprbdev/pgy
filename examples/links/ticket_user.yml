@@ -1,0 +1,31 @@
+# Link: ticket → user (requester and assignee).
+# Requires: modules/support/ticket.yml, modules/core/user.yml.
+schema public:
+  table ticket:
+    columns:
+      requester_id:
+        type: uuid
+        nullable: true
+      assignee_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      ticket_requester_id_fkey:
+        columns: [requester_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+      ticket_assignee_id_fkey:
+        columns: [assignee_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      ticket_requester_id_idx:
+        columns: [requester_id]
+      ticket_assignee_id_idx:
+        columns: [assignee_id]
+    dependsOn:
+      - table public.user

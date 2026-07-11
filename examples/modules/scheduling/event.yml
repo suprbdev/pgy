@@ -1,0 +1,46 @@
+# Module: event — calendar events / bookable slots.
+# Standalone: organizer reference is added by the link file.
+# Combine with: links/event_organizer.yml, links/booking_event.yml.
+schema public:
+  table event:
+    comment: "Calendar event or bookable slot."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      title:
+        type: text
+        notNull: true
+      description:
+        type: text
+        nullable: true
+      location:
+        type: text
+        nullable: true
+      starts_at:
+        type: timestamptz
+        notNull: true
+      ends_at:
+        type: timestamptz
+        notNull: true
+      capacity:
+        type: int
+        nullable: true
+      canceled_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      event_starts_at_idx:
+        columns: [starts_at]
+    constraints:
+      event_time_check:
+        type: check
+        expression: "ends_at > starts_at"
+      event_capacity_check:
+        type: check
+        expression: "capacity IS NULL OR capacity > 0"

@@ -110,6 +110,53 @@ tables:
 
 ---
 
+## Merging across files
+
+`pgy diff` accepts multiple schema files and merges them before diffing. When
+the same table is declared in more than one file:
+
+- **Columns** are combined; a column re-declared in a later file replaces the
+  earlier declaration.
+- **Indexes, foreign keys, constraints, and triggers** are combined by name:
+  entries with new names are appended, and a same-named entry from a later
+  file replaces the earlier one.
+- **`dependsOn`** entries are appended (duplicates ignored).
+- **`grants`, `policies`, `comment`**, and partition settings from a later
+  file replace the earlier values when present.
+- **Extensions** are deduplicated by name.
+- **Types, functions, procedures, views, sequences, and domains** are keyed by
+  name; a later declaration replaces an earlier one.
+
+This enables composable schema files: one file can declare a base table and a
+supplementary "link" file can add a foreign-key column pointing at another
+module's table (see `examples/modules/` and `examples/links/`).
+
+```yaml
+# post.yml — standalone module
+schema public:
+  table post:
+    columns:
+      id: { type: uuid, primaryKey: true, default: gen_random_uuid() }
+      title: { type: text, notNull: true }
+
+# post_author.yml — link file; include together with post.yml and user.yml
+schema public:
+  table post:
+    columns:
+      author_id: { type: uuid, nullable: true }
+    foreignKeys:
+      post_author_id_fkey:
+        columns: [author_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    dependsOn:
+      - table public.user
+```
+
+---
+
 ## Extensions
 
 Defined at the top level of any file:

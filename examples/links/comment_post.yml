@@ -1,0 +1,20 @@
+# Link: comment → post (what is commented on).
+# Requires: modules/content/comment.yml, modules/content/post.yml.
+schema public:
+  table comment:
+    columns:
+      post_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      comment_post_id_fkey:
+        columns: [post_id]
+        references:
+          table: public.post
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      comment_post_id_idx:
+        columns: [post_id]
+    dependsOn:
+      - table public.post

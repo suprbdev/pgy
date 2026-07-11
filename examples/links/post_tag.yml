@@ -1,0 +1,34 @@
+# Link: post ↔ tag (many-to-many junction).
+# Requires: modules/content/post.yml, modules/core/tag.yml.
+schema public:
+  table post_tag:
+    comment: "Tags applied to a post."
+    columns:
+      post_id:
+        type: uuid
+        notNull: true
+      tag_id:
+        type: uuid
+        notNull: true
+    primaryKey:
+      post_tag_pkey:
+        columns: [post_id, tag_id]
+    foreignKeys:
+      post_tag_post_id_fkey:
+        columns: [post_id]
+        references:
+          table: public.post
+          columns: [id]
+        onDelete: cascade
+      post_tag_tag_id_fkey:
+        columns: [tag_id]
+        references:
+          table: public.tag
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      post_tag_tag_id_idx:
+        columns: [tag_id]
+    dependsOn:
+      - table public.post
+      - table public.tag

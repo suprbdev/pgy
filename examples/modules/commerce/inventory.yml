@@ -1,0 +1,64 @@
+# Module: inventory — warehouses and stock levels.
+# Standalone: product reference is added by the link file.
+# Combine with: links/stock_product.yml.
+schema public:
+  table warehouse:
+    comment: "Physical or virtual stock location."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      code:
+        type: text
+        notNull: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      warehouse_code_key:
+        columns: [code]
+        unique: true
+
+  table stock:
+    comment: "Stock level for one item in one warehouse."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      warehouse_id:
+        type: uuid
+        notNull: true
+      quantity:
+        type: int
+        notNull: true
+        default: 0
+      reserved:
+        type: int
+        notNull: true
+        default: 0
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      stock_warehouse_id_fkey:
+        columns: [warehouse_id]
+        references:
+          table: public.warehouse
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      stock_warehouse_id_idx:
+        columns: [warehouse_id]
+    constraints:
+      stock_quantity_check:
+        type: check
+        expression: "quantity >= 0 AND reserved >= 0 AND reserved <= quantity"
+    dependsOn:
+      - table public.warehouse

@@ -1,0 +1,56 @@
+# Module: plan — subscription pricing plans.
+# Standalone: no other module required.
+# Combine with: links/subscription_plan.yml.
+schema public:
+  type billing_interval:
+    type: enum
+    labels:
+      - month
+      - year
+
+  table plan:
+    comment: "Subscription pricing plan."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      code:
+        type: text
+        notNull: true
+      name:
+        type: text
+        notNull: true
+      price_cents:
+        type: bigint
+        notNull: true
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      interval:
+        type: public.billing_interval
+        notNull: true
+        default: "'month'"
+      trial_days:
+        type: int
+        notNull: true
+        default: 0
+      active:
+        type: boolean
+        notNull: true
+        default: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      plan_code_key:
+        columns: [code]
+        unique: true
+    constraints:
+      plan_price_cents_check:
+        type: check
+        expression: "price_cents >= 0"
+    dependsOn:
+      - type public.billing_interval

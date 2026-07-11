@@ -1,0 +1,20 @@
+# Link: subscription → plan.
+# Requires: modules/billing/subscription.yml, modules/billing/plan.yml.
+schema public:
+  table subscription:
+    columns:
+      plan_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      subscription_plan_id_fkey:
+        columns: [plan_id]
+        references:
+          table: public.plan
+          columns: [id]
+        onDelete: restrict
+    indexes:
+      subscription_plan_id_idx:
+        columns: [plan_id]
+    dependsOn:
+      - table public.plan

@@ -1,0 +1,72 @@
+# Module: post — blog posts / articles / CMS content.
+# Standalone: author reference is added by the link file.
+# Combine with: links/post_author.yml, links/comment_post.yml,
+#               links/post_tag.yml, links/post_category.yml.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  type post_status:
+    type: enum
+    labels:
+      - draft
+      - published
+      - archived
+
+  table post:
+    comment: "Blog post / article."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      title:
+        type: text
+        notNull: true
+      slug:
+        type: text
+        notNull: true
+      excerpt:
+        type: text
+        nullable: true
+      body:
+        type: text
+        notNull: true
+        default: "''"
+      status:
+        type: public.post_status
+        notNull: true
+        default: "'draft'"
+      published_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      post_slug_key:
+        columns: [slug]
+        unique: true
+      post_status_published_at_idx:
+        columns: [status, published_at]
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - type public.post_status
+      - function public.set_updated_at

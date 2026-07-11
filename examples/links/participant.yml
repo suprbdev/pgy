@@ -1,0 +1,41 @@
+# Link: user ↔ conversation (many-to-many junction).
+# Requires: modules/messaging/conversation.yml, modules/core/user.yml.
+schema public:
+  table participant:
+    comment: "User's participation in a conversation."
+    columns:
+      conversation_id:
+        type: uuid
+        notNull: true
+      user_id:
+        type: uuid
+        notNull: true
+      joined_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      last_read_at:
+        type: timestamptz
+        nullable: true
+    primaryKey:
+      participant_pkey:
+        columns: [conversation_id, user_id]
+    foreignKeys:
+      participant_conversation_id_fkey:
+        columns: [conversation_id]
+        references:
+          table: public.conversation
+          columns: [id]
+        onDelete: cascade
+      participant_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      participant_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.conversation
+      - table public.user

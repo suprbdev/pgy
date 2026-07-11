@@ -1,0 +1,20 @@
+# Link: session → user (session owner).
+# Requires: modules/core/session.yml, modules/core/user.yml.
+schema public:
+  table session:
+    columns:
+      user_id:
+        type: uuid
+        notNull: true
+    foreignKeys:
+      session_user_id_fkey:
+        columns: [user_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      session_user_id_idx:
+        columns: [user_id]
+    dependsOn:
+      - table public.user

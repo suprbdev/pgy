@@ -1,0 +1,51 @@
+# Module: deal — CRM sales pipeline deals.
+# Standalone: company/contact/owner references are added by link files.
+# Combine with: links/deal_company.yml, links/deal_contact.yml,
+#               links/deal_owner.yml.
+schema public:
+  type deal_stage:
+    type: enum
+    labels:
+      - lead
+      - qualified
+      - proposal
+      - negotiation
+      - won
+      - lost
+
+  table deal:
+    comment: "Sales pipeline deal; value in minor units (cents)."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      title:
+        type: text
+        notNull: true
+      stage:
+        type: public.deal_stage
+        notNull: true
+        default: "'lead'"
+      value_cents:
+        type: bigint
+        nullable: true
+      currency:
+        type: char(3)
+        notNull: true
+        default: "'USD'"
+      expected_close_date:
+        type: date
+        nullable: true
+      closed_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      deal_stage_idx:
+        columns: [stage]
+    dependsOn:
+      - type public.deal_stage

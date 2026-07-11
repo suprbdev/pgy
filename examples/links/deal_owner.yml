@@ -1,0 +1,20 @@
+# Link: deal → user (sales owner).
+# Requires: modules/crm/deal.yml, modules/core/user.yml.
+schema public:
+  table deal:
+    columns:
+      owner_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      deal_owner_id_fkey:
+        columns: [owner_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      deal_owner_id_idx:
+        columns: [owner_id]
+    dependsOn:
+      - table public.user

@@ -1,0 +1,20 @@
+# Link: event → user (organizer).
+# Requires: modules/scheduling/event.yml, modules/core/user.yml.
+schema public:
+  table event:
+    columns:
+      organizer_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      event_organizer_id_fkey:
+        columns: [organizer_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      event_organizer_id_idx:
+        columns: [organizer_id]
+    dependsOn:
+      - table public.user

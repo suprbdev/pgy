@@ -1,0 +1,20 @@
+# Link: message → user (sender).
+# Requires: modules/messaging/conversation.yml, modules/core/user.yml.
+schema public:
+  table message:
+    columns:
+      sender_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      message_sender_id_fkey:
+        columns: [sender_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      message_sender_id_idx:
+        columns: [sender_id]
+    dependsOn:
+      - table public.user

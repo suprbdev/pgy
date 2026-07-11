@@ -1,0 +1,20 @@
+# Link: product → category.
+# Requires: modules/commerce/product.yml, modules/content/category.yml.
+schema public:
+  table product:
+    columns:
+      category_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      product_category_id_fkey:
+        columns: [category_id]
+        references:
+          table: public.category
+          columns: [id]
+        onDelete: set null
+    indexes:
+      product_category_id_idx:
+        columns: [category_id]
+    dependsOn:
+      - table public.category

@@ -1,0 +1,20 @@
+# Link: order → user (customer). Nullable to allow guest checkout.
+# Requires: modules/commerce/order.yml, modules/core/user.yml.
+schema public:
+  table order:
+    columns:
+      customer_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      order_customer_id_fkey:
+        columns: [customer_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      order_customer_id_idx:
+        columns: [customer_id]
+    dependsOn:
+      - table public.user

@@ -1,0 +1,53 @@
+# Module: cart — shopping carts with line items.
+# Standalone: works for anonymous carts; user/product references via links.
+# Combine with: links/cart_user.yml, links/cart_product.yml.
+schema public:
+  table cart:
+    comment: "Shopping cart; anonymous until linked to a user."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      expires_at:
+        type: timestamptz
+        nullable: true
+
+  table cart_item:
+    comment: "Cart line item."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      cart_id:
+        type: uuid
+        notNull: true
+      quantity:
+        type: int
+        notNull: true
+        default: 1
+      added_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      cart_item_cart_id_fkey:
+        columns: [cart_id]
+        references:
+          table: public.cart
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      cart_item_cart_id_idx:
+        columns: [cart_id]
+    constraints:
+      cart_item_quantity_check:
+        type: check
+        expression: "quantity > 0"
+    dependsOn:
+      - table public.cart

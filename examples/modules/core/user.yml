@@ -1,0 +1,70 @@
+# Module: user — application user accounts.
+# Standalone: no other module required.
+# Combine with: links/membership.yml (organizations), links/session_user.yml,
+#               links/post_author.yml, and most other user_* / *_user links.
+schema public:
+  function set_updated_at():
+    returns: trigger
+    language: plpgsql
+    volatile: true
+    body: |
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+
+  type user_status:
+    type: enum
+    labels:
+      - active
+      - suspended
+      - deleted
+
+  table user:
+    comment: "Application user account."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      email:
+        type: text
+        notNull: true
+      name:
+        type: text
+        nullable: true
+      password_hash:
+        type: text
+        nullable: true
+      status:
+        type: public.user_status
+        notNull: true
+        default: "'active'"
+      email_verified_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      user_email_key:
+        columns: [email]
+        unique: true
+    constraints:
+      user_email_check:
+        type: check
+        expression: "email ~ '^[^@]+@[^@]+$'"
+    triggers:
+      set_updated_at:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.set_updated_at()
+    dependsOn:
+      - type public.user_status
+      - function public.set_updated_at

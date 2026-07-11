@@ -1,0 +1,21 @@
+# Link: order_item → product. Nullable so order history survives product
+# deletion (name/price are already copied onto the line item).
+# Requires: modules/commerce/order.yml, modules/commerce/product.yml.
+schema public:
+  table order_item:
+    columns:
+      product_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      order_item_product_id_fkey:
+        columns: [product_id]
+        references:
+          table: public.product
+          columns: [id]
+        onDelete: set null
+    indexes:
+      order_item_product_id_idx:
+        columns: [product_id]
+    dependsOn:
+      - table public.product

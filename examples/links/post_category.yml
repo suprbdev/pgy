@@ -1,0 +1,20 @@
+# Link: post → category.
+# Requires: modules/content/post.yml, modules/content/category.yml.
+schema public:
+  table post:
+    columns:
+      category_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      post_category_id_fkey:
+        columns: [category_id]
+        references:
+          table: public.category
+          columns: [id]
+        onDelete: set null
+    indexes:
+      post_category_id_idx:
+        columns: [category_id]
+    dependsOn:
+      - table public.category

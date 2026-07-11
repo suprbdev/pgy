@@ -1,0 +1,37 @@
+# Module: address — postal addresses.
+# Standalone: no other module required.
+# Combine with: links/address_user.yml, links/order_address.yml.
+schema public:
+  table address:
+    comment: "Postal address."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      line1:
+        type: text
+        notNull: true
+      line2:
+        type: text
+        nullable: true
+      city:
+        type: text
+        notNull: true
+      region:
+        type: text
+        nullable: true
+      postal_code:
+        type: text
+        nullable: true
+      country:
+        type: char(2)
+        notNull: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    constraints:
+      address_country_check:
+        type: check
+        expression: "country ~ '^[A-Z]{2}$'"

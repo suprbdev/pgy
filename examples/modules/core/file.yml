@@ -1,0 +1,42 @@
+# Module: file — uploaded file / media metadata (blobs live in object storage).
+# Standalone: no other module required.
+# Combine with: links/file_user.yml (uploader).
+schema public:
+  table file:
+    comment: "Metadata for a file stored in object storage."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      name:
+        type: text
+        notNull: true
+      mime_type:
+        type: text
+        notNull: true
+      size_bytes:
+        type: bigint
+        notNull: true
+      storage_path:
+        type: text
+        notNull: true
+      checksum:
+        type: text
+        nullable: true
+      metadata:
+        type: jsonb
+        notNull: true
+        default: "'{}'"
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      file_storage_path_key:
+        columns: [storage_path]
+        unique: true
+    constraints:
+      file_size_bytes_check:
+        type: check
+        expression: "size_bytes >= 0"

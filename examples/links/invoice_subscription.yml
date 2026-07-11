@@ -1,0 +1,20 @@
+# Link: invoice → subscription (recurring billing source).
+# Requires: modules/billing/invoice.yml, modules/billing/subscription.yml.
+schema public:
+  table invoice:
+    columns:
+      subscription_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      invoice_subscription_id_fkey:
+        columns: [subscription_id]
+        references:
+          table: public.subscription
+          columns: [id]
+        onDelete: set null
+    indexes:
+      invoice_subscription_id_idx:
+        columns: [subscription_id]
+    dependsOn:
+      - table public.subscription

@@ -1,0 +1,20 @@
+# Link: review → user (author).
+# Requires: modules/commerce/review.yml, modules/core/user.yml.
+schema public:
+  table review:
+    columns:
+      author_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      review_author_id_fkey:
+        columns: [author_id]
+        references:
+          table: public.user
+          columns: [id]
+        onDelete: set null
+    indexes:
+      review_author_id_idx:
+        columns: [author_id]
+    dependsOn:
+      - table public.user

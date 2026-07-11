@@ -1,0 +1,35 @@
+# Module: comment — threaded comments.
+# Standalone: subject and author references are added by link files.
+# Combine with: links/comment_post.yml (what is commented on),
+#               links/comment_author.yml (who wrote it).
+schema public:
+  table comment:
+    comment: "Comment; parent_id enables threading."
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      parent_id:
+        type: uuid
+        nullable: true
+      body:
+        type: text
+        notNull: true
+      deleted_at:
+        type: timestamptz
+        nullable: true
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    foreignKeys:
+      comment_parent_id_fkey:
+        columns: [parent_id]
+        references:
+          table: public.comment
+          columns: [id]
+        onDelete: cascade
+    indexes:
+      comment_parent_id_idx:
+        columns: [parent_id]

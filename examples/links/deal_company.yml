@@ -1,0 +1,20 @@
+# Link: deal → company.
+# Requires: modules/crm/deal.yml, modules/crm/company.yml.
+schema public:
+  table deal:
+    columns:
+      company_id:
+        type: uuid
+        nullable: true
+    foreignKeys:
+      deal_company_id_fkey:
+        columns: [company_id]
+        references:
+          table: public.company
+          columns: [id]
+        onDelete: set null
+    indexes:
+      deal_company_id_idx:
+        columns: [company_id]
+    dependsOn:
+      - table public.company
