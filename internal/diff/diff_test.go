@@ -3319,3 +3319,37 @@ func TestAlterColumnNoChangeNoSQL(t *testing.T) {
 		t.Errorf("identical column must emit no SQL, got %+v %+v %+v", p.Creates, p.Alters, p.Drops)
 	}
 }
+
+// --- plan determinism ---
+
+func TestPlanDeterministic(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"app.a": {Name: "a", Columns: map[string]*schema.Column{"id": {Type: "uuid"}}},
+			"app.b": {Name: "b", Columns: map[string]*schema.Column{"id": {Type: "uuid"}},
+				DependsOn: []string{"table app.a"},
+				ForeignKeys: []*schema.ForeignKey{
+					{Name: "b_a_fkey", Columns: []string{"id"}, RefTable: "app.a", RefColumns: []string{"id"}},
+				},
+				Triggers: []*schema.Trigger{
+					{Name: "b_trg", Timing: "before", Events: []string{"update"}, Level: "row", Procedure: "public.fn()"},
+				},
+			},
+			"app.c": {Name: "c", Columns: map[string]*schema.Column{"id": {Type: "uuid"}}},
+		},
+		Functions: map[string]*schema.Function{
+			"public.fn": {Name: "fn", Returns: "trigger", Language: "plpgsql", Body: "BEGIN RETURN NEW; END;"},
+			"public.g":  {Name: "g", Returns: "boolean", Language: "sql", Body: "SELECT true;", DependsOn: []string{"table app.c"}},
+		},
+	}
+	first := Plan(emptyLive(), desired, false)
+	for i := 0; i < 30; i++ {
+		again := Plan(emptyLive(), desired, false)
+		if strings.Join(again.Creates, "\n") != strings.Join(first.Creates, "\n") {
+			t.Fatalf("run %d: Creates order differs:\n%v\nvs\n%v", i, again.Creates, first.Creates)
+		}
+		if strings.Join(again.Alters, "\n") != strings.Join(first.Alters, "\n") {
+			t.Fatalf("run %d: Alters order differs", i)
+		}
+	}
+}

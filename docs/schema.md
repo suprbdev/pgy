@@ -294,7 +294,7 @@ The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` bet
 
 #### Trigger creation order
 
-`CREATE TRIGGER` statements are always emitted **after** all table and function creates. A trigger function whose body references the trigger's own table (required for `language: sql` functions, whose bodies are validated at `CREATE` time) can therefore declare `dependsOn: [table <its_table>]` safely — the table does **not** need a reciprocal `dependsOn` for the function, which would form a cycle. Dependency cycles are now a hard error in `pgy diff`.
+`CREATE TRIGGER` statements are always emitted **after** all table and function creates. A trigger function whose body references the trigger's own table (required for `language: sql` functions, whose bodies are validated at `CREATE` time) can therefore declare `dependsOn: [table <its_table>]` safely — the table does **not** need a reciprocal `dependsOn` for the function. Any `dependsOn` edge pointing at a `returns: trigger` function is ignored during ordering (nothing can reference one at `CREATE` time), so such declarations are harmless but redundant. Genuine dependency cycles are a hard error in `pgy diff`, reported with the concrete cycle path.
 
 ```yaml
 schema public:
@@ -847,6 +847,15 @@ All object types support `dependsOn` to control creation order. The topological 
 | `sequence <schema.seq>` | `sequence public.order_number_seq` |
 | `domain <schema.domain>` | `domain public.email` |
 | `schema <name>` | `schema private` (informational only, not resolved) |
+
+The sort is **deterministic**: entities with no ordering constraint between them are emitted by kind (types → domains → sequences → functions → procedures → tables → views), then by name, so identical YAML always produces an identical buffer.
+
+Two kinds of `dependsOn` are never needed (and can only manufacture cycles):
+
+- **On trigger functions** (`returns: trigger`). Triggers are emitted after every other create, and no `CREATE` statement can call a trigger function, so edges pointing at trigger-returning functions are silently ignored. Declare `dependsOn` the other way if the trigger function's body needs a table (required for `language: sql`; `plpgsql` bodies are not validated at `CREATE`).
+- **On functions referenced only by row-level-security policies or grants.** `CREATE POLICY`, `GRANT`, and `COMMENT` statements are all emitted after every create, so a table never needs `dependsOn` for functions its policies call.
+
+A genuine dependency cycle is a hard error; the message shows one concrete cycle path (`a -> b -> a`) to remove.
 
 ---
 

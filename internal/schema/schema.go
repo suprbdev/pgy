@@ -829,6 +829,7 @@ func parseIndexes(v any) []*Index {
             out = append(out, ix)
         }
     }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
 }
 
@@ -848,6 +849,7 @@ func parseForeignKeys(v any) []*ForeignKey {
             out = append(out, fk)
         }
     }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
 }
 
@@ -869,6 +871,7 @@ func parseTriggers(v any) []*Trigger {
             out = append(out, tr)
         }
     }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
 }
 
@@ -886,6 +889,7 @@ func parseConstraints(v any) []*Constraint {
             out = append(out, c)
         }
     }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
 }
 
@@ -1203,12 +1207,30 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         graph[e.Key] = []string{}
         for _, rawDep := range e.DependsOn {
             resolvedKey := resolveDependency(rawDep, d)
-            if resolvedKey != "" {
-                graph[e.Key] = append(graph[e.Key], resolvedKey)
+            if resolvedKey == "" { continue }
+            // Edges to trigger-returning functions are dropped: triggers are
+            // emitted after every other create, so no CREATE statement can
+            // reference such a function, and keeping the edge manufactures
+            // false cycles (table -> its trigger function -> the tables the
+            // function body reads).
+            if fn, ok := d.Functions[resolvedKey]; ok && fn != nil && strings.EqualFold(strings.TrimSpace(fn.Returns), "trigger") {
+                continue
             }
+            graph[e.Key] = append(graph[e.Key], resolvedKey)
         }
     }
-    
+
+    // Deterministic ordering among ready nodes: kind first (matching the
+    // natural create order), then name. Without this, Kahn's queue would
+    // follow Go's randomized map iteration and the buffer would differ
+    // between runs on identical input.
+    kindRank := map[string]int{"extension": 0, "type": 1, "domain": 2, "sequence": 3, "function": 4, "procedure": 5, "table": 6, "view": 7}
+    entityLess := func(a, b string) bool {
+        ra, rb := kindRank[entityMap[a].Kind], kindRank[entityMap[b].Kind]
+        if ra != rb { return ra < rb }
+        return a < b
+    }
+
     // Topological sort (Kahn's algorithm)
     inDegree := map[string]int{}
     for k := range graph {
@@ -1221,18 +1243,19 @@ func TopologicalSort(d *Database) ([]Entity, error) {
             }
         }
     }
-    
+
     queue := []string{}
     for k, deg := range inDegree {
         if deg == 0 {
             queue = append(queue, k)
         }
     }
-    
+
     result := []Entity{}
     visited := map[string]bool{}
-    
+
     for len(queue) > 0 {
+        sort.Slice(queue, func(i, j int) bool { return entityLess(queue[i], queue[j]) })
         node := queue[0]
         queue = queue[1:]
         if visited[node] { continue }
@@ -1267,10 +1290,58 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         for _, k := range remaining {
             result = append(result, entityMap[k])
         }
-        return result, fmt.Errorf("dependency cycle detected among: %s — check dependsOn declarations (note: triggers are created after all tables and functions, so a table never needs dependsOn for its trigger functions)", strings.Join(remaining, ", "))
+        cycleMsg := ""
+        if cycle := findCycle(graph, remaining); len(cycle) > 0 {
+            cycleMsg = strings.Join(cycle, " -> ")
+        } else {
+            cycleMsg = "among: " + strings.Join(remaining, ", ")
+        }
+        return result, fmt.Errorf("dependency cycle detected: %s — check dependsOn declarations (note: triggers, policies, and grants are all emitted after every create, so dependsOn is never needed for trigger functions or functions referenced only by policies)", cycleMsg)
     }
 
     return result, nil
+}
+
+// findCycle returns one concrete dependency cycle (as a path ending on its
+// first node) among the given unvisited nodes, or nil if none is reachable.
+// Deterministic: nodes and edges are explored in sorted order.
+func findCycle(graph map[string][]string, unvisited []string) []string {
+    const (
+        inProgress = 1
+        done       = 2
+    )
+    color := map[string]int{}
+    path := []string{}
+    var cycle []string
+    var visit func(n string) bool
+    visit = func(n string) bool {
+        color[n] = inProgress
+        path = append(path, n)
+        deps := append([]string{}, graph[n]...)
+        sort.Strings(deps)
+        for _, dep := range deps {
+            if _, ok := graph[dep]; !ok { continue }
+            switch color[dep] {
+            case inProgress:
+                for i, p := range path {
+                    if p == dep {
+                        cycle = append(append([]string{}, path[i:]...), dep)
+                        return true
+                    }
+                }
+            case done:
+            default:
+                if visit(dep) { return true }
+            }
+        }
+        color[n] = done
+        path = path[:len(path)-1]
+        return false
+    }
+    for _, k := range unvisited {
+        if color[k] == 0 && visit(k) { return cycle }
+    }
+    return nil
 }
 
 // resolveDependency converts raw dependency strings like "table private.account" or "schema private"

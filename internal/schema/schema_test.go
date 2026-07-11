@@ -712,6 +712,142 @@ func TestTopologicalSortFunctionAfterTable(t *testing.T) {
 	}
 }
 
+func TestTopologicalSortDeterministic(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"app.a": {Name: "a"}, "app.b": {Name: "b"}, "app.c": {Name: "c"},
+			"app.d": {Name: "d", DependsOn: []string{"table app.a"}},
+		},
+		Functions: map[string]*Function{
+			"public.f1": {Name: "f1"}, "public.f2": {Name: "f2"},
+			"public.f3": {Name: "f3", DependsOn: []string{"table app.b"}},
+		},
+		Types: map[string]*TypeDef{
+			"public.t1": {Name: "t1", Kind: "enum"}, "public.t2": {Name: "t2", Kind: "enum"},
+		},
+	}
+	first, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		again, err := TopologicalSort(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j := range first {
+			if again[j].Key != first[j].Key {
+				t.Fatalf("run %d: order differs at %d: %s vs %s", i, j, again[j].Key, first[j].Key)
+			}
+		}
+	}
+}
+
+func TestTopologicalSortIgnoresTriggerFunctionEdge(t *testing.T) {
+	// table -> its trigger function -> the table it reads would be a cycle,
+	// but edges to trigger-returning functions are dropped (triggers are
+	// emitted after every create, so nothing references them at CREATE time)
+	db := &Database{
+		Tables: map[string]*Table{
+			"app.entry": {Name: "entry", DependsOn: []string{"function app.check_entry"}},
+		},
+		Functions: map[string]*Function{
+			"app.check_entry": {Name: "check_entry", Returns: "trigger", DependsOn: []string{"table app.entry"}},
+		},
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatalf("trigger-function edge must not create a cycle: %v", err)
+	}
+	ti, fi := -1, -1
+	for i, e := range sorted {
+		if e.Key == "app.entry" { ti = i }
+		if e.Key == "app.check_entry" { fi = i }
+	}
+	if ti < 0 || fi < 0 || fi < ti {
+		t.Errorf("trigger function's own dependsOn on the table must still hold; order: %v", sorted)
+	}
+}
+
+func TestTopologicalSortCycleErrorShowsPath(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"public.a": {Name: "a", DependsOn: []string{"table public.b"}},
+			"public.b": {Name: "b", DependsOn: []string{"table public.a"}},
+		},
+	}
+	_, err := TopologicalSort(db)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if !strings.Contains(err.Error(), "public.a -> public.b -> public.a") {
+		t.Errorf("cycle error should show the concrete path: %v", err)
+	}
+}
+
+func TestTableObjectsSortedByName(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      a:
+        type: uuid
+      b:
+        type: uuid
+    foreignKeys:
+      z_fkey:
+        columns: [b]
+        references:
+          table: public.o
+          columns: [id]
+      a_fkey:
+        columns: [a]
+        references:
+          table: public.o
+          columns: [id]
+    indexes:
+      z_idx:
+        columns: [b]
+      a_idx:
+        columns: [a]
+    triggers:
+      z_trg:
+        timing: before
+        events: [update]
+        level: row
+        procedure: public.fn()
+      a_trg:
+        timing: before
+        events: [insert]
+        level: row
+        procedure: public.fn()
+    constraints:
+      z_chk:
+        type: check
+        expression: "a is not null"
+      a_chk:
+        type: check
+        expression: "b is not null"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := db.Tables["public.t"]
+	if tb.ForeignKeys[0].Name != "a_fkey" || tb.ForeignKeys[1].Name != "z_fkey" {
+		t.Errorf("foreign keys not sorted by name: %s, %s", tb.ForeignKeys[0].Name, tb.ForeignKeys[1].Name)
+	}
+	if tb.Indexes[0].Name != "a_idx" || tb.Indexes[1].Name != "z_idx" {
+		t.Errorf("indexes not sorted by name: %s, %s", tb.Indexes[0].Name, tb.Indexes[1].Name)
+	}
+	if tb.Triggers[0].Name != "a_trg" || tb.Triggers[1].Name != "z_trg" {
+		t.Errorf("triggers not sorted by name: %s, %s", tb.Triggers[0].Name, tb.Triggers[1].Name)
+	}
+	if tb.Constraints[0].Name != "a_chk" || tb.Constraints[1].Name != "z_chk" {
+		t.Errorf("constraints not sorted by name: %s, %s", tb.Constraints[0].Name, tb.Constraints[1].Name)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {
