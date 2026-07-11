@@ -4,7 +4,7 @@ This document describes the structure and format of the YAML schema files used b
 
 ## Overview
 
-Schema files define database objects including tables, columns, types, functions, extensions, views, and materialized views. `pgy` diffs them against a live PostgreSQL database and generates the SQL to bring the database in sync.
+Schema files define database objects including tables, columns, types, functions, extensions, views, materialized views, and sequences. `pgy` diffs them against a live PostgreSQL database and generates the SQL to bring the database in sync.
 
 ## YAML Formats
 
@@ -12,7 +12,7 @@ Three formats are supported and can be mixed across files merged via `pgy diff`.
 
 ### Format 1: `schema <name>:` blocks (recommended)
 
-The most expressive format. Supports tables, functions, types, views, and materialized views. Column order in `CREATE TABLE` is preserved.
+The most expressive format. Supports tables, functions, types, views, materialized views, and sequences. Column order in `CREATE TABLE` is preserved.
 
 ```yaml
 schema public:
@@ -324,7 +324,7 @@ schema app:
     body: select 1
 ```
 
-Supported on: schemas, tables, columns, types, functions, views, materialized views.
+Supported on: schemas, tables, columns, types, functions, views, materialized views, sequences.
 
 Behavior:
 
@@ -483,6 +483,56 @@ schema public:
 
 ---
 
+## Sequence Definitions
+
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`; existing sequences are never altered or dropped (forward-only). Only the options set in YAML are emitted — PostgreSQL defaults apply to the rest.
+
+```yaml
+schema public:
+  sequence order_number_seq:
+    as: bigint
+    increment: 5
+    minValue: 10
+    maxValue: 99999
+    start: 100
+    cache: 20
+    cycle: true
+    ownedBy: orders.order_number
+    comment: "order number allocator"
+    dependsOn:
+      - table public.orders
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `as` | string | Data type: `smallint`, `integer`, or `bigint` (default `bigint`) |
+| `increment` | integer | `INCREMENT BY` step (may be negative for descending sequences) |
+| `minValue` | integer | `MINVALUE` |
+| `maxValue` | integer | `MAXVALUE` |
+| `start` | integer | `START WITH` value |
+| `cache` | integer | Number of values preallocated per session |
+| `cycle` | boolean | Wrap around when the limit is reached |
+| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Requires the table to exist; add a matching `dependsOn` |
+| `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+
+To use a sequence as a column default, reference it with `nextval` and declare the ordering:
+
+```yaml
+schema public:
+  sequence order_number_seq: {}
+
+  table orders:
+    dependsOn:
+      - sequence public.order_number_seq
+    columns:
+      order_number:
+        type: bigint
+        default: nextval('public.order_number_seq')
+```
+
+---
+
 ## Dependencies
 
 All object types support `dependsOn` to control creation order. The topological sort resolves these before generating SQL.
@@ -495,6 +545,7 @@ All object types support `dependsOn` to control creation order. The topological 
 | `function <schema.fn>(args)` | `function public.set_updated_at()` |
 | `view <schema.view>` | `view public.active_users` |
 | `materialized view <schema.view>` | `materialized view public.user_stats` |
+| `sequence <schema.seq>` | `sequence public.order_number_seq` |
 | `schema <name>` | `schema private` (informational only, not resolved) |
 
 ---

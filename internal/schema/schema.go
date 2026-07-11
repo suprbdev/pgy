@@ -17,6 +17,7 @@ type Database struct {
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
     Views map[string]*View `yaml:"-"`
+    Sequences map[string]*Sequence `yaml:"-"`
     Roles map[string]*Role `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
@@ -46,6 +47,23 @@ type View struct {
     DependsOn    []string `yaml:"dependsOn"`
     Comment      string
     Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
+}
+
+// Sequence is an explicit CREATE SEQUENCE declaration. Numeric options are
+// stored as strings so zero/negative values are distinguishable from unset.
+type Sequence struct {
+    Schema    string
+    Name      string
+    As        string // smallint | integer | bigint
+    Increment string
+    MinValue  string
+    MaxValue  string
+    Start     string
+    Cache     string
+    Cycle     bool
+    OwnedBy   string // table.column (or schema.table.column)
+    DependsOn []string `yaml:"dependsOn"`
+    Comment   string
 }
 
 type Table struct {
@@ -207,6 +225,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
             if merged.Views == nil { merged.Views = map[string]*View{} }
             for k, v := range d.Views { merged.Views[k] = v }
         }
+        // merge sequences
+        if len(d.Sequences) > 0 {
+            if merged.Sequences == nil { merged.Sequences = map[string]*Sequence{} }
+            for k, v := range d.Sequences { merged.Sequences[k] = v }
+        }
         // merge roles
         if len(d.Roles) > 0 {
             if merged.Roles == nil { merged.Roles = map[string]*Role{} }
@@ -243,6 +266,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.Types = map[string]*TypeDef{}
     out.Functions = map[string]*Function{}
     out.Views = map[string]*View{}
+    out.Sequences = map[string]*Sequence{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
@@ -459,6 +483,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if vw != nil {
                 full := qualify(schemaName, vw.Name)
                 db.Views[full] = vw
+            }
+        } else if strings.HasPrefix(key, "sequence ") {
+            sq := parseSequence(schemaName, key, body)
+            if sq != nil {
+                full := qualify(schemaName, sq.Name)
+                db.Sequences[full] = sq
             }
         } else if key == "grants" {
             if g := parseGrants(body); g != nil {
@@ -832,6 +862,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, sq := range d.Sequences {
+        if sq == nil { continue }
+        e := Entity{Key: k, Kind: "sequence", DependsOn: sq.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, fn := range d.Functions {
         if fn == nil { continue }
         e := Entity{Key: k, Kind: "function", DependsOn: fn.DependsOn}
@@ -967,6 +1003,18 @@ func resolveDependency(raw string, d *Database) string {
         return ""
     }
     
+    // Handle "sequence <name>"
+    if strings.HasPrefix(raw, "sequence ") {
+        seqName := strings.TrimSpace(strings.TrimPrefix(raw, "sequence "))
+        if !strings.Contains(seqName, ".") {
+            seqName = "public." + seqName
+        }
+        if _, ok := d.Sequences[seqName]; ok {
+            return seqName
+        }
+        return ""
+    }
+
     // Handle "view <name>"
     if strings.HasPrefix(raw, "view ") || strings.HasPrefix(raw, "materialized view ") {
         viewName := raw
@@ -989,6 +1037,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Types[raw]; ok { return raw }
     if _, ok := d.Functions[raw]; ok { return raw }
     if _, ok := d.Views[raw]; ok { return raw }
+    if _, ok := d.Sequences[raw]; ok { return raw }
 
     // Try with public schema
     pub := "public." + raw
@@ -996,6 +1045,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Types[pub]; ok { return pub }
     if _, ok := d.Functions[pub]; ok { return pub }
     if _, ok := d.Views[pub]; ok { return pub }
+    if _, ok := d.Sequences[pub]; ok { return pub }
 
     return ""
 }
@@ -1017,6 +1067,26 @@ func parseView(schemaName, key string, body any) *View {
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
     return vw
+}
+
+func parseSequence(schemaName, key string, body any) *Sequence {
+    name := strings.TrimSpace(strings.TrimPrefix(key, "sequence "))
+    sq := &Sequence{Schema: schemaName, Name: name}
+    m, ok := body.(map[string]any)
+    if !ok { return sq }
+    if a, ok := m["as"].(string); ok { sq.As = a }
+    if v, ok := m["increment"]; ok { sq.Increment = defaultToString(v) }
+    if v, ok := m["minValue"]; ok { sq.MinValue = defaultToString(v) }
+    if v, ok := m["maxValue"]; ok { sq.MaxValue = defaultToString(v) }
+    if v, ok := m["start"]; ok { sq.Start = defaultToString(v) }
+    if v, ok := m["cache"]; ok { sq.Cache = defaultToString(v) }
+    if b, ok := m["cycle"].(bool); ok { sq.Cycle = b }
+    if ob, ok := m["ownedBy"].(string); ok { sq.OwnedBy = ob }
+    if dep, ok := m["dependsOn"]; ok {
+        sq.DependsOn = parseStringListFromNode(dep)
+    }
+    if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
+    return sq
 }
 
 func errorsIsNotExist(err error) bool {

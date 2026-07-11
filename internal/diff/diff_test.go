@@ -18,6 +18,7 @@ func emptyLive() *Live {
 		Extensions: map[string]bool{},
 		Views:      map[string]bool{},
 		MatViews:   map[string]bool{},
+		Sequences:  map[string]bool{},
 		Roles:       map[string]bool{},
 		RoleMembers: map[string]map[string]bool{},
 		RoleComments: map[string]string{},
@@ -1865,5 +1866,126 @@ func TestRoleCommentSkippedIfSame(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findAlter(p, "comment on role") {
 		t.Errorf("comment unchanged, should not re-emit; alters: %v", p.Alters)
+	}
+}
+
+// --- sequences ---
+
+func seqDesired(key string, sq *schema.Sequence) *schema.Database {
+	return &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Sequences: map[string]*schema.Sequence{key: sq},
+	}
+}
+
+func TestSequenceCreate(t *testing.T) {
+	desired := seqDesired("public.order_seq", &schema.Sequence{Schema: "public", Name: "order_seq"})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create sequence if not exists "public"."order_seq";`) {
+		t.Errorf("expected create sequence, creates=%v", p.Creates)
+	}
+}
+
+func TestSequenceSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Sequences["public.order_seq"] = true
+	desired := seqDesired("public.order_seq", &schema.Sequence{Schema: "public", Name: "order_seq"})
+	p := Plan(live, desired, false)
+	if findCreate(p, "order_seq") {
+		t.Errorf("should skip sequence that already exists; creates=%v", p.Creates)
+	}
+}
+
+func TestSequenceOptions(t *testing.T) {
+	desired := seqDesired("public.order_seq", &schema.Sequence{
+		Schema: "public", Name: "order_seq",
+		As: "bigint", Increment: "5", MinValue: "10", MaxValue: "99999",
+		Start: "100", Cache: "20", Cycle: true,
+	})
+	p := Plan(emptyLive(), desired, false)
+	for _, want := range []string{
+		"as bigint",
+		"increment by 5",
+		"minvalue 10",
+		"maxvalue 99999",
+		"start with 100",
+		"cache 20",
+		"cycle",
+	} {
+		if !findCreate(p, want) {
+			t.Errorf("expected %q in create; creates=%v", want, p.Creates)
+		}
+	}
+}
+
+func TestSequenceOwnedBy(t *testing.T) {
+	desired := seqDesired("public.order_seq", &schema.Sequence{
+		Schema: "public", Name: "order_seq", OwnedBy: "public.orders.order_number",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `owned by "public"."orders"."order_number"`) {
+		t.Errorf("expected owned by clause; creates=%v", p.Creates)
+	}
+}
+
+func TestSequenceCreatesSchema(t *testing.T) {
+	desired := seqDesired("billing.invoice_seq", &schema.Sequence{Schema: "billing", Name: "invoice_seq"})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create schema if not exists "billing";`) {
+		t.Errorf("expected schema create for sequence-only schema; creates=%v", p.Creates)
+	}
+}
+
+func TestSequenceComment(t *testing.T) {
+	desired := seqDesired("public.order_seq", &schema.Sequence{
+		Schema: "public", Name: "order_seq", Comment: "order numbers",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on sequence "public"."order_seq" is 'order numbers';`) {
+		t.Errorf("expected sequence comment; alters=%v", p.Alters)
+	}
+}
+
+func TestSequenceCommentSkippedIfSame(t *testing.T) {
+	live := emptyLive()
+	live.Sequences["public.order_seq"] = true
+	live.RelComments = map[string]string{"public.order_seq": "order numbers"}
+	desired := seqDesired("public.order_seq", &schema.Sequence{
+		Schema: "public", Name: "order_seq", Comment: "order numbers",
+	})
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on sequence") {
+		t.Errorf("comment unchanged, should not re-emit; alters=%v", p.Alters)
+	}
+}
+
+func TestSequenceBeforeDependentTable(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"public.orders": {
+				Name:      "public.orders",
+				Columns:   map[string]*schema.Column{"id": {Type: "bigint", Default: "nextval('order_seq')"}},
+				DependsOn: []string{"sequence public.order_seq"},
+			},
+		},
+		Sequences: map[string]*schema.Sequence{
+			"public.order_seq": {Schema: "public", Name: "order_seq"},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	seqIdx, tblIdx := -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, "create sequence") {
+			seqIdx = i
+		}
+		if strings.Contains(s, "create table") {
+			tblIdx = i
+		}
+	}
+	if seqIdx < 0 || tblIdx < 0 {
+		t.Fatalf("missing creates: %v", p.Creates)
+	}
+	if seqIdx > tblIdx {
+		t.Errorf("sequence must be created before dependent table; creates=%v", p.Creates)
 	}
 }

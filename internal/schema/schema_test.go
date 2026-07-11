@@ -1182,3 +1182,116 @@ func TestRoleMerge(t *testing.T) {
 		t.Errorf("app_user role lost in merge: %+v", r)
 	}
 }
+
+// --- sequences ---
+
+func TestParseSequence(t *testing.T) {
+	yml := `
+schema public:
+  sequence order_number_seq:
+    as: bigint
+    increment: 5
+    minValue: 10
+    maxValue: 99999
+    start: 100
+    cache: 20
+    cycle: true
+    ownedBy: orders.order_number
+    comment: "order number allocator"
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sq, ok := db.Sequences["public.order_number_seq"]
+	if !ok {
+		t.Fatal("expected public.order_number_seq sequence")
+	}
+	if sq.As != "bigint" {
+		t.Errorf("as: want bigint, got %q", sq.As)
+	}
+	if sq.Increment != "5" {
+		t.Errorf("increment: want 5, got %q", sq.Increment)
+	}
+	if sq.MinValue != "10" {
+		t.Errorf("minValue: want 10, got %q", sq.MinValue)
+	}
+	if sq.MaxValue != "99999" {
+		t.Errorf("maxValue: want 99999, got %q", sq.MaxValue)
+	}
+	if sq.Start != "100" {
+		t.Errorf("start: want 100, got %q", sq.Start)
+	}
+	if sq.Cache != "20" {
+		t.Errorf("cache: want 20, got %q", sq.Cache)
+	}
+	if !sq.Cycle {
+		t.Error("cycle: want true")
+	}
+	if sq.OwnedBy != "orders.order_number" {
+		t.Errorf("ownedBy: want orders.order_number, got %q", sq.OwnedBy)
+	}
+	if sq.Comment != "order number allocator" {
+		t.Errorf("comment wrong: %q", sq.Comment)
+	}
+}
+
+func TestParseSequenceDefaults(t *testing.T) {
+	yml := `
+schema billing:
+  sequence invoice_seq: {}
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sq, ok := db.Sequences["billing.invoice_seq"]
+	if !ok {
+		t.Fatal("expected billing.invoice_seq sequence")
+	}
+	if sq.As != "" || sq.Increment != "" || sq.MinValue != "" || sq.MaxValue != "" || sq.Start != "" || sq.Cache != "" || sq.Cycle || sq.OwnedBy != "" {
+		t.Errorf("all options should be unset: %+v", sq)
+	}
+}
+
+func TestParseSequenceDependsOn(t *testing.T) {
+	yml := `
+schema public:
+  sequence order_number_seq:
+    dependsOn:
+      - table public.orders
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sq, ok := db.Sequences["public.order_number_seq"]
+	if !ok {
+		t.Fatal("expected public.order_number_seq sequence")
+	}
+	if len(sq.DependsOn) != 1 || sq.DependsOn[0] != "table public.orders" {
+		t.Errorf("dependsOn wrong: %v", sq.DependsOn)
+	}
+}
+
+func TestSequenceMerge(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.yml")
+	f2 := filepath.Join(dir, "b.yml")
+	if err := os.WriteFile(f1, []byte("schema public:\n  sequence s1:\n    increment: 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("schema public:\n  sequence s2: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Sequences) != 2 {
+		t.Fatalf("want 2 merged sequences, got %d", len(db.Sequences))
+	}
+	if s := db.Sequences["public.s1"]; s == nil || s.Increment != "2" {
+		t.Errorf("s1 lost in merge: %+v", s)
+	}
+}

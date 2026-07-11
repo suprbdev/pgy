@@ -18,6 +18,7 @@ type Live struct{
     Extensions map[string]bool
     Views      map[string]bool
     MatViews   map[string]bool
+    Sequences  map[string]bool
     Roles      map[string]bool
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
@@ -71,6 +72,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Extensions: map[string]bool{},
         Views: map[string]bool{},
         MatViews: map[string]bool{},
+        Sequences: map[string]bool{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
@@ -382,6 +384,27 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     matViewRows.Close()
 
+    // Query existing sequences (includes serial/identity-owned sequences,
+    // which is fine: presence only guards against duplicate CREATE SEQUENCE)
+    seqQ := `
+        select n.nspname, c.relname
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind = 'S'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    seqRows, err := pool.Query(ctx, seqQ)
+    if err != nil { return nil, err }
+    for seqRows.Next() {
+        var schemaName, seqName string
+        if err := seqRows.Scan(&schemaName, &seqName); err != nil {
+            seqRows.Close()
+            return nil, err
+        }
+        l.Sequences[fmt.Sprintf("%s.%s", schemaName, seqName)] = true
+    }
+    seqRows.Close()
+
     // Query table grants (explicit ACL entries, owner excluded)
     tgQ := `
         select n.nspname, c.relname,
@@ -521,7 +544,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_class c on c.oid = d.objoid
         join pg_namespace n on n.oid = c.relnamespace
         where d.classoid = 'pg_class'::regclass and d.objsubid = 0
-        and c.relkind in ('r', 'p', 'v', 'm')
+        and c.relkind in ('r', 'p', 'v', 'm', 'S')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
     `
     rcRows, err := pool.Query(ctx, rcQ)
@@ -722,7 +745,14 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    
+    for k := range desired.Sequences {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
+            neededSchemas[parts[0]] = true
+        } else {
+            neededSchemas["public"] = true
+        }
+    }
+
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
@@ -840,6 +870,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             if found { verb = "create or replace function" }
             stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
             plan.Creates = append(plan.Creates, stmt)
+        case "sequence":
+            sq, ok := desired.Sequences[e.Key]
+            if !ok || sq == nil { continue }
+            // Existing sequences are never altered (forward-only, and live
+            // option introspection is not supported)
+            if live.Sequences[e.Key] { continue }
+            plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
         case "view":
             vw, ok := desired.Views[e.Key]
             if !ok || vw == nil || vw.Query == "" { continue }
@@ -942,6 +979,29 @@ func renderRole(r *schema.Role) string {
     return stmt + ";"
 }
 
+// renderSequence emits CREATE SEQUENCE IF NOT EXISTS with only the options
+// set in YAML (postgres defaults apply otherwise).
+func renderSequence(fq string, sq *schema.Sequence) string {
+    parts := []string{"create sequence if not exists", pqIdent(fq)}
+    if sq.As != "" { parts = append(parts, "as "+sq.As) }
+    if sq.Increment != "" { parts = append(parts, "increment by "+sq.Increment) }
+    if sq.MinValue != "" { parts = append(parts, "minvalue "+sq.MinValue) }
+    if sq.MaxValue != "" { parts = append(parts, "maxvalue "+sq.MaxValue) }
+    if sq.Start != "" { parts = append(parts, "start with "+sq.Start) }
+    if sq.Cache != "" { parts = append(parts, "cache "+sq.Cache) }
+    if sq.Cycle { parts = append(parts, "cycle") }
+    if sq.OwnedBy != "" { parts = append(parts, "owned by "+ownedByIdent(sq.OwnedBy)) }
+    return strings.Join(parts, " ") + ";"
+}
+
+// ownedByIdent quotes a table.column (or schema.table.column) OWNED BY target.
+func ownedByIdent(s string) string {
+    if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
+    parts := strings.Split(s, ".")
+    for i := range parts { parts[i] = `"` + parts[i] + `"` }
+    return strings.Join(parts, ".")
+}
+
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared).
 func planComments(live *Live, desired *schema.Database) []string {
@@ -1007,6 +1067,15 @@ func planComments(live *Live, desired *schema.Database) []string {
         kind := "view "
         if vw.Materialized { kind = "materialized view " }
         comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
+    }
+
+    seqNames := make([]string, 0, len(desired.Sequences))
+    for k := range desired.Sequences { seqNames = append(seqNames, k) }
+    sort.Strings(seqNames)
+    for _, k := range seqNames {
+        sq := desired.Sequences[k]
+        if sq == nil { continue }
+        comment("sequence "+pqIdent(k), sq.Comment, live.RelComments[k])
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
