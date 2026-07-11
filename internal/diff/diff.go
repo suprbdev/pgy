@@ -182,7 +182,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // pg_constraint rather than information_schema so pg_get_constraintdef is
     // available (and NOT NULL pseudo-constraints are excluded).
     conQ := `
-        select n.nspname, c.relname, con.conname, con.contype,
+        select n.nspname, c.relname, con.conname, con.contype::text,
                pg_get_constraintdef(con.oid)
         from pg_constraint con
         join pg_class c on c.oid = con.conrelid
