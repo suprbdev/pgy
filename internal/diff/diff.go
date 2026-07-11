@@ -996,6 +996,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             fq := e.Key
             lt := live.Tables[fq]
             if lt == nil {
+                if dt.PartitionOf != "" {
+                    // partition children inherit columns from the parent
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
+                    applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
+                    continue
+                }
                 cols := make([]string, 0, len(dt.Columns))
                 if len(dt.ColumnOrder) > 0 {
                     for _, cn := range dt.ColumnOrder {
@@ -1015,7 +1021,11 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     }
                     sort.Strings(cols)
                 }
-                plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s (%s);", pqIdent(fq), strings.Join(cols, ", ")))
+                create := fmt.Sprintf("create table if not exists %s (%s)", pqIdent(fq), strings.Join(cols, ", "))
+                if dt.PartitionBy != nil {
+                    create += " partition by " + renderPartitionBy(dt.PartitionBy)
+                }
+                plan.Creates = append(plan.Creates, create+";")
                 applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
             } else {
                 // existing table: add missing columns
@@ -1092,6 +1102,70 @@ func renderSequence(fq string, sq *schema.Sequence) string {
     if sq.Cycle { parts = append(parts, "cycle") }
     if sq.OwnedBy != "" { parts = append(parts, "owned by "+ownedByIdent(sq.OwnedBy)) }
     return strings.Join(parts, " ") + ";"
+}
+
+// renderPartitionBy renders "range ("col1", "col2")" etc. for PARTITION BY.
+// Plain identifiers are quoted; anything else (an expression) passes through.
+func renderPartitionBy(pb *schema.PartitionBy) string {
+    cols := make([]string, 0, len(pb.Columns))
+    for _, c := range pb.Columns { cols = append(cols, partitionKeyExpr(c)) }
+    return strings.ToLower(pb.Type) + " (" + strings.Join(cols, ", ") + ")"
+}
+
+// partitionKeyExpr quotes a partition key column unless it looks like an
+// expression (contains parens, spaces, or an operator).
+func partitionKeyExpr(s string) string {
+    if strings.ContainsAny(s, "() ,+-/*") {
+        return "(" + s + ")"
+    }
+    return pqIdent(s)
+}
+
+// renderPartitionBound renders a partition child's bound clause:
+// DEFAULT, FOR VALUES FROM/TO, FOR VALUES IN, or FOR VALUES WITH (hash).
+func renderPartitionBound(ps *schema.PartitionSpec) string {
+    if ps == nil || ps.Default { return "default" }
+    if ps.Modulus >= 0 && ps.Remainder >= 0 {
+        return fmt.Sprintf("for values with (modulus %d, remainder %d)", ps.Modulus, ps.Remainder)
+    }
+    if len(ps.In) > 0 {
+        return "for values in (" + joinBoundList(ps.In) + ")"
+    }
+    return fmt.Sprintf("for values from (%s) to (%s)", joinBoundList(ps.From), joinBoundList(ps.To))
+}
+
+func joinBoundList(vals []string) string {
+    out := make([]string, 0, len(vals))
+    for _, v := range vals { out = append(out, partitionBoundLiteral(v)) }
+    return strings.Join(out, ", ")
+}
+
+// partitionBoundLiteral renders one bound value: MINVALUE/MAXVALUE keywords,
+// numbers, booleans, and NULL stay bare; everything else becomes a string literal.
+func partitionBoundLiteral(v string) string {
+    t := strings.TrimSpace(v)
+    switch strings.ToLower(t) {
+    case "minvalue", "maxvalue", "true", "false", "null":
+        return strings.ToLower(t)
+    }
+    if isNumericLiteral(t) { return t }
+    return quoteString(t)
+}
+
+func isNumericLiteral(s string) bool {
+    if s == "" { return false }
+    dot := false
+    for i, r := range s {
+        switch {
+        case r >= '0' && r <= '9':
+        case r == '-' && i == 0:
+        case r == '.' && !dot:
+            dot = true
+        default:
+            return false
+        }
+    }
+    return s != "-" && s != "." && s != "-."
 }
 
 // renderDomain emits CREATE DOMAIN with only the options set in YAML.

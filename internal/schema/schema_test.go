@@ -1565,3 +1565,194 @@ func TestProcedureMerge(t *testing.T) {
 		t.Errorf("p1 lost in merge: %+v", p)
 	}
 }
+
+func TestPartitionByParse(t *testing.T) {
+	yml := `
+schema public:
+  table measurement:
+    columns:
+      logdate:
+        type: date
+    partitionBy:
+      type: range
+      columns: [logdate]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["public.measurement"]
+	if tbl == nil || tbl.PartitionBy == nil {
+		t.Fatalf("partitionBy not parsed: %+v", tbl)
+	}
+	if tbl.PartitionBy.Type != "range" {
+		t.Errorf("want range, got %q", tbl.PartitionBy.Type)
+	}
+	if len(tbl.PartitionBy.Columns) != 1 || tbl.PartitionBy.Columns[0] != "logdate" {
+		t.Errorf("columns wrong: %+v", tbl.PartitionBy.Columns)
+	}
+}
+
+func TestPartitionByShorthandParse(t *testing.T) {
+	yml := `
+schema public:
+  table events:
+    columns:
+      tenant:
+        type: text
+    partitionBy:
+      list: [tenant]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := db.Tables["public.events"].PartitionBy
+	if pb == nil || pb.Type != "list" || len(pb.Columns) != 1 || pb.Columns[0] != "tenant" {
+		t.Errorf("shorthand partitionBy wrong: %+v", pb)
+	}
+}
+
+func TestPartitionOfRangeParse(t *testing.T) {
+	yml := `
+schema public:
+  table measurement_y2024:
+    partitionOf: measurement
+    forValues:
+      from: [2024-01-01]
+      to: ["2025-01-01"]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["public.measurement_y2024"]
+	if tbl == nil || tbl.PartitionOf != "public.measurement" {
+		t.Fatalf("partitionOf wrong: %+v", tbl)
+	}
+	ps := tbl.Partition
+	if ps == nil {
+		t.Fatal("partition spec missing")
+	}
+	if len(ps.From) != 1 || ps.From[0] != "2024-01-01" {
+		t.Errorf("from wrong (bare YAML date should coerce to string): %+v", ps.From)
+	}
+	if len(ps.To) != 1 || ps.To[0] != "2025-01-01" {
+		t.Errorf("to wrong: %+v", ps.To)
+	}
+}
+
+func TestPartitionOfListParse(t *testing.T) {
+	yml := `
+schema public:
+  table events_eu:
+    partitionOf: events
+    forValues:
+      in: [de, fr]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := db.Tables["public.events_eu"].Partition
+	if ps == nil || len(ps.In) != 2 || ps.In[0] != "de" || ps.In[1] != "fr" {
+		t.Errorf("list bound wrong: %+v", ps)
+	}
+}
+
+func TestPartitionOfHashParse(t *testing.T) {
+	yml := `
+schema public:
+  table users_p0:
+    partitionOf: users
+    forValues:
+      modulus: 4
+      remainder: 0
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := db.Tables["public.users_p0"].Partition
+	if ps == nil || ps.Modulus != 4 || ps.Remainder != 0 {
+		t.Errorf("hash bound wrong: %+v", ps)
+	}
+}
+
+func TestPartitionOfDefaultParse(t *testing.T) {
+	yml := `
+schema public:
+  table measurement_default:
+    partitionOf: measurement
+    default: true
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["public.measurement_default"]
+	if tbl.PartitionOf != "public.measurement" {
+		t.Errorf("partitionOf wrong: %q", tbl.PartitionOf)
+	}
+	if tbl.Partition == nil || !tbl.Partition.Default {
+		t.Errorf("default partition not parsed: %+v", tbl.Partition)
+	}
+}
+
+func TestPartitionOfQualifiedParent(t *testing.T) {
+	yml := `
+schema app:
+  table logs_2024:
+    partitionOf: metrics.logs
+    forValues:
+      from: [1]
+      to: [100]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := db.Tables["app.logs_2024"].PartitionOf; got != "metrics.logs" {
+		t.Errorf("qualified parent should not be re-qualified, got %q", got)
+	}
+}
+
+func TestPartitionTopologicalOrder(t *testing.T) {
+	yml := `
+schema public:
+  table measurement_y2024:
+    partitionOf: measurement
+    forValues:
+      from: ["2024-01-01"]
+      to: ["2025-01-01"]
+  table measurement:
+    columns:
+      logdate:
+        type: date
+    partitionBy:
+      range: [logdate]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentIdx, childIdx := -1, -1
+	for i, e := range sorted {
+		switch e.Key {
+		case "public.measurement":
+			parentIdx = i
+		case "public.measurement_y2024":
+			childIdx = i
+		}
+	}
+	if parentIdx < 0 || childIdx < 0 {
+		t.Fatalf("entities missing from sort: parent=%d child=%d", parentIdx, childIdx)
+	}
+	if parentIdx > childIdx {
+		t.Errorf("parent (%d) must sort before partition child (%d)", parentIdx, childIdx)
+	}
+}

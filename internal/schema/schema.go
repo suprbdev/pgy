@@ -6,6 +6,7 @@ import (
     "os"
     "sort"
     "strings"
+    "time"
 
     yaml "gopkg.in/yaml.v3"
 )
@@ -97,6 +98,28 @@ type Table struct {
     RowLevelSecurity bool      `yaml:"-"`
     Policies []*Policy         `yaml:"-"` // nil means unmanaged
     Comment string             `yaml:"-"` // empty means unmanaged
+    PartitionBy *PartitionBy   `yaml:"-"` // declarative partitioning key (parent tables)
+    PartitionOf string         `yaml:"-"` // fully qualified parent table (partition children)
+    Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
+}
+
+// PartitionBy declares a table's partitioning strategy (PARTITION BY).
+// Columns may be plain column names or expressions.
+type PartitionBy struct {
+    Type    string   // range | list | hash
+    Columns []string
+}
+
+// PartitionSpec is a partition child's bound (FOR VALUES ... / DEFAULT).
+// Values are stored as raw strings; the diff layer quotes non-numeric,
+// non-keyword values as SQL string literals.
+type PartitionSpec struct {
+    From      []string // range: FOR VALUES FROM (...)
+    To        []string // range: ... TO (...)
+    In        []string // list: FOR VALUES IN (...)
+    Modulus   int      // hash: -1 = unset
+    Remainder int      // hash: -1 = unset
+    Default   bool     // DEFAULT partition (no FOR VALUES)
 }
 
 type Policy struct {
@@ -236,6 +259,15 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 }
                 if t.Comment != "" {
                     existing.Comment = t.Comment
+                }
+                if t.PartitionBy != nil {
+                    existing.PartitionBy = t.PartitionBy
+                }
+                if t.PartitionOf != "" {
+                    existing.PartitionOf = t.PartitionOf
+                }
+                if t.Partition != nil {
+                    existing.Partition = t.Partition
                 }
             } else {
                 merged.Tables[name] = t
@@ -417,6 +449,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Policies = parsePolicies(polRaw)
                 }
                 if cm, ok := m["comment"].(string); ok { t.Comment = cm }
+                parseTablePartitioning(t, defaultSchema, m)
             }
             db.Tables[fq] = t
         }
@@ -460,6 +493,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 t.Policies = parsePolicies(polRaw)
             }
             if cm, ok := m["comment"].(string); ok { t.Comment = cm }
+            parseTablePartitioning(t, schemaName, m)
             db.Tables[fq] = t
         }
     }
@@ -511,6 +545,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Policies = parsePolicies(polRaw)
                 }
                 if cm, ok := inner["comment"].(string); ok { t.Comment = cm }
+                parseTablePartitioning(t, schemaName, inner)
             }
             db.Tables[fq] = t
         } else if strings.HasPrefix(key, "function ") {
@@ -789,6 +824,89 @@ func parseConstraints(v any) []*Constraint {
     return out
 }
 
+// parseTablePartitioning fills partitioning properties from a table's YAML map:
+// `partitionBy` (parent), `partitionOf` + `forValues`/`default` (child).
+func parseTablePartitioning(t *Table, schemaName string, m map[string]any) {
+    if pbRaw, ok := m["partitionBy"]; ok {
+        t.PartitionBy = parsePartitionBy(pbRaw)
+    }
+    if po, ok := m["partitionOf"].(string); ok && po != "" {
+        t.PartitionOf = qualify(schemaName, po)
+        spec := &PartitionSpec{Modulus: -1, Remainder: -1}
+        if fv, ok := m["forValues"]; ok {
+            if parsed := parsePartitionSpec(fv); parsed != nil { spec = parsed }
+        }
+        if b, ok := m["default"].(bool); ok { spec.Default = b }
+        t.Partition = spec
+    }
+}
+
+// parsePartitionBy accepts either the explicit form
+//   { type: range, columns: [c1, c2] }
+// or the shorthand form keyed by strategy:
+//   { range: [c1] } / { list: [c1] } / { hash: [c1] }
+func parsePartitionBy(v any) *PartitionBy {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    pb := &PartitionBy{}
+    if t, ok := m["type"].(string); ok { pb.Type = strings.ToLower(strings.TrimSpace(t)) }
+    if cols, ok := m["columns"]; ok { pb.Columns = parseStringListFromNode(cols) }
+    for _, k := range []string{"range", "list", "hash"} {
+        if cols, ok := m[k]; ok {
+            pb.Type = k
+            pb.Columns = parseStringListFromNode(cols)
+        }
+    }
+    if pb.Type == "" || len(pb.Columns) == 0 { return nil }
+    return pb
+}
+
+// parsePartitionSpec parses a `forValues` block:
+//   { from: [...], to: [...] }         range
+//   { in: [...] }                      list
+//   { modulus: 4, remainder: 0 }       hash
+func parsePartitionSpec(v any) *PartitionSpec {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    ps := &PartitionSpec{Modulus: -1, Remainder: -1}
+    if f, ok := m["from"]; ok { ps.From = parseScalarList(f) }
+    if t, ok := m["to"]; ok { ps.To = parseScalarList(t) }
+    if in, ok := m["in"]; ok { ps.In = parseScalarList(in) }
+    if n, ok := m["modulus"].(int); ok { ps.Modulus = n }
+    if n, ok := m["remainder"].(int); ok { ps.Remainder = n }
+    return ps
+}
+
+// parseScalarList coerces a YAML list of scalars (strings, numbers, bools,
+// timestamps) to strings, preserving order. Unlike parseStringListFromNode it
+// keeps non-string scalars, which partition bounds routinely contain.
+func parseScalarList(v any) []string {
+    arr, ok := v.([]any)
+    if !ok { return nil }
+    out := []string{}
+    for _, it := range arr {
+        if s := scalarToString(it); s != "" { out = append(out, s) }
+    }
+    return out
+}
+
+// scalarToString renders a YAML scalar as a string. yaml.v3 resolves bare
+// dates like 2024-01-01 to time.Time; format those back as date/timestamp.
+func scalarToString(v any) string {
+    switch x := v.(type) {
+    case string:
+        return x
+    case bool, int, int64, uint64, float64:
+        return fmt.Sprintf("%v", x)
+    case time.Time:
+        if x.Hour() == 0 && x.Minute() == 0 && x.Second() == 0 && x.Nanosecond() == 0 {
+            return x.Format("2006-01-02")
+        }
+        return x.Format("2006-01-02 15:04:05")
+    }
+    return ""
+}
+
 func parseFunction(schemaName, key string, body any) *Function {
     // key format: "function <name>(args):"
     nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "function "))
@@ -997,7 +1115,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, t := range d.Tables {
         if t == nil { continue }
-        e := Entity{Key: k, Kind: "table", DependsOn: t.DependsOn}
+        deps := t.DependsOn
+        if t.PartitionOf != "" {
+            // partition children must be created after their parent
+            deps = append(append([]string{}, deps...), "table "+t.PartitionOf)
+        }
+        e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }

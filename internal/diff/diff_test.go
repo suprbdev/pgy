@@ -11,18 +11,18 @@ import (
 
 func emptyLive() *Live {
 	return &Live{
-		Schemas:    map[string]bool{},
-		Tables:     map[string]*LiveTable{},
-		Types:      map[string]bool{},
-		Functions:  map[string]bool{},
-		Extensions: map[string]bool{},
-		Views:      map[string]bool{},
-		MatViews:   map[string]bool{},
-		Sequences:  map[string]bool{},
-		Domains:    map[string]bool{},
-		Roles:       map[string]bool{},
-		RoleMembers: map[string]map[string]bool{},
-		RoleComments: map[string]string{},
+		Schemas:            map[string]bool{},
+		Tables:             map[string]*LiveTable{},
+		Types:              map[string]bool{},
+		Functions:          map[string]bool{},
+		Extensions:         map[string]bool{},
+		Views:              map[string]bool{},
+		MatViews:           map[string]bool{},
+		Sequences:          map[string]bool{},
+		Domains:            map[string]bool{},
+		Roles:              map[string]bool{},
+		RoleMembers:        map[string]map[string]bool{},
+		RoleComments:       map[string]string{},
 		TableGrants:        map[string]map[string]map[string]bool{},
 		FunctionGrants:     map[string]map[string]map[string]bool{},
 		SchemaGrants:       map[string]map[string]map[string]bool{},
@@ -608,7 +608,9 @@ func TestPolicyDroppedOnRemoval(t *testing.T) {
 	p := Plan(live, desired, false)
 	found := false
 	for _, s := range p.Drops {
-		if s == `drop policy "old_policy" on "public"."t";` { found = true }
+		if s == `drop policy "old_policy" on "public"."t";` {
+			found = true
+		}
 	}
 	if !found {
 		t.Errorf("expected drop of removed policy; drops: %v", p.Drops)
@@ -2378,5 +2380,174 @@ func TestProcedureGrantSkippedIfLive(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findAlter(p, "grant execute on procedure") {
 		t.Errorf("live grant should be skipped, got %v", p.Alters)
+	}
+}
+
+// --- table partitioning ---
+
+func TestPartitionedTableCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement": {
+			Name:        "measurement",
+			Columns:     map[string]*schema.Column{"logdate": {Type: "date"}},
+			PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"logdate"}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `partition by range ("logdate")`) {
+		t.Errorf("expected PARTITION BY clause, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionedTableSkippedIfExists(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement": {
+			Name:        "measurement",
+			Columns:     map[string]*schema.Column{"logdate": {Type: "date"}},
+			PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"logdate"}},
+		},
+	}}
+	live := liveWithTable("public.measurement", map[string]*LiveColumn{"logdate": {Type: "date"}})
+	p := Plan(live, desired, false)
+	if findCreate(p, "create table") {
+		t.Errorf("existing partitioned table should be skipped, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionRangeCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement_y2024": {
+			Name:        "measurement_y2024",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.measurement",
+			Partition:   &schema.PartitionSpec{From: []string{"2024-01-01"}, To: []string{"2025-01-01"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create table if not exists "public"."measurement_y2024" partition of "public"."measurement" for values from ('2024-01-01') to ('2025-01-01');`
+	if !findCreate(p, want) {
+		t.Errorf("want %q, got %+v", want, p.Creates)
+	}
+}
+
+func TestPartitionSkippedIfExists(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement_y2024": {
+			Name:        "measurement_y2024",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.measurement",
+			Partition:   &schema.PartitionSpec{From: []string{"2024-01-01"}, To: []string{"2025-01-01"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	live := liveWithTable("public.measurement_y2024", map[string]*LiveColumn{})
+	p := Plan(live, desired, false)
+	if findCreate(p, "partition of") {
+		t.Errorf("existing partition should be skipped, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionListCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.events_eu": {
+			Name:        "events_eu",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.events",
+			Partition:   &schema.PartitionSpec{In: []string{"de", "fr"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "for values in ('de', 'fr')") {
+		t.Errorf("expected list bound, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionHashCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users_p0": {
+			Name:        "users_p0",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.users",
+			Partition:   &schema.PartitionSpec{Modulus: 4, Remainder: 0},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "for values with (modulus 4, remainder 0)") {
+		t.Errorf("expected hash bound, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionDefaultCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement_default": {
+			Name:        "measurement_default",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.measurement",
+			Partition:   &schema.PartitionSpec{Default: true, Modulus: -1, Remainder: -1},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `partition of "public"."measurement" default;`) {
+		t.Errorf("expected DEFAULT partition, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionBoundLiterals(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t_low": {
+			Name:        "t_low",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.t",
+			Partition:   &schema.PartitionSpec{From: []string{"minvalue"}, To: []string{"100"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "for values from (minvalue) to (100)") {
+		t.Errorf("MINVALUE keyword and numbers must stay unquoted, got %+v", p.Creates)
+	}
+}
+
+func TestPartitionCreatedAfterParent(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement": {
+			Name:        "measurement",
+			Columns:     map[string]*schema.Column{"logdate": {Type: "date"}},
+			PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"logdate"}},
+		},
+		"public.measurement_y2024": {
+			Name:        "measurement_y2024",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.measurement",
+			Partition:   &schema.PartitionSpec{From: []string{"2024-01-01"}, To: []string{"2025-01-01"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	parentIdx, childIdx := -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, "partition by range") {
+			parentIdx = i
+		}
+		if strings.Contains(s, "partition of") {
+			childIdx = i
+		}
+	}
+	if parentIdx < 0 || childIdx < 0 {
+		t.Fatalf("missing statements: %+v", p.Creates)
+	}
+	if parentIdx > childIdx {
+		t.Errorf("parent create (%d) must precede partition create (%d): %+v", parentIdx, childIdx, p.Creates)
+	}
+}
+
+func TestPartitionByExpressionKey(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.events": {
+			Name:        "events",
+			Columns:     map[string]*schema.Column{"created_at": {Type: "timestamptz"}},
+			PartitionBy: &schema.PartitionBy{Type: "hash", Columns: []string{"date_trunc('day', created_at)"}},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "partition by hash ((date_trunc('day', created_at)))") {
+		t.Errorf("expression key should pass through parenthesized, got %+v", p.Creates)
 	}
 }

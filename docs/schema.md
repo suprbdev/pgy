@@ -233,6 +233,66 @@ constraints:
     columns: [col1, col2]       # for unique
 ```
 
+### Partitioning
+
+Declarative partitioning: a parent table declares `partitionBy`, and each partition is its own table with `partitionOf` plus a bound (`forValues`) or `default: true`.
+
+Parent table:
+
+```yaml
+schema public:
+  table measurement:
+    columns:
+      logdate: { type: date }
+      value:   { type: numeric }
+    partitionBy:
+      type: range          # range | list | hash
+      columns: [logdate]
+    # shorthand: partitionBy: { range: [logdate] }
+```
+
+Partition children (columns are inherited from the parent — do not redeclare them):
+
+```yaml
+schema public:
+  table measurement_y2024:
+    partitionOf: measurement
+    forValues:
+      from: ["2024-01-01"]
+      to: ["2025-01-01"]
+
+  table events_eu:
+    partitionOf: events
+    forValues:
+      in: [de, fr]
+
+  table users_p0:
+    partitionOf: users
+    forValues:
+      modulus: 4
+      remainder: 0
+
+  table measurement_default:
+    partitionOf: measurement
+    default: true          # DEFAULT partition, no forValues
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `partitionBy.type` | string | `range`, `list`, or `hash`. Shorthand: use the strategy as the key (`range: [col]`) |
+| `partitionBy.columns` | list | Partition key columns. Values containing spaces, parens, or operators are treated as expressions and emitted as-is |
+| `partitionOf` | string | Parent table name. Unqualified names take the child's schema; the child is automatically ordered after its parent |
+| `forValues.from` / `forValues.to` | list | Range bounds. `minvalue` / `maxvalue` are emitted as keywords; numbers, booleans, and `null` stay bare; everything else is quoted as a string literal |
+| `forValues.in` | list | List bound values (same literal rules) |
+| `forValues.modulus` / `forValues.remainder` | int | Hash bound |
+| `default` | boolean | Emit a `DEFAULT` partition instead of `FOR VALUES` |
+
+Notes:
+
+- Both parents and partitions are create-only and skipped when already live; partition bounds of existing partitions are never altered, and `pgy` never emits `ATTACH`/`DETACH PARTITION`.
+- Indexes, foreign keys, constraints, and triggers declared on a partition child apply to that child as usual.
+- PostgreSQL requires a partitioned table's primary key to include the partition key columns.
+
 ---
 
 ## Type Definitions
