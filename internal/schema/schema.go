@@ -146,6 +146,7 @@ type Column struct {
     Comment  string `yaml:"comment"`
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
+    Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
 }
 
 type Index struct {
@@ -685,6 +686,7 @@ func parseColumnSpec(spec any) *Column {
         if cm, ok := m["comment"].(string); ok { c.Comment = cm }
         if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
         if u, ok := m["using"].(string); ok { c.Using = u }
+        if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }
     return c
 }

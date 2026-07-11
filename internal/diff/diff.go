@@ -28,6 +28,8 @@ type Live struct{
     TableGrants    map[string]map[string]map[string]bool // key "schema.table"
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
     SchemaGrants   map[string]map[string]map[string]bool // key schema name
+    // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists (pg_attribute.attacl)
+    ColumnGrants map[string]map[string]map[string]map[string]bool
     // FunctionPublicExec: normalized signature -> PUBLIC still has EXECUTE
     // (true when proacl is NULL, i.e. default privileges, or PUBLIC=X entry present).
     FunctionPublicExec map[string]bool
@@ -95,6 +97,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         TableGrants: map[string]map[string]map[string]bool{},
         FunctionGrants: map[string]map[string]map[string]bool{},
         SchemaGrants: map[string]map[string]map[string]bool{},
+        ColumnGrants: map[string]map[string]map[string]map[string]bool{},
         FunctionPublicExec: map[string]bool{},
         RelComments: map[string]string{},
         FunctionComments: map[string]string{},
@@ -497,6 +500,33 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         addLiveGrant(l.TableGrants, key, role, priv)
     }
     tgRows.Close()
+
+    // Query column grants (explicit column ACL entries, owner excluded)
+    cgQ := `
+        select n.nspname, c.relname, att.attname,
+               case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
+               lower(a.privilege_type)
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute att on att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
+        cross join lateral aclexplode(att.attacl) a
+        where c.relkind in ('r', 'p')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and a.grantee <> c.relowner
+    `
+    cgRows, err := pool.Query(ctx, cgQ)
+    if err != nil { return nil, err }
+    for cgRows.Next() {
+        var schemaName, tableName, colName, role, priv string
+        if err := cgRows.Scan(&schemaName, &tableName, &colName, &role, &priv); err != nil {
+            cgRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if l.ColumnGrants[key] == nil { l.ColumnGrants[key] = map[string]map[string]map[string]bool{} }
+        addLiveGrant(l.ColumnGrants[key], colName, role, priv)
+    }
+    cgRows.Close()
 
     // Query function grants; left join keeps NULL-acl functions (default privileges,
     // meaning PUBLIC still has EXECUTE) visible for FunctionPublicExec.
@@ -1351,8 +1381,18 @@ func planGrants(live *Live, desired *schema.Database) []string {
     sort.Strings(tableNames)
     for _, k := range tableNames {
         dt := desired.Tables[k]
-        if dt == nil || dt.Grants == nil { continue }
-        stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k])...)
+        if dt == nil { continue }
+        if dt.Grants != nil {
+            stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k])...)
+        }
+        colNames := make([]string, 0, len(dt.Columns))
+        for cn := range dt.Columns { colNames = append(colNames, cn) }
+        sort.Strings(colNames)
+        for _, cn := range colNames {
+            c := dt.Columns[cn]
+            if c == nil || c.Grants == nil { continue }
+            stmts = append(stmts, columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn])...)
+        }
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -1432,6 +1472,52 @@ func grantDiffStmts(target string, desired map[string][]string, liveG map[string
         if len(extra) > 0 {
             sort.Strings(extra)
             out = append(out, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(extra, ", "), target, grantRole(role)))
+        }
+    }
+    return out
+}
+
+// columnGrantDiffStmts reconciles desired role->privs for one column against
+// live column ACLs (pg_attribute.attacl). Same authoritative semantics as
+// grantDiffStmts: missing privileges are granted, extra live privileges are
+// revoked, PUBLIC is never auto-revoked. Emits column-list grant syntax:
+// grant select ("email") on table "s"."t" to "role";
+func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool) []string {
+    out := []string{}
+    target := "table " + pqIdent(tableKey)
+    colIdent := pqIdent(col)
+    roles := make([]string, 0, len(desired))
+    for r := range desired { roles = append(roles, r) }
+    sort.Strings(roles)
+    for _, role := range roles {
+        missing := []string{}
+        for _, priv := range desired[role] {
+            p := strings.ToLower(priv)
+            if !liveG[role][p] { missing = append(missing, p) }
+        }
+        if len(missing) > 0 {
+            sort.Strings(missing)
+            parts := make([]string, 0, len(missing))
+            for _, p := range missing { parts = append(parts, p+" ("+colIdent+")") }
+            out = append(out, fmt.Sprintf("grant %s on %s to %s;", strings.Join(parts, ", "), target, grantRole(role)))
+        }
+    }
+    liveRoles := make([]string, 0, len(liveG))
+    for r := range liveG { liveRoles = append(liveRoles, r) }
+    sort.Strings(liveRoles)
+    for _, role := range liveRoles {
+        if role == "public" { continue } // PUBLIC managed only via revokePublic
+        want := map[string]bool{}
+        for _, priv := range desired[role] { want[strings.ToLower(priv)] = true }
+        extra := []string{}
+        for priv := range liveG[role] {
+            if !want[priv] { extra = append(extra, priv) }
+        }
+        if len(extra) > 0 {
+            sort.Strings(extra)
+            parts := make([]string, 0, len(extra))
+            for _, p := range extra { parts = append(parts, p+" ("+colIdent+")") }
+            out = append(out, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(parts, ", "), target, grantRole(role)))
         }
     }
     return out

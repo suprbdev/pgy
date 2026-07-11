@@ -26,6 +26,7 @@ func emptyLive() *Live {
 		TableGrants:        map[string]map[string]map[string]bool{},
 		FunctionGrants:     map[string]map[string]map[string]bool{},
 		SchemaGrants:       map[string]map[string]map[string]bool{},
+		ColumnGrants:       map[string]map[string]map[string]map[string]bool{},
 		FunctionPublicExec: map[string]bool{},
 		FunctionDefs:       map[string]*LiveFunction{},
 		FunctionComments:   map[string]string{},
@@ -483,6 +484,106 @@ func TestGrantNoRevokeWithoutGrantsBlock(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findAlter(p, "revoke") {
 		t.Errorf("no grants block, grants unmanaged, should not revoke; alters: %v", p.Alters)
+	}
+}
+
+// --- column-level grants ---
+
+func TestColumnGrantCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "int"},
+				"email": {Type: "text", Grants: map[string][]string{"reporting": {"select", "update"}}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant select ("email"), update ("email") on table "public"."users" to "reporting";`) {
+		t.Errorf("expected column grant; alters: %v", p.Alters)
+	}
+}
+
+func TestColumnGrantSkippedIfLive(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
+	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{
+		"email": {"reporting": {"select": true}},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"email": {Type: "text", Grants: map[string][]string{"reporting": {"select"}}},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "grant") {
+		t.Errorf("column grant already live, should not re-grant; alters: %v", p.Alters)
+	}
+}
+
+func TestColumnGrantRevokeOnRemoval(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
+	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{
+		"email": {
+			"reporting": {"select": true, "update": true},
+			"old_role":  {"select": true},
+		},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"email": {Type: "text", Grants: map[string][]string{"reporting": {"select"}}},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `revoke update ("email") on table "public"."users" from "reporting";`) {
+		t.Errorf("expected revoke of removed column priv; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `revoke select ("email") on table "public"."users" from "old_role";`) {
+		t.Errorf("expected revoke of removed role; alters: %v", p.Alters)
+	}
+}
+
+func TestColumnGrantUnmanagedWithoutBlock(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
+	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{
+		"email": {"some_role": {"select": true}},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"email": {Type: "text"}, // no grants block
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "revoke") {
+		t.Errorf("no column grants block, unmanaged, should not revoke; alters: %v", p.Alters)
+	}
+}
+
+func TestColumnGrantPublicNotAutoRevoked(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
+	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{
+		"email": {"public": {"select": true}},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"email": {Type: "text", Grants: map[string][]string{"reporting": {"select"}}},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "revoke") {
+		t.Errorf("PUBLIC column grant must not be auto-revoked; alters: %v", p.Alters)
 	}
 }
 

@@ -606,6 +606,38 @@ tables:
 	}
 }
 
+// --- column grants ---
+
+func TestColumnGrantsParse(t *testing.T) {
+	yaml := `
+tables:
+  public.users:
+    columns:
+      email:
+        type: text
+        grants:
+          reporting: [select, UPDATE]
+      id:
+        type: int
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := db.Tables["public.users"].Columns
+	g := cols["email"].Grants
+	if g == nil {
+		t.Fatal("expected grants on email column")
+	}
+	privs := g["reporting"]
+	if len(privs) != 2 || privs[0] != "select" || privs[1] != "update" {
+		t.Errorf("privs: %v (want lowercased [select update])", privs)
+	}
+	if cols["id"].Grants != nil {
+		t.Error("id column has no grants block, Grants must stay nil (unmanaged)")
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {
