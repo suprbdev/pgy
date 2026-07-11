@@ -28,6 +28,9 @@ func emptyLive() *Live {
 		SchemaGrants:       map[string]map[string]map[string]bool{},
 		FunctionPublicExec: map[string]bool{},
 		FunctionDefs:       map[string]*LiveFunction{},
+		FunctionComments:   map[string]string{},
+		Procedures:         map[string]bool{},
+		ProcedureDefs:      map[string]*LiveProcedure{},
 		EnumLabels:         map[string][]string{},
 	}
 }
@@ -2203,5 +2206,177 @@ func TestDomainBeforeDependentTable(t *testing.T) {
 	}
 	if domIdx > tblIdx {
 		t.Errorf("domain must be created before dependent table: %v", p.Creates)
+	}
+}
+
+// --- procedures ---
+
+func procDesired(key string, pr *schema.Procedure) *schema.Database {
+	return &schema.Database{
+		Tables:     map[string]*schema.Table{},
+		Procedures: map[string]*schema.Procedure{key: pr},
+	}
+}
+
+func TestProcedureCreate(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin delete from public.audit; end;",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create procedure "public"."cleanup"() language plpgsql as $$`) {
+		t.Errorf("expected CREATE PROCEDURE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin delete from public.audit; end;", Security: "invoker"}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin delete from public.audit; end;",
+	})
+	p := Plan(live, desired, false)
+	if findCreate(p, "procedure") {
+		t.Errorf("unchanged procedure should be skipped, got %v", p.Creates)
+	}
+}
+
+func TestProcedureReplaceOnBodyChange(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker"}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin delete from public.audit; end;",
+	})
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace procedure") {
+		t.Errorf("changed body should emit CREATE OR REPLACE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureReplaceOnSecurityChange(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker"}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Security: "definer", Body: "begin null; end;",
+	})
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace procedure") {
+		t.Errorf("changed security should emit CREATE OR REPLACE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureSecurityDefiner(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Security: "definer", Body: "begin null; end;",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "language plpgsql security definer as $$") {
+		t.Errorf("expected SECURITY DEFINER clause, got %v", p.Creates)
+	}
+}
+
+func TestProcedureSetClause(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Set: map[string]string{"search_path": "public"},
+		Body: "begin null; end;",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, "set search_path = public as $$") {
+		t.Errorf("expected SET clause, got %v", p.Creates)
+	}
+}
+
+func TestProcedureWithArgs(t *testing.T) {
+	desired := procDesired("public.archive_user", &schema.Procedure{
+		Schema: "public", Name: "archive_user", ArgsSig: "(user_id bigint)",
+		Language: "plpgsql", Body: "begin null; end;",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create procedure "public"."archive_user"(user_id bigint) language plpgsql`) {
+		t.Errorf("expected args in CREATE PROCEDURE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureCreatesSchema(t *testing.T) {
+	desired := procDesired("jobs.run_all", &schema.Procedure{
+		Schema: "jobs", Name: "run_all", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create schema if not exists "jobs";`) {
+		t.Errorf("expected CREATE SCHEMA, got %v", p.Creates)
+	}
+}
+
+func TestProcedureComment(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;", Comment: "nightly cleanup",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on procedure "public"."cleanup"() is 'nightly cleanup';`) {
+		t.Errorf("expected COMMENT ON PROCEDURE, got %v", p.Alters)
+	}
+}
+
+func TestProcedureCommentSkippedIfSame(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker"}
+	live.FunctionComments["public.cleanup()"] = "nightly cleanup"
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;", Comment: "nightly cleanup",
+	})
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on procedure") {
+		t.Errorf("unchanged comment should be skipped, got %v", p.Alters)
+	}
+}
+
+func TestProcedureRevokePublic(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;", RevokePublic: true,
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `revoke all on procedure "public"."cleanup"() from public;`) {
+		t.Errorf("expected REVOKE from PUBLIC, got %v", p.Alters)
+	}
+}
+
+func TestProcedureGrants(t *testing.T) {
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;",
+		Grants: map[string][]string{"batch_role": {"execute"}},
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant execute on procedure "public"."cleanup"() to "batch_role";`) {
+		t.Errorf("expected GRANT EXECUTE, got %v", p.Alters)
+	}
+}
+
+func TestProcedureGrantSkippedIfLive(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker"}
+	live.FunctionGrants["public.cleanup()"] = map[string]map[string]bool{"batch_role": {"execute": true}}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Body: "begin null; end;",
+		Grants: map[string][]string{"batch_role": {"execute"}},
+	})
+	p := Plan(live, desired, false)
+	if findAlter(p, "grant execute on procedure") {
+		t.Errorf("live grant should be skipped, got %v", p.Alters)
 	}
 }

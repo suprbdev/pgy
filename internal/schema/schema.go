@@ -16,6 +16,7 @@ type Database struct {
     Extensions []*Extension `yaml:"extensions"`
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
+    Procedures map[string]*Procedure `yaml:"-"`
     Views map[string]*View `yaml:"-"`
     Sequences map[string]*Sequence `yaml:"-"`
     Domains map[string]*Domain `yaml:"-"`
@@ -182,6 +183,23 @@ type Function struct {
     Comment string             // empty means unmanaged
 }
 
+// Procedure is a CREATE PROCEDURE declaration (PostgreSQL 11+). Unlike
+// functions, procedures have no return type, volatility, or strictness;
+// they are invoked with CALL and may control transactions.
+type Procedure struct {
+    Schema   string
+    Name     string
+    ArgsSig  string
+    Language string
+    Security string // definer/invoker
+    Set      map[string]string
+    Body     string
+    DependsOn []string `yaml:"dependsOn"`
+    Grants map[string][]string // role -> privileges; nil means unmanaged
+    RevokePublic bool          // revoke default PUBLIC execute
+    Comment string             // empty means unmanaged
+}
+
 func LoadAndMerge(paths []string) (*Database, error) {
     merged := &Database{Tables: map[string]*Table{}}
     for _, p := range paths {
@@ -237,6 +255,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
             if merged.Functions == nil { merged.Functions = map[string]*Function{} }
             for k, v := range d.Functions { merged.Functions[k] = v }
         }
+        // merge procedures
+        if len(d.Procedures) > 0 {
+            if merged.Procedures == nil { merged.Procedures = map[string]*Procedure{} }
+            for k, v := range d.Procedures { merged.Procedures[k] = v }
+        }
         // merge views
         if len(d.Views) > 0 {
             if merged.Views == nil { merged.Views = map[string]*View{} }
@@ -287,6 +310,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out := &Database{Tables: map[string]*Table{}}
     out.Types = map[string]*TypeDef{}
     out.Functions = map[string]*Function{}
+    out.Procedures = map[string]*Procedure{}
     out.Views = map[string]*View{}
     out.Sequences = map[string]*Sequence{}
     out.Domains = map[string]*Domain{}
@@ -494,6 +518,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if fn != nil {
                 full := qualify(schemaName, fn.Name)
                 db.Functions[full] = fn
+            }
+        } else if strings.HasPrefix(key, "procedure ") {
+            pr := parseProcedure(schemaName, key, body)
+            if pr != nil {
+                full := qualify(schemaName, pr.Name)
+                db.Procedures[full] = pr
             }
         } else if strings.HasPrefix(key, "type ") {
             td := parseType(schemaName, key, body)
@@ -795,6 +825,37 @@ func parseFunction(schemaName, key string, body any) *Function {
     return fn
 }
 
+func parseProcedure(schemaName, key string, body any) *Procedure {
+    // key format: "procedure <name>(args):"
+    nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "procedure "))
+    pr := &Procedure{Schema: schemaName}
+    if i := strings.Index(nameAndSig, "("); i >= 0 {
+        pr.Name = strings.TrimSpace(nameAndSig[:i])
+        pr.ArgsSig = strings.TrimSuffix(strings.TrimSpace(nameAndSig[i:]), ":")
+    } else {
+        pr.Name = strings.TrimSuffix(nameAndSig, ":")
+        pr.ArgsSig = "()"
+    }
+    m, ok := body.(map[string]any)
+    if !ok { return pr }
+    if l, ok := m["language"].(string); ok { pr.Language = l }
+    if s, ok := m["security"].(string); ok { pr.Security = s }
+    if set, ok := m["set"].(map[string]any); ok {
+        pr.Set = map[string]string{}
+        for k, v := range set {
+            if s, ok := v.(string); ok { pr.Set[k] = s }
+        }
+    }
+    if b, ok := m["body"].(string); ok { pr.Body = b }
+    if dep, ok := m["dependsOn"]; ok {
+        pr.DependsOn = parseStringListFromNode(dep)
+    }
+    if gRaw, ok := m["grants"]; ok { pr.Grants = parseGrants(gRaw) }
+    if rp, ok := m["revokePublic"].(bool); ok { pr.RevokePublic = rp }
+    if cm, ok := m["comment"].(string); ok { pr.Comment = cm }
+    return pr
+}
+
 func parseType(schemaName, key string, body any) *TypeDef {
     name := strings.TrimSpace(strings.TrimPrefix(key, "type "))
     td := &TypeDef{Name: name, Schema: schemaName}
@@ -928,6 +989,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, pr := range d.Procedures {
+        if pr == nil { continue }
+        e := Entity{Key: k, Kind: "procedure", DependsOn: pr.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, t := range d.Tables {
         if t == nil { continue }
         e := Entity{Key: k, Kind: "table", DependsOn: t.DependsOn}
@@ -1045,6 +1112,17 @@ func resolveDependency(raw string, d *Database) string {
         return ""
     }
     
+    // Handle "procedure <name>(args)"
+    if strings.HasPrefix(raw, "procedure ") {
+        prSig := strings.TrimSpace(strings.TrimPrefix(raw, "procedure "))
+        for k := range d.Procedures {
+            if strings.Contains(k, prSig) || strings.HasPrefix(k, prSig) {
+                return k
+            }
+        }
+        return ""
+    }
+
     // Handle "type <name>"
     if strings.HasPrefix(raw, "type ") {
         typeName := strings.TrimSpace(strings.TrimPrefix(raw, "type "))
@@ -1102,6 +1180,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Tables[raw]; ok { return raw }
     if _, ok := d.Types[raw]; ok { return raw }
     if _, ok := d.Functions[raw]; ok { return raw }
+    if _, ok := d.Procedures[raw]; ok { return raw }
     if _, ok := d.Views[raw]; ok { return raw }
     if _, ok := d.Sequences[raw]; ok { return raw }
     if _, ok := d.Domains[raw]; ok { return raw }
@@ -1111,6 +1190,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Tables[pub]; ok { return pub }
     if _, ok := d.Types[pub]; ok { return pub }
     if _, ok := d.Functions[pub]; ok { return pub }
+    if _, ok := d.Procedures[pub]; ok { return pub }
     if _, ok := d.Views[pub]; ok { return pub }
     if _, ok := d.Sequences[pub]; ok { return pub }
     if _, ok := d.Domains[pub]; ok { return pub }

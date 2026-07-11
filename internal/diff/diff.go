@@ -38,6 +38,12 @@ type Live struct{
     SchemaComments   map[string]string // schema name -> comment
     // FunctionDefs: normalized signature -> live definition, for replace-on-change
     FunctionDefs map[string]*LiveFunction
+    // Procedures: normalized signature -> exists (pg_proc prokind = 'p').
+    // Grants/comments for procedures share FunctionGrants/FunctionComments/
+    // FunctionPublicExec (same pg_proc key space).
+    Procedures map[string]bool
+    // ProcedureDefs: normalized signature -> live definition, for replace-on-change
+    ProcedureDefs map[string]*LiveProcedure
     // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
     EnumLabels map[string][]string
 }
@@ -47,6 +53,10 @@ type LiveFunction struct{
     Volatility string // volatile|stable|immutable
     Security   string // definer|invoker
     Strict     bool
+}
+type LiveProcedure struct{
+    Body     string
+    Security string // definer|invoker
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -88,6 +98,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         TypeComments: map[string]string{},
         SchemaComments: map[string]string{},
         FunctionDefs: map[string]*LiveFunction{},
+        Procedures: map[string]bool{},
+        ProcedureDefs: map[string]*LiveProcedure{},
         EnumLabels: map[string][]string{},
     }
     
@@ -287,10 +299,11 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     typeRows.Close()
     
-    // Query existing functions with definition details for replace-on-change
+    // Query existing functions and procedures with definition details for
+    // replace-on-change. prokind routes rows: 'p' = procedure, else function.
     funcQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
-               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict
+               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.prokind::text
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -298,13 +311,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     funcRows, err := pool.Query(ctx, funcQ)
     if err != nil { return nil, err }
     for funcRows.Next() {
-        var schemaName, funcName, args, src, vol string
+        var schemaName, funcName, args, src, vol, kind string
         var secdef, strict bool
-        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict); err != nil {
+        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &kind); err != nil {
             funcRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
+        if kind == "p" {
+            norm := normalizeFunctionSignature(key)
+            l.Procedures[norm] = true
+            lp := &LiveProcedure{Body: src, Security: "invoker"}
+            if secdef { lp.Security = "definer" }
+            l.ProcedureDefs[norm] = lp
+            continue
+        }
         l.Functions[key] = true
         lf := &LiveFunction{Body: src, Strict: strict, Security: "invoker", Volatility: "volatile"}
         if secdef { lf.Security = "definer" }
@@ -674,6 +695,15 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     return l, nil
 }
 
+// procedureChanged reports whether a live procedure's definition differs from
+// desired. Security is compared only when the YAML sets it; body comparison
+// is whitespace-trimmed (prosrc stores the body verbatim).
+func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
+    if strings.TrimSpace(p.Body) != strings.TrimSpace(lp.Body) { return true }
+    if p.Security != "" && strings.ToLower(p.Security) != lp.Security { return true }
+    return false
+}
+
 // functionChanged reports whether a live function's definition differs from
 // desired. Volatility/security are compared only when the YAML sets them;
 // body comparison is whitespace-trimmed (prosrc stores the body verbatim).
@@ -749,6 +779,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         }
     }
     for k := range desired.Functions {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
+            neededSchemas[parts[0]] = true
+        } else {
+            neededSchemas["public"] = true
+        }
+    }
+    for k := range desired.Procedures {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -900,6 +937,31 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             verb := "create function"
             if found { verb = "create or replace function" }
             stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
+            plan.Creates = append(plan.Creates, stmt)
+        case "procedure":
+            pr, ok := desired.Procedures[e.Key]
+            if !ok || pr == nil { continue }
+            norm := normalizeFunctionSignature(e.Key + pr.ArgsSig)
+            found := live.Procedures[norm]
+            if found {
+                lp := live.ProcedureDefs[norm]
+                if lp == nil || !procedureChanged(pr, lp) { continue }
+                // fall through: definition changed, emit CREATE OR REPLACE
+            }
+            setClauses := ""
+            if len(pr.Set) > 0 {
+                keys := make([]string, 0, len(pr.Set))
+                for k := range pr.Set { keys = append(keys, k) }
+                sort.Strings(keys)
+                for _, k := range keys {
+                    setClauses += fmt.Sprintf(" set %s = %s", k, pr.Set[k])
+                }
+            }
+            attrsStr := ""
+            if pr.Security != "" { attrsStr = " security " + pr.Security }
+            verb := "create procedure"
+            if found { verb = "create or replace procedure" }
+            stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
             plan.Creates = append(plan.Creates, stmt)
         case "domain":
             dm, ok := desired.Domains[e.Key]
@@ -1149,6 +1211,17 @@ func planComments(live *Live, desired *schema.Database) []string {
         norm := normalizeFunctionSignature(k + f.ArgsSig)
         comment("function "+pqIdent(k)+grantFuncArgs(f.ArgsSig), f.Comment, live.FunctionComments[norm])
     }
+
+    procNames := make([]string, 0, len(desired.Procedures))
+    for k := range desired.Procedures { procNames = append(procNames, k) }
+    sort.Strings(procNames)
+    for _, k := range procNames {
+        pr := desired.Procedures[k]
+        if pr == nil { continue }
+        // procedure comments share pg_proc's pg_description entries
+        norm := normalizeFunctionSignature(k + pr.ArgsSig)
+        comment("procedure "+pqIdent(k)+grantFuncArgs(pr.ArgsSig), pr.Comment, live.FunctionComments[norm])
+    }
     return stmts
 }
 
@@ -1195,6 +1268,26 @@ func planGrants(live *Live, desired *schema.Database) []string {
         }
         if f.Grants != nil {
             stmts = append(stmts, grantDiffStmts(target, f.Grants, live.FunctionGrants[norm])...)
+        }
+    }
+
+    procNames := make([]string, 0, len(desired.Procedures))
+    for k := range desired.Procedures { procNames = append(procNames, k) }
+    sort.Strings(procNames)
+    for _, k := range procNames {
+        pr := desired.Procedures[k]
+        if pr == nil { continue }
+        // procedure ACLs share pg_proc's live maps (FunctionGrants/PublicExec)
+        norm := normalizeFunctionSignature(k + pr.ArgsSig)
+        target := "procedure " + pqIdent(k) + grantFuncArgs(pr.ArgsSig)
+        if pr.RevokePublic {
+            // new procedure (not live yet) has default PUBLIC execute
+            if !live.Procedures[norm] || live.FunctionPublicExec[norm] {
+                stmts = append(stmts, fmt.Sprintf("revoke all on %s from public;", target))
+            }
+        }
+        if pr.Grants != nil {
+            stmts = append(stmts, grantDiffStmts(target, pr.Grants, live.FunctionGrants[norm])...)
         }
     }
     return stmts

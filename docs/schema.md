@@ -316,6 +316,44 @@ schema public:
 
 ---
 
+## Procedure Definitions
+
+Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
+
+```yaml
+schema public:
+  procedure archive_user(user_id bigint):
+    language: plpgsql
+    security: definer    # definer | invoker
+    set:
+      search_path: public
+    body: |
+      BEGIN
+        UPDATE public.users SET archived = true WHERE id = user_id;
+      END;
+    grants:
+      batch_role: [execute]
+    revokePublic: true
+    comment: "archives a user"
+    dependsOn:
+      - table public.users
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `language` | string | e.g. `plpgsql`, `sql` |
+| `security` | string | `definer` or `invoker` |
+| `set` | map | `SET` configuration options (e.g. `search_path`) |
+| `body` | string | Procedure body (dollar-quoted in output SQL) |
+| `grants` | map | Role → privilege list. See [Grants](#grants) |
+| `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
+| `comment` | string | `COMMENT ON PROCEDURE` (diffed against live) |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+
+Signature changes are not supported — rename the procedure instead.
+
+---
+
 ## Comments
 
 All object types accept a `comment:` key emitted as `COMMENT ON`. Comment text is preserved exactly (multi-line included), so PostGraphile smart tags (`@behavior`, `@name`, ...) work as-is.
@@ -593,6 +631,7 @@ All object types support `dependsOn` to control creation order. The topological 
 | `extension <name>` | `extension citext` |
 | `type <schema.type>` | `type public.auth_role` |
 | `function <schema.fn>(args)` | `function public.set_updated_at()` |
+| `procedure <schema.proc>(args)` | `procedure public.archive_user` |
 | `view <schema.view>` | `view public.active_users` |
 | `materialized view <schema.view>` | `materialized view public.user_stats` |
 | `sequence <schema.seq>` | `sequence public.order_number_seq` |

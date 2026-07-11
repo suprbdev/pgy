@@ -3,6 +3,7 @@ package schema
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1461,5 +1462,106 @@ func TestDomainMerge(t *testing.T) {
 	}
 	if d := db.Domains["public.d1"]; d == nil || d.Type != "text" {
 		t.Errorf("d1 lost in merge: %+v", d)
+	}
+}
+
+func TestParseProcedure(t *testing.T) {
+	yml := `
+schema public:
+  procedure archive_user(user_id bigint):
+    language: plpgsql
+    security: definer
+    set:
+      search_path: public
+    body: |
+      begin
+        update public.users set archived = true where id = user_id;
+      end;
+    grants:
+      batch_role: [execute]
+    revokePublic: true
+    comment: "archives a user"
+    dependsOn:
+      - table public.users
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, ok := db.Procedures["public.archive_user"]
+	if !ok {
+		t.Fatal("expected public.archive_user procedure")
+	}
+	if pr.ArgsSig != "(user_id bigint)" {
+		t.Errorf("argsSig wrong: %q", pr.ArgsSig)
+	}
+	if pr.Language != "plpgsql" {
+		t.Errorf("language wrong: %q", pr.Language)
+	}
+	if pr.Security != "definer" {
+		t.Errorf("security wrong: %q", pr.Security)
+	}
+	if pr.Set["search_path"] != "public" {
+		t.Errorf("set wrong: %v", pr.Set)
+	}
+	if !strings.Contains(pr.Body, "update public.users") {
+		t.Errorf("body wrong: %q", pr.Body)
+	}
+	if len(pr.Grants["batch_role"]) != 1 || pr.Grants["batch_role"][0] != "execute" {
+		t.Errorf("grants wrong: %v", pr.Grants)
+	}
+	if !pr.RevokePublic {
+		t.Error("revokePublic: want true")
+	}
+	if pr.Comment != "archives a user" {
+		t.Errorf("comment wrong: %q", pr.Comment)
+	}
+	if len(pr.DependsOn) != 1 || pr.DependsOn[0] != "table public.users" {
+		t.Errorf("dependsOn wrong: %v", pr.DependsOn)
+	}
+}
+
+func TestParseProcedureNoArgs(t *testing.T) {
+	yml := `
+schema public:
+  procedure cleanup:
+    language: sql
+    body: "delete from public.audit;"
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, ok := db.Procedures["public.cleanup"]
+	if !ok {
+		t.Fatal("expected public.cleanup procedure")
+	}
+	if pr.ArgsSig != "()" {
+		t.Errorf("argsSig: want (), got %q", pr.ArgsSig)
+	}
+	if pr.Language != "sql" {
+		t.Errorf("language wrong: %q", pr.Language)
+	}
+}
+
+func TestProcedureMerge(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.yml")
+	f2 := filepath.Join(dir, "b.yml")
+	if err := os.WriteFile(f1, []byte("schema public:\n  procedure p1():\n    language: sql\n    body: select 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("schema public:\n  procedure p2():\n    language: sql\n    body: select 2;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Procedures) != 2 {
+		t.Fatalf("want 2 merged procedures, got %d", len(db.Procedures))
+	}
+	if p := db.Procedures["public.p1"]; p == nil || p.Language != "sql" {
+		t.Errorf("p1 lost in merge: %+v", p)
 	}
 }
