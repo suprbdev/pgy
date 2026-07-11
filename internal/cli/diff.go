@@ -65,6 +65,11 @@ Exit codes:
             if err != nil {
                 return err
             }
+            // fail loudly on dependsOn cycles: the plan's entity order would
+            // not be dependency-correct
+            if _, err := schema.TopologicalSort(compiled); err != nil {
+                return err
+            }
             plan := diff.Plan(live, compiled, unsafe)
             sql := diff.Render(plan)
 

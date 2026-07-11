@@ -638,6 +638,80 @@ tables:
 	}
 }
 
+// --- trigger when guard ---
+
+func TestTriggerWhenParse(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      id:
+        type: int
+    triggers:
+      trg_supersede:
+        timing: after
+        events: [insert]
+        level: row
+        procedure: public.supersede()
+        when: old.created_at <= new.created_at
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trs := db.Tables["public.t"].Triggers
+	if len(trs) != 1 {
+		t.Fatalf("want 1 trigger, got %d", len(trs))
+	}
+	if trs[0].When != "old.created_at <= new.created_at" {
+		t.Errorf("when: %q", trs[0].When)
+	}
+}
+
+// --- topological sort cycle detection ---
+
+func TestTopologicalSortCycleError(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"public.a": {Name: "a", DependsOn: []string{"table public.b"}},
+			"public.b": {Name: "b", DependsOn: []string{"table public.a"}},
+		},
+	}
+	sorted, err := TopologicalSort(db)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if !strings.Contains(err.Error(), "public.a") || !strings.Contains(err.Error(), "public.b") {
+		t.Errorf("cycle error should name members: %v", err)
+	}
+	if len(sorted) != 2 {
+		t.Errorf("cycle members must still be returned; got %d entities", len(sorted))
+	}
+}
+
+func TestTopologicalSortFunctionAfterTable(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"public.t": {Name: "t"},
+		},
+		Functions: map[string]*Function{
+			"public.fn": {Name: "fn", Schema: "public", DependsOn: []string{"table public.t"}},
+		},
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti, fi := -1, -1
+	for i, e := range sorted {
+		if e.Key == "public.t" { ti = i }
+		if e.Key == "public.fn" { fi = i }
+	}
+	if ti < 0 || fi < 0 || fi < ti {
+		t.Errorf("function dependsOn table must sort after it; order: %v", sorted)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {

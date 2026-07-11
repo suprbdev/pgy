@@ -171,6 +171,7 @@ type Trigger struct {
     Events  []string
     Level   string // row/statement
     Procedure string
+    When    string // WHEN (condition) guard, e.g. "old.created_at <= new.created_at"
     Constraint bool        // CREATE CONSTRAINT TRIGGER (must be AFTER ... FOR EACH ROW)
     Deferrable bool
     InitiallyDeferred bool // implies deferrable
@@ -859,6 +860,7 @@ func parseTriggers(v any) []*Trigger {
                 tr.Events = parseStringListFromNode(dm["events"])
                 if l, ok := dm["level"].(string); ok { tr.Level = l }
                 if p, ok := dm["procedure"].(string); ok { tr.Procedure = p }
+                if w, ok := dm["when"].(string); ok { tr.When = w }
                 if c, ok := dm["constraint"].(bool); ok { tr.Constraint = c }
                 if d, ok := dm["deferrable"].(bool); ok { tr.Deferrable = d }
                 if id, ok := dm["initiallyDeferred"].(bool); ok { tr.InitiallyDeferred = id }
@@ -1251,13 +1253,22 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         }
     }
     
-    // Add any remaining nodes (cycles or missing deps)
-    for k, e := range entityMap {
-        if !visited[k] {
-            result = append(result, e)
+    // Any unvisited node is part of a dependency cycle (or depends on one).
+    // Append them deterministically so the result is still usable, but return
+    // an error so callers can fail loudly — their relative order is NOT
+    // dependency-correct.
+    if len(visited) < len(entityMap) {
+        remaining := []string{}
+        for k := range entityMap {
+            if !visited[k] { remaining = append(remaining, k) }
         }
+        sort.Strings(remaining)
+        for _, k := range remaining {
+            result = append(result, entityMap[k])
+        }
+        return result, fmt.Errorf("dependency cycle detected among: %s — check dependsOn declarations (note: triggers are created after all tables and functions, so a table never needs dependsOn for its trigger functions)", strings.Join(remaining, ", "))
     }
-    
+
     return result, nil
 }
 

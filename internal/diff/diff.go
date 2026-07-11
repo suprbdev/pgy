@@ -815,6 +815,11 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
     deferredFKs := []string{}
+    // Trigger creates are deferred until after all other creates so a trigger
+    // function may declare dependsOn on the trigger's own table (needed for
+    // SQL-language bodies, which are validated at CREATE time) without forming
+    // a table->function->table cycle.
+    deferredTriggers := []string{}
     plan := &PlanDiff{}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
@@ -907,12 +912,11 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         plan.Creates = append(plan.Creates, stmt)
     }
     
-    // Topologically sort remaining entities (types, functions, tables) respecting dependsOn
-    sorted, err := schema.TopologicalSort(desired)
-    if err != nil {
-        // fallback to old behavior on error
-        sorted = []schema.Entity{}
-    }
+    // Topologically sort remaining entities (types, functions, tables) respecting dependsOn.
+    // On a cycle the sort still returns every entity (cycle members appended in
+    // name order) — use it as-is; the CLI surfaces the cycle error before
+    // planning, so reaching here with err != nil means the caller opted in.
+    sorted, _ := schema.TopologicalSort(desired)
     
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
@@ -1052,7 +1056,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 if dt.PartitionOf != "" {
                     // partition children inherit columns from the parent
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
-                    applyTableConstraints(plan, fq, dt, nil, &deferredFKs, unsafe)
+                    applyTableConstraints(plan, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
@@ -1079,7 +1083,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
                 plan.Creates = append(plan.Creates, create+";")
-                applyTableConstraints(plan, fq, dt, nil, &deferredFKs, unsafe)
+                applyTableConstraints(plan, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
                 // of columns present in both
@@ -1098,7 +1102,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
                 }
                 // apply any missing constraints, indexes, triggers
-                applyTableConstraints(plan, fq, dt, lt, &deferredFKs, unsafe)
+                applyTableConstraints(plan, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
                 if unsafe {
                     for cn := range lt.Columns {
@@ -1110,6 +1114,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             }
         }
     }
+    plan.Creates = append(plan.Creates, deferredTriggers...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
@@ -1565,10 +1570,12 @@ func grantFuncArgs(argsSig string) string {
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
 // on a table. lt is the live table state (nil for new tables — skip existence checks).
 // FK statements go to deferredFKs so the caller can emit them after all PK/unique alters.
+// Trigger statements go to deferredTriggers so they run after every table AND
+// function create (trigger functions may be topologically sorted after this table).
 // A live constraint whose definition no longer matches the desired one is
 // dropped and re-added; since DROP CONSTRAINT can break dependents and FK/unique
 // re-validation can fail on existing data, that path is gated behind --unsafe.
-func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable, deferredFKs *[]string, unsafe bool) {
+func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable, deferredFKs, deferredTriggers *[]string, unsafe bool) {
     liveConstraints := map[string]bool{}
     liveConstraintDefs := map[string]string{}
     liveIndexes := map[string]bool{}
@@ -1649,11 +1656,13 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), pqIdent(name), pqIdent(cn)))
     }
 
-    // Triggers
+    // Triggers (deferred: emitted after all table and function creates)
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
         if liveTriggers[tr.Name] { continue }
         events := strings.ToUpper(strings.Join(tr.Events, " or "))
+        when := ""
+        if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
         var stmt string
         if tr.Constraint {
             // constraint triggers are always AFTER ... FOR EACH ROW
@@ -1663,11 +1672,11 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
             } else if tr.Deferrable {
                 deferral = " deferrable"
             }
-            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row execute procedure %s;", pqIdent(tr.Name), events, pqIdent(fq), deferral, tr.Procedure)
+            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(tr.Name), events, pqIdent(fq), deferral, when, tr.Procedure)
         } else {
-            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), tr.Procedure)
+            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s%s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), when, tr.Procedure)
         }
-        plan.Creates = append(plan.Creates, stmt)
+        *deferredTriggers = append(*deferredTriggers, stmt)
     }
 
 }

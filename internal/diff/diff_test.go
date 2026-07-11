@@ -396,6 +396,75 @@ func TestTrigger(t *testing.T) {
 	}
 }
 
+func TestTriggerWhen(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"created_at": {Type: "timestamptz"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_supersede", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: "supersede_fn()", When: "old.created_at <= new.created_at"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `for each row when (old.created_at <= new.created_at) execute procedure supersede_fn();`) {
+		t.Errorf("expected WHEN guard before EXECUTE; creates: %v", p.Creates)
+	}
+}
+
+func TestConstraintTriggerWhen(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_chk", Events: []string{"insert"}, Procedure: "chk_fn()", Constraint: true, InitiallyDeferred: true, When: "new.id > 0"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `deferrable initially deferred for each row when (new.id > 0) execute procedure chk_fn();`) {
+		t.Errorf("expected WHEN guard on constraint trigger; creates: %v", p.Creates)
+	}
+}
+
+func TestTriggerEmittedAfterDependentFunction(t *testing.T) {
+	// SQL-language trigger function body references its own table, so it
+	// declares dependsOn the table. Order must be: table -> function -> trigger.
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"public.t": {
+				Name:    "t",
+				Columns: map[string]*schema.Column{"id": {Type: "int"}},
+				Triggers: []*schema.Trigger{
+					{Name: "trg_t", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: "public.trg_fn()"},
+				},
+			},
+		},
+		Functions: map[string]*schema.Function{
+			"public.trg_fn": {
+				Name: "trg_fn", Schema: "public", ArgsSig: "()",
+				Returns: "trigger", Language: "plpgsql",
+				Body:      "begin return new; end",
+				DependsOn: []string{"table public.t"},
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	tableIdx, fnIdx, trgIdx := -1, -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, "create table") { tableIdx = i }
+		if strings.Contains(s, "create function") { fnIdx = i }
+		if strings.Contains(s, "create trigger") { trgIdx = i }
+	}
+	if tableIdx < 0 || fnIdx < 0 || trgIdx < 0 {
+		t.Fatalf("missing statements; creates: %v", p.Creates)
+	}
+	if !(tableIdx < fnIdx && fnIdx < trgIdx) {
+		t.Errorf("want table < function < trigger, got table=%d function=%d trigger=%d; creates: %v", tableIdx, fnIdx, trgIdx, p.Creates)
+	}
+}
+
 // --- grants ---
 
 func TestGrantTableCreate(t *testing.T) {

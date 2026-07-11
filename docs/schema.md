@@ -285,6 +285,32 @@ triggers:
     events: [insert, update, delete]
     level: row         # row | statement
     procedure: public.set_updated_at()
+    when: old.updated_at is distinct from new.updated_at   # optional WHEN (condition) guard
+```
+
+The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` between `FOR EACH ROW` and `EXECUTE`. Use it to guard row triggers, e.g. a supersede trigger that must not fire for rows older than the current one (`when: old.created_at <= new.created_at`) — with `AFTER ... FOR EACH ROW` triggers on multi-row inserts, every row's trigger sees the fully-inserted statement result, so unguarded triggers can outdate each other.
+
+#### Trigger creation order
+
+`CREATE TRIGGER` statements are always emitted **after** all table and function creates. A trigger function whose body references the trigger's own table (required for `language: sql` functions, whose bodies are validated at `CREATE` time) can therefore declare `dependsOn: [table <its_table>]` safely — the table does **not** need a reciprocal `dependsOn` for the function, which would form a cycle. Dependency cycles are now a hard error in `pgy diff`.
+
+```yaml
+schema public:
+  table events:
+    columns:
+      id: { type: bigint, primaryKey: true }
+    triggers:
+      trg_supersede:
+        timing: after
+        events: [insert]
+        level: row
+        procedure: public.supersede()
+  function supersede():
+    returns: trigger
+    language: sql          # body validated at CREATE — table must exist first
+    dependsOn:
+      - table public.events
+    body: ...
 ```
 
 #### Constraint Triggers
@@ -302,6 +328,7 @@ triggers:
 
 | Property | Type | Description |
 |----------|------|-------------|
+| `when` | string | `WHEN (<expression>)` row guard, emitted verbatim. Works on plain and constraint triggers |
 | `constraint` | boolean | Emit `CREATE CONSTRAINT TRIGGER` |
 | `deferrable` | boolean | `DEFERRABLE` (initially immediate) |
 | `initiallyDeferred` | boolean | `DEFERRABLE INITIALLY DEFERRED`; check runs at commit |
