@@ -61,6 +61,9 @@ type LiveProcedure struct{
 type LiveTable struct{
     Columns     map[string]*LiveColumn
     Constraints map[string]bool // constraint name -> exists
+    // ConstraintDefs: constraint name -> pg_get_constraintdef() output,
+    // for detecting redefined constraints (drop+add, gated behind --unsafe)
+    ConstraintDefs map[string]string
     Indexes     map[string]bool // index name -> exists
     Triggers    map[string]bool // trigger name -> exists
     Policies    map[string]bool // policy name -> exists
@@ -137,7 +140,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}
     }
     tableRows.Close()
     
@@ -169,29 +172,37 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
 
-    // Query existing table constraints (pk, fk, check, unique, exclude)
+    // Query existing table constraints (pk, fk, check, unique, exclude) with
+    // their full definitions so redefined constraints can be detected. Uses
+    // pg_constraint rather than information_schema so pg_get_constraintdef is
+    // available (and NOT NULL pseudo-constraints are excluded).
     conQ := `
-        select tc.table_schema, tc.table_name, tc.constraint_name, tc.constraint_type
-        from information_schema.table_constraints tc
-        where tc.table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
+        select n.nspname, c.relname, con.conname, con.contype,
+               pg_get_constraintdef(con.oid)
+        from pg_constraint con
+        join pg_class c on c.oid = con.conrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where con.contype in ('p', 'f', 'c', 'u', 'x')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
     `
     conRows, err := pool.Query(ctx, conQ)
     if err != nil { return nil, err }
     for conRows.Next() {
-        var schemaName, tableName, conName, conType string
-        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType); err != nil {
+        var schemaName, tableName, conName, conType, conDef string
+        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType, &conDef); err != nil {
             conRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         if t := l.Tables[key]; t != nil {
             t.Constraints[conName] = true
-            if conType == "PRIMARY KEY" {
+            t.ConstraintDefs[conName] = conDef
+            if conType == "p" {
                 t.HasPK = true
             }
         }
@@ -1011,7 +1022,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 if dt.PartitionOf != "" {
                     // partition children inherit columns from the parent
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
-                    applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
+                    applyTableConstraints(plan, fq, dt, nil, &deferredFKs, unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
@@ -1038,7 +1049,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
                 plan.Creates = append(plan.Creates, create+";")
-                applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
+                applyTableConstraints(plan, fq, dt, nil, &deferredFKs, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
                 // of columns present in both
@@ -1057,7 +1068,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
                 }
                 // apply any missing constraints, indexes, triggers
-                applyTableConstraints(plan, fq, dt, lt, &deferredFKs)
+                applyTableConstraints(plan, fq, dt, lt, &deferredFKs, unsafe)
                 // drops
                 if unsafe {
                     for cn := range lt.Columns {
@@ -1468,13 +1479,18 @@ func grantFuncArgs(argsSig string) string {
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
 // on a table. lt is the live table state (nil for new tables — skip existence checks).
 // FK statements go to deferredFKs so the caller can emit them after all PK/unique alters.
-func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable, deferredFKs *[]string) {
+// A live constraint whose definition no longer matches the desired one is
+// dropped and re-added; since DROP CONSTRAINT can break dependents and FK/unique
+// re-validation can fail on existing data, that path is gated behind --unsafe.
+func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *LiveTable, deferredFKs *[]string, unsafe bool) {
     liveConstraints := map[string]bool{}
+    liveConstraintDefs := map[string]string{}
     liveIndexes := map[string]bool{}
     liveTriggers := map[string]bool{}
     livePK := false
     if lt != nil {
         liveConstraints = lt.Constraints
+        liveConstraintDefs = lt.ConstraintDefs
         liveIndexes = lt.Indexes
         liveTriggers = lt.Triggers
         livePK = lt.HasPK
@@ -1498,10 +1514,14 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Foreign keys
     for _, fk := range dt.ForeignKeys {
         if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
-        if liveConstraints[fk.Name] { continue }
-        stmt := fmt.Sprintf("alter table %s add constraint %s foreign key (%s) references %s(%s)", pqIdent(fq), pqIdent(fk.Name), joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
-        if fk.OnDelete != "" { stmt += " on delete " + strings.ToLower(fk.OnDelete) }
-        stmt += ";"
+        def := renderFKDef(fk)
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fk.Name), def)
+        if liveConstraints[fk.Name] {
+            if liveDef, ok := liveConstraintDefs[fk.Name]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fk.Name)), stmt)
+            }
+            continue
+        }
         *deferredFKs = append(*deferredFKs, stmt)
     }
 
@@ -1519,17 +1539,13 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Named constraints (check, unique, exclude)
     for _, ct := range dt.Constraints {
         if ct == nil || ct.Type == "" { continue }
-        if liveConstraints[ct.Name] { continue }
-        typ := strings.ToLower(ct.Type)
-        stmt := fmt.Sprintf("alter table %s add constraint %s ", pqIdent(fq), pqIdent(ct.Name))
-        switch typ {
-        case "check":
-            stmt += fmt.Sprintf("check (%s);", ct.Expression)
-        case "unique":
-            stmt += fmt.Sprintf("unique (%s);", joinIdentList(ct.Columns))
-        case "exclude":
-            stmt += fmt.Sprintf("exclude %s;", ct.Expression)
-        default:
+        def := renderConstraintDef(ct)
+        if def == "" { continue }
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ct.Name), def)
+        if liveConstraints[ct.Name] {
+            if liveDef, ok := liveConstraintDefs[ct.Name]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ct.Name)), stmt)
+            }
             continue
         }
         plan.Alters = append(plan.Alters, stmt)
@@ -1749,6 +1765,68 @@ func normalizeDefaultExpr(s string) string {
     out := strings.Join(strings.Fields(b.String()), " ")
     out = strings.ReplaceAll(out, " (", "(")
     return out
+}
+
+// renderFKDef renders the definition body of a foreign key constraint
+// (everything after "add constraint <name>").
+func renderFKDef(fk *schema.ForeignKey) string {
+    def := fmt.Sprintf("foreign key (%s) references %s(%s)", joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
+    if fk.OnDelete != "" { def += " on delete " + strings.ToLower(fk.OnDelete) }
+    return def
+}
+
+// renderConstraintDef renders the definition body of a named check/unique/
+// exclude constraint. Returns "" for unknown constraint types.
+func renderConstraintDef(ct *schema.Constraint) string {
+    switch strings.ToLower(ct.Type) {
+    case "check":
+        return fmt.Sprintf("check (%s)", ct.Expression)
+    case "unique":
+        return fmt.Sprintf("unique (%s)", joinIdentList(ct.Columns))
+    case "exclude":
+        return fmt.Sprintf("exclude %s", ct.Expression)
+    }
+    return ""
+}
+
+func constraintDefsEqual(desired, live string) bool {
+    return normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+}
+
+// normalizeConstraintDef canonicalizes a constraint definition for comparison
+// against pg_get_constraintdef() output: outside single-quoted strings it
+// strips ::type casts, double quotes, parentheses, whitespace, and "public."
+// qualifiers, and lowercases. Stripping parentheses and whitespace can make
+// differently-grouped expressions compare equal; that errs toward emitting no
+// SQL, same as the old name-only matching.
+func normalizeConstraintDef(s string) string {
+    var b strings.Builder
+    inQ := false
+    rs := []rune(strings.TrimSpace(s))
+    for i := 0; i < len(rs); i++ {
+        r := rs[i]
+        if r == '\'' {
+            inQ = !inQ
+            b.WriteRune(r)
+            continue
+        }
+        if inQ {
+            b.WriteRune(r)
+            continue
+        }
+        if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
+            i++
+            for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            continue
+        }
+        switch r {
+        case '"', '(', ')', ' ', '\t', '\n', '\r':
+            continue
+        }
+        if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
+        b.WriteRune(r)
+    }
+    return strings.ReplaceAll(b.String(), "public.", "")
 }
 
 func isCastTypeChar(r rune) bool {

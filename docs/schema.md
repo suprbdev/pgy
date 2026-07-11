@@ -252,6 +252,12 @@ constraints:
     columns: [col1, col2]       # for unique
 ```
 
+#### Constraint alterations
+
+Constraints (including foreign keys) are matched against the live database by name, and their definitions are compared via `pg_get_constraintdef()`. A constraint whose definition changed is dropped and re-added — since the re-add revalidates existing rows (and can fail on them), this requires `--unsafe`. Without `--unsafe`, a redefined constraint emits no SQL.
+
+Definition comparison is normalized: casts (`''::text`), parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so a live `CHECK ((email <> ''::text))` matches a YAML `expression: "email <> ''"` without churn. FK clauses not modeled in YAML (`ON UPDATE`, `MATCH`, `DEFERRABLE`) make a live constraint compare unequal, and the re-added constraint will not include them. Primary keys are matched by existence only and never dropped.
+
 ### Partitioning
 
 Declarative partitioning: a parent table declares `partitionBy`, and each partition is its own table with `partitionOf` plus a bound (`forValues`) or `default: true`.

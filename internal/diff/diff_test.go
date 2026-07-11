@@ -1412,6 +1412,186 @@ func TestConstraintSkippedIfAlreadyLive(t *testing.T) {
 	}
 }
 
+// --- constraint alterations (changed definitions -> drop + re-add, --unsafe) ---
+
+func constraintAlterDesired(cts []*schema.Constraint, fks []*schema.ForeignKey) *schema.Database {
+	return &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {
+			Name: "users",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "int"},
+				"email": {Type: "text"},
+			},
+			Constraints: cts,
+			ForeignKeys: fks,
+		},
+	}}
+}
+
+func constraintAlterLive(defs map[string]string) *Live {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id":    {Type: "integer"},
+		"email": {Type: "text"},
+	})
+	lt := live.Tables["public.users"]
+	lt.ConstraintDefs = defs
+	for name := range defs {
+		lt.Constraints[name] = true
+	}
+	return live
+}
+
+func alterIndex(p *PlanDiff, substr string) int {
+	for i, s := range p.Alters {
+		if strings.Contains(s, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestConstraintAlterCheckChanged(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"chk_email": "CHECK ((email <> ''::text))",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "chk_email", Type: "check", Expression: "length(email) > 3"},
+	}, nil)
+	p := Plan(live, desired, true)
+	di := alterIndex(p, `drop constraint "chk_email"`)
+	ai := alterIndex(p, `add constraint "chk_email" check (length(email) > 3)`)
+	if di < 0 || ai < 0 {
+		t.Fatalf("expected drop+add for changed check; alters: %v", p.Alters)
+	}
+	if di > ai {
+		t.Errorf("drop must precede add; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterSkippedWhenSafe(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"chk_email": "CHECK ((email <> ''::text))",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "chk_email", Type: "check", Expression: "length(email) > 3"},
+	}, nil)
+	p := Plan(live, desired, false)
+	if findAlter(p, "chk_email") {
+		t.Errorf("changed constraint must be unsafe-gated; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterSkippedIfEquivalent(t *testing.T) {
+	// live defs come back with extra parens and ::casts — must not churn
+	live := constraintAlterLive(map[string]string{
+		"chk_email": "CHECK (((email)::text <> ''::text))",
+		"uq_email":  "UNIQUE (email)",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "chk_email", Type: "check", Expression: "email <> ''"},
+		{Name: "uq_email", Type: "unique", Columns: []string{"email"}},
+	}, nil)
+	p := Plan(live, desired, true)
+	if findAlter(p, "chk_email") || findAlter(p, "uq_email") {
+		t.Errorf("equivalent constraints must emit no SQL; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterUniqueChanged(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"uq_users": "UNIQUE (email)",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "uq_users", Type: "unique", Columns: []string{"id", "email"}},
+	}, nil)
+	p := Plan(live, desired, true)
+	if alterIndex(p, `drop constraint "uq_users"`) < 0 || alterIndex(p, `add constraint "uq_users" unique ("id", "email")`) < 0 {
+		t.Errorf("expected drop+add for changed unique; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterExcludeChanged(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"excl_room": "EXCLUDE USING gist (room WITH =)",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "excl_room", Type: "exclude", Expression: "using gist (room with =, during with &&)"},
+	}, nil)
+	p := Plan(live, desired, true)
+	if alterIndex(p, `drop constraint "excl_room"`) < 0 || alterIndex(p, `add constraint "excl_room" exclude using gist`) < 0 {
+		t.Errorf("expected drop+add for changed exclude; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterFKChanged(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"fk_org": "FOREIGN KEY (id) REFERENCES orgs(id)",
+	})
+	desired := constraintAlterDesired(nil, []*schema.ForeignKey{
+		{Name: "fk_org", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}, OnDelete: "cascade"},
+	})
+	p := Plan(live, desired, true)
+	di := alterIndex(p, `drop constraint "fk_org"`)
+	ai := alterIndex(p, `add constraint "fk_org" foreign key ("id") references "orgs"("id") on delete cascade`)
+	if di < 0 || ai < 0 {
+		t.Fatalf("expected drop+add for changed FK; alters: %v", p.Alters)
+	}
+	if di > ai {
+		t.Errorf("drop must precede add; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterFKEquivalentSkipped(t *testing.T) {
+	// live def: unquoted idents, uppercase keywords, schema omitted for public
+	live := constraintAlterLive(map[string]string{
+		"fk_org": "FOREIGN KEY (id) REFERENCES orgs(id) ON DELETE CASCADE",
+	})
+	desired := constraintAlterDesired(nil, []*schema.ForeignKey{
+		{Name: "fk_org", Columns: []string{"id"}, RefTable: "public.orgs", RefColumns: []string{"id"}, OnDelete: "CASCADE"},
+	})
+	p := Plan(live, desired, true)
+	if findAlter(p, "fk_org") {
+		t.Errorf("equivalent FK must emit no SQL; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintAlterNoDefRecordedNoChange(t *testing.T) {
+	// live constraint known by name only (no definition captured) — keep old
+	// name-only behavior and emit nothing even under --unsafe
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id":    {Type: "integer"},
+		"email": {Type: "text"},
+	})
+	live.Tables["public.users"].Constraints["chk_email"] = true
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "chk_email", Type: "check", Expression: "length(email) > 3"},
+	}, nil)
+	p := Plan(live, desired, true)
+	if findAlter(p, "chk_email") {
+		t.Errorf("no live def recorded, should not drop+add; alters: %v", p.Alters)
+	}
+}
+
+func TestNormalizeConstraintDef(t *testing.T) {
+	cases := [][2]string{
+		{"CHECK ((price > (0)::numeric))", "check (price > 0)"},
+		{"UNIQUE (a, b)", "unique (\"a\",\"b\")"},
+		{"FOREIGN KEY (uid) REFERENCES public.users(id) ON DELETE SET NULL", `foreign key ("uid") references "users"("id") on delete set null`},
+		{"CHECK ((status <> 'del'::text))", "check (status <> 'del')"},
+	}
+	for _, c := range cases {
+		if normalizeConstraintDef(c[0]) != normalizeConstraintDef(c[1]) {
+			t.Errorf("expected %q == %q after normalization (%q vs %q)", c[0], c[1], normalizeConstraintDef(c[0]), normalizeConstraintDef(c[1]))
+		}
+	}
+	if normalizeConstraintDef("CHECK (a > 1)") == normalizeConstraintDef("check (a > 2)") {
+		t.Errorf("different expressions must not normalize equal")
+	}
+	if normalizeConstraintDef("CHECK (s <> 'A')") == normalizeConstraintDef("check (s <> 'a')") {
+		t.Errorf("string literal case must be preserved")
+	}
+}
+
 func TestIndexSkippedIfAlreadyLive(t *testing.T) {
 	live := liveWithTable("public.users", map[string]*LiveColumn{
 		"email": {Type: "text"},
