@@ -152,6 +152,8 @@ type Index struct {
     Name    string
     Columns []string
     Unique  bool
+    Using   string // index method: btree (default), gist, gin, brin, hash, spgist
+    Where   string // partial index predicate
 }
 
 type ForeignKey struct {
@@ -817,6 +819,8 @@ func parseIndexes(v any) []*Index {
             if dm, ok := def.(map[string]any); ok {
                 ix.Columns = parseStringListFromNode(dm["columns"])
                 if u, ok := dm["unique"].(bool); ok { ix.Unique = u }
+                if m, ok := dm["using"].(string); ok { ix.Using = m }
+                if w, ok := dm["where"].(string); ok { ix.Where = w }
             }
             out = append(out, ix)
         }

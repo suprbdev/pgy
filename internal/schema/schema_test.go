@@ -577,6 +577,35 @@ tables:
 	}
 }
 
+func TestIndexUsingAndWhere(t *testing.T) {
+	yaml := `
+tables:
+  public.places:
+    columns:
+      geom:
+        type: geometry(Point, 4326)
+    indexes:
+      idx_geom:
+        columns: [geom]
+        using: gist
+        where: geom is not null
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ixs := db.Tables["public.places"].Indexes
+	if len(ixs) != 1 {
+		t.Fatalf("want 1 index, got %d", len(ixs))
+	}
+	if ixs[0].Using != "gist" {
+		t.Errorf("using: %q", ixs[0].Using)
+	}
+	if ixs[0].Where != "geom is not null" {
+		t.Errorf("where: %q", ixs[0].Where)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {

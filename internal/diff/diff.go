@@ -1533,7 +1533,11 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if liveIndexes[name] { continue }
         uniq := ""
         if ix.Unique { uniq = " unique" }
-        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s(%s);", uniq, pqIdent(name), pqIdent(fq), joinIdentList(ix.Columns)))
+        using := ""
+        if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
+        where := ""
+        if ix.Where != "" { where = fmt.Sprintf(" where (%s)", ix.Where) }
+        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, joinIdentList(ix.Columns), where))
     }
 
     // Named constraints (check, unique, exclude)

@@ -241,10 +241,27 @@ primaryKey:
 indexes:
   <index_name>:
     columns: [col1, col2]
-    unique: true   # optional, default false
+    unique: true            # optional, default false
+    using: gist             # optional index method: btree (default) | gist | gin | brin | hash | spgist
+    where: deleted_at is null   # optional partial index predicate
 ```
 
 If `name` is omitted, an auto-name is derived from the table and column names.
+
+`using: btree` is the PostgreSQL default and is omitted from the generated SQL. The `where` expression is emitted verbatim (wrapped in parentheses), so any valid predicate works.
+
+Example — a PostGIS spatial index and a partial unique index:
+
+```yaml
+indexes:
+  idx_places_geom:
+    columns: [geom]
+    using: gist
+  uq_active_email:
+    columns: [email]
+    unique: true
+    where: deleted_at is null
+```
 
 ### Foreign Keys
 

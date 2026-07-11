@@ -254,6 +254,73 @@ func TestIndexAutoName(t *testing.T) {
 	}
 }
 
+func TestIndexUsingGist(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"geom": {Type: "geometry(Point, 4326)"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_geom", Columns: []string{"geom"}, Using: "gist"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create index if not exists "idx_geom" on "public"."t" using gist("geom");`) {
+		t.Errorf("expected USING gist index; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexUsingBtreeOmitted(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_name", Columns: []string{"name"}, Using: "btree"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if findCreate(p, "using btree") {
+		t.Errorf("btree is default, should be omitted; creates: %v", p.Creates)
+	}
+	if !findCreate(p, `create index if not exists "idx_name"`) {
+		t.Errorf("expected index create; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexPartial(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"email": {Type: "text"}, "deleted_at": {Type: "timestamptz", Nullable: true}},
+			Indexes: []*schema.Index{
+				{Name: "idx_active_email", Columns: []string{"email"}, Unique: true, Where: "deleted_at is null"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create unique index if not exists "idx_active_email" on "public"."t"("email") where (deleted_at is null);`) {
+		t.Errorf("expected partial unique index; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexGistPartialCombined(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"geom": {Type: "geometry"}, "active": {Type: "boolean"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_geom_active", Columns: []string{"geom"}, Using: "GIST", Where: "active"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `using gist("geom") where (active);`) {
+		t.Errorf("expected combined gist+partial index; creates: %v", p.Creates)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {
