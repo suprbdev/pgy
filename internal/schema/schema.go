@@ -50,6 +50,7 @@ type View struct {
     DependsOn    []string `yaml:"dependsOn"`
     Comment      string
     Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
+    Grants       map[string][]string // role -> privileges; nil means unmanaged
 }
 
 // Sequence is an explicit CREATE SEQUENCE declaration. Numeric options are
@@ -1424,6 +1425,7 @@ func parseView(schemaName, key string, body any) *View {
     }
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
+    if gRaw, ok := m["grants"]; ok { vw.Grants = parseGrants(gRaw) }
     return vw
 }
 

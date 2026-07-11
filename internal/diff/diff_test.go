@@ -637,6 +637,54 @@ func TestColumnGrantUnmanagedWithoutBlock(t *testing.T) {
 	}
 }
 
+// --- view grants ---
+
+func TestViewGrantCreate(t *testing.T) {
+	desired := viewDesired("public.active_users", "select id from users", false)
+	desired.Views["public.active_users"].Grants = map[string][]string{"reporting": {"select"}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant select on table "public"."active_users" to "reporting";`) {
+		t.Errorf("expected view grant; alters: %v", p.Alters)
+	}
+}
+
+func TestViewGrantSkippedIfLive(t *testing.T) {
+	live := emptyLive()
+	live.Views["public.active_users"] = true
+	live.TableGrants["public.active_users"] = map[string]map[string]bool{
+		"reporting": {"select": true},
+	}
+	desired := viewDesired("public.active_users", "select id from users", false)
+	desired.Views["public.active_users"].Grants = map[string][]string{"reporting": {"select"}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "grant select") {
+		t.Errorf("view grant already live, should not re-grant; alters: %v", p.Alters)
+	}
+}
+
+func TestViewGrantRevokeOnRemoval(t *testing.T) {
+	live := emptyLive()
+	live.Views["public.active_users"] = true
+	live.TableGrants["public.active_users"] = map[string]map[string]bool{
+		"reporting": {"select": true, "update": true},
+	}
+	desired := viewDesired("public.active_users", "select id from users", false)
+	desired.Views["public.active_users"].Grants = map[string][]string{"reporting": {"select"}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `revoke update on table "public"."active_users" from "reporting";`) {
+		t.Errorf("expected revoke of removed view priv; alters: %v", p.Alters)
+	}
+}
+
+func TestMatViewGrantCreate(t *testing.T) {
+	desired := viewDesired("public.user_stats", "select count(*) from users", true)
+	desired.Views["public.user_stats"].Grants = map[string][]string{"reporting": {"select"}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant select on table "public"."user_stats" to "reporting";`) {
+		t.Errorf("expected matview grant; alters: %v", p.Alters)
+	}
+}
+
 func TestColumnGrantPublicNotAutoRevoked(t *testing.T) {
 	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
 	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{

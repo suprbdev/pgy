@@ -642,7 +642,7 @@ Behavior:
 
 ## Grants
 
-Tables, functions, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist.
+Tables, views, materialized views, functions, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump).
 
 ```yaml
 schema app:
@@ -718,6 +718,8 @@ schema public:
     replace: true   # re-emit CREATE OR REPLACE on every diff
     dependsOn:
       - table public.users
+    grants:
+      reporting: [select]
 ```
 
 ### Materialized Views
@@ -737,6 +739,7 @@ schema public:
 | `query` | string | The `SELECT` statement defining the view |
 | `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
+| `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 
 ---
 

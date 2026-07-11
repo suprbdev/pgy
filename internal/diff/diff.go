@@ -476,7 +476,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     seqRows.Close()
 
-    // Query table grants (explicit ACL entries, owner excluded)
+    // Query relation grants (explicit ACL entries, owner excluded).
+    // Views ('v') and materialized views ('m') share pg_class.relacl with
+    // tables, so their grants land in the same TableGrants map.
     tgQ := `
         select n.nspname, c.relname,
                case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
@@ -484,7 +486,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         cross join lateral aclexplode(c.relacl) a
-        where c.relkind in ('r', 'p')
+        where c.relkind in ('r', 'p', 'v', 'm')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and a.grantee <> c.relowner
     `
@@ -1398,6 +1400,18 @@ func planGrants(live *Live, desired *schema.Database) []string {
             if c == nil || c.Grants == nil { continue }
             stmts = append(stmts, columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn])...)
         }
+    }
+
+    // Views and materialized views: ACLs live in pg_class.relacl like tables,
+    // so live state comes from the same TableGrants map. pg_dump likewise
+    // emits GRANT ... ON TABLE for views.
+    viewNames := make([]string, 0, len(desired.Views))
+    for k := range desired.Views { viewNames = append(viewNames, k) }
+    sort.Strings(viewNames)
+    for _, k := range viewNames {
+        vw := desired.Views[k]
+        if vw == nil || vw.Grants == nil { continue }
+        stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), vw.Grants, live.TableGrants[k])...)
     }
 
     funcNames := make([]string, 0, len(desired.Functions))

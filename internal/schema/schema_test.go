@@ -1370,6 +1370,32 @@ schema public:
 	}
 }
 
+func TestParseViewGrants(t *testing.T) {
+	yml := `
+schema public:
+  view active_users:
+    query: "select id from users where active"
+    grants:
+      reporting: [select]
+  materialized view user_stats:
+    query: "select count(*) from users"
+    grants:
+      reporting: [SELECT]
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := db.Views["public.active_users"].Grants
+	if g == nil || len(g["reporting"]) != 1 || g["reporting"][0] != "select" {
+		t.Errorf("view grants: %v", g)
+	}
+	mg := db.Views["public.user_stats"].Grants
+	if mg == nil || len(mg["reporting"]) != 1 || mg["reporting"][0] != "select" {
+		t.Errorf("matview grants (lowercased): %v", mg)
+	}
+}
+
 func TestParseViewReplaceFlag(t *testing.T) {
 	yml := `
 schema public:
