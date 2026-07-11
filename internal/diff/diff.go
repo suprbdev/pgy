@@ -67,7 +67,7 @@ type LiveTable struct{
     // for detecting redefined constraints (drop+add, gated behind --unsafe)
     ConstraintDefs map[string]string
     Indexes     map[string]bool // index name -> exists
-    Triggers    map[string]bool // trigger name -> exists
+    Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
     Policies    map[string]bool // policy name -> exists
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
@@ -143,7 +143,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]bool{}}
     }
     tableRows.Close()
     
@@ -175,7 +175,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]bool{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -233,9 +233,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     idxRows.Close()
 
-    // Query existing triggers (skip internal triggers, e.g. FK enforcement)
+    // Query existing triggers with their full definitions so redefined
+    // triggers can be detected (skip internal triggers, e.g. FK enforcement)
     trgQ := `
-        select n.nspname, c.relname, t.tgname
+        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid)
         from pg_trigger t
         join pg_class c on c.oid = t.tgrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -245,14 +246,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     trgRows, err := pool.Query(ctx, trgQ)
     if err != nil { return nil, err }
     for trgRows.Next() {
-        var schemaName, tableName, trgName string
-        if err := trgRows.Scan(&schemaName, &tableName, &trgName); err != nil {
+        var schemaName, tableName, trgName, trgDef string
+        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef); err != nil {
             trgRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         if t := l.Tables[key]; t != nil {
-            t.Triggers[trgName] = true
+            t.Triggers[trgName] = trgDef
         }
     }
     trgRows.Close()
@@ -1593,7 +1594,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     liveConstraints := map[string]bool{}
     liveConstraintDefs := map[string]string{}
     liveIndexes := map[string]bool{}
-    liveTriggers := map[string]bool{}
+    liveTriggers := map[string]string{}
     livePK := false
     if lt != nil {
         liveConstraints = lt.Constraints
@@ -1670,11 +1671,14 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), pqIdent(name), pqIdent(cn)))
     }
 
-    // Triggers (deferred: emitted after all table and function creates)
+    // Triggers (deferred: emitted after all table and function creates).
+    // A live trigger whose definition no longer matches the desired one is
+    // dropped and recreated. Unlike constraints this is not gated behind
+    // --unsafe: DROP TRIGGER is metadata-only, has no dependents, and the
+    // recreate runs in the same migration transaction.
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
-        if liveTriggers[tr.Name] { continue }
-        events := strings.ToUpper(strings.Join(tr.Events, " or "))
+        events := strings.ToUpper(strings.Join(canonicalTriggerEvents(tr.Events), " or "))
         when := ""
         if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
         var stmt string
@@ -1689,6 +1693,12 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
             stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(tr.Name), events, pqIdent(fq), deferral, when, tr.Procedure)
         } else {
             stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s%s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), when, tr.Procedure)
+        }
+        if liveDef, ok := liveTriggers[tr.Name]; ok {
+            // "" means the live definition is unknown — fall back to
+            // name-only matching and skip rather than churn.
+            if liveDef == "" || triggerDefsEqual(stmt, liveDef) { continue }
+            *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", pqIdent(tr.Name), pqIdent(fq)))
         }
         *deferredTriggers = append(*deferredTriggers, stmt)
     }
@@ -1904,6 +1914,45 @@ func renderConstraintDef(ct *schema.Constraint) string {
 
 func constraintDefsEqual(desired, live string) bool {
     return normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+}
+
+// triggerDefsEqual compares a desired CREATE TRIGGER statement against
+// pg_get_triggerdef() output. Both sides go through normalizeConstraintDef
+// (case, quoting, parens, casts, whitespace, public. qualifiers); on top of
+// that the trailing semicolon is ignored and EXECUTE FUNCTION (emitted by
+// PostgreSQL 11+) is treated as equal to EXECUTE PROCEDURE.
+func triggerDefsEqual(desired, live string) bool {
+    n := func(s string) string {
+        s = normalizeConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";"))
+        return strings.ReplaceAll(s, "executefunction", "executeprocedure")
+    }
+    return n(desired) == n(live)
+}
+
+// canonicalTriggerEvents orders trigger events the way pg_get_triggerdef()
+// prints them (INSERT, DELETE, UPDATE, TRUNCATE) so a reordered YAML event
+// list does not read as a definition change. Events are ranked by their
+// first word, so "update of col" sorts with "update".
+func canonicalTriggerEvents(events []string) []string {
+    rank := func(e string) int {
+        f := strings.Fields(e)
+        if len(f) == 0 { return 4 }
+        switch strings.ToLower(f[0]) {
+        case "insert":
+            return 0
+        case "delete":
+            return 1
+        case "update":
+            return 2
+        case "truncate":
+            return 3
+        }
+        return 4
+    }
+    out := make([]string, len(events))
+    copy(out, events)
+    sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+    return out
 }
 
 // normalizeConstraintDef canonicalizes a constraint definition for comparison

@@ -288,6 +288,8 @@ triggers:
     when: old.updated_at is distinct from new.updated_at   # optional WHEN (condition) guard
 ```
 
+Triggers are compared against the live database by **definition**, not just name: if a live trigger's `pg_get_triggerdef()` no longer matches the desired trigger (timing, events, level, `when:` guard, procedure, deferrability), it is dropped and recreated in the same migration. The comparison normalizes cosmetic differences (case, quoting, parentheses, type casts, `public.` qualifiers, event order, `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE`), so an unchanged trigger emits no SQL.
+
 The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` between `FOR EACH ROW` and `EXECUTE`. Use it to guard row triggers, e.g. a supersede trigger that must not fire for rows older than the current one (`when: old.created_at <= new.created_at`) — with `AFTER ... FOR EACH ROW` triggers on multi-row inserts, every row's trigger sees the fully-inserted statement result, so unguarded triggers can outdate each other.
 
 #### Trigger creation order

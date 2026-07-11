@@ -42,7 +42,7 @@ func liveWithTable(fq string, cols map[string]*LiveColumn) *Live {
 		Columns:     cols,
 		Constraints: map[string]bool{},
 		Indexes:     map[string]bool{},
-		Triggers:    map[string]bool{},
+		Triggers:    map[string]string{},
 	}
 	return l
 }
@@ -1223,7 +1223,7 @@ func TestConstraintTriggerDeferrableOnly(t *testing.T) {
 
 func TestConstraintTriggerSkippedIfExists(t *testing.T) {
 	live := liveWithTable("app.entry", map[string]*LiveColumn{"id": {Type: "bigint"}})
-	live.Tables["app.entry"].Triggers = map[string]bool{"trg_check": true}
+	live.Tables["app.entry"].Triggers = map[string]string{"trg_check": `CREATE CONSTRAINT TRIGGER trg_check AFTER INSERT ON app.entry DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION f()`}
 	desired := &schema.Database{Tables: map[string]*schema.Table{
 		"app.entry": {
 			Name:    "entry",
@@ -2082,7 +2082,7 @@ func TestTriggerOnExistingTable(t *testing.T) {
 
 func TestTriggerSkippedIfExists(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
-	live.Tables["public.t"].Triggers["trg_audit"] = true
+	live.Tables["public.t"].Triggers["trg_audit"] = `CREATE TRIGGER trg_audit AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
 	desired := &schema.Database{Tables: map[string]*schema.Table{
 		"public.t": {
 			Name:    "t",
@@ -2095,6 +2095,72 @@ func TestTriggerSkippedIfExists(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findCreate(p, "trg_audit") {
 		t.Errorf("trigger already live, should not create; creates: %v", p.Creates)
+	}
+}
+
+func TestTriggerRecreateOnChange(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	// live trigger fires on INSERT only; desired adds UPDATE
+	live.Tables["public.t"].Triggers["trg_audit"] = `CREATE TRIGGER trg_audit AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION audit_fn()`
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_audit", Timing: "after", Events: []string{"insert", "update"}, Level: "row", Procedure: "audit_fn()"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	dropIdx, createIdx := -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, `drop trigger "trg_audit"`) { dropIdx = i }
+		if strings.Contains(s, `create trigger "trg_audit"`) { createIdx = i }
+	}
+	if dropIdx < 0 || createIdx < 0 {
+		t.Fatalf("expected drop+recreate of changed trigger; creates: %v", p.Creates)
+	}
+	if dropIdx > createIdx {
+		t.Errorf("drop at %d must precede create at %d; creates: %v", dropIdx, createIdx, p.Creates)
+	}
+}
+
+func TestTriggerSkippedIfDefinitionEquivalent(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"created_at": {Type: "timestamptz"}})
+	// pg_get_triggerdef output: EXECUTE FUNCTION, reordered events, extra
+	// parens and casts in the WHEN clause, schema-qualified function
+	live.Tables["public.t"].Triggers["trg_sup"] = `CREATE TRIGGER trg_sup AFTER INSERT OR UPDATE ON public.t FOR EACH ROW WHEN ((old.created_at <= new.created_at)) EXECUTE FUNCTION public.supersede_fn()`
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"created_at": {Type: "timestamptz"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_sup", Timing: "after", Events: []string{"update", "insert"}, Level: "row", Procedure: "supersede_fn()", When: "old.created_at <= new.created_at"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "trg_sup") {
+		t.Errorf("equivalent trigger definition should emit no SQL; creates: %v", p.Creates)
+	}
+}
+
+func TestTriggerNameOnlyLiveSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	// unknown live definition ("") falls back to name-only matching: skip
+	live.Tables["public.t"].Triggers["trg_audit"] = ""
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Triggers: []*schema.Trigger{
+				{Name: "trg_audit", Timing: "after", Events: []string{"insert"}, Level: "row", Procedure: "audit_fn()"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "trg_audit") {
+		t.Errorf("unknown live definition should skip, not churn; creates: %v", p.Creates)
 	}
 }
 
