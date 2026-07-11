@@ -2291,6 +2291,20 @@ func TestRoleCreate(t *testing.T) {
 	}
 }
 
+func TestRoleCreateGuardedAgainstPreexisting(t *testing.T) {
+	// Roles are cluster-level: with --from-empty the Live snapshot is empty
+	// but the role may still exist, so CREATE ROLE must be wrapped in an
+	// IF NOT EXISTS guard.
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", Login: true, ConnectionLimit: -1},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	want := `do $$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'app_user') then create role "app_user" with login; end if; end $$;`
+	if !findCreate(p, want) {
+		t.Errorf("expected guarded CREATE ROLE; creates: %v", p.Creates)
+	}
+}
+
 func TestRoleSkippedIfExists(t *testing.T) {
 	live := emptyLive()
 	live.Roles["app_user"] = true

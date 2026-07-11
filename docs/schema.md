@@ -603,7 +603,7 @@ Behavior:
 
 ## Roles
 
-Roles are cluster-level objects declared in a top-level `roles:` map (not inside a `schema <name>:` block). Each entry is created with `CREATE ROLE` if missing from the live database and skipped otherwise. Forward-only: existing roles are never altered or dropped, and removed memberships are never revoked.
+Roles are cluster-level objects declared in a top-level `roles:` map (not inside a `schema <name>:` block). Each entry is created with `CREATE ROLE` if missing from the live database and skipped otherwise. The statement is wrapped in a `DO $$ ... $$` block guarded by a `pg_roles` lookup, so it is a no-op if the role already exists in the cluster (roles survive database re-creation, so `diff --from-empty` cannot assume they are absent). Forward-only: existing roles are never altered or dropped, and removed memberships are never revoked.
 
 ```yaml
 roles:

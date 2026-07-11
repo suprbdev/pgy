@@ -1157,7 +1157,12 @@ func renderRole(r *schema.Role) string {
     if r.ConnectionLimit >= 0 { opts = append(opts, fmt.Sprintf("connection limit %d", r.ConnectionLimit)) }
     stmt := "create role " + grantRole(r.Name)
     if len(opts) > 0 { stmt += " with " + strings.Join(opts, " ") }
-    return stmt + ";"
+    // Roles are cluster-level and may pre-exist even when the target database
+    // is fresh (e.g. diff --from-empty bootstraps against an empty Live
+    // snapshot). Postgres has no CREATE ROLE IF NOT EXISTS, so guard with a
+    // DO block instead.
+    return fmt.Sprintf("do $$ begin if not exists (select from pg_catalog.pg_roles where rolname = %s) then %s; end if; end $$;",
+        quoteString(r.Name), stmt)
 }
 
 // renderSequence emits CREATE SEQUENCE IF NOT EXISTS with only the options
