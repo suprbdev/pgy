@@ -104,6 +104,7 @@ type Column struct {
     Unique   bool   `yaml:"unique"`
     PrimaryKey bool `yaml:"primaryKey"`
     Comment  string `yaml:"comment"`
+    Identity string `yaml:"identity"` // "" (none), "always", or "by default"
 }
 
 type Index struct {
@@ -532,8 +533,27 @@ func parseColumnSpec(spec any) *Column {
         if u, ok := m["unique"].(bool); ok { c.Unique = u }
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }
         if cm, ok := m["comment"].(string); ok { c.Comment = cm }
+        if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
     }
     return c
+}
+
+// parseIdentity normalizes the `identity` column property to "always" or
+// "by default". Accepts `always`, `byDefault`, `by default`, `default`, and
+// bare `true` (treated as ALWAYS, the stricter form). Unknown values = unset.
+func parseIdentity(v any) string {
+    switch x := v.(type) {
+    case bool:
+        if x { return "always" }
+    case string:
+        switch strings.ToLower(strings.TrimSpace(x)) {
+        case "always":
+            return "always"
+        case "bydefault", "by default", "default":
+            return "by default"
+        }
+    }
+    return ""
 }
 
 // defaultToString coerces a YAML scalar default (bool, int, float) to its SQL

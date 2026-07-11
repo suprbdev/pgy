@@ -61,6 +61,7 @@ type LiveColumn struct{
     Nullable bool
     Default  string
     Comment  string
+    Identity string // "" (none), "always", or "by default"
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -128,7 +129,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     
     // Query columns to enrich table info
     const q = `
-        select table_schema, table_name, column_name, data_type, is_nullable, coalesce(column_default, '')
+        select table_schema, table_name, column_name, data_type, is_nullable, coalesce(column_default, ''),
+               lower(coalesce(identity_generation, ''))
         from information_schema.columns
         where table_schema not in ('pg_catalog','information_schema')
         order by table_schema, table_name, ordinal_position
@@ -137,12 +139,12 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     defer rows.Close()
     for rows.Next() {
-        var schemaName, tableName, colName, dataType, isNullable, def string
-        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def); err != nil { return nil, err }
+        var schemaName, tableName, colName, dataType, isNullable, def, identity string
+        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
         if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
-        t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def}
+        t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
 
@@ -1378,7 +1380,12 @@ func Render(p *PlanDiff) string {
 func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
     if !c.Nullable { parts = append(parts, "not null") }
-    if c.Default != "" { parts = append(parts, "default "+c.Default) }
+    if c.Identity != "" {
+        // identity columns cannot also have a default expression
+        parts = append(parts, "generated "+c.Identity+" as identity")
+    } else if c.Default != "" {
+        parts = append(parts, "default "+c.Default)
+    }
     return strings.Join(parts, " ")
 }
 

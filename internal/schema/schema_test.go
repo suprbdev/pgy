@@ -1295,3 +1295,63 @@ func TestSequenceMerge(t *testing.T) {
 		t.Errorf("s1 lost in merge: %+v", s)
 	}
 }
+
+func TestIdentityColumnParse(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      id:
+        type: bigint
+        identity: always
+      seq_no:
+        type: int
+        identity: byDefault
+      alt:
+        type: int
+        identity: by default
+      flag:
+        type: bigint
+        identity: true
+      plain:
+        type: text
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := db.Tables["public.t"].Columns
+	if cols["id"].Identity != "always" {
+		t.Errorf("want identity always, got %q", cols["id"].Identity)
+	}
+	if cols["seq_no"].Identity != "by default" {
+		t.Errorf("want identity by default, got %q", cols["seq_no"].Identity)
+	}
+	if cols["alt"].Identity != "by default" {
+		t.Errorf("want identity by default, got %q", cols["alt"].Identity)
+	}
+	if cols["flag"].Identity != "always" {
+		t.Errorf("identity: true should mean always, got %q", cols["flag"].Identity)
+	}
+	if cols["plain"].Identity != "" {
+		t.Errorf("plain column should have no identity, got %q", cols["plain"].Identity)
+	}
+}
+
+func TestIdentityColumnParseUnknownValue(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      id:
+        type: bigint
+        identity: sometimes
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := db.Tables["public.t"].Columns["id"].Identity; got != "" {
+		t.Errorf("unknown identity value should be unset, got %q", got)
+	}
+}
