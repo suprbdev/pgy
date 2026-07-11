@@ -141,24 +141,36 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     tableRows.Close()
     
-    // Query columns to enrich table info
+    // Query columns to enrich table info. Uses pg_catalog rather than
+    // information_schema so format_type keeps type modifiers (varchar(255))
+    // and resolves arrays/user types (information_schema reports those as
+    // ARRAY/USER-DEFINED, which cannot be diffed against YAML types).
     const q = `
-        select table_schema, table_name, column_name, data_type, is_nullable, coalesce(column_default, ''),
-               lower(coalesce(identity_generation, ''))
-        from information_schema.columns
-        where table_schema not in ('pg_catalog','information_schema')
-        order by table_schema, table_name, ordinal_position
+        select n.nspname, c.relname, a.attname,
+               format_type(a.atttypid, a.atttypmod),
+               not a.attnotnull,
+               coalesce(pg_get_expr(ad.adbin, ad.adrelid), ''),
+               case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end
+        from pg_attribute a
+        join pg_class c on c.oid = a.attrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum
+        where a.attnum > 0 and not a.attisdropped
+        and c.relkind in ('r', 'p')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        order by n.nspname, c.relname, a.attnum
     `
     rows, err := pool.Query(ctx, q)
     if err != nil { return nil, err }
     defer rows.Close()
     for rows.Next() {
-        var schemaName, tableName, colName, dataType, isNullable, def, identity string
-        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &isNullable, &def, &identity); err != nil { return nil, err }
+        var schemaName, tableName, colName, dataType, def, identity string
+        var nullable bool
+        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
         if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]bool{}, Policies: map[string]bool{}}; l.Tables[key] = t }
-        t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: isNullable == "YES", Default: def, Identity: identity}
+        t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
 
@@ -1028,11 +1040,21 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 plan.Creates = append(plan.Creates, create+";")
                 applyTableConstraints(plan, fq, dt, nil, &deferredFKs)
             } else {
-                // existing table: add missing columns
-                for cn, c := range dt.Columns {
-                    if _, ok := lt.Columns[cn]; !ok {
+                // existing table: add missing columns, reconcile attributes
+                // of columns present in both
+                pkCols := map[string]bool{}
+                for _, pc := range dt.PrimaryKey { pkCols[pc] = true }
+                colNames := make([]string, 0, len(dt.Columns))
+                for cn := range dt.Columns { colNames = append(colNames, cn) }
+                sort.Strings(colNames)
+                for _, cn := range colNames {
+                    c := dt.Columns[cn]
+                    lc, ok := lt.Columns[cn]
+                    if !ok {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
+                        continue
                     }
+                    plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
                 }
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, fq, dt, lt, &deferredFKs)
@@ -1602,6 +1624,136 @@ func Render(p *PlanDiff) string {
     statements = append(statements, p.Drops...)
     if len(statements) == 0 { return "" }
     return strings.Join(statements, "\n") + "\n"
+}
+
+// alterColumnStmts reconciles an existing column's live attributes with its
+// desired definition. Type changes can rewrite the table or fail on cast, so
+// they are gated behind --unsafe (with an optional USING expression from the
+// column's `using` property). Identity is create-only and never altered;
+// identity/serial columns keep their generated defaults and implicit NOT NULL.
+func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool) []string {
+    out := []string{}
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+
+    if unsafe && c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type) {
+        stmt := fmt.Sprintf("%s type %s", target, c.Type)
+        if c.Using != "" { stmt += " using " + c.Using }
+        out = append(out, stmt+";")
+    }
+
+    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type)
+    if !generated {
+        switch {
+        case c.Default != "" && !defaultsEqual(c.Default, lc.Default):
+            out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
+        case c.Default == "" && lc.Default != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval("):
+            out = append(out, fmt.Sprintf("%s drop default;", target))
+        }
+    }
+
+    if !c.Nullable && lc.Nullable {
+        out = append(out, target+" set not null;")
+    } else if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && lc.Identity == "" {
+        out = append(out, target+" drop not null;")
+    }
+    return out
+}
+
+// columnTypeAliases maps type spellings to one canonical form for comparison.
+// Ordered: longer spellings must be rewritten before their substrings.
+var columnTypeAliases = [][2]string{
+    {"character varying", "varchar"},
+    {"double precision", "float8"},
+    {"timestamp with time zone", "timestamptz"},
+    {"timestamp without time zone", "timestamp"},
+    {"time with time zone", "timetz"},
+    {"time without time zone", "time"},
+    {"character", "char"},
+    {"integer", "int"},
+    {"int4", "int"},
+    {"int8", "bigint"},
+    {"int2", "smallint"},
+    {"boolean", "bool"},
+    {"float4", "real"},
+    {"decimal", "numeric"},
+    {"bigserial", "bigint"},
+    {"smallserial", "smallint"},
+    {"serial", "int"},
+}
+
+// normalizeColumnType canonicalizes a column type for comparison between YAML
+// spellings (varchar(255)) and live format_type output (character varying(255)).
+// serial types normalize to their base integer type so a YAML `serial` column
+// never diffs against its live `integer` + nextval default form.
+func normalizeColumnType(t string) string {
+    s := strings.ToLower(strings.TrimSpace(t))
+    s = strings.Join(strings.Fields(s), " ")
+    // move an inline modifier past a with/without suffix so
+    // "timestamp(6) with time zone" aliases like "timestamptz(6)"
+    if i := strings.Index(s, "("); i >= 0 {
+        if j := strings.Index(s[i:], ")"); j >= 0 {
+            base, mod, rest := s[:i], s[i:i+j+1], s[i+j+1:]
+            if strings.HasPrefix(rest, " with") {
+                s = base + rest + mod
+            }
+        }
+    }
+    for _, a := range columnTypeAliases {
+        s = strings.ReplaceAll(s, a[0], a[1])
+    }
+    s = strings.ReplaceAll(s, " (", "(")
+    s = strings.ReplaceAll(s, ", ", ",")
+    s = strings.ReplaceAll(s, `"`, "")
+    return s
+}
+
+func isSerialType(t string) bool {
+    switch strings.ToLower(strings.TrimSpace(t)) {
+    case "serial", "smallserial", "bigserial", "serial2", "serial4", "serial8":
+        return true
+    }
+    return false
+}
+
+func defaultsEqual(desired, live string) bool {
+    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live)
+}
+
+// normalizeDefaultExpr canonicalizes a default expression for comparison:
+// strips ::type casts outside quoted literals (live defaults come back as
+// 'x'::text or nextval('s'::regclass)), lowercases everything outside
+// single-quoted strings, and collapses whitespace.
+func normalizeDefaultExpr(s string) string {
+    var b strings.Builder
+    inQ := false
+    rs := []rune(strings.TrimSpace(s))
+    for i := 0; i < len(rs); i++ {
+        r := rs[i]
+        if r == '\'' {
+            inQ = !inQ
+            b.WriteRune(r)
+            continue
+        }
+        if inQ {
+            b.WriteRune(r)
+            continue
+        }
+        if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
+            i++
+            for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            continue
+        }
+        if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
+        b.WriteRune(r)
+    }
+    out := strings.Join(strings.Fields(b.String()), " ")
+    out = strings.ReplaceAll(out, " (", "(")
+    return out
+}
+
+func isCastTypeChar(r rune) bool {
+    return r == '_' || r == '.' || r == '[' || r == ']' ||
+        (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
 func renderColumn(name string, c *schema.Column) string {

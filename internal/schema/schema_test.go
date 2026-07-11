@@ -1756,3 +1756,27 @@ schema public:
 		t.Errorf("parent (%d) must sort before partition child (%d)", parentIdx, childIdx)
 	}
 }
+
+func TestColumnUsingParse(t *testing.T) {
+	yaml := `
+tables:
+  public.t:
+    columns:
+      amount:
+        type: numeric(10,2)
+        using: amount::numeric(10,2)
+      plain:
+        type: text
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := db.Tables["public.t"].Columns
+	if cols["amount"].Using != "amount::numeric(10,2)" {
+		t.Errorf("want using expression, got %q", cols["amount"].Using)
+	}
+	if cols["plain"].Using != "" {
+		t.Errorf("plain column should have no using, got %q", cols["plain"].Using)
+	}
+}

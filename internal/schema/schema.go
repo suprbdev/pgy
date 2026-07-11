@@ -145,6 +145,7 @@ type Column struct {
     PrimaryKey bool `yaml:"primaryKey"`
     Comment  string `yaml:"comment"`
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
+    Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
 }
 
 type Index struct {
@@ -627,6 +628,7 @@ func parseColumnSpec(spec any) *Column {
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }
         if cm, ok := m["comment"].(string); ok { c.Comment = cm }
         if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
+        if u, ok := m["using"].(string); ok { c.Using = u }
     }
     return c
 }

@@ -2551,3 +2551,226 @@ func TestPartitionByExpressionKey(t *testing.T) {
 		t.Errorf("expression key should pass through parenthesized, got %+v", p.Creates)
 	}
 }
+
+// --- column alterations ---
+
+func TestAlterColumnTypeUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "character varying(100)"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"name": {Type: "varchar(255)"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if !findAlter(p, `alter table "public"."t" alter column "name" type varchar(255);`) {
+		t.Errorf("expected type alter, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnTypeSafeSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "character varying(100)"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"name": {Type: "varchar(255)"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "type varchar(255)") {
+		t.Errorf("type alter must be gated behind unsafe, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnTypeUsing(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"amount": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"amount": {Type: "numeric(10,2)", Using: "amount::numeric(10,2)"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if !findAlter(p, `alter column "amount" type numeric(10,2) using amount::numeric(10,2);`) {
+		t.Errorf("expected type alter with using clause, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnTypeEquivalentSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"a": {Type: "character varying(255)"},
+		"b": {Type: "integer"},
+		"c": {Type: "timestamp with time zone"},
+		"d": {Type: "numeric(10, 2)"},
+		"e": {Type: "double precision"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"a": {Type: "varchar(255)"},
+			"b": {Type: "int"},
+			"c": {Type: "timestamptz"},
+			"d": {Type: "numeric(10,2)"},
+			"e": {Type: "float8"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 0 {
+		t.Errorf("equivalent types must not diff, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnSerialNotDiffedAgainstInteger(t *testing.T) {
+	live := liveWithTablePK("public.t", map[string]*LiveColumn{
+		"id": {Type: "integer", Default: "nextval('t_id_seq'::regclass)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"id": {Type: "serial", PrimaryKey: true},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 0 {
+		t.Errorf("serial column must not diff against its live integer+nextval form, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnSetDefault(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"status": {Type: "text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"status": {Type: "text", Default: "'active'"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter table "public"."t" alter column "status" set default 'active';`) {
+		t.Errorf("expected set default, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnSetDefaultChanged(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"status": {Type: "text", Default: "'old'::text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"status": {Type: "text", Default: "'new'"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `set default 'new';`) {
+		t.Errorf("expected set default for changed default, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDefaultEquivalentSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"status": {Type: "text", Default: "'active'::text"},
+		"created": {Type: "timestamptz", Default: "NOW()"},
+		"meta": {Type: "jsonb", Default: "'{}'::jsonb"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"status":  {Type: "text", Default: "'active'"},
+			"created": {Type: "timestamptz", Default: "now()"},
+			"meta":    {Type: "jsonb", Default: "'{}'"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if len(p.Alters) != 0 {
+		t.Errorf("equivalent defaults must not diff, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDropDefault(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"status": {Type: "text", Default: "'active'::text"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"status": {Type: "text"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter table "public"."t" alter column "status" drop default;`) {
+		t.Errorf("expected drop default, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDropDefaultSkipsNextval(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "integer", Default: "nextval('t_id_seq'::regclass)"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"id": {Type: "int"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "drop default") {
+		t.Errorf("nextval defaults (serial) must never be dropped, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnSetNotNull(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"email": {Type: "text", Nullable: true}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"email": {Type: "text", Nullable: false},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter table "public"."t" alter column "email" set not null;`) {
+		t.Errorf("expected set not null, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDropNotNull(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"email": {Type: "text", Nullable: false}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"email": {Type: "text", Nullable: true},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter table "public"."t" alter column "email" drop not null;`) {
+		t.Errorf("expected drop not null, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDropNotNullSkippedForPK(t *testing.T) {
+	live := liveWithTablePK("public.t", map[string]*LiveColumn{"id": {Type: "bigint", Nullable: false}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:       "t",
+			PrimaryKey: []string{"id"},
+			Columns: map[string]*schema.Column{
+				"id": {Type: "bigint", Nullable: true},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "drop not null") {
+		t.Errorf("primary key columns must never drop not null, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnIdentityNeverAltered(t *testing.T) {
+	live := liveWithTablePK("public.t", map[string]*LiveColumn{
+		"id": {Type: "bigint", Nullable: false, Identity: "always"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"id": {Type: "bigint", PrimaryKey: true, Identity: "always"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 0 {
+		t.Errorf("identity columns are create-only, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnNoChangeNoSQL(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"email": {Type: "text", Nullable: false, Default: "'x'::text"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"email": {Type: "text", Nullable: false, Default: "'x'"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 0 || len(p.Creates) != 0 || len(p.Drops) != 0 {
+		t.Errorf("identical column must emit no SQL, got %+v %+v %+v", p.Creates, p.Alters, p.Drops)
+	}
+}
