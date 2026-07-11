@@ -19,6 +19,7 @@ func emptyLive() *Live {
 		Views:      map[string]bool{},
 		MatViews:   map[string]bool{},
 		Sequences:  map[string]bool{},
+		Domains:    map[string]bool{},
 		Roles:       map[string]bool{},
 		RoleMembers: map[string]map[string]bool{},
 		RoleComments: map[string]string{},
@@ -2059,5 +2060,148 @@ func TestIdentityColumnOverridesDefault(t *testing.T) {
 	}
 	if !findCreate(p, "generated always as identity") {
 		t.Errorf("expected identity clause; creates=%v", p.Creates)
+	}
+}
+
+// --- domains ---
+
+func domainDesired(key string, dm *schema.Domain) *schema.Database {
+	return &schema.Database{
+		Tables:  map[string]*schema.Table{},
+		Domains: map[string]*schema.Domain{key: dm},
+	}
+}
+
+func TestDomainCreate(t *testing.T) {
+	desired := domainDesired("public.email", &schema.Domain{Schema: "public", Name: "email", Type: "text"})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create domain "public"."email" as text;`) {
+		t.Errorf("expected CREATE DOMAIN, got %v", p.Creates)
+	}
+}
+
+func TestDomainSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Domains["public.email"] = true
+	desired := domainDesired("public.email", &schema.Domain{Schema: "public", Name: "email", Type: "text"})
+	p := Plan(live, desired, false)
+	if findCreate(p, "create domain") {
+		t.Errorf("existing domain should be skipped, got %v", p.Creates)
+	}
+}
+
+func TestDomainOptions(t *testing.T) {
+	desired := domainDesired("public.email", &schema.Domain{
+		Schema:  "public",
+		Name:    "email",
+		Type:    "text",
+		Default: "'unknown@example.com'",
+		NotNull: true,
+		Check:   "value ~ '^[^@]+@[^@]+$'",
+	})
+	p := Plan(emptyLive(), desired, false)
+	want := `create domain "public"."email" as text default 'unknown@example.com' not null check (value ~ '^[^@]+@[^@]+$');`
+	if !findCreate(p, want) {
+		t.Errorf("want %q, got %v", want, p.Creates)
+	}
+}
+
+func TestDomainNamedCheckConstraint(t *testing.T) {
+	desired := domainDesired("public.email", &schema.Domain{
+		Schema:         "public",
+		Name:           "email",
+		Type:           "text",
+		Check:          "value <> ''",
+		ConstraintName: "email_not_empty",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `constraint "email_not_empty" check (value <> '')`) {
+		t.Errorf("expected named check constraint, got %v", p.Creates)
+	}
+}
+
+func TestDomainCollate(t *testing.T) {
+	desired := domainDesired("public.name_ci", &schema.Domain{
+		Schema:  "public",
+		Name:    "name_ci",
+		Type:    "text",
+		Collate: "en_US",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `as text collate "en_US"`) {
+		t.Errorf("expected COLLATE clause, got %v", p.Creates)
+	}
+}
+
+func TestDomainCreatesSchema(t *testing.T) {
+	desired := domainDesired("billing.money_amount", &schema.Domain{Schema: "billing", Name: "money_amount", Type: "numeric(12,2)"})
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create schema if not exists "billing";`) {
+		t.Errorf("expected CREATE SCHEMA, got %v", p.Creates)
+	}
+	if !findCreate(p, `create domain "billing"."money_amount" as numeric(12,2);`) {
+		t.Errorf("expected CREATE DOMAIN, got %v", p.Creates)
+	}
+}
+
+func TestDomainWithoutTypeSkipped(t *testing.T) {
+	desired := domainDesired("public.broken", &schema.Domain{Schema: "public", Name: "broken"})
+	p := Plan(emptyLive(), desired, false)
+	if findCreate(p, "create domain") {
+		t.Errorf("domain without type should emit no SQL, got %v", p.Creates)
+	}
+}
+
+func TestDomainComment(t *testing.T) {
+	desired := domainDesired("public.email", &schema.Domain{
+		Schema: "public", Name: "email", Type: "text", Comment: "validated email",
+	})
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on domain "public"."email" is 'validated email';`) {
+		t.Errorf("expected COMMENT ON DOMAIN, got %v", p.Alters)
+	}
+}
+
+func TestDomainCommentSkippedIfSame(t *testing.T) {
+	live := emptyLive()
+	live.Domains["public.email"] = true
+	live.TypeComments = map[string]string{"public.email": "validated email"}
+	desired := domainDesired("public.email", &schema.Domain{
+		Schema: "public", Name: "email", Type: "text", Comment: "validated email",
+	})
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on domain") {
+		t.Errorf("unchanged comment should be skipped, got %v", p.Alters)
+	}
+}
+
+func TestDomainBeforeDependentTable(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"public.users": {
+				Name:      "public.users",
+				Columns:   map[string]*schema.Column{"email": {Type: "public.email", Nullable: false}},
+				DependsOn: []string{"domain public.email"},
+			},
+		},
+		Domains: map[string]*schema.Domain{
+			"public.email": {Schema: "public", Name: "email", Type: "text"},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	domIdx, tblIdx := -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, "create domain") {
+			domIdx = i
+		}
+		if strings.Contains(s, "create table") {
+			tblIdx = i
+		}
+	}
+	if domIdx < 0 || tblIdx < 0 {
+		t.Fatalf("expected both domain and table creates, got %v", p.Creates)
+	}
+	if domIdx > tblIdx {
+		t.Errorf("domain must be created before dependent table: %v", p.Creates)
 	}
 }

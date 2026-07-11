@@ -1355,3 +1355,111 @@ tables:
 		t.Errorf("unknown identity value should be unset, got %q", got)
 	}
 }
+
+func TestParseDomain(t *testing.T) {
+	yml := `
+schema public:
+  domain email:
+    type: text
+    collate: en_US
+    default: "'unknown@example.com'"
+    notNull: true
+    check: "value ~ '^[^@]+@[^@]+$'"
+    constraintName: email_format
+    comment: "validated email address"
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm, ok := db.Domains["public.email"]
+	if !ok {
+		t.Fatal("expected public.email domain")
+	}
+	if dm.Type != "text" {
+		t.Errorf("type: want text, got %q", dm.Type)
+	}
+	if dm.Collate != "en_US" {
+		t.Errorf("collate: want en_US, got %q", dm.Collate)
+	}
+	if dm.Default != "'unknown@example.com'" {
+		t.Errorf("default wrong: %q", dm.Default)
+	}
+	if !dm.NotNull {
+		t.Error("notNull: want true")
+	}
+	if dm.Check != "value ~ '^[^@]+@[^@]+$'" {
+		t.Errorf("check wrong: %q", dm.Check)
+	}
+	if dm.ConstraintName != "email_format" {
+		t.Errorf("constraintName wrong: %q", dm.ConstraintName)
+	}
+	if dm.Comment != "validated email address" {
+		t.Errorf("comment wrong: %q", dm.Comment)
+	}
+}
+
+func TestParseDomainDefaults(t *testing.T) {
+	yml := `
+schema billing:
+  domain money_amount:
+    type: numeric(12,2)
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm, ok := db.Domains["billing.money_amount"]
+	if !ok {
+		t.Fatal("expected billing.money_amount domain")
+	}
+	if dm.Type != "numeric(12,2)" {
+		t.Errorf("type wrong: %q", dm.Type)
+	}
+	if dm.Collate != "" || dm.Default != "" || dm.NotNull || dm.Check != "" || dm.ConstraintName != "" || dm.Comment != "" {
+		t.Errorf("all options should be unset: %+v", dm)
+	}
+}
+
+func TestParseDomainDependsOn(t *testing.T) {
+	yml := `
+schema public:
+  domain status_code:
+    type: text
+    dependsOn:
+      - type public.status
+`
+	db, err := parseFlexibleDatabase([]byte(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm, ok := db.Domains["public.status_code"]
+	if !ok {
+		t.Fatal("expected public.status_code domain")
+	}
+	if len(dm.DependsOn) != 1 || dm.DependsOn[0] != "type public.status" {
+		t.Errorf("dependsOn wrong: %v", dm.DependsOn)
+	}
+}
+
+func TestDomainMerge(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.yml")
+	f2 := filepath.Join(dir, "b.yml")
+	if err := os.WriteFile(f1, []byte("schema public:\n  domain d1:\n    type: text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("schema public:\n  domain d2:\n    type: int\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Domains) != 2 {
+		t.Fatalf("want 2 merged domains, got %d", len(db.Domains))
+	}
+	if d := db.Domains["public.d1"]; d == nil || d.Type != "text" {
+		t.Errorf("d1 lost in merge: %+v", d)
+	}
+}

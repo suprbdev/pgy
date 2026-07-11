@@ -547,6 +547,42 @@ schema public:
 
 ---
 
+## Domain Definitions
+
+Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with optional default, `NOT NULL`, and a `CHECK` constraint (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`; existing domains are never altered or dropped (forward-only). Comments are diffed against live.
+
+```yaml
+schema public:
+  domain email:
+    type: text
+    notNull: true
+    check: "value ~ '^[^@]+@[^@]+$'"
+    constraintName: email_format
+    comment: "validated email address"
+
+  table users:
+    dependsOn:
+      - domain public.email
+    columns:
+      email:
+        type: public.email
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `type` | string | Underlying data type (required; `as` is accepted as an alias) |
+| `collate` | string | `COLLATE` clause (collation identifier) |
+| `default` | string | `DEFAULT` expression |
+| `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
+| `check` | string | `CHECK` expression; use `value` to reference the value being tested |
+| `constraintName` | string | Optional name for the `CHECK` constraint |
+| `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+
+Tables using a domain as a column type must declare `dependsOn: [domain <schema.name>]` so the domain is created first.
+
+---
+
 ## Dependencies
 
 All object types support `dependsOn` to control creation order. The topological sort resolves these before generating SQL.
@@ -560,6 +596,7 @@ All object types support `dependsOn` to control creation order. The topological 
 | `view <schema.view>` | `view public.active_users` |
 | `materialized view <schema.view>` | `materialized view public.user_stats` |
 | `sequence <schema.seq>` | `sequence public.order_number_seq` |
+| `domain <schema.domain>` | `domain public.email` |
 | `schema <name>` | `schema private` (informational only, not resolved) |
 
 ---

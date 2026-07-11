@@ -18,6 +18,7 @@ type Database struct {
     Functions map[string]*Function `yaml:"-"`
     Views map[string]*View `yaml:"-"`
     Sequences map[string]*Sequence `yaml:"-"`
+    Domains map[string]*Domain `yaml:"-"`
     Roles map[string]*Role `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
@@ -64,6 +65,21 @@ type Sequence struct {
     OwnedBy   string // table.column (or schema.table.column)
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
+}
+
+// Domain is a CREATE DOMAIN declaration: a named base type with optional
+// default, NOT NULL, and CHECK constraint (which sees the value as VALUE).
+type Domain struct {
+    Schema         string
+    Name           string
+    Type           string // underlying data type
+    Collate        string
+    Default        string
+    NotNull        bool
+    Check          string // CHECK expression (without surrounding parens)
+    ConstraintName string // optional name for the CHECK constraint
+    DependsOn      []string `yaml:"dependsOn"`
+    Comment        string
 }
 
 type Table struct {
@@ -231,6 +247,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
             if merged.Sequences == nil { merged.Sequences = map[string]*Sequence{} }
             for k, v := range d.Sequences { merged.Sequences[k] = v }
         }
+        // merge domains
+        if len(d.Domains) > 0 {
+            if merged.Domains == nil { merged.Domains = map[string]*Domain{} }
+            for k, v := range d.Domains { merged.Domains[k] = v }
+        }
         // merge roles
         if len(d.Roles) > 0 {
             if merged.Roles == nil { merged.Roles = map[string]*Role{} }
@@ -268,6 +289,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.Functions = map[string]*Function{}
     out.Views = map[string]*View{}
     out.Sequences = map[string]*Sequence{}
+    out.Domains = map[string]*Domain{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
@@ -490,6 +512,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if sq != nil {
                 full := qualify(schemaName, sq.Name)
                 db.Sequences[full] = sq
+            }
+        } else if strings.HasPrefix(key, "domain ") {
+            dm := parseDomain(schemaName, key, body)
+            if dm != nil {
+                full := qualify(schemaName, dm.Name)
+                db.Domains[full] = dm
             }
         } else if key == "grants" {
             if g := parseGrants(body); g != nil {
@@ -882,6 +910,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, dm := range d.Domains {
+        if dm == nil { continue }
+        e := Entity{Key: k, Kind: "domain", DependsOn: dm.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, sq := range d.Sequences {
         if sq == nil { continue }
         e := Entity{Key: k, Kind: "sequence", DependsOn: sq.DependsOn}
@@ -1023,6 +1057,18 @@ func resolveDependency(raw string, d *Database) string {
         return ""
     }
     
+    // Handle "domain <name>"
+    if strings.HasPrefix(raw, "domain ") {
+        domName := strings.TrimSpace(strings.TrimPrefix(raw, "domain "))
+        if !strings.Contains(domName, ".") {
+            domName = "public." + domName
+        }
+        if _, ok := d.Domains[domName]; ok {
+            return domName
+        }
+        return ""
+    }
+
     // Handle "sequence <name>"
     if strings.HasPrefix(raw, "sequence ") {
         seqName := strings.TrimSpace(strings.TrimPrefix(raw, "sequence "))
@@ -1058,6 +1104,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Functions[raw]; ok { return raw }
     if _, ok := d.Views[raw]; ok { return raw }
     if _, ok := d.Sequences[raw]; ok { return raw }
+    if _, ok := d.Domains[raw]; ok { return raw }
 
     // Try with public schema
     pub := "public." + raw
@@ -1066,6 +1113,7 @@ func resolveDependency(raw string, d *Database) string {
     if _, ok := d.Functions[pub]; ok { return pub }
     if _, ok := d.Views[pub]; ok { return pub }
     if _, ok := d.Sequences[pub]; ok { return pub }
+    if _, ok := d.Domains[pub]; ok { return pub }
 
     return ""
 }
@@ -1107,6 +1155,26 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     return sq
+}
+
+func parseDomain(schemaName, key string, body any) *Domain {
+    name := strings.TrimSpace(strings.TrimPrefix(key, "domain "))
+    dm := &Domain{Schema: schemaName, Name: name}
+    m, ok := body.(map[string]any)
+    if !ok { return dm }
+    if t, ok := m["type"].(string); ok { dm.Type = t }
+    if t, ok := m["as"].(string); ok && t != "" { dm.Type = t } // alias
+    if c, ok := m["collate"].(string); ok { dm.Collate = c }
+    if v, ok := m["default"]; ok { dm.Default = defaultToString(v) }
+    if b, ok := m["notNull"].(bool); ok { dm.NotNull = b }
+    if b, ok := m["nullable"].(bool); ok { dm.NotNull = !b }
+    if c, ok := m["check"].(string); ok { dm.Check = c }
+    if cn, ok := m["constraintName"].(string); ok { dm.ConstraintName = cn }
+    if dep, ok := m["dependsOn"]; ok {
+        dm.DependsOn = parseStringListFromNode(dep)
+    }
+    if cm, ok := m["comment"].(string); ok { dm.Comment = cm }
+    return dm
 }
 
 func errorsIsNotExist(err error) bool {

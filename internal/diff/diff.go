@@ -19,6 +19,7 @@ type Live struct{
     Views      map[string]bool
     MatViews   map[string]bool
     Sequences  map[string]bool
+    Domains    map[string]bool
     Roles      map[string]bool
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
@@ -74,6 +75,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Views: map[string]bool{},
         MatViews: map[string]bool{},
         Sequences: map[string]bool{},
+        Domains: map[string]bool{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
@@ -336,6 +338,26 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     enumRows.Close()
     
+    // Query existing domains
+    domQ := `
+        select n.nspname, t.typname
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and t.typtype = 'd'
+    `
+    domRows, err := pool.Query(ctx, domQ)
+    if err != nil { return nil, err }
+    for domRows.Next() {
+        var schemaName, domName string
+        if err := domRows.Scan(&schemaName, &domName); err != nil {
+            domRows.Close()
+            return nil, err
+        }
+        l.Domains[fmt.Sprintf("%s.%s", schemaName, domName)] = true
+    }
+    domRows.Close()
+
     // Query existing extensions
     extQ := `select extname from pg_extension`
     extRows, err := pool.Query(ctx, extQ)
@@ -754,6 +776,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
+    for k := range desired.Domains {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
+            neededSchemas[parts[0]] = true
+        } else {
+            neededSchemas["public"] = true
+        }
+    }
 
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
@@ -872,6 +901,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             if found { verb = "create or replace function" }
             stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
             plan.Creates = append(plan.Creates, stmt)
+        case "domain":
+            dm, ok := desired.Domains[e.Key]
+            if !ok || dm == nil || dm.Type == "" { continue }
+            // Existing domains are never altered (forward-only; constraint
+            // changes would need DROP/ADD CONSTRAINT with table validation)
+            if live.Domains[e.Key] { continue }
+            plan.Creates = append(plan.Creates, renderDomain(e.Key, dm))
         case "sequence":
             sq, ok := desired.Sequences[e.Key]
             if !ok || sq == nil { continue }
@@ -996,6 +1032,20 @@ func renderSequence(fq string, sq *schema.Sequence) string {
     return strings.Join(parts, " ") + ";"
 }
 
+// renderDomain emits CREATE DOMAIN with only the options set in YAML.
+// CREATE DOMAIN has no IF NOT EXISTS; existence is guarded by live.Domains.
+func renderDomain(fq string, dm *schema.Domain) string {
+    parts := []string{"create domain", pqIdent(fq), "as", dm.Type}
+    if dm.Collate != "" { parts = append(parts, "collate "+pqIdent(dm.Collate)) }
+    if dm.Default != "" { parts = append(parts, "default "+dm.Default) }
+    if dm.NotNull { parts = append(parts, "not null") }
+    if dm.Check != "" {
+        if dm.ConstraintName != "" { parts = append(parts, "constraint "+pqIdent(dm.ConstraintName)) }
+        parts = append(parts, fmt.Sprintf("check (%s)", dm.Check))
+    }
+    return strings.Join(parts, " ") + ";"
+}
+
 // ownedByIdent quotes a table.column (or schema.table.column) OWNED BY target.
 func ownedByIdent(s string) string {
     if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
@@ -1037,6 +1087,16 @@ func planComments(live *Live, desired *schema.Database) []string {
         td := desired.Types[k]
         if td == nil { continue }
         comment("type "+pqIdent(k), td.Comment, live.TypeComments[k])
+    }
+
+    domainNames := make([]string, 0, len(desired.Domains))
+    for k := range desired.Domains { domainNames = append(domainNames, k) }
+    sort.Strings(domainNames)
+    for _, k := range domainNames {
+        dm := desired.Domains[k]
+        if dm == nil { continue }
+        // domain comments live in pg_type's pg_description entries
+        comment("domain "+pqIdent(k), dm.Comment, live.TypeComments[k])
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
