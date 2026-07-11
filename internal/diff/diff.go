@@ -18,6 +18,10 @@ type Live struct{
     Extensions map[string]bool
     Views      map[string]bool
     MatViews   map[string]bool
+    Roles      map[string]bool
+    // RoleMembers: member role -> parent role -> exists (pg_auth_members)
+    RoleMembers map[string]map[string]bool
+    RoleComments map[string]string // role name -> comment (pg_shdescription)
     // Grants: object key -> role -> privilege -> exists. Object owners excluded.
     TableGrants    map[string]map[string]map[string]bool // key "schema.table"
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
@@ -67,6 +71,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Extensions: map[string]bool{},
         Views: map[string]bool{},
         MatViews: map[string]bool{},
+        Roles: map[string]bool{},
+        RoleMembers: map[string]map[string]bool{},
+        RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         FunctionGrants: map[string]map[string]map[string]bool{},
         SchemaGrants: map[string]map[string]map[string]bool{},
@@ -453,6 +460,60 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     sgRows.Close()
 
+    // Query existing roles (skip pg_* system roles)
+    roleQ := `select rolname from pg_roles where rolname not like 'pg\_%'`
+    roleRows, err := pool.Query(ctx, roleQ)
+    if err != nil { return nil, err }
+    for roleRows.Next() {
+        var roleName string
+        if err := roleRows.Scan(&roleName); err != nil {
+            roleRows.Close()
+            return nil, err
+        }
+        l.Roles[roleName] = true
+    }
+    roleRows.Close()
+
+    // Query role memberships
+    memQ := `
+        select m.rolname, r.rolname
+        from pg_auth_members am
+        join pg_roles m on m.oid = am.member
+        join pg_roles r on r.oid = am.roleid
+        where m.rolname not like 'pg\_%'
+    `
+    memRows, err := pool.Query(ctx, memQ)
+    if err != nil { return nil, err }
+    for memRows.Next() {
+        var member, parent string
+        if err := memRows.Scan(&member, &parent); err != nil {
+            memRows.Close()
+            return nil, err
+        }
+        if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
+        l.RoleMembers[member][parent] = true
+    }
+    memRows.Close()
+
+    // Query role comments (shared catalog)
+    rcmQ := `
+        select r.rolname, d.description
+        from pg_shdescription d
+        join pg_roles r on r.oid = d.objoid
+        where d.classoid = 'pg_authid'::regclass
+    `
+    rcmRows, err := pool.Query(ctx, rcmQ)
+    if err != nil { return nil, err }
+    for rcmRows.Next() {
+        var roleName, comment string
+        if err := rcmRows.Scan(&roleName, &comment); err != nil {
+            rcmRows.Close()
+            return nil, err
+        }
+        l.RoleComments[roleName] = comment
+    }
+    rcmRows.Close()
+
     // Query comments on relations (tables, views, matviews)
     rcQ := `
         select n.nspname, c.relname, d.description
@@ -625,7 +686,11 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     // (required for circular FK pairs, which topological sort cannot order).
     deferredFKs := []string{}
     plan := &PlanDiff{}
-    
+
+    // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
+    // policies, and memberships later in the plan
+    planRoles(plan, live, desired)
+
     // Collect all schemas needed from desired entities
     neededSchemas := map[string]bool{}
     // Extensions don't require schemas, skip them
@@ -842,6 +907,41 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     return plan
 }
 
+// planRoles emits CREATE ROLE for roles missing from live and GRANT <parent>
+// TO <role> for missing memberships. Forward-only: existing roles are never
+// altered or dropped; removed memberships are not revoked.
+func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
+    names := make([]string, 0, len(desired.Roles))
+    for k := range desired.Roles { names = append(names, k) }
+    sort.Strings(names)
+    for _, name := range names {
+        r := desired.Roles[name]
+        if r == nil { continue }
+        if !live.Roles[name] {
+            plan.Creates = append(plan.Creates, renderRole(r))
+        }
+        for _, parent := range r.InRoles {
+            if parent == "" || live.RoleMembers[name][parent] { continue }
+            plan.Alters = append(plan.Alters, fmt.Sprintf("grant %s to %s;", grantRole(parent), grantRole(name)))
+        }
+    }
+}
+
+func renderRole(r *schema.Role) string {
+    opts := []string{}
+    if r.Login { opts = append(opts, "login") }
+    if r.Superuser { opts = append(opts, "superuser") }
+    if r.CreateDB { opts = append(opts, "createdb") }
+    if r.CreateRole { opts = append(opts, "createrole") }
+    if r.Replication { opts = append(opts, "replication") }
+    if r.BypassRLS { opts = append(opts, "bypassrls") }
+    if r.NoInherit { opts = append(opts, "noinherit") }
+    if r.ConnectionLimit >= 0 { opts = append(opts, fmt.Sprintf("connection limit %d", r.ConnectionLimit)) }
+    stmt := "create role " + grantRole(r.Name)
+    if len(opts) > 0 { stmt += " with " + strings.Join(opts, " ") }
+    return stmt + ";"
+}
+
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared).
 func planComments(live *Live, desired *schema.Database) []string {
@@ -857,6 +957,15 @@ func planComments(live *Live, desired *schema.Database) []string {
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
         comment("schema "+pqIdent(s), desired.SchemaComments[s], live.SchemaComments[s])
+    }
+
+    roleNames := make([]string, 0, len(desired.Roles))
+    for k := range desired.Roles { roleNames = append(roleNames, k) }
+    sort.Strings(roleNames)
+    for _, k := range roleNames {
+        r := desired.Roles[k]
+        if r == nil { continue }
+        comment("role "+grantRole(k), r.Comment, live.RoleComments[k])
     }
 
     typeNames := make([]string, 0, len(desired.Types))

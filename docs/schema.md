@@ -370,9 +370,50 @@ Behavior:
 - A present `policies:` block is authoritative: live policies not listed are dropped. Tables without a `policies:` block are unmanaged.
 - `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` are emitted after all object creates/alters, so policy expressions may freely reference functions created in the same plan.
 
+## Roles
+
+Roles are cluster-level objects declared in a top-level `roles:` map (not inside a `schema <name>:` block). Each entry is created with `CREATE ROLE` if missing from the live database and skipped otherwise. Forward-only: existing roles are never altered or dropped, and removed memberships are never revoked.
+
+```yaml
+roles:
+  readonly: {}
+  app_user:
+    login: true
+    inherit: false
+    connectionLimit: 10
+    inRoles: [readonly]
+    comment: "application login role"
+  migrator:
+    login: true
+    createdb: true
+    createrole: true
+```
+
+Behavior:
+
+- Role creates are emitted **first** in the plan, before schemas and all other objects, so grants, policies (`to:`), and memberships can reference them.
+- `inRoles` memberships are reconciled additively: `GRANT <parent> TO <role>` is emitted for each membership missing from live (`pg_auth_members`).
+- Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
+- `comment` is diffed against `pg_shdescription` like other object comments.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `login` | boolean | `LOGIN` (default `false` = nologin) |
+| `superuser` | boolean | `SUPERUSER` |
+| `createdb` | boolean | `CREATEDB` |
+| `createrole` | boolean | `CREATEROLE` |
+| `replication` | boolean | `REPLICATION` |
+| `bypassRLS` | boolean | `BYPASSRLS` |
+| `inherit` | boolean | Set `false` to emit `NOINHERIT` (default inherits) |
+| `connectionLimit` | integer | `CONNECTION LIMIT n`; omit for unlimited |
+| `inRoles` | list | Parent roles; each emits `GRANT <parent> TO <role>` when missing |
+| `comment` | string | `COMMENT ON ROLE` |
+
+---
+
 ## Grants
 
-Tables, functions, and schemas accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles must already exist (pgy does not manage roles).
+Tables, functions, and schemas accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist.
 
 ```yaml
 schema app:

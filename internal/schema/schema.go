@@ -17,8 +17,25 @@ type Database struct {
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
     Views map[string]*View `yaml:"-"`
+    Roles map[string]*Role `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
+}
+
+// Role is a cluster-level role (CREATE ROLE). Passwords are intentionally
+// unsupported: secrets do not belong in schema YAML.
+type Role struct {
+    Name            string
+    Login           bool
+    Superuser       bool
+    CreateDB        bool
+    CreateRole      bool
+    Replication     bool
+    BypassRLS       bool
+    NoInherit       bool     // yaml `inherit: false`
+    ConnectionLimit int      // -1 = unset (no clause emitted)
+    InRoles         []string // memberships: GRANT <parent> TO <role>
+    Comment         string
 }
 
 type View struct {
@@ -190,6 +207,11 @@ func LoadAndMerge(paths []string) (*Database, error) {
             if merged.Views == nil { merged.Views = map[string]*View{} }
             for k, v := range d.Views { merged.Views[k] = v }
         }
+        // merge roles
+        if len(d.Roles) > 0 {
+            if merged.Roles == nil { merged.Roles = map[string]*Role{} }
+            for k, v := range d.Roles { merged.Roles[k] = v }
+        }
         // merge schema grants
         if len(d.SchemaGrants) > 0 {
             if merged.SchemaGrants == nil { merged.SchemaGrants = map[string]map[string][]string{} }
@@ -261,6 +283,12 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                 }
                 mergeTablesInto(out, schemaName, v)
             }
+        }
+    }
+    // roles top-level (cluster-scoped, no schema qualification)
+    if rolesRaw, ok := root["roles"]; ok {
+        if r := parseRoles(rolesRaw); len(r) > 0 {
+            out.Roles = r
         }
     }
     // Handle top-level tables
@@ -510,6 +538,31 @@ func parsePolicies(v any) []*Policy {
         out = append(out, p)
     }
     sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+    return out
+}
+
+// parseRoles parses { name: {login, superuser, createdb, createrole,
+// replication, bypassRLS, inherit, connectionLimit, inRoles, comment}, ... }.
+func parseRoles(v any) map[string]*Role {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    out := map[string]*Role{}
+    for name, def := range m {
+        r := &Role{Name: name, ConnectionLimit: -1}
+        if dm, ok := def.(map[string]any); ok {
+            if b, ok := dm["login"].(bool); ok { r.Login = b }
+            if b, ok := dm["superuser"].(bool); ok { r.Superuser = b }
+            if b, ok := dm["createdb"].(bool); ok { r.CreateDB = b }
+            if b, ok := dm["createrole"].(bool); ok { r.CreateRole = b }
+            if b, ok := dm["replication"].(bool); ok { r.Replication = b }
+            if b, ok := dm["bypassRLS"].(bool); ok { r.BypassRLS = b }
+            if b, ok := dm["inherit"].(bool); ok { r.NoInherit = !b }
+            if n, ok := dm["connectionLimit"].(int); ok { r.ConnectionLimit = n }
+            if ir, ok := dm["inRoles"]; ok { r.InRoles = parseStringListFromNode(ir) }
+            if cm, ok := dm["comment"].(string); ok { r.Comment = cm }
+        }
+        out[name] = r
+    }
     return out
 }
 

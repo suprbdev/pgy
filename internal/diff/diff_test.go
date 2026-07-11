@@ -18,6 +18,9 @@ func emptyLive() *Live {
 		Extensions: map[string]bool{},
 		Views:      map[string]bool{},
 		MatViews:   map[string]bool{},
+		Roles:       map[string]bool{},
+		RoleMembers: map[string]map[string]bool{},
+		RoleComments: map[string]string{},
 		TableGrants:        map[string]map[string]map[string]bool{},
 		FunctionGrants:     map[string]map[string]map[string]bool{},
 		SchemaGrants:       map[string]map[string]map[string]bool{},
@@ -1735,5 +1738,132 @@ func TestCustomSchemaSkippedIfAlreadyLive(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findCreate(p, "create schema") {
 		t.Errorf("schema already live, should not re-create; creates: %v", p.Creates)
+	}
+}
+
+// --- roles ---
+
+func TestRoleCreate(t *testing.T) {
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", Login: true, ConnectionLimit: -1},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create role "app_user" with login;`) {
+		t.Errorf("expected CREATE ROLE; creates: %v", p.Creates)
+	}
+}
+
+func TestRoleSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Roles["app_user"] = true
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", Login: true, ConnectionLimit: -1},
+	}}
+	p := Plan(live, desired, false)
+	if findCreate(p, "create role") {
+		t.Errorf("role already live, should not re-create; creates: %v", p.Creates)
+	}
+}
+
+func TestRoleCreateNoOptions(t *testing.T) {
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"readonly": {Name: "readonly", ConnectionLimit: -1},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create role "readonly";`) {
+		t.Errorf("expected bare CREATE ROLE without with clause; creates: %v", p.Creates)
+	}
+}
+
+func TestRoleOptions(t *testing.T) {
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"admin": {
+			Name: "admin", Login: true, Superuser: true, CreateDB: true,
+			CreateRole: true, Replication: true, BypassRLS: true,
+			NoInherit: true, ConnectionLimit: 5,
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create role "admin" with login superuser createdb createrole replication bypassrls noinherit connection limit 5;`
+	if !findCreate(p, want) {
+		t.Errorf("expected all role options; creates: %v", p.Creates)
+	}
+}
+
+func TestRoleCreatedBeforeSchema(t *testing.T) {
+	desired := &schema.Database{
+		Roles: map[string]*schema.Role{"app_user": {Name: "app_user", ConnectionLimit: -1}},
+		Tables: map[string]*schema.Table{
+			"private.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	roleIdx, schemaIdx := -1, -1
+	for i, s := range p.Creates {
+		if strings.Contains(s, "create role") {
+			roleIdx = i
+		}
+		if strings.Contains(s, "create schema") {
+			schemaIdx = i
+		}
+	}
+	if roleIdx < 0 || schemaIdx < 0 || roleIdx > schemaIdx {
+		t.Errorf("role create must precede schema create; creates: %v", p.Creates)
+	}
+}
+
+func TestRoleMembershipGrant(t *testing.T) {
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", Login: true, ConnectionLimit: -1, InRoles: []string{"readonly"}},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `grant "readonly" to "app_user";`) {
+		t.Errorf("expected membership grant; alters: %v", p.Alters)
+	}
+}
+
+func TestRoleMembershipSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Roles["app_user"] = true
+	live.RoleMembers["app_user"] = map[string]bool{"readonly": true}
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", ConnectionLimit: -1, InRoles: []string{"readonly"}},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, `grant "readonly"`) {
+		t.Errorf("membership already live, should not re-grant; alters: %v", p.Alters)
+	}
+}
+
+func TestRoleNotDroppedIfRemoved(t *testing.T) {
+	live := emptyLive()
+	live.Roles["old_role"] = true
+	desired := &schema.Database{Roles: map[string]*schema.Role{}}
+	p := Plan(live, desired, false)
+	if findDrop(p, "role") {
+		t.Errorf("forward-only tool must never drop roles; drops: %v", p.Drops)
+	}
+}
+
+func TestRoleComment(t *testing.T) {
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", ConnectionLimit: -1, Comment: "application login role"},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on role "app_user" is 'application login role';`) {
+		t.Errorf("expected role comment; alters: %v", p.Alters)
+	}
+}
+
+func TestRoleCommentSkippedIfSame(t *testing.T) {
+	live := emptyLive()
+	live.Roles["app_user"] = true
+	live.RoleComments["app_user"] = "application login role"
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"app_user": {Name: "app_user", ConnectionLimit: -1, Comment: "application login role"},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on role") {
+		t.Errorf("comment unchanged, should not re-emit; alters: %v", p.Alters)
 	}
 }

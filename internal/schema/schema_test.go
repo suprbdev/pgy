@@ -1110,3 +1110,75 @@ schema public:
 		t.Errorf("want 1 dependsOn, got %d", len(vw.DependsOn))
 	}
 }
+
+func TestRoleParse(t *testing.T) {
+	yaml := `
+roles:
+  app_user:
+    login: true
+    createdb: true
+    inherit: false
+    connectionLimit: 10
+    inRoles: [readonly, reporting]
+    comment: "application login role"
+  readonly: {}
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Roles) != 2 {
+		t.Fatalf("want 2 roles, got %d", len(db.Roles))
+	}
+	r := db.Roles["app_user"]
+	if r == nil {
+		t.Fatal("expected app_user role")
+	}
+	if !r.Login || !r.CreateDB || r.Superuser || r.CreateRole || r.Replication || r.BypassRLS {
+		t.Errorf("role flags wrong: %+v", r)
+	}
+	if !r.NoInherit {
+		t.Error("inherit: false must set NoInherit")
+	}
+	if r.ConnectionLimit != 10 {
+		t.Errorf("want connectionLimit 10, got %d", r.ConnectionLimit)
+	}
+	if len(r.InRoles) != 2 || r.InRoles[0] != "readonly" || r.InRoles[1] != "reporting" {
+		t.Errorf("want inRoles [readonly reporting], got %v", r.InRoles)
+	}
+	if r.Comment != "application login role" {
+		t.Errorf("comment wrong: %q", r.Comment)
+	}
+	ro := db.Roles["readonly"]
+	if ro == nil {
+		t.Fatal("expected readonly role")
+	}
+	if ro.ConnectionLimit != -1 {
+		t.Errorf("unset connectionLimit must be -1, got %d", ro.ConnectionLimit)
+	}
+	if ro.Login || ro.NoInherit {
+		t.Errorf("defaults wrong: %+v", ro)
+	}
+}
+
+func TestRoleMerge(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "a.yml")
+	f2 := filepath.Join(dir, "b.yml")
+	if err := os.WriteFile(f1, []byte("roles:\n  app_user:\n    login: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("roles:\n  readonly: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := LoadAndMerge([]string{f1, f2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Roles) != 2 {
+		t.Fatalf("want 2 merged roles, got %d", len(db.Roles))
+	}
+	if r := db.Roles["app_user"]; r == nil || !r.Login {
+		t.Errorf("app_user role lost in merge: %+v", r)
+	}
+}
