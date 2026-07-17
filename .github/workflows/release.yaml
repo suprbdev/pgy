@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  # Path to the main package. Use "./cmd/<name>" if you keep a cmd/ layout.
+  MAIN_PACKAGE: "./cmd/pgy"
+  GO_VERSION: "1.23"
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Tests (race)
+        run: go test -race ./...
+      - name: Cross-compile
+        env:
+          VERSION: ${{ github.ref_name }}
+          BIN: ${{ github.event.repository.name }}
+        run: |
+          mkdir -p dist
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os=${platform%/*} arch=${platform#*/}
+            bin=$BIN; [ "$os" = windows ] && bin=$BIN.exe
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags="-s -w -X github.com/suprbdev/pgy/internal/cli.version=${VERSION}" \
+              -o "dist/$bin" "$MAIN_PACKAGE"
+            name="${BIN}_${VERSION#v}_${os}_${arch}"
+            if [ "$os" = windows ]; then
+              (cd dist && zip -q "$name.zip" "$bin")
+            else
+              tar -C dist -czf "dist/$name.tar.gz" "$bin"
+            fi
+            rm "dist/$bin"
+          done
+      - name: Checksums
+        run: cd dist && sha256sum -- * > checksums.txt
+      - name: Create GitHub release
+        # Skipped under act (local workflow testing); act sets ACT=true.
+        if: ${{ !env.ACT }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
