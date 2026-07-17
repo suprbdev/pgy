@@ -1,10 +1,33 @@
 # pgy
 
+[![CI](https://github.com/suprbdev/pgy/actions/workflows/ci.yaml/badge.svg)](https://github.com/suprbdev/pgy/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/suprbdev/pgy)](https://github.com/suprbdev/pgy/releases/latest)
+
 Forward-only PostgreSQL migration tool. It reads YAML schema files, diffs against a live DB, writes SQL to a buffer, and commits/applies migrations. No rollbacks.
 
-## Install / Build
+## Install
 
-- Build with Go:
+### Prebuilt binaries
+
+Download the archive for your platform from the [latest release](https://github.com/suprbdev/pgy/releases/latest) (Linux/macOS amd64+arm64, Windows amd64), verify against `checksums.txt` if desired, and put `pgy` on your `PATH`:
+
+```sh
+# example: v0.1.0 on Linux amd64
+curl -LO https://github.com/suprbdev/pgy/releases/download/v0.1.0/pgy_0.1.0_linux_amd64.tar.gz
+tar xzf pgy_0.1.0_linux_amd64.tar.gz
+sudo install -m 0755 pgy /usr/local/bin/pgy
+pgy version
+```
+
+### go install
+
+```sh
+go install github.com/suprbdev/pgy/cmd/pgy@latest
+```
+
+(Note: `go install` builds report version `0.1.0` without the release stamping.)
+
+### Build from source
 
 ```
 make build     # builds bin/pgy with version ldflags
@@ -125,13 +148,15 @@ See `docs/schema.md` for the full YAML reference, and `examples/` for a
 library of composable starter modules (users, orgs, e-commerce, billing, CRM,
 messaging, and more) plus link files that wire them together.
 
-Diff behavior (current minimal version):
-- Creates missing tables with columns.
-- Adds missing columns to existing tables.
+Diff behavior highlights:
+- Creates missing schemas, extensions, tables, types, functions, views, triggers, and more; skips objects already live.
+- Adds missing columns to existing tables; alters changed columns and constraints (type/default/nullability changes gated behind `--unsafe`).
 - Drops columns only with `--unsafe`.
+
+See `docs/feature_support.md` for the full capability matrix.
 
 ## Notes
 - Forward-only: no down/rollback.
 - Advisory locks during init/migrate.
 - Checksums added to committed files; verified before applying.
-- SQL splitting is naive (semicolon-separated); avoid dollar-quoted function bodies for now.
+- SQL splitting respects single/double quotes, dollar quotes, and line/block comments. `E'...'` backslash-escape strings are not handled.
