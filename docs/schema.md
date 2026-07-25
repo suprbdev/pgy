@@ -457,6 +457,8 @@ Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (re
 
 Functions are defined inside `schema <name>:` blocks. The key format is `function <name>(<args>):`.
 
+Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. An unqualified type is treated as `public` — `fn(t my_type)` and `fn(t public.my_type)` refer to the same function. Note: if the connection's `search_path` includes a non-`public` schema, introspection may report that schema's types unqualified, which will not match a qualified declaration; keep non-`public` types qualified in YAML and off the `search_path`.
+
 ```yaml
 schema public:
   function set_updated_at():
@@ -497,7 +499,7 @@ schema public:
 
 ## Procedure Definitions
 
-Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
+Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
 
 ```yaml
 schema public:

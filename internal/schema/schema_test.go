@@ -1077,6 +1077,34 @@ schema public:
 	}
 }
 
+func TestFunctionQualifiedArgTypeParse(t *testing.T) {
+	yaml := `
+schema public:
+  function fn(t public.my_type):
+    returns: text
+    language: sql
+    body: select 'ok'
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *Function
+	for _, f := range db.Functions {
+		fn = f
+		break
+	}
+	if fn == nil {
+		t.Fatal("no function parsed")
+	}
+	if fn.Name != "fn" {
+		t.Errorf("name: %s", fn.Name)
+	}
+	if fn.ArgsSig != "(t public.my_type)" {
+		t.Errorf("argssig: %s", fn.ArgsSig)
+	}
+}
+
 func TestFunctionStrict(t *testing.T) {
 	yaml := `
 schema public:

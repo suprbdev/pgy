@@ -2134,15 +2134,23 @@ func normalizeArgNoDefault(arg string) string {
     // Normalize whitespace and type names
     words := strings.Fields(arg)
     if len(words) < 2 {
-        return strings.ToLower(strings.TrimSpace(arg))
+        // Unnamed arg: the single token is a type name
+        return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public.")
     }
-    
+
     // Parameter name (first word) - lowercase for comparison
     paramName := strings.ToLower(words[0])
-    
+
     // Type name (rest) - normalize to lowercase
     typeName := strings.ToLower(strings.Join(words[1:], " "))
-    
+
+    // "public" is the default schema: "public.my_type" and "my_type" are the
+    // same type. Introspection returns types on the search_path unqualified,
+    // so strip the qualifier before comparing. Other schemas stay qualified
+    // on both sides. Strip before the alias pass below so the substring
+    // replacements never see the qualifier.
+    typeName = strings.TrimPrefix(typeName, "public.")
+
     // Normalize common PostgreSQL type aliases and variations to canonical forms
     // Order matters - do longer matches first
     typeName = strings.ReplaceAll(typeName, "character varying", "varchar")

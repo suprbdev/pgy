@@ -1401,6 +1401,40 @@ func TestFunctionSkippedIfExists(t *testing.T) {
 	}
 }
 
+func TestFunctionQualifiedArgSkippedIfExists(t *testing.T) {
+	l := emptyLive()
+	l.Functions["public.hello(t my_type)"] = true
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.hello": {
+				Name: "hello", Schema: "public", ArgsSig: "(t public.my_type)",
+				Returns: "text", Language: "sql", Body: "select 'hello'",
+			},
+		},
+	}
+	p := Plan(l, desired, false)
+	if findCreate(p, "create function") {
+		t.Errorf("qualified arg type should match unqualified live signature; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionQualifiedArgCreate(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.hello": {
+				Name: "hello", Schema: "public", ArgsSig: "(t public.my_type)",
+				Returns: "text", Language: "sql", Body: "select 'hello'",
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create function "public"."hello"(t public.my_type)`) {
+		t.Errorf("expected qualified arg type verbatim in CREATE; creates: %v", p.Creates)
+	}
+}
+
 func TestFunctionSecurityDefiner(t *testing.T) {
 	desired := &schema.Database{
 		Tables: map[string]*schema.Table{},
@@ -1584,6 +1618,10 @@ func TestNormalizeFunctionSignature(t *testing.T) {
 		{"public.fn(key text, val jsonb default null)", "public.fn(key text, val jsonb)"},
 		{"public.fn(a integer, b boolean)", "public.fn(a int, b bool)"},
 		{"public.fn()", "public.fn()"},
+		{"public.fn(t public.my_type)", "public.fn(t my_type)"},
+		{"public.fn(public.my_type)", "public.fn(my_type)"},
+		{"public.fn(t app.my_type)", "public.fn(t app.my_type)"},
+		{"public.fn(t public.my_type default null)", "public.fn(t my_type)"},
 	}
 	for _, c := range cases {
 		got := normalizeFunctionSignature(c.in)
@@ -2849,6 +2887,20 @@ func TestProcedureWithArgs(t *testing.T) {
 	p := Plan(emptyLive(), desired, false)
 	if !findCreate(p, `create procedure "public"."archive_user"(user_id bigint) language plpgsql`) {
 		t.Errorf("expected args in CREATE PROCEDURE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureQualifiedArgSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.archive_user(t my_type)"] = true
+	live.ProcedureDefs["public.archive_user(t my_type)"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker"}
+	desired := procDesired("public.archive_user", &schema.Procedure{
+		Schema: "public", Name: "archive_user", ArgsSig: "(t public.my_type)",
+		Language: "plpgsql", Body: "begin null; end;",
+	})
+	p := Plan(live, desired, false)
+	if findCreate(p, "procedure") {
+		t.Errorf("qualified arg type should match unqualified live signature, got %v", p.Creates)
 	}
 }
 

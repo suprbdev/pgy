@@ -27,7 +27,7 @@ Features that encapsulate business logic, complex data structures, or procedural
 - [x] **ENUM Types** (Including `ALTER TYPE ... ADD VALUE` for new labels, order-preserving)
 - [x] **Composite Types** (Attribute order preserved from YAML declaration)
 - [x] **Extensions** (`CREATE EXTENSION`)
-- [x] **Functions** (PL/pgSQL, etc.; replace-on-change via body/attribute diff → `CREATE OR REPLACE`)
+- [x] **Functions** (PL/pgSQL, etc.; replace-on-change via body/attribute diff → `CREATE OR REPLACE`; arg types may be schema-qualified — unqualified and `public.`-qualified are equivalent)
 - [x] **Triggers** (Including `WHEN (condition)` guards via `when:` and `CREATE CONSTRAINT TRIGGER` with `deferrable`/`initiallyDeferred`. Matched by definition via `pg_get_triggerdef()` — a changed trigger is dropped and recreated in the same migration; equivalent definitions (case, casts, parens, event order, `EXECUTE FUNCTION` vs `PROCEDURE`) emit no SQL. Trigger creates are emitted after all table and function creates, so trigger functions may `dependsOn` their own table — needed for SQL-language bodies, which validate at CREATE time. `dependsOn` cycles are a hard error in `pgy diff`)
 - [x] **Views** (Standard `CREATE VIEW`; opt-in `replace: true` for `CREATE OR REPLACE` on every diff)
 - [x] **Materialized Views**
