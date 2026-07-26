@@ -338,7 +338,7 @@ tables:
 		t.Fatal(err)
 	}
 	tbl := db.Tables["public.orders"]
-	if !tbl.RowLevelSecurity {
+	if tbl.RowLevelSecurity == nil || !*tbl.RowLevelSecurity {
 		t.Error("want RowLevelSecurity true")
 	}
 	if len(tbl.Policies) != 2 {
@@ -354,6 +354,114 @@ tables:
 	}
 	if ins.For != "insert" || len(ins.To) != 1 || ins.WithCheck == "" || ins.Using != "" {
 		t.Errorf("insert policy fields wrong: %+v", ins)
+	}
+}
+
+// rowLevelSecurity is tri-state: absent (nil/unmanaged), true, false.
+func TestRLSTriStateParse(t *testing.T) {
+	yaml := `
+tables:
+  public.a:
+    columns:
+      id:
+        type: bigint
+    rowLevelSecurity: false
+  public.b:
+    columns:
+      id:
+        type: bigint
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rls := db.Tables["public.a"].RowLevelSecurity; rls == nil || *rls {
+		t.Errorf("want RowLevelSecurity false, got %v", rls)
+	}
+	if rls := db.Tables["public.b"].RowLevelSecurity; rls != nil {
+		t.Errorf("want RowLevelSecurity nil (unmanaged), got %v", *rls)
+	}
+}
+
+func TestRLSFalseParsesInSchemaBlockAndListFormats(t *testing.T) {
+	block := `
+schema app:
+  table orders:
+    columns:
+      id: bigint
+    rowLevelSecurity: false
+`
+	db, err := parseFlexibleDatabase([]byte(block))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rls := db.Tables["app.orders"].RowLevelSecurity; rls == nil || *rls {
+		t.Errorf("schema-block format: want false, got %v", rls)
+	}
+
+	list := `
+tables:
+  - name: orders
+    columns:
+      id:
+        type: bigint
+    rowLevelSecurity: false
+`
+	db, err = parseFlexibleDatabase([]byte(list))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rls := db.Tables["public.orders"].RowLevelSecurity; rls == nil || *rls {
+		t.Errorf("list format: want false, got %v", rls)
+	}
+}
+
+// A later file setting rowLevelSecurity: false must win over an earlier true,
+// and a later file omitting the key must not clear an earlier setting.
+func TestRLSMergeAcrossFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	on := write("a.yml", `
+tables:
+  public.t:
+    columns:
+      id:
+        type: bigint
+    rowLevelSecurity: true
+`)
+	off := write("b.yml", `
+tables:
+  public.t:
+    rowLevelSecurity: false
+`)
+	silent := write("c.yml", `
+tables:
+  public.t:
+    columns:
+      name:
+        type: text
+`)
+
+	db, err := LoadAndMerge([]string{on, off})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rls := db.Tables["public.t"].RowLevelSecurity; rls == nil || *rls {
+		t.Errorf("later false must win, got %v", rls)
+	}
+
+	db, err = LoadAndMerge([]string{on, silent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rls := db.Tables["public.t"].RowLevelSecurity; rls == nil || !*rls {
+		t.Errorf("file omitting the key must not clear earlier true, got %v", rls)
 	}
 }
 

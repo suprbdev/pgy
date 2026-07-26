@@ -567,7 +567,8 @@ Behavior:
 
 ## Row Level Security
 
-Tables accept `rowLevelSecurity: true` and a `policies:` map of policy name → spec.
+Tables accept `rowLevelSecurity: true` / `false` and a `policies:` map of policy
+name → spec.
 
 ```yaml
 schema app:
@@ -591,7 +592,7 @@ schema app:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `rowLevelSecurity` | boolean | Emits `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` when not already enabled. Never disables (forward-only) |
+| `rowLevelSecurity` | boolean | `true` emits `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` when not already enabled. `false` emits `... DISABLE ROW LEVEL SECURITY` when currently enabled, and only under `--unsafe`. Omit the key to leave the live setting alone |
 | `policies.<name>.for` | string | `select` \| `insert` \| `update` \| `delete` \| `all`. Omit for `ALL` |
 | `policies.<name>.to` | string or list | Role(s). Omit for all roles |
 | `policies.<name>.using` | string | `USING` expression |
@@ -599,9 +600,12 @@ schema app:
 
 Behavior:
 
-- Policies are matched **by name only** — changes to an existing policy's expressions are not detected. Rename the policy to replace it.
+- Policies are matched by name, and their definitions are diffed. A live policy whose `for`, `to`, `using` or `withCheck` no longer matches is dropped and recreated in the same migration transaction. This is not gated behind `--unsafe`: `DROP POLICY` is metadata-only and has no dependents.
+- Expression comparison is normalized, so the casts, parentheses and quoting PostgreSQL adds when echoing an expression back (`member_id = (current_setting('app.member_id'::text))::bigint`) do not count as a change. Role lists are compared order- and case-insensitively.
 - A present `policies:` block is authoritative: live policies not listed are dropped. Tables without a `policies:` block are unmanaged.
 - `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` are emitted after all object creates/alters, so policy expressions may freely reference functions created in the same plan.
+- `rowLevelSecurity` is tri-state. Omitting the key leaves the table's live RLS setting untouched, so adopting `pgy` for an existing database never silently changes it.
+- `rowLevelSecurity: false` is **gated behind `--unsafe`**. Disabling RLS stops every policy on the table from filtering rows, which widens access for all non-owner roles — it is a security-relevant change, so it never happens on a default `diff`. Note that disabling RLS does not drop the policies; they remain defined and take effect again if RLS is re-enabled.
 
 ## Roles
 

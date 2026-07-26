@@ -783,7 +783,7 @@ func rlsTable(policies []*schema.Policy) *schema.Table {
 	return &schema.Table{
 		Name:             "t",
 		Columns:          map[string]*schema.Column{"id": {Type: "bigint"}},
-		RowLevelSecurity: true,
+		RowLevelSecurity: schema.BoolPtr(true),
 		Policies:         policies,
 	}
 }
@@ -803,6 +803,55 @@ func TestRLSSkippedIfEnabled(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findAlter(p, "row level security") {
 		t.Errorf("RLS already enabled, should not re-enable; alters: %v", p.Alters)
+	}
+}
+
+func TestRLSDisableUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	tbl := rlsTable(nil)
+	tbl.RowLevelSecurity = schema.BoolPtr(false)
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": tbl}}
+	p := Plan(live, desired, true)
+	if !findAlter(p, `alter table "public"."t" disable row level security;`) {
+		t.Errorf("expected disable RLS; alters: %v", p.Alters)
+	}
+}
+
+func TestRLSDisableSkippedWithoutUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	tbl := rlsTable(nil)
+	tbl.RowLevelSecurity = schema.BoolPtr(false)
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": tbl}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "disable row level security") {
+		t.Errorf("disable RLS must be gated behind --unsafe; alters: %v", p.Alters)
+	}
+}
+
+func TestRLSDisableSkippedIfAlreadyDisabled(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	tbl := rlsTable(nil)
+	tbl.RowLevelSecurity = schema.BoolPtr(false)
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": tbl}}
+	p := Plan(live, desired, true)
+	if findAlter(p, "row level security") {
+		t.Errorf("RLS already disabled, should emit nothing; alters: %v", p.Alters)
+	}
+}
+
+// A table with no rowLevelSecurity key is unmanaged: live RLS is left alone
+// even under --unsafe.
+func TestRLSUnmanagedLeavesLiveEnabled(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	tbl := rlsTable(nil)
+	tbl.RowLevelSecurity = nil
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": tbl}}
+	p := Plan(live, desired, true)
+	if findAlter(p, "row level security") {
+		t.Errorf("unmanaged RLS should emit nothing; alters: %v", p.Alters)
 	}
 }
 
@@ -831,7 +880,9 @@ func TestPolicyWithCheck(t *testing.T) {
 func TestPolicySkippedIfExists(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
 	live.Tables["public.t"].RLSEnabled = true
-	live.Tables["public.t"].Policies = map[string]bool{"member_select": true}
+	live.Tables["public.t"].Policies = map[string]*LivePolicy{
+		"member_select": {Cmd: "select", Using: "true"},
+	}
 	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
 		{Name: "member_select", For: "select", Using: "true"},
 	})}}
@@ -851,7 +902,7 @@ func TestPolicyAfterFunctionCreate(t *testing.T) {
 			"public.t": {
 				Name:             "t",
 				Columns:          map[string]*schema.Column{"id": {Type: "bigint"}},
-				RowLevelSecurity: true,
+				RowLevelSecurity: schema.BoolPtr(true),
 				Policies: []*schema.Policy{
 					{Name: "admin_all", Using: "public.is_organisation_admin(id)"},
 				},
@@ -886,7 +937,7 @@ func TestPolicyAfterFunctionCreate(t *testing.T) {
 func TestPolicyDroppedOnRemoval(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
 	live.Tables["public.t"].RLSEnabled = true
-	live.Tables["public.t"].Policies = map[string]bool{"old_policy": true}
+	live.Tables["public.t"].Policies = map[string]*LivePolicy{"old_policy": {Cmd: "all"}}
 	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
 		{Name: "member_select", For: "select", Using: "true"},
 	})}}
@@ -902,9 +953,132 @@ func TestPolicyDroppedOnRemoval(t *testing.T) {
 	}
 }
 
+// livePolicyTable returns a live table with RLS on and one policy installed.
+func livePolicyTable(name string, lp *LivePolicy) *Live {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
+	live.Tables["public.t"].RLSEnabled = true
+	live.Tables["public.t"].Policies = map[string]*LivePolicy{name: lp}
+	return live
+}
+
+// assertPolicyReplaced checks the plan drops then recreates the policy, in
+// that order, within Alters (Drops renders last, so a drop there would run
+// after the recreate).
+func assertPolicyReplaced(t *testing.T, p *PlanDiff, name string) {
+	t.Helper()
+	drop := `drop policy "` + name + `" on "public"."t";`
+	dropAt, createAt := -1, -1
+	for i, s := range p.Alters {
+		if s == drop && dropAt == -1 {
+			dropAt = i
+		}
+		if strings.HasPrefix(s, `create policy "`+name+`"`) && createAt == -1 {
+			createAt = i
+		}
+	}
+	if dropAt == -1 || createAt == -1 {
+		t.Fatalf("expected drop+create of %q; alters: %v", name, p.Alters)
+	}
+	if dropAt > createAt {
+		t.Errorf("drop must precede create; alters: %v", p.Alters)
+	}
+	for _, s := range p.Drops {
+		if s == drop {
+			t.Errorf("replace drop must live in Alters, not Drops (Drops renders last); drops: %v", p.Drops)
+		}
+	}
+}
+
+func TestPolicyReplacedOnChangedUsing(t *testing.T) {
+	live := livePolicyTable("member_select", &LivePolicy{Cmd: "select", Using: "member_id = 1"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_select", For: "select", Using: "member_id = 2"},
+	})}}
+	p := Plan(live, desired, false)
+	assertPolicyReplaced(t, p, "member_select")
+	if !findAlter(p, `create policy "member_select" on "public"."t" for select using (member_id = 2);`) {
+		t.Errorf("expected recreate with new using; alters: %v", p.Alters)
+	}
+}
+
+func TestPolicyReplacedOnChangedWithCheck(t *testing.T) {
+	live := livePolicyTable("member_insert", &LivePolicy{Cmd: "insert", WithCheck: "member_id = 1"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "member_insert", For: "insert", WithCheck: "member_id = 2"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "member_insert")
+}
+
+func TestPolicyReplacedOnChangedCommand(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "select", Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", For: "delete", Using: "true"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "p")
+}
+
+func TestPolicyReplacedOnChangedRoles(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "all", Roles: []string{"alice"}, Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", To: []string{"bob"}, Using: "true"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "p")
+}
+
+// Narrowing PUBLIC (no TO clause) to a named role must be detected.
+func TestPolicyReplacedWhenRolesNarrowed(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "all", Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", To: []string{"app"}, Using: "true"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "p")
+}
+
+// An omitted `for:` means ALL, matching a live polcmd of '*'.
+func TestPolicyOmittedForMatchesLiveAll(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "all", Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", Using: "true"},
+	})}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "policy") {
+		t.Errorf("unchanged policy should emit nothing; alters: %v", p.Alters)
+	}
+}
+
+// PostgreSQL echoes expressions back with added casts, parens and quoting.
+// Those must not read as a change, or every plan would churn the policy.
+func TestPolicyNotReplacedOnEquivalentExpression(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{
+		Cmd:   "select",
+		Roles: []string{"app"},
+		Using: "(member_id = (current_setting('app.member_id'::text))::bigint)",
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", For: "select", To: []string{"app"},
+			Using: "member_id = current_setting('app.member_id')::bigint"},
+	})}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "policy") {
+		t.Errorf("equivalent expression should emit nothing; alters: %v", p.Alters)
+	}
+}
+
+// Role comparison is case- and order-insensitive.
+func TestPolicyRoleOrderAndCaseIgnored(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "all", Roles: []string{"alice", "bob"}, Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", To: []string{"BOB", "alice"}, Using: "true"},
+	})}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "policy") {
+		t.Errorf("same roles reordered should emit nothing; alters: %v", p.Alters)
+	}
+}
+
 func TestPolicyNoDropWithoutPoliciesBlock(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
-	live.Tables["public.t"].Policies = map[string]bool{"some_policy": true}
+	live.Tables["public.t"].Policies = map[string]*LivePolicy{"some_policy": {Cmd: "all"}}
 	desired := &schema.Database{Tables: map[string]*schema.Table{
 		"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "bigint"}}},
 	}}

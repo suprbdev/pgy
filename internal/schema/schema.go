@@ -96,7 +96,10 @@ type Table struct {
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
     Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
-    RowLevelSecurity bool      `yaml:"-"`
+    // RowLevelSecurity is tri-state: nil means unmanaged (RLS state is left
+    // alone), true means ENABLE, false means DISABLE (gated behind --unsafe,
+    // since disabling removes row filtering from every policy on the table).
+    RowLevelSecurity *bool     `yaml:"-"`
     Policies []*Policy         `yaml:"-"` // nil means unmanaged
     Comment string             `yaml:"-"` // empty means unmanaged
     PartitionBy *PartitionBy   `yaml:"-"` // declarative partitioning key (parent tables)
@@ -257,8 +260,8 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 if t.Grants != nil {
                     existing.Grants = t.Grants
                 }
-                if t.RowLevelSecurity {
-                    existing.RowLevelSecurity = true
+                if t.RowLevelSecurity != nil {
+                    existing.RowLevelSecurity = t.RowLevelSecurity
                 }
                 if t.Policies != nil {
                     existing.Policies = t.Policies
@@ -503,7 +506,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Grants = parseGrants(gRaw)
                 }
                 if rls, ok := m["rowLevelSecurity"].(bool); ok {
-                    t.RowLevelSecurity = rls
+                    t.RowLevelSecurity = &rls
                 }
                 if polRaw, ok := m["policies"]; ok {
                     t.Policies = parsePolicies(polRaw)
@@ -547,7 +550,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 t.Grants = parseGrants(gRaw)
             }
             if rls, ok := m["rowLevelSecurity"].(bool); ok {
-                t.RowLevelSecurity = rls
+                t.RowLevelSecurity = &rls
             }
             if polRaw, ok := m["policies"]; ok {
                 t.Policies = parsePolicies(polRaw)
@@ -599,7 +602,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Grants = parseGrants(gRaw)
                 }
                 if rls, ok := inner["rowLevelSecurity"].(bool); ok {
-                    t.RowLevelSecurity = rls
+                    t.RowLevelSecurity = &rls
                 }
                 if polRaw, ok := inner["policies"]; ok {
                     t.Policies = parsePolicies(polRaw)
@@ -787,6 +790,10 @@ func parseGrants(v any) map[string][]string {
     if len(out) == 0 { return nil }
     return out
 }
+
+// BoolPtr returns a pointer to b, for setting tri-state fields such as
+// Table.RowLevelSecurity where nil means unmanaged.
+func BoolPtr(b bool) *bool { return &b }
 
 func qualify(schemaName, tableName string) string {
     if tableName == "" { return tableName }

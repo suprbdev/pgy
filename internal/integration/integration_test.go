@@ -1678,7 +1678,7 @@ func TestIntegrationRLSAndPolicies(t *testing.T) {
 			sch + ".orders": {
 				Name:             "orders",
 				Columns:          map[string]*schema.Column{"id": {Type: "bigint"}, "member_id": {Type: "bigint"}},
-				RowLevelSecurity: true,
+				RowLevelSecurity: schema.BoolPtr(true),
 				Policies: []*schema.Policy{
 					{Name: "member_select", For: "select", To: []string{role},
 						Using: "member_id = current_setting('app.member_id')::bigint"},
@@ -1751,6 +1751,176 @@ func TestIntegrationRLSAndPolicies(t *testing.T) {
 	}
 	if polCount != 1 {
 		t.Errorf("expected 1 policy after removal, got %d", polCount)
+	}
+}
+
+// A changed policy expression must be detected and replaced, and an unchanged
+// one must not churn (PostgreSQL echoes expressions back with extra casts and
+// parens, which must normalize equal).
+func TestIntegrationPolicyReplacedOnChange(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "m")
+	ctx := context.Background()
+
+	pol := &schema.Policy{Name: "member_select", For: "select", To: []string{role},
+		Using: "member_id = current_setting('app.member_id')::bigint"}
+	tbl := &schema.Table{
+		Name:             "orders",
+		Columns:          map[string]*schema.Column{"id": {Type: "bigint"}, "member_id": {Type: "bigint"}},
+		RowLevelSecurity: schema.BoolPtr(true),
+		Policies:         []*schema.Policy{pol},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{sch + ".orders": tbl}}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	liveUsing := func() string {
+		var expr string
+		if err := pool.QueryRow(ctx, `
+			select pg_get_expr(pol.polqual, pol.polrelid)
+			from pg_policy pol
+			join pg_class c on c.oid = pol.polrelid
+			join pg_namespace n on n.oid = c.relnamespace
+			where n.nspname = $1 and c.relname = 'orders' and pol.polname = 'member_select'
+		`, sch).Scan(&expr); err != nil {
+			t.Fatal(err)
+		}
+		return expr
+	}
+
+	// unchanged -> empty plan (guards against churn on echoed expressions)
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty plan for unchanged policy; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
+	}
+
+	// change the expression -> replaced in place
+	pol.Using = "member_id = current_setting('app.other_id')::bigint"
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+	if got := liveUsing(); !strings.Contains(got, "app.other_id") {
+		t.Errorf("expected policy replaced with new expression, got %q", got)
+	}
+
+	// exactly one policy survives the drop+recreate
+	var polCount int
+	if err := pool.QueryRow(ctx, `
+		select count(*) from pg_policy pol
+		join pg_class c on c.oid = pol.polrelid
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 'orders'
+	`, sch).Scan(&polCount); err != nil {
+		t.Fatal(err)
+	}
+	if polCount != 1 {
+		t.Errorf("expected 1 policy after replace, got %d", polCount)
+	}
+
+	// changing only the command is detected too
+	pol.For = "delete"
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+	var cmd string
+	if err := pool.QueryRow(ctx, `
+		select pol.polcmd::text from pg_policy pol
+		join pg_class c on c.oid = pol.polrelid
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = $1 and c.relname = 'orders' and pol.polname = 'member_select'
+	`, sch).Scan(&cmd); err != nil {
+		t.Fatal(err)
+	}
+	if cmd != "d" {
+		t.Errorf("expected polcmd 'd' after command change, got %q", cmd)
+	}
+
+	// settled again
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty plan after replace; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
+	}
+}
+
+func TestIntegrationRLSDisable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	tbl := &schema.Table{
+		Name:             "orders",
+		Columns:          map[string]*schema.Column{"id": {Type: "bigint"}},
+		RowLevelSecurity: schema.BoolPtr(true),
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{sch + ".orders": tbl}}
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	rlsEnabled := func() bool {
+		var on bool
+		if err := pool.QueryRow(ctx, `
+			select c.relrowsecurity from pg_class c
+			join pg_namespace n on n.oid = c.relnamespace
+			where n.nspname = $1 and c.relname = 'orders'
+		`, sch).Scan(&on); err != nil {
+			t.Fatal(err)
+		}
+		return on
+	}
+	if !rlsEnabled() {
+		t.Fatal("expected RLS enabled after first apply")
+	}
+
+	// flip to false without --unsafe: no change
+	tbl.RowLevelSecurity = schema.BoolPtr(false)
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+	if !rlsEnabled() {
+		t.Error("RLS must stay enabled without --unsafe")
+	}
+
+	// with --unsafe: disabled
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, true))
+	if rlsEnabled() {
+		t.Error("expected RLS disabled under --unsafe")
+	}
+
+	// idempotent
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, true)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty second plan; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
 	}
 }
 
@@ -2055,7 +2225,7 @@ func TestIntegrationPolicyReferencingNewFunction(t *testing.T) {
 			sch + ".t": {
 				Name:             "t",
 				Columns:          map[string]*schema.Column{"id": {Type: "uuid"}},
-				RowLevelSecurity: true,
+				RowLevelSecurity: schema.BoolPtr(true),
 				Policies: []*schema.Policy{
 					{Name: "admin_all", Using: fmt.Sprintf("%q.is_organisation_admin(id)", sch)},
 				},

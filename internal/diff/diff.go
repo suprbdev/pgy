@@ -68,10 +68,21 @@ type LiveTable struct{
     ConstraintDefs map[string]string
     Indexes     map[string]bool // index name -> exists
     Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
-    Policies    map[string]bool // policy name -> exists
+    Policies    map[string]*LivePolicy // policy name -> live definition
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
+// LivePolicy is a policy as it exists in the live database. Cmd/Roles/Using/
+// WithCheck mirror the CREATE POLICY clauses so a redefined policy can be
+// detected and replaced. Roles is nil/empty when the policy applies to PUBLIC
+// (i.e. no explicit TO clause).
+type LivePolicy struct {
+    Cmd       string // select|insert|update|delete|all
+    Roles     []string
+    Using     string
+    WithCheck string
+}
+
 type LiveColumn struct{
     Type     string
     Nullable bool
@@ -143,7 +154,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]bool{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}
     }
     tableRows.Close()
     
@@ -175,7 +186,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]bool{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -282,9 +293,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     rlsRows.Close()
 
-    // Query existing policies
+    // Query existing policies, including their expressions and roles so a
+    // redefined policy can be detected. polroles is '{0}' for PUBLIC (no TO
+    // clause), which maps to an empty role list.
     polQ := `
-        select n.nspname, c.relname, pol.polname
+        select n.nspname, c.relname, pol.polname, pol.polcmd::text,
+               coalesce(
+                   (select array_agg(r.rolname order by r.rolname)
+                    from pg_roles r where r.oid = any(pol.polroles)),
+                   '{}'
+               ) as roles,
+               coalesce(pg_get_expr(pol.polqual, pol.polrelid), ''),
+               coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '')
         from pg_policy pol
         join pg_class c on c.oid = pol.polrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -293,14 +313,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     polRows, err := pool.Query(ctx, polQ)
     if err != nil { return nil, err }
     for polRows.Next() {
-        var schemaName, tableName, polName string
-        if err := polRows.Scan(&schemaName, &tableName, &polName); err != nil {
+        var schemaName, tableName, polName, polCmd string
+        var roles []string
+        var using, withCheck string
+        if err := polRows.Scan(&schemaName, &tableName, &polName, &polCmd, &roles, &using, &withCheck); err != nil {
             polRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         if t := l.Tables[key]; t != nil {
-            t.Policies[polName] = true
+            t.Policies[polName] = &LivePolicy{
+                Cmd:       expandPolicyCmd(polCmd),
+                Roles:     roles,
+                Using:     using,
+                WithCheck: withCheck,
+            }
         }
     }
     polRows.Close()
@@ -1119,7 +1146,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     }
     plan.Creates = append(plan.Creates, deferredTriggers...)
     plan.Alters = append(plan.Alters, deferredFKs...)
-    planPolicies(plan, live, desired)
+    planPolicies(plan, live, desired, unsafe)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired)...)
     return plan
@@ -1710,11 +1737,11 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
 
 }
 
-// planPolicies emits ENABLE ROW LEVEL SECURITY and policy create/drop for all
-// tables. Runs after every object create/alter (policies may reference
+// planPolicies emits ENABLE/DISABLE ROW LEVEL SECURITY and policy create/drop
+// for all tables. Runs after every object create/alter (policies may reference
 // functions created later in the same plan than their table — dependsOn cannot
 // order this when the table itself is skipped as already live).
-func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database) {
+func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe bool) {
     tableNames := make([]string, 0, len(desired.Tables))
     for k := range desired.Tables { tableNames = append(tableNames, k) }
     sort.Strings(tableNames)
@@ -1723,20 +1750,35 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database) {
         if dt == nil { continue }
         lt := live.Tables[fq]
 
-        // Row level security (enable only — forward-only tool, never disables)
-        if dt.RowLevelSecurity && (lt == nil || !lt.RLSEnabled) {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
+        // Row level security. nil means unmanaged: the live state is left
+        // alone. Disabling widens access — every policy on the table stops
+        // filtering rows — so it is gated behind --unsafe, like DROP COLUMN.
+        if dt.RowLevelSecurity != nil {
+            if *dt.RowLevelSecurity {
+                if lt == nil || !lt.RLSEnabled {
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
+                }
+            } else if unsafe && lt != nil && lt.RLSEnabled {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s disable row level security;", pqIdent(fq)))
+            }
         }
 
-        // Policies — a present policies block is authoritative by name:
-        // missing policies are created, live policies not listed are dropped.
-        livePolicies := map[string]bool{}
+        // Policies — a present policies block is authoritative: missing
+        // policies are created, live policies not listed are dropped, and a
+        // live policy whose definition no longer matches is dropped and
+        // recreated. Like triggers (and unlike constraints) the replace is not
+        // gated behind --unsafe: DROP POLICY is metadata-only, has no
+        // dependents, and the recreate runs in the same migration transaction.
+        livePolicies := map[string]*LivePolicy{}
         if lt != nil { livePolicies = lt.Policies }
         desiredPolicies := map[string]bool{}
         for _, pol := range dt.Policies {
             if pol == nil || pol.Name == "" { continue }
             desiredPolicies[pol.Name] = true
-            if livePolicies[pol.Name] { continue }
+            if lp := livePolicies[pol.Name]; lp != nil {
+                if policyMatchesLive(pol, lp) { continue }
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(pol.Name), pqIdent(fq)))
+            }
             stmt := fmt.Sprintf("create policy %s on %s", pqIdent(pol.Name), pqIdent(fq))
             if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
             if len(pol.To) > 0 {
@@ -1915,6 +1957,50 @@ func renderConstraintDef(ct *schema.Constraint) string {
         return fmt.Sprintf("exclude %s", ct.Expression)
     }
     return ""
+}
+
+// expandPolicyCmd maps pg_policy.polcmd's single-char encoding to the command
+// keyword used in CREATE POLICY ... FOR <cmd>.
+func expandPolicyCmd(c string) string {
+    switch c {
+    case "r":
+        return "select"
+    case "a":
+        return "insert"
+    case "w":
+        return "update"
+    case "d":
+        return "delete"
+    default: // "*"
+        return "all"
+    }
+}
+
+// policyMatchesLive reports whether a desired policy is already in place. The
+// expressions are compared with normalizeConstraintDef, so the casts, parens
+// and quoting PostgreSQL adds when echoing an expression back (`member_id =
+// (current_setting('app.member_id'))::bigint`) do not count as a change.
+//
+// An empty desired For means ALL; an empty desired To means PUBLIC, which is
+// how the live side reports a policy with no TO clause.
+func policyMatchesLive(pol *schema.Policy, live *LivePolicy) bool {
+    wantCmd := strings.ToLower(pol.For)
+    if wantCmd == "" { wantCmd = "all" }
+    if wantCmd != live.Cmd { return false }
+
+    wantRoles := append([]string{}, pol.To...)
+    for i, r := range wantRoles { wantRoles[i] = strings.ToLower(r) }
+    liveRoles := append([]string{}, live.Roles...)
+    for i, r := range liveRoles { liveRoles[i] = strings.ToLower(r) }
+    sort.Strings(wantRoles)
+    sort.Strings(liveRoles)
+    if len(wantRoles) != len(liveRoles) { return false }
+    for i := range wantRoles {
+        if wantRoles[i] != liveRoles[i] { return false }
+    }
+
+    return constraintDefsEqual(pol.Using, live.Using) &&
+        constraintDefsEqual(pol.WithCheck, live.WithCheck)
 }
 
 func constraintDefsEqual(desired, live string) bool {
