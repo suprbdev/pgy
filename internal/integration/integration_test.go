@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1622,6 +1623,211 @@ func TestIntegrationFunctionRevokePublic(t *testing.T) {
 		if strings.Contains(s, "grant") || strings.Contains(s, "revoke") {
 			t.Errorf("expected no grant churn on second plan; alters: %v", p.Alters)
 		}
+	}
+}
+
+// Regression for the two grant bugs in PGY_GRANT_BUGS.md. Two-step: migrate to
+// a table-wide select, then narrow the YAML to per-column select. A fresh-DB
+// single-shot test passes even when both bugs are present.
+//
+// Bug 1: emptying a role's privilege list must emit a REVOKE rather than being
+// silently dropped as unmanaged. Bug 2: REVOKE ... ON TABLE also strips column
+// privileges, so the revoke must be ordered before the column grants.
+func TestIntegrationGrantNarrowTableToColumns(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "anon")
+	ctx := context.Background()
+
+	// Load through LoadAndMerge rather than building structs directly: bug 1
+	// was in YAML parsing, so a struct-literal desired state cannot catch it.
+	dir := t.TempDir()
+	loadYAML := func(body string) *schema.Database {
+		t.Helper()
+		p := filepath.Join(dir, "schema.yml")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		db, err := schema.LoadAndMerge([]string{p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+
+	desired := loadYAML(fmt.Sprintf(`
+tables:
+  %s.person:
+    columns:
+      id:
+        type: bigint
+      email:
+        type: text
+    grants:
+      %s: [select]
+`, sch, role))
+
+	// step 1: table-wide select
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	// selectableCols reports which columns the role can actually read,
+	// counting both table-level and column-level privileges.
+	selectableCols := func() []string {
+		rows, err := pool.Query(ctx, `
+			select column_name from information_schema.column_privileges
+			where table_schema=$1 and table_name='person'
+			  and grantee=$2 and privilege_type='SELECT'
+			order by column_name
+		`, sch, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+
+	if got := selectableCols(); len(got) != 2 {
+		t.Fatalf("step 1: expected select on both columns, got %v", got)
+	}
+
+	// step 2: narrow to id only — empty the table grant, add a column grant
+	desired = loadYAML(fmt.Sprintf(`
+tables:
+  %s.person:
+    columns:
+      id:
+        type: bigint
+        grants:
+          %s: [select]
+      email:
+        type: text
+    grants:
+      %s: []
+`, sch, role, role))
+
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := diff.Plan(live, desired, false)
+	if len(p.Alters) == 0 {
+		t.Fatal("step 2: expected a plan; removing a grant must not be a no-op")
+	}
+	applyPlan(t, pool, p)
+
+	got := selectableCols()
+	if len(got) != 1 || got[0] != "id" {
+		t.Errorf("expected select on exactly [id] after narrowing, got %v", got)
+	}
+
+	// the role must genuinely be unable to read email
+	var canReadEmail bool
+	if err := pool.QueryRow(ctx,
+		`select has_column_privilege($1, $2, 'email', 'select')`,
+		role, sch+".person").Scan(&canReadEmail); err != nil {
+		t.Fatal(err)
+	}
+	if canReadEmail {
+		t.Error("role must not retain select on email after the table grant is revoked")
+	}
+
+	// round-trip idempotence
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = diff.Plan(live, desired, false)
+	if len(p.Creates)+len(p.Alters)+len(p.Drops) != 0 {
+		t.Errorf("expected empty plan after narrowing; creates=%v alters=%v drops=%v", p.Creates, p.Alters, p.Drops)
+	}
+}
+
+// Removing a column grant entirely must revoke it.
+func TestIntegrationColumnGrantRemoved(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := freshRole(t, pool, "c")
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	loadYAML := func(body string) *schema.Database {
+		t.Helper()
+		p := filepath.Join(dir, "schema.yml")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		db, err := schema.LoadAndMerge([]string{p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+
+	desired := loadYAML(fmt.Sprintf(`
+tables:
+  %s.person:
+    columns:
+      id:
+        type: bigint
+        grants:
+          %s: [select]
+    grants:
+      %s: []
+`, sch, role, role))
+
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	var canRead bool
+	if err := pool.QueryRow(ctx,
+		`select has_column_privilege($1, $2, 'id', 'select')`,
+		role, sch+".person").Scan(&canRead); err != nil {
+		t.Fatal(err)
+	}
+	if !canRead {
+		t.Fatal("setup: expected column grant to apply")
+	}
+
+	// remove the column grant
+	desired = loadYAML(fmt.Sprintf(`
+tables:
+  %s.person:
+    columns:
+      id:
+        type: bigint
+        grants:
+          %s: []
+    grants:
+      %s: []
+`, sch, role, role))
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	if err := pool.QueryRow(ctx,
+		`select has_column_privilege($1, $2, 'id', 'select')`,
+		role, sch+".person").Scan(&canRead); err != nil {
+		t.Fatal(err)
+	}
+	if canRead {
+		t.Error("expected column select revoked after removal from YAML")
 	}
 }
 

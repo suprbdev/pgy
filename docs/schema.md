@@ -677,8 +677,10 @@ Behavior:
 
 - A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched.
 - Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
+- An **empty privilege list** (`some_role: []`) is not the same as omitting the block. It means "this role holds nothing on this object" and revokes whatever the live database still grants. Use it to take a privilege away while keeping the object managed.
 - `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute.
 - Grant/revoke statements are emitted after all object creation and FK alters.
+- **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
 ### Column-Level Grants
 
@@ -706,6 +708,7 @@ grant select ("email"), update ("email") on table "public"."users" to "support";
 - Valid column privileges are `select`, `insert`, `update`, and `references` (PostgreSQL restriction; pgy passes privileges through verbatim).
 - A column **with** a `grants:` block is authoritative for that column: missing privileges are granted, extra live column privileges are revoked. Columns without a block are unmanaged.
 - `PUBLIC` column grants are never auto-revoked.
+- To narrow a table-wide grant to specific columns, empty the table-level list and add per-column grants in the same change: `grants: {role: []}` on the table plus `grants: {role: [select]}` on each column. The table revoke is ordered ahead of the column grants, so the result is select on exactly those columns.
 - Column grants are independent of table-level grants: a table-level `select` already covers every column, so column grants are typically used *instead of* a table-level privilege to restrict access to a subset of columns.
 
 | Property | Type | Description |

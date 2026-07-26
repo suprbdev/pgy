@@ -776,18 +776,22 @@ func parseRoles(v any) map[string]*Role {
 
 // parseGrants parses { role: [priv, ...], ... }. Privileges are lowercased.
 // Returns nil (unmanaged) if the value has no valid role -> list entries.
+// parseGrants builds the role -> privileges map for a grants block. A role
+// mapped to an empty list is kept as an empty (non-nil) entry rather than
+// dropped: it means "this role should hold no privileges here", which the diff
+// layer turns into a REVOKE. Likewise a present-but-empty block returns an
+// empty map, not nil — nil is reserved for "no grants block at all", i.e.
+// unmanaged, where live privileges are left untouched.
 func parseGrants(v any) map[string][]string {
     m, ok := v.(map[string]any)
     if !ok { return nil }
     out := map[string][]string{}
     for role, privs := range m {
         list := parseStringListFromNode(privs)
-        if len(list) == 0 { continue }
         for i := range list { list[i] = strings.ToLower(strings.TrimSpace(list[i])) }
         sort.Strings(list)
         out[role] = list
     }
-    if len(out) == 0 { return nil }
     return out
 }
 

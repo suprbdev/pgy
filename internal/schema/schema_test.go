@@ -746,6 +746,57 @@ tables:
 	}
 }
 
+// An empty privilege list must survive parsing as an empty (non-nil) entry:
+// `role: []` means "revoke everything for this role", which is distinct from
+// omitting the grants block entirely (unmanaged). Dropping it made removing a
+// grant from the YAML a silent no-op.
+func TestGrantsEmptyListPreserved(t *testing.T) {
+	yaml := `
+tables:
+  public.person:
+    columns:
+      id:
+        type: bigint
+        grants:
+          anon: []
+      email:
+        type: text
+    grants:
+      anon: []
+      other: [select]
+  public.unmanaged:
+    columns:
+      id:
+        type: bigint
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["public.person"]
+	if tbl.Grants == nil {
+		t.Fatal("present grants block must not parse to nil (unmanaged)")
+	}
+	privs, ok := tbl.Grants["anon"]
+	if !ok {
+		t.Fatal("role with an empty list must be kept, not dropped")
+	}
+	if len(privs) != 0 {
+		t.Errorf("want empty privilege list, got %v", privs)
+	}
+	if got := tbl.Grants["other"]; len(got) != 1 || got[0] != "select" {
+		t.Errorf("sibling role wrong: %v", got)
+	}
+	if cg := tbl.Columns["id"].Grants; cg == nil {
+		t.Error("column grants block with an empty list must not be nil")
+	} else if p, ok := cg["anon"]; !ok || len(p) != 0 {
+		t.Errorf("column role with empty list must be kept empty, got %v ok=%v", p, ok)
+	}
+	if db.Tables["public.unmanaged"].Grants != nil {
+		t.Error("absent grants block must stay nil (unmanaged)")
+	}
+}
+
 // --- trigger when guard ---
 
 func TestTriggerWhenParse(t *testing.T) {

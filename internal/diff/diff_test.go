@@ -556,6 +556,122 @@ func TestGrantNoRevokeWithoutGrantsBlock(t *testing.T) {
 	}
 }
 
+// An explicitly empty privilege list (`role: []`) means "this role holds
+// nothing here" and must revoke, not be silently dropped as unmanaged.
+func TestGrantEmptyListRevokes(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"anon": {"select": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"anon": {}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `revoke select on table "public"."t" from "anon";`) {
+		t.Errorf("expected revoke for emptied grant list; alters: %v", p.Alters)
+	}
+}
+
+// A grants block whose every role is empty is still a present block, so it
+// stays authoritative rather than degrading to unmanaged.
+func TestGrantAllRolesEmptyStillAuthoritative(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.TableGrants["public.t"] = map[string]map[string]bool{
+		"anon": {"select": true, "insert": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"anon": {}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `revoke insert, select on table "public"."t" from "anon";`) {
+		t.Errorf("expected all privileges revoked; alters: %v", p.Alters)
+	}
+}
+
+// Narrowing a table-wide grant to per-column grants: REVOKE ... ON TABLE also
+// strips column privileges, so the revoke must be emitted before the column
+// grant or it destroys it.
+func TestGrantRevokeEmittedBeforeColumnGrant(t *testing.T) {
+	live := liveWithTable("public.person", map[string]*LiveColumn{
+		"id": {Type: "bigint"}, "email": {Type: "text"},
+	})
+	live.TableGrants["public.person"] = map[string]map[string]bool{
+		"anon": {"select": true},
+	}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.person": {
+			Name: "person",
+			Columns: map[string]*schema.Column{
+				"id":    {Type: "bigint", Grants: map[string][]string{"anon": {"select"}}},
+				"email": {Type: "text"},
+			},
+			Grants: map[string][]string{"anon": {}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	rv := alterIndex(p, `revoke select on table "public"."person" from "anon";`)
+	gr := alterIndex(p, `grant select ("id") on table "public"."person" to "anon";`)
+	if rv == -1 {
+		t.Fatalf("expected table revoke; alters: %v", p.Alters)
+	}
+	if gr == -1 {
+		t.Fatalf("expected column grant; alters: %v", p.Alters)
+	}
+	if rv > gr {
+		t.Errorf("revoke must precede column grant or it strips it; alters: %v", p.Alters)
+	}
+}
+
+// Every revoke precedes every grant across all objects, not just within one
+// table — a later table's revoke must not land after an earlier table's grant.
+func TestGrantAllRevokesPrecedeAllGrants(t *testing.T) {
+	live := liveWithTable("public.aaa", map[string]*LiveColumn{"id": {Type: "int"}})
+	live.Tables["public.zzz"] = &LiveTable{
+		Columns:     map[string]*LiveColumn{"id": {Type: "int"}},
+		Constraints: map[string]bool{}, ConstraintDefs: map[string]string{},
+		Indexes: map[string]bool{}, Triggers: map[string]string{},
+		Policies: map[string]*LivePolicy{},
+	}
+	live.TableGrants["public.zzz"] = map[string]map[string]bool{"anon": {"select": true}}
+
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.aaa": {
+			Name:    "aaa",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"anon": {"select"}},
+		},
+		"public.zzz": {
+			Name:    "zzz",
+			Columns: map[string]*schema.Column{"id": {Type: "int"}},
+			Grants:  map[string][]string{"anon": {}},
+		},
+	}}
+	p := Plan(live, desired, false)
+	lastRevoke, firstGrant := -1, -1
+	for i, s := range p.Alters {
+		if strings.HasPrefix(s, "revoke ") {
+			lastRevoke = i
+		}
+		if strings.HasPrefix(s, "grant ") && firstGrant == -1 {
+			firstGrant = i
+		}
+	}
+	if lastRevoke == -1 || firstGrant == -1 {
+		t.Fatalf("expected both a revoke and a grant; alters: %v", p.Alters)
+	}
+	if lastRevoke > firstGrant {
+		t.Errorf("all revokes must precede all grants; alters: %v", p.Alters)
+	}
+}
+
 // --- column-level grants ---
 
 func TestColumnGrantCreate(t *testing.T) {

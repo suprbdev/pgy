@@ -1406,14 +1406,24 @@ func planComments(live *Live, desired *schema.Database) []string {
 // and functions. A present grants block is authoritative: missing privileges
 // are granted, live privileges absent from the block are revoked. PUBLIC is
 // never auto-revoked; for functions use revokePublic.
+//
+// Every REVOKE is emitted ahead of every GRANT. PostgreSQL's REVOKE ... ON
+// TABLE also drops that role's column-level privileges, so narrowing a
+// table-wide grant to per-column grants in one migration must revoke first or
+// the table revoke wipes the column grants issued above it.
 func planGrants(live *Live, desired *schema.Database) []string {
-    stmts := []string{}
+    revokes := []string{}
+    grants := []string{}
+    add := func(rv, gr []string) {
+        revokes = append(revokes, rv...)
+        grants = append(grants, gr...)
+    }
 
     schemaNames := make([]string, 0, len(desired.SchemaGrants))
     for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
-        stmts = append(stmts, grantDiffStmts("schema "+pqIdent(s), desired.SchemaGrants[s], live.SchemaGrants[s])...)
+        add(grantDiffStmts("schema "+pqIdent(s), desired.SchemaGrants[s], live.SchemaGrants[s]))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -1423,7 +1433,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
         dt := desired.Tables[k]
         if dt == nil { continue }
         if dt.Grants != nil {
-            stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k])...)
+            add(grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k]))
         }
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -1431,7 +1441,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
         for _, cn := range colNames {
             c := dt.Columns[cn]
             if c == nil || c.Grants == nil { continue }
-            stmts = append(stmts, columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn])...)
+            add(columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn]))
         }
     }
 
@@ -1444,7 +1454,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range viewNames {
         vw := desired.Views[k]
         if vw == nil || vw.Grants == nil { continue }
-        stmts = append(stmts, grantDiffStmts("table "+pqIdent(k), vw.Grants, live.TableGrants[k])...)
+        add(grantDiffStmts("table "+pqIdent(k), vw.Grants, live.TableGrants[k]))
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -1462,11 +1472,11 @@ func planGrants(live *Live, desired *schema.Database) []string {
                 if normalizeFunctionSignature(liveSig) == norm { liveExists = true; break }
             }
             if !liveExists || live.FunctionPublicExec[norm] {
-                stmts = append(stmts, fmt.Sprintf("revoke all on %s from public;", target))
+                revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
             }
         }
         if f.Grants != nil {
-            stmts = append(stmts, grantDiffStmts(target, f.Grants, live.FunctionGrants[norm])...)
+            add(grantDiffStmts(target, f.Grants, live.FunctionGrants[norm]))
         }
     }
 
@@ -1482,20 +1492,23 @@ func planGrants(live *Live, desired *schema.Database) []string {
         if pr.RevokePublic {
             // new procedure (not live yet) has default PUBLIC execute
             if !live.Procedures[norm] || live.FunctionPublicExec[norm] {
-                stmts = append(stmts, fmt.Sprintf("revoke all on %s from public;", target))
+                revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
             }
         }
         if pr.Grants != nil {
-            stmts = append(stmts, grantDiffStmts(target, pr.Grants, live.FunctionGrants[norm])...)
+            add(grantDiffStmts(target, pr.Grants, live.FunctionGrants[norm]))
         }
     }
-    return stmts
+    return append(revokes, grants...)
 }
 
-// grantDiffStmts returns grant/revoke statements reconciling desired role->privs
-// against live role->priv->exists for one target ("table X", "schema Y", ...).
-func grantDiffStmts(target string, desired map[string][]string, liveG map[string]map[string]bool) []string {
-    out := []string{}
+// grantDiffStmts returns revoke and grant statements reconciling desired
+// role->privs against live role->priv->exists for one target ("table X",
+// "schema Y", ...). Revokes and grants are returned separately so the caller
+// can emit every revoke ahead of every grant: REVOKE ... ON TABLE also strips
+// that role's column-level privileges, so a table revoke running after a
+// column grant would silently destroy it.
+func grantDiffStmts(target string, desired map[string][]string, liveG map[string]map[string]bool) (revokes, grants []string) {
     roles := make([]string, 0, len(desired))
     for r := range desired { roles = append(roles, r) }
     sort.Strings(roles)
@@ -1507,7 +1520,7 @@ func grantDiffStmts(target string, desired map[string][]string, liveG map[string
         }
         if len(missing) > 0 {
             sort.Strings(missing)
-            out = append(out, fmt.Sprintf("grant %s on %s to %s;", strings.Join(missing, ", "), target, grantRole(role)))
+            grants = append(grants, fmt.Sprintf("grant %s on %s to %s;", strings.Join(missing, ", "), target, grantRole(role)))
         }
     }
     liveRoles := make([]string, 0, len(liveG))
@@ -1523,10 +1536,10 @@ func grantDiffStmts(target string, desired map[string][]string, liveG map[string
         }
         if len(extra) > 0 {
             sort.Strings(extra)
-            out = append(out, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(extra, ", "), target, grantRole(role)))
+            revokes = append(revokes, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(extra, ", "), target, grantRole(role)))
         }
     }
-    return out
+    return revokes, grants
 }
 
 // columnGrantDiffStmts reconciles desired role->privs for one column against
@@ -1534,8 +1547,7 @@ func grantDiffStmts(target string, desired map[string][]string, liveG map[string
 // grantDiffStmts: missing privileges are granted, extra live privileges are
 // revoked, PUBLIC is never auto-revoked. Emits column-list grant syntax:
 // grant select ("email") on table "s"."t" to "role";
-func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool) []string {
-    out := []string{}
+func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool) (revokes, grants []string) {
     target := "table " + pqIdent(tableKey)
     colIdent := pqIdent(col)
     roles := make([]string, 0, len(desired))
@@ -1551,7 +1563,7 @@ func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liv
             sort.Strings(missing)
             parts := make([]string, 0, len(missing))
             for _, p := range missing { parts = append(parts, p+" ("+colIdent+")") }
-            out = append(out, fmt.Sprintf("grant %s on %s to %s;", strings.Join(parts, ", "), target, grantRole(role)))
+            grants = append(grants, fmt.Sprintf("grant %s on %s to %s;", strings.Join(parts, ", "), target, grantRole(role)))
         }
     }
     liveRoles := make([]string, 0, len(liveG))
@@ -1569,10 +1581,10 @@ func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liv
             sort.Strings(extra)
             parts := make([]string, 0, len(extra))
             for _, p := range extra { parts = append(parts, p+" ("+colIdent+")") }
-            out = append(out, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(parts, ", "), target, grantRole(role)))
+            revokes = append(revokes, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(parts, ", "), target, grantRole(role)))
         }
     }
-    return out
+    return revokes, grants
 }
 
 // grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.
