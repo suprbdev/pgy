@@ -5,8 +5,8 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "runtime/debug"
     "strings"
-    "time"
 
     "github.com/spf13/cobra"
 )
@@ -149,16 +149,46 @@ func splitCSV(v string) []string {
     return out
 }
 
-var (
-    version = "0.1.0"
-    builtAt = ""
-)
+// version is set at build time via -ldflags "-X .../internal/cli.version=...".
+// When it is empty (e.g. `go install`, `go run`, or a plain `go build`), it is
+// derived from the module build info instead.
+var version = ""
 
 func VersionString() string {
-    if builtAt == "" {
-        return fmt.Sprintf("pgy %s", version)
+    return fmt.Sprintf("pgy %s", resolveVersion())
+}
+
+func resolveVersion() string {
+    if version != "" {
+        return version
     }
-    return fmt.Sprintf("pgy %s (%s)", version, time.Unix(0, 0).UTC().Format(time.RFC3339))
+    info, ok := debug.ReadBuildInfo()
+    if !ok {
+        return "dev"
+    }
+    // Module version is set for `go install module@version` builds.
+    if v := info.Main.Version; v != "" && v != "(devel)" {
+        return v
+    }
+    // Otherwise fall back to VCS stamps recorded by the toolchain.
+    var revision, dirty string
+    for _, s := range info.Settings {
+        switch s.Key {
+        case "vcs.revision":
+            revision = s.Value
+        case "vcs.modified":
+            if s.Value == "true" {
+                dirty = "-dirty"
+            }
+        }
+    }
+    if revision != "" {
+        if len(revision) > 12 {
+            revision = revision[:12]
+        }
+        return revision + dirty
+    }
+    return "dev"
 }
 
 
