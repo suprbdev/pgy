@@ -43,6 +43,13 @@ func AttachGlobalFlags(root *cobra.Command) {
 
     // store on context for subcommands
     root.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+        // Commands that need no schema/DB config: skip config load and the
+        // schema-root walk entirely.
+        switch cmd.Name() {
+        case "version", "help":
+            return
+        }
+
         // Load .pgy.yml and merge with precedence: flags > env > config > defaults
         fc, _ := loadFileConfig(".")
         f := cmd.Flags()
@@ -84,6 +91,12 @@ func AttachGlobalFlags(root *cobra.Command) {
                     return nil
                 }
                 if d.IsDir() {
+                    // Never descend into dot-dirs or dependency trees; walking an
+                    // unpruned "." (e.g. $HOME) is pathologically slow.
+                    n := d.Name()
+                    if path != cfg.SchemaRoot && (strings.HasPrefix(n, ".") || n == "node_modules" || n == "vendor") {
+                        return filepath.SkipDir
+                    }
                     return nil
                 }
                 if strings.HasSuffix(d.Name(), ".yml") || strings.HasSuffix(d.Name(), ".yaml") {
