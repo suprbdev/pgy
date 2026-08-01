@@ -1126,7 +1126,14 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
                     if !ok {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
+                        // ADD COLUMN is emitted into Creates at the table's
+                        // topological position, not Alters: Render puts all
+                        // Creates before Alters, so later creates in the same
+                        // buffer that reference the new column (indexes on it,
+                        // functions with dependsOn on this table) would
+                        // otherwise run before the column exists and force a
+                        // two-migration split.
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
                         continue
                     }
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
@@ -2228,12 +2235,20 @@ func normalizeArg(arg string) string {
 
 // normalizeArgNoDefault normalizes an argument without default clause
 func normalizeArgNoDefault(arg string) string {
-    // Format: "param_name type_name" or "param_name schema.type_name"
-    // Normalize whitespace and type names
+    // Format: "param_name type_name", "param_name schema.type_name", or an
+    // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
     words := strings.Fields(arg)
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
-        return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public.")
+        return normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
+    }
+
+    // Unnamed multi-word type: pg_get_function_identity_arguments prints
+    // unnamed args as bare canonical type names, so "timestamp with time
+    // zone[]" must not be parsed as param "timestamp" + type "with time
+    // zone[]" — it would never match the YAML's "timestamptz[]" spelling.
+    if isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) {
+        return normalizeColumnType(arg)
     }
 
     // Parameter name (first word) - lowercase for comparison
@@ -2249,20 +2264,27 @@ func normalizeArgNoDefault(arg string) string {
     // replacements never see the qualifier.
     typeName = strings.TrimPrefix(typeName, "public.")
 
-    // Normalize common PostgreSQL type aliases and variations to canonical forms
-    // Order matters - do longer matches first
-    typeName = strings.ReplaceAll(typeName, "character varying", "varchar")
-    typeName = strings.ReplaceAll(typeName, "double precision", "float8")
-    typeName = strings.ReplaceAll(typeName, "integer", "int")
-    typeName = strings.ReplaceAll(typeName, "int4", "int")
-    typeName = strings.ReplaceAll(typeName, "int8", "bigint")
-    typeName = strings.ReplaceAll(typeName, "boolean", "bool")
-    typeName = strings.ReplaceAll(typeName, "character", "char")
-    
-    // Normalize whitespace (multiple spaces to single)
-    typeName = strings.Join(strings.Fields(typeName), " ")
-    
+    // Canonicalize through the same alias table as column types so alias
+    // spellings (timestamptz[]) and live canonical forms (timestamp with
+    // time zone[]) compare equal instead of re-emitting the function forever.
+    typeName = normalizeColumnType(typeName)
+
     return paramName + " " + typeName
+}
+
+// isMultiWordTypeStart reports whether the first two tokens of an argument
+// begin a multi-word Postgres type name rather than "param_name type_name".
+func isMultiWordTypeStart(first, second string) bool {
+    switch {
+    case first == "double" && second == "precision",
+        (first == "character" || first == "bit") && second == "varying",
+        // covers time/timestamp, with or without an inline modifier ("timestamp(6)")
+        strings.HasPrefix(first, "time") && (second == "with" || second == "without"),
+        first == "interval" && (second == "year" || second == "month" || second == "day" ||
+            second == "hour" || second == "minute" || strings.HasPrefix(second, "second")):
+        return true
+    }
+    return false
 }
 
 
