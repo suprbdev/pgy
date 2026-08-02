@@ -832,16 +832,35 @@ func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
     return false
 }
 
-// functionChanged reports whether a live function's definition differs from
-// desired. Volatility/security are compared only when the YAML sets them;
-// body comparison is whitespace-trimmed (prosrc stores the body verbatim).
-func functionChanged(f *schema.Function, lf *LiveFunction) bool {
-    if strings.TrimSpace(f.Body) != strings.TrimSpace(lf.Body) { return true }
-    if f.Volatility != "" && strings.ToLower(f.Volatility) != lf.Volatility { return true }
-    if f.Security != "" && strings.ToLower(f.Security) != lf.Security { return true }
-    if f.Strict != lf.Strict { return true }
-    if f.Leakproof != lf.Leakproof { return true }
-    return false
+// functionAttrClauses returns ALTER FUNCTION action clauses for attribute
+// settings the YAML manages (non-empty volatility/security, non-nil
+// strict/leakproof) that differ from live. Used when the body is unchanged
+// (or unmanaged) so an attribute flip doesn't require CREATE OR REPLACE —
+// essential for extension-owned functions (e.g. PostGIS LANGUAGE c) whose
+// bodies pgy cannot express.
+func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
+    out := []string{}
+    if f.Volatility != "" && strings.ToLower(f.Volatility) != lf.Volatility {
+        out = append(out, strings.ToLower(f.Volatility))
+    }
+    if f.Security != "" && strings.ToLower(f.Security) != lf.Security {
+        out = append(out, "security "+strings.ToLower(f.Security))
+    }
+    if f.Strict != nil && *f.Strict != lf.Strict {
+        if *f.Strict {
+            out = append(out, "strict")
+        } else {
+            out = append(out, "called on null input")
+        }
+    }
+    if f.Leakproof != nil && *f.Leakproof != lf.Leakproof {
+        if *f.Leakproof {
+            out = append(out, "leakproof")
+        } else {
+            out = append(out, "not leakproof")
+        }
+    }
+    return out
 }
 
 // enumAddValueStmts emits ALTER TYPE ... ADD VALUE for desired labels missing
@@ -1048,8 +1067,23 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             }
             if found {
                 lf := live.FunctionDefs[normalizedDesired]
-                if lf == nil || !functionChanged(f, lf) { continue }
-                // fall through: definition changed, emit CREATE OR REPLACE
+                if lf == nil { continue }
+                // Empty YAML body means the body is unmanaged (attribute-only
+                // declaration, e.g. marking an extension function leakproof).
+                bodyChanged := strings.TrimSpace(f.Body) != "" &&
+                    strings.TrimSpace(f.Body) != strings.TrimSpace(lf.Body)
+                if !bodyChanged {
+                    if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
+                            pqIdent(e.Key)+f.ArgsSig, strings.Join(clauses, " ")))
+                    }
+                    continue
+                }
+                // fall through: body changed, emit CREATE OR REPLACE
+            } else if strings.TrimSpace(f.Body) == "" {
+                // Attribute-only declaration for a function that doesn't exist
+                // yet (extension not installed on this DB) — nothing to create.
+                continue
             }
             setClauses := ""
             if len(f.Set) > 0 {
@@ -1063,8 +1097,8 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             attrs := []string{}
             if f.Security != "" { attrs = append(attrs, "security "+f.Security) }
             if f.Volatility != "" { attrs = append(attrs, f.Volatility) }
-            if f.Strict { attrs = append(attrs, "strict") }
-            if f.Leakproof { attrs = append(attrs, "leakproof") }
+            if f.Strict != nil && *f.Strict { attrs = append(attrs, "strict") }
+            if f.Leakproof != nil && *f.Leakproof { attrs = append(attrs, "leakproof") }
             attrsStr := strings.Join(attrs, " ")
             if attrsStr != "" { attrsStr = " " + attrsStr }
             body := f.Body

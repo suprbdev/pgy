@@ -1364,7 +1364,7 @@ schema public:
 		t.Fatal(err)
 	}
 	for _, f := range db.Functions {
-		if !f.Strict {
+		if f.Strict == nil || !*f.Strict {
 			t.Error("expected Strict=true")
 		}
 		return
@@ -1386,7 +1386,7 @@ schema public:
 		t.Fatal(err)
 	}
 	for _, f := range db.Functions {
-		if !f.Leakproof {
+		if f.Leakproof == nil || !*f.Leakproof {
 			t.Error("expected Leakproof=true")
 		}
 		return

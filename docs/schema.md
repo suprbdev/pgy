@@ -505,12 +505,13 @@ schema public:
 | `stable` | boolean | Marks function `STABLE` |
 | `volatile` | boolean | Marks function `VOLATILE` |
 | `immutable` | boolean | Marks function `IMMUTABLE` |
-| `strict` | boolean | Adds `STRICT` attribute |
-| `leakproof` | boolean | Adds `LEAKPROOF` attribute (requires superuser to apply) |
+| `strict` | boolean | `STRICT` vs `CALLED ON NULL INPUT`. Omitted = unmanaged |
+| `leakproof` | boolean | `LEAKPROOF` vs `NOT LEAKPROOF` (requires superuser to apply). Omitted = unmanaged |
 | `set` | map | `SET` configuration options (e.g. `search_path`) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition (body via `prosrc`, volatility, security, strict, leakproof). On change, `CREATE OR REPLACE FUNCTION` is emitted. Signature or return type changes are not supported — rename the function instead |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof), `ALTER FUNCTION` is emitted instead — no body replacement. Signature or return type changes are not supported — rename the function instead |
+| *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 

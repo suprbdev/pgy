@@ -208,8 +208,8 @@ type Function struct {
     Language string
     Security string // definer/invoker
     Volatility string // stable/volatile/immutable
-    Strict bool
-    Leakproof bool
+    Strict *bool    // nil = unmanaged
+    Leakproof *bool // nil = unmanaged
     Set map[string]string
     Body string
     DependsOn []string `yaml:"dependsOn"`
@@ -1023,8 +1023,8 @@ func parseFunction(schemaName, key string, body any) *Function {
     if _, ok := m["stable"].(bool); ok { fn.Volatility = "stable" }
     if _, ok := m["volatile"].(bool); ok { fn.Volatility = "volatile" }
     if _, ok := m["immutable"].(bool); ok { fn.Volatility = "immutable" }
-    if st, ok := m["strict"].(bool); ok { fn.Strict = st }
-    if lp, ok := m["leakproof"].(bool); ok { fn.Leakproof = lp }
+    if st, ok := m["strict"].(bool); ok { fn.Strict = &st }
+    if lp, ok := m["leakproof"].(bool); ok { fn.Leakproof = &lp }
     if set, ok := m["set"].(map[string]any); ok {
         fn.Set = map[string]string{}
         for k, v := range set {

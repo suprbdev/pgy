@@ -1458,7 +1458,7 @@ func TestFunctionBodyCompareTrimsWhitespace(t *testing.T) {
 	}
 }
 
-func TestFunctionReplaceOnVolatilityChange(t *testing.T) {
+func TestFunctionAlterOnVolatilityChange(t *testing.T) {
 	live := liveWithLoginFn("select 1")
 	f := loginFn("select 1")
 	f.Volatility = "stable"
@@ -1467,8 +1467,11 @@ func TestFunctionReplaceOnVolatilityChange(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findCreate(p, "create or replace function") {
-		t.Errorf("expected replace on volatility change; creates: %v", p.Creates)
+	if !findAlter(p, `alter function "public"."login"(email text) stable;`) {
+		t.Errorf("expected ALTER FUNCTION on volatility-only change; alters: %v", p.Alters)
+	}
+	if findCreate(p, "function") {
+		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
 	}
 }
 
@@ -1973,14 +1976,16 @@ func TestFunctionImmutable(t *testing.T) {
 	}
 }
 
-func TestFunctionLeakproof(t *testing.T) {
+func bptr(b bool) *bool { return &b }
+
+func TestFunctionLeakproofCreate(t *testing.T) {
 	desired := &schema.Database{
 		Tables: map[string]*schema.Table{},
 		Functions: map[string]*schema.Function{
 			"public.fn": {
 				Name: "fn", Schema: "public", ArgsSig: "()",
 				Returns: "int", Language: "sql",
-				Leakproof: true, Body: "select 1",
+				Leakproof: bptr(true), Body: "select 1",
 			},
 		},
 	}
@@ -1990,20 +1995,35 @@ func TestFunctionLeakproof(t *testing.T) {
 	}
 }
 
-func TestFunctionReplaceOnLeakproofChange(t *testing.T) {
+func TestFunctionAlterOnLeakproofChange(t *testing.T) {
 	live := liveWithLoginFn("select 1")
 	f := loginFn("select 1")
-	f.Leakproof = true
+	f.Leakproof = bptr(true)
 	desired := &schema.Database{
 		Tables:    map[string]*schema.Table{},
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findCreate(p, "create or replace function") {
-		t.Errorf("expected replace on leakproof change; creates: %v", p.Creates)
+	if !findAlter(p, `alter function "public"."login"(email text) leakproof;`) {
+		t.Errorf("expected ALTER FUNCTION LEAKPROOF; alters: %v", p.Alters)
 	}
-	if !findCreate(p, " leakproof") {
-		t.Errorf("expected leakproof in replacement; creates: %v", p.Creates)
+	if findCreate(p, "function") {
+		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionAlterNotLeakproof(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	live.FunctionDefs[normalizeFunctionSignature("public.login(email text)")].Leakproof = true
+	f := loginFn("select 1")
+	f.Leakproof = bptr(false)
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, "not leakproof") {
+		t.Errorf("expected ALTER FUNCTION NOT LEAKPROOF; alters: %v", p.Alters)
 	}
 }
 
@@ -2011,14 +2031,76 @@ func TestFunctionLeakproofSkippedIfMatches(t *testing.T) {
 	live := liveWithLoginFn("select 1")
 	live.FunctionDefs[normalizeFunctionSignature("public.login(email text)")].Leakproof = true
 	f := loginFn("select 1")
-	f.Leakproof = true
+	f.Leakproof = bptr(true)
 	desired := &schema.Database{
 		Tables:    map[string]*schema.Table{},
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if findCreate(p, "function") {
-		t.Errorf("leakproof matches live, should skip; creates: %v", p.Creates)
+	if findCreate(p, "function") || findAlter(p, "function") {
+		t.Errorf("leakproof matches live, should skip; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
+
+func TestFunctionLeakproofUnmanagedWhenUnset(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	live.FunctionDefs[normalizeFunctionSignature("public.login(email text)")].Leakproof = true
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": loginFn("select 1")},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") || findAlter(p, "leakproof") {
+		t.Errorf("leakproof unset in YAML, should stay unmanaged; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
+
+// Extension-owned C functions (e.g. PostGIS geometry_overlaps) can't be
+// expressed as dollar-quoted bodies; a bodyless declaration manages
+// attributes only via ALTER FUNCTION.
+func TestFunctionBodylessAltersExtensionFunction(t *testing.T) {
+	live := emptyLive()
+	sig := "public.geometry_overlaps(geom1 geometry, geom2 geometry)"
+	live.Functions[sig] = true
+	live.FunctionDefs[normalizeFunctionSignature(sig)] = &LiveFunction{
+		Body: "geometry_overlaps", Volatility: "immutable", Security: "invoker", Strict: true,
+	}
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.geometry_overlaps": {
+				Name: "geometry_overlaps", Schema: "public",
+				ArgsSig:   "(geom1 geometry, geom2 geometry)",
+				Leakproof: bptr(true),
+			},
+		},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."geometry_overlaps"(geom1 geometry, geom2 geometry) leakproof;`) {
+		t.Errorf("expected attribute-only ALTER; alters: %v", p.Alters)
+	}
+	if findCreate(p, "geometry_overlaps") {
+		t.Errorf("bodyless declaration must never CREATE OR REPLACE; creates: %v", p.Creates)
+	}
+	if findAlter(p, "null input") || findAlter(p, "strict") {
+		t.Errorf("strict unset in YAML, must not touch strictness; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionBodylessSkippedWhenAbsentFromLive(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.geometry_overlaps": {
+				Name: "geometry_overlaps", Schema: "public",
+				ArgsSig:   "(geom1 geometry, geom2 geometry)",
+				Leakproof: bptr(true),
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if findCreate(p, "geometry_overlaps") || findAlter(p, "geometry_overlaps") {
+		t.Errorf("bodyless function absent from live, nothing to emit; creates: %v alters: %v", p.Creates, p.Alters)
 	}
 }
 
