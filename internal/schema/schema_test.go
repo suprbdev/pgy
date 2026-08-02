@@ -1184,6 +1184,49 @@ extensions:
 	}
 }
 
+func TestExtensionsStringShorthand(t *testing.T) {
+	yaml := `
+extensions: [pg_trgm, pgcrypto]
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Extensions) != 2 {
+		t.Fatalf("want 2 extensions, got %d", len(db.Extensions))
+	}
+	for i, want := range []string{"pg_trgm", "pgcrypto"} {
+		if db.Extensions[i].Name != want {
+			t.Errorf("extension %d: %q, want %q", i, db.Extensions[i].Name, want)
+		}
+		if !db.Extensions[i].IfNotExists {
+			t.Errorf("shorthand %s should imply ifNotExists", want)
+		}
+	}
+}
+
+func TestExtensionsMixedShorthandAndMap(t *testing.T) {
+	yaml := `
+extensions:
+  - pg_trgm
+  - name: postgis
+    ifNotExists: false
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Extensions) != 2 {
+		t.Fatalf("want 2 extensions, got %d", len(db.Extensions))
+	}
+	if db.Extensions[0].Name != "pg_trgm" || !db.Extensions[0].IfNotExists {
+		t.Errorf("shorthand entry: %+v", db.Extensions[0])
+	}
+	if db.Extensions[1].Name != "postgis" || db.Extensions[1].IfNotExists {
+		t.Errorf("map entry: %+v", db.Extensions[1])
+	}
+}
+
 // --- enum types ---
 
 func TestEnumType(t *testing.T) {

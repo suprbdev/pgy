@@ -171,6 +171,12 @@ extensions:
       - schema public
 ```
 
+A plain string entry is shorthand for `{name: <string>, ifNotExists: true}`, so the common case is just:
+
+```yaml
+extensions: [pg_trgm, pgcrypto]
+```
+
 | Property | Type | Description |
 |----------|------|-------------|
 | `name` | string | Extension name |

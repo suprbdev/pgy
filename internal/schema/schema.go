@@ -376,12 +376,19 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
             for _, it := range arr {
-                if m, ok := it.(map[string]any); ok {
-                    name, _ := m["name"].(string)
+                switch v := it.(type) {
+                case string:
+                    // shorthand: `extensions: [pg_trgm, pgcrypto]` — implies
+                    // ifNotExists, matching the tool's if-not-exists style
+                    if v != "" {
+                        out.Extensions = append(out.Extensions, &Extension{Name: v, IfNotExists: true})
+                    }
+                case map[string]any:
+                    name, _ := v["name"].(string)
                     if name == "" { continue }
                     ext := &Extension{Name: name}
-                    if b, ok := m["ifNotExists"].(bool); ok { ext.IfNotExists = b }
-                    if dep, ok := m["dependsOn"]; ok {
+                    if b, ok := v["ifNotExists"].(bool); ok { ext.IfNotExists = b }
+                    if dep, ok := v["dependsOn"]; ok {
                         ext.DependsOn = parseStringListFromNode(dep)
                     }
                     out.Extensions = append(out.Extensions, ext)
