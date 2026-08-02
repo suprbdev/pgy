@@ -67,11 +67,25 @@ type LiveTable struct{
     // for detecting redefined constraints (drop+add, gated behind --unsafe)
     ConstraintDefs map[string]string
     Indexes     map[string]bool // index name -> exists
+    // IndexOpclasses: index name -> per-key-column operator class, in column
+    // order, for detecting opclass changes (drop+recreate, gated behind
+    // --unsafe). Nil / missing entry means unknown: the index is adopted
+    // by name and opclass changes are not detected.
+    IndexOpclasses map[string][]LiveIndexOpclass
     Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
     Policies    map[string]*LivePolicy // policy name -> live definition
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
+// LiveIndexOpclass is the operator class of one index key column. Default is
+// true when the column uses the access method's default opclass for its type,
+// so a desired index with no explicit opclass matches regardless of the
+// default's actual name (text_ops, int4_ops, ...).
+type LiveIndexOpclass struct {
+    Name    string
+    Default bool
+}
+
 // LivePolicy is a policy as it exists in the live database. Cmd/Roles/Using/
 // WithCheck mirror the CREATE POLICY clauses so a redefined policy can be
 // detected and replaced. Roles is nil/empty when the policy applies to PUBLIC
@@ -154,7 +168,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}
     }
     tableRows.Close()
     
@@ -186,7 +200,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -243,6 +257,36 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
     }
     idxRows.Close()
+
+    // Query per-key-column operator classes so redefined opclasses can be
+    // detected (drop+recreate, gated behind --unsafe). Default opclasses are
+    // flagged so a desired index without an explicit opclass matches.
+    opcQ := `
+        select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault
+        from pg_index x
+        join pg_class i on i.oid = x.indexrelid
+        join pg_class t on t.oid = x.indrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        cross join lateral generate_series(0, x.indnkeyatts - 1) k(ord)
+        join pg_opclass op on op.oid = x.indclass[k.ord]
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        order by n.nspname, t.relname, i.relname, k.ord
+    `
+    opcRows, err := pool.Query(ctx, opcQ)
+    if err != nil { return nil, err }
+    for opcRows.Next() {
+        var schemaName, tableName, idxName, opcName string
+        var opcDefault bool
+        if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault); err != nil {
+            opcRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        if t := l.Tables[key]; t != nil {
+            t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault})
+        }
+    }
+    opcRows.Close()
 
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
@@ -1689,14 +1733,25 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ix == nil || len(ix.Columns) == 0 { continue }
         name := ix.Name
         if name == "" { name = strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
-        if liveIndexes[name] { continue }
         uniq := ""
         if ix.Unique { uniq = " unique" }
         using := ""
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
         where := ""
         if ix.Where != "" { where = fmt.Sprintf(" where (%s)", ix.Where) }
-        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), where))
+        stmt := fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), where)
+        if liveIndexes[name] {
+            // Opclass change → drop + recreate. Rebuilding an index can be
+            // expensive and briefly leaves queries without it, so gate behind
+            // --unsafe. Without live opclass data the index is adopted by name.
+            if liveOCs, ok := liveIndexOpclasses(lt)[name]; unsafe && ok && indexOpclassesDiffer(ix, liveOCs) {
+                idxFq := name
+                if i := strings.IndexByte(fq, '.'); i >= 0 { idxFq = fq[:i] + "." + name }
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt)
+            }
+            continue
+        }
+        plan.Creates = append(plan.Creates, stmt)
     }
 
     // Named constraints (check, unique, exclude)
@@ -2142,6 +2197,30 @@ func renderIndexElems(ix *schema.Index) string {
         parts = append(parts, elem)
     }
     return strings.Join(parts, ", ")
+}
+
+func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
+    if lt == nil { return nil }
+    return lt.IndexOpclasses
+}
+
+// indexOpclassesDiffer reports whether the desired index's operator classes
+// disagree with the live index's. A desired column with no explicit opclass
+// matches any default opclass. A key-column count mismatch means the index
+// changed in ways beyond opclasses (out of scope here), so it is not treated
+// as an opclass change.
+func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
+    if len(ix.Columns) != len(live) { return false }
+    for i, c := range ix.Columns {
+        oc := ix.Opclass
+        if v, ok := ix.Opclasses[c]; ok { oc = v }
+        if oc == "" {
+            if !live[i].Default { return true }
+        } else if !strings.EqualFold(oc, live[i].Name) {
+            return true
+        }
+    }
+    return false
 }
 
 func isIndexExpression(s string) bool {

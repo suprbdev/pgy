@@ -423,6 +423,102 @@ func TestIndexOpclassSkippedIfExists(t *testing.T) {
 	}
 }
 
+func trgmDesired() *schema.Database {
+	return &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_name", Columns: []string{"name"}, Using: "gin", Opclass: "gin_trgm_ops"},
+			},
+		},
+	}}
+}
+
+func TestIndexOpclassChangeRecreatedUnderUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	live.Tables["public.t"].IndexOpclasses = map[string][]LiveIndexOpclass{
+		"idx_name": {{Name: "text_ops", Default: true}},
+	}
+	p := Plan(live, trgmDesired(), true)
+	if !findAlter(p, `drop index "public"."idx_name";`) {
+		t.Errorf("expected drop of redefined index; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `using gin("name" gin_trgm_ops);`) {
+		t.Errorf("expected recreate with new opclass; alters: %v", p.Alters)
+	}
+}
+
+func TestIndexOpclassChangeGatedWithoutUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	live.Tables["public.t"].IndexOpclasses = map[string][]LiveIndexOpclass{
+		"idx_name": {{Name: "text_ops", Default: true}},
+	}
+	p := Plan(live, trgmDesired(), false)
+	if findAlter(p, "drop index") || findCreate(p, "idx_name") {
+		t.Errorf("opclass change without --unsafe should emit nothing; alters: %v creates: %v", p.Alters, p.Creates)
+	}
+}
+
+func TestIndexOpclassSameSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	live.Tables["public.t"].IndexOpclasses = map[string][]LiveIndexOpclass{
+		"idx_name": {{Name: "gin_trgm_ops", Default: false}},
+	}
+	p := Plan(live, trgmDesired(), true)
+	if findAlter(p, "drop index") || findCreate(p, "idx_name") {
+		t.Errorf("matching opclass should emit nothing; alters: %v creates: %v", p.Alters, p.Creates)
+	}
+}
+
+func TestIndexOpclassExplicitDefaultSkipped(t *testing.T) {
+	// desired names the default opclass explicitly — must not flap
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_name", Columns: []string{"name"}, Opclass: "text_ops"},
+			},
+		},
+	}}
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	live.Tables["public.t"].IndexOpclasses = map[string][]LiveIndexOpclass{
+		"idx_name": {{Name: "text_ops", Default: true}},
+	}
+	p := Plan(live, desired, true)
+	if findAlter(p, "drop index") {
+		t.Errorf("explicit default opclass matches live default; alters: %v", p.Alters)
+	}
+}
+
+func TestIndexOpclassNameOnlyLiveAdopted(t *testing.T) {
+	// no live opclass data (old snapshot / name-only) — adopt by name, no SQL
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	p := Plan(live, trgmDesired(), true)
+	if findAlter(p, "drop index") || findCreate(p, "idx_name") {
+		t.Errorf("name-only live index should be adopted; alters: %v creates: %v", p.Alters, p.Creates)
+	}
+}
+
+func TestIndexOpclassColumnCountMismatchAdopted(t *testing.T) {
+	// live index has different key column count — not an opclass change
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name"] = true
+	live.Tables["public.t"].IndexOpclasses = map[string][]LiveIndexOpclass{
+		"idx_name": {{Name: "text_ops", Default: true}, {Name: "text_ops", Default: true}},
+	}
+	p := Plan(live, trgmDesired(), true)
+	if findAlter(p, "drop index") {
+		t.Errorf("column count mismatch should be adopted; alters: %v", p.Alters)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {

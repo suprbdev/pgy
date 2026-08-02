@@ -275,7 +275,7 @@ indexes:
     where: deleted_at is null
 ```
 
-Note: pgy tracks live indexes by name only. An existing index with the same name is adopted as-is — changing `opclass`, `columns`, or other properties of an index that already exists will not drop and recreate it.
+Note: for an index that already exists live, only operator-class changes are detected: with `--unsafe`, a changed `opclass`/`opclasses` drops and recreates the index (a rebuild — potentially slow, and queries lose the index briefly); without `--unsafe`, nothing is emitted. Changing `columns`, `using`, `unique`, or `where` on an existing index is not detected — the live index is adopted by name as-is.
 
 ### Foreign Keys
 
