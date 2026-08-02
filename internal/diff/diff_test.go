@@ -322,6 +322,107 @@ func TestIndexGistPartialCombined(t *testing.T) {
 	}
 }
 
+func TestIndexOpclass(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_name_trgm", Columns: []string{"name"}, Using: "gin", Opclass: "gin_trgm_ops"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create index if not exists "idx_name_trgm" on "public"."t" using gin("name" gin_trgm_ops);`) {
+		t.Errorf("expected gin opclass index; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexPerColumnOpclass(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}, "tags": {Type: "jsonb"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_mixed", Columns: []string{"name", "tags"}, Using: "gin",
+					Opclasses: map[string]string{"name": "gin_trgm_ops"}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `using gin("name" gin_trgm_ops, "tags");`) {
+		t.Errorf("expected per-column opclass on name only; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexPerColumnOpclassOverridesDefault(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"a": {Type: "text"}, "b": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_ab", Columns: []string{"a", "b"}, Opclass: "text_pattern_ops",
+					Opclasses: map[string]string{"b": "varchar_pattern_ops"}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `("a" text_pattern_ops, "b" varchar_pattern_ops);`) {
+		t.Errorf("expected per-column override of index opclass; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexExpression(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_lower_name", Columns: []string{"lower(name)"}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `create index if not exists "idx_lower_name" on "public"."t"((lower(name)));`) {
+		t.Errorf("expected expression index; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexExpressionWithOpclass(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_lower_name_trgm", Columns: []string{"lower(name)"}, Using: "gin",
+					Opclasses: map[string]string{"lower(name)": "gin_trgm_ops"}},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, `using gin((lower(name)) gin_trgm_ops);`) {
+		t.Errorf("expected expression index with opclass; creates: %v", p.Creates)
+	}
+}
+
+func TestIndexOpclassSkippedIfExists(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name:    "t",
+			Columns: map[string]*schema.Column{"name": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "idx_name_trgm", Columns: []string{"name"}, Using: "gin", Opclass: "gin_trgm_ops"},
+			},
+		},
+	}}
+	live := liveWithTable("public.t", map[string]*LiveColumn{"name": {Type: "text"}})
+	live.Tables["public.t"].Indexes["idx_name_trgm"] = true
+	p := Plan(live, desired, false)
+	if findCreate(p, "idx_name_trgm") {
+		t.Errorf("index exists in live, should be skipped; creates: %v", p.Creates)
+	}
+}
+
 // --- constraints ---
 
 func TestCheckConstraint(t *testing.T) {

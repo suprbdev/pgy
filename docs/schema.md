@@ -245,16 +245,27 @@ indexes:
     unique: true            # optional, default false
     using: gist             # optional index method: btree (default) | gist | gin | brin | hash | spgist
     where: deleted_at is null   # optional partial index predicate
+    opclass: gin_trgm_ops   # optional operator class applied to every column
+    opclasses:              # optional per-column operator classes (override opclass)
+      col1: gin_trgm_ops
 ```
 
 If `name` is omitted, an auto-name is derived from the table and column names.
 
 `using: btree` is the PostgreSQL default and is omitted from the generated SQL. The `where` expression is emitted verbatim (wrapped in parentheses), so any valid predicate works.
 
-Example — a PostGIS spatial index and a partial unique index:
+A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
+
+Example — a GIN trigram index (requires the `pg_trgm` extension), an expression index, a PostGIS spatial index, and a partial unique index:
 
 ```yaml
 indexes:
+  idx_users_name_trgm:
+    columns: [name]
+    using: gin
+    opclass: gin_trgm_ops
+  idx_users_lower_email:
+    columns: ["lower(email)"]
   idx_places_geom:
     columns: [geom]
     using: gist
@@ -263,6 +274,8 @@ indexes:
     unique: true
     where: deleted_at is null
 ```
+
+Note: pgy tracks live indexes by name only. An existing index with the same name is adopted as-is — changing `opclass`, `columns`, or other properties of an index that already exists will not drop and recreate it.
 
 ### Foreign Keys
 

@@ -714,6 +714,49 @@ tables:
 	}
 }
 
+func TestIndexOpclassParse(t *testing.T) {
+	yaml := `
+tables:
+  public.users:
+    columns:
+      name:
+        type: text
+      tags:
+        type: jsonb
+    indexes:
+      idx_name_trgm:
+        columns: [name]
+        using: gin
+        opclass: gin_trgm_ops
+      idx_mixed:
+        columns: ["lower(name)", tags]
+        using: gin
+        opclasses:
+          lower(name): gin_trgm_ops
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ixs := db.Tables["public.users"].Indexes
+	if len(ixs) != 2 {
+		t.Fatalf("want 2 indexes, got %d", len(ixs))
+	}
+	// sorted by name: idx_mixed, idx_name_trgm
+	if ixs[0].Name != "idx_mixed" || ixs[1].Name != "idx_name_trgm" {
+		t.Fatalf("unexpected order: %s, %s", ixs[0].Name, ixs[1].Name)
+	}
+	if ixs[1].Opclass != "gin_trgm_ops" {
+		t.Errorf("opclass: %q", ixs[1].Opclass)
+	}
+	if ixs[0].Columns[0] != "lower(name)" {
+		t.Errorf("expression column: %q", ixs[0].Columns[0])
+	}
+	if ixs[0].Opclasses["lower(name)"] != "gin_trgm_ops" {
+		t.Errorf("per-column opclass: %v", ixs[0].Opclasses)
+	}
+}
+
 // --- column grants ---
 
 func TestColumnGrantsParse(t *testing.T) {

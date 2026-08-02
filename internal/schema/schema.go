@@ -154,11 +154,13 @@ type Column struct {
 }
 
 type Index struct {
-    Name    string
-    Columns []string
-    Unique  bool
-    Using   string // index method: btree (default), gist, gin, brin, hash, spgist
-    Where   string // partial index predicate
+    Name      string
+    Columns   []string
+    Unique    bool
+    Using     string            // index method: btree (default), gist, gin, brin, hash, spgist
+    Where     string            // partial index predicate
+    Opclass   string            // operator class applied to every column (e.g. gin_trgm_ops)
+    Opclasses map[string]string // per-column operator class overrides; key matches the columns entry
 }
 
 type ForeignKey struct {
@@ -836,6 +838,13 @@ func parseIndexes(v any) []*Index {
                 if u, ok := dm["unique"].(bool); ok { ix.Unique = u }
                 if m, ok := dm["using"].(string); ok { ix.Using = m }
                 if w, ok := dm["where"].(string); ok { ix.Where = w }
+                if oc, ok := dm["opclass"].(string); ok { ix.Opclass = oc }
+                if ocm, ok := dm["opclasses"].(map[string]any); ok {
+                    ix.Opclasses = map[string]string{}
+                    for col, v := range ocm {
+                        if s, ok := v.(string); ok { ix.Opclasses[col] = s }
+                    }
+                }
             }
             out = append(out, ix)
         }

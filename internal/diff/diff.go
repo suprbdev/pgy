@@ -1696,7 +1696,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
         where := ""
         if ix.Where != "" { where = fmt.Sprintf(" where (%s)", ix.Where) }
-        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, joinIdentList(ix.Columns), where))
+        plan.Creates = append(plan.Creates, fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), where))
     }
 
     // Named constraints (check, unique, exclude)
@@ -2125,6 +2125,34 @@ func pqIdent(fq string) string {
         return `"` + parts[0] + `"."` + parts[1] + `"`
     }
     return `"` + fq + `"`
+}
+
+// renderIndexElems renders index column entries: plain identifiers are quoted,
+// entries containing non-identifier characters are treated as expressions and
+// wrapped in parentheses, and operator classes (per-index or per-column) are
+// appended unquoted.
+func renderIndexElems(ix *schema.Index) string {
+    parts := make([]string, 0, len(ix.Columns))
+    for _, c := range ix.Columns {
+        elem := pqIdent(c)
+        if isIndexExpression(c) { elem = "(" + c + ")" }
+        oc := ix.Opclass
+        if v, ok := ix.Opclasses[c]; ok { oc = v }
+        if oc != "" { elem += " " + oc }
+        parts = append(parts, elem)
+    }
+    return strings.Join(parts, ", ")
+}
+
+func isIndexExpression(s string) bool {
+    for _, r := range s {
+        switch {
+        case r == '_', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+        default:
+            return true
+        }
+    }
+    return false
 }
 
 func joinIdentList(cols []string) string {
