@@ -1372,6 +1372,28 @@ schema public:
 	t.Fatal("no function parsed")
 }
 
+func TestFunctionLeakproof(t *testing.T) {
+	yaml := `
+schema public:
+  function add(a int, b int):
+    returns: int
+    language: sql
+    leakproof: true
+    body: "select a + b"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range db.Functions {
+		if !f.Leakproof {
+			t.Error("expected Leakproof=true")
+		}
+		return
+	}
+	t.Fatal("no function parsed")
+}
+
 func TestFunctionImmutable(t *testing.T) {
 	yaml := `
 schema public:

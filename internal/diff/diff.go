@@ -55,6 +55,7 @@ type LiveFunction struct{
     Volatility string // volatile|stable|immutable
     Security   string // definer|invoker
     Strict     bool
+    Leakproof  bool
 }
 type LiveProcedure struct{
     Body     string
@@ -401,7 +402,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // replace-on-change. prokind routes rows: 'p' = procedure, else function.
     funcQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
-               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.prokind::text
+               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -410,8 +411,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for funcRows.Next() {
         var schemaName, funcName, args, src, vol, kind string
-        var secdef, strict bool
-        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &kind); err != nil {
+        var secdef, strict, leakproof bool
+        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind); err != nil {
             funcRows.Close()
             return nil, err
         }
@@ -425,7 +426,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             continue
         }
         l.Functions[key] = true
-        lf := &LiveFunction{Body: src, Strict: strict, Security: "invoker", Volatility: "volatile"}
+        lf := &LiveFunction{Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile"}
         if secdef { lf.Security = "definer" }
         switch vol {
         case "i": lf.Volatility = "immutable"
@@ -839,6 +840,7 @@ func functionChanged(f *schema.Function, lf *LiveFunction) bool {
     if f.Volatility != "" && strings.ToLower(f.Volatility) != lf.Volatility { return true }
     if f.Security != "" && strings.ToLower(f.Security) != lf.Security { return true }
     if f.Strict != lf.Strict { return true }
+    if f.Leakproof != lf.Leakproof { return true }
     return false
 }
 
@@ -1062,6 +1064,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             if f.Security != "" { attrs = append(attrs, "security "+f.Security) }
             if f.Volatility != "" { attrs = append(attrs, f.Volatility) }
             if f.Strict { attrs = append(attrs, "strict") }
+            if f.Leakproof { attrs = append(attrs, "leakproof") }
             attrsStr := strings.Join(attrs, " ")
             if attrsStr != "" { attrsStr = " " + attrsStr }
             body := f.Body

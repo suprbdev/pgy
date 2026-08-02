@@ -506,10 +506,11 @@ schema public:
 | `volatile` | boolean | Marks function `VOLATILE` |
 | `immutable` | boolean | Marks function `IMMUTABLE` |
 | `strict` | boolean | Adds `STRICT` attribute |
+| `leakproof` | boolean | Adds `LEAKPROOF` attribute (requires superuser to apply) |
 | `set` | map | `SET` configuration options (e.g. `search_path`) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition (body via `prosrc`, volatility, security, strict). On change, `CREATE OR REPLACE FUNCTION` is emitted. Signature or return type changes are not supported — rename the function instead |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition (body via `prosrc`, volatility, security, strict, leakproof). On change, `CREATE OR REPLACE FUNCTION` is emitted. Signature or return type changes are not supported — rename the function instead |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 

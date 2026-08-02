@@ -1973,6 +1973,55 @@ func TestFunctionImmutable(t *testing.T) {
 	}
 }
 
+func TestFunctionLeakproof(t *testing.T) {
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"public.fn": {
+				Name: "fn", Schema: "public", ArgsSig: "()",
+				Returns: "int", Language: "sql",
+				Leakproof: true, Body: "select 1",
+			},
+		},
+	}
+	p := Plan(emptyLive(), desired, false)
+	if !findCreate(p, " leakproof") {
+		t.Errorf("expected leakproof; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionReplaceOnLeakproofChange(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	f := loginFn("select 1")
+	f.Leakproof = true
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace function") {
+		t.Errorf("expected replace on leakproof change; creates: %v", p.Creates)
+	}
+	if !findCreate(p, " leakproof") {
+		t.Errorf("expected leakproof in replacement; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionLeakproofSkippedIfMatches(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	live.FunctionDefs[normalizeFunctionSignature("public.login(email text)")].Leakproof = true
+	f := loginFn("select 1")
+	f.Leakproof = true
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") {
+		t.Errorf("leakproof matches live, should skip; creates: %v", p.Creates)
+	}
+}
+
 // --- schemas ---
 
 func TestCustomSchemaCreate(t *testing.T) {
