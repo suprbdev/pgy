@@ -6,6 +6,30 @@ This document describes the structure and format of the YAML schema files used b
 
 Schema files define database objects including tables, columns, types, functions, extensions, views, materialized views, and sequences. `pgy` diffs them against a live PostgreSQL database and generates the SQL to bring the database in sync.
 
+## Editor Support (JSON Schema)
+
+A JSON Schema for schema files ships at [`schemas/pgy.schema.json`](../schemas/pgy.schema.json). Editors running [yaml-language-server](https://github.com/redhat-developer/yaml-language-server) (VS Code via the Red Hat YAML extension, Neovim, etc.) use it for validation, completion, and hover documentation.
+
+Enable it per file with a modeline at the top of the YAML file:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/main/schemas/pgy.schema.json
+```
+
+(or a relative path such as `$schema=./schemas/pgy.schema.json`), or map it by filename in VS Code settings:
+
+```json
+{
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/suprbdev/pgy/main/schemas/pgy.schema.json": ["pgy.yaml", "*.pgy.yml", "schema*.yml"]
+  }
+}
+```
+
+The schema validates property names and value types (catching typos like `funtion get():` or `using: btre`), enforces enums (index methods, trigger timing/events, volatility, partition strategies), and documents every property on hover. One limitation: the editor cannot autocomplete the dynamic header keys themselves (`table <name>:`, `function <name>(args):`) since those are pattern-matched, but everything inside their bodies completes normally.
+
+The schema is kept in sync with the parser by `internal/schema/jsonschema_test.go`, which validates `examples/schema.yml` and format fixtures against it as part of `make test`.
+
 ## YAML Formats
 
 Three formats are supported and can be mixed across files merged via `pgy diff`.

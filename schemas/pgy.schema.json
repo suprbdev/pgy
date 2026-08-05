@@ -1,0 +1,580 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/suprbdev/pgy/main/schemas/pgy.schema.json",
+  "title": "pgy schema file",
+  "description": "Declarative PostgreSQL schema definition consumed by pgy. Three formats are supported and may be mixed across merged files: top-level `schemas:`/`tables:` maps, a `tables:` list, and `schema <name>:` blocks (recommended).",
+  "type": "object",
+  "properties": {
+    "extensions": {
+      "description": "PostgreSQL extensions to create. String shorthand implies ifNotExists: true.",
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "ifNotExists": { "type": "boolean" },
+              "dependsOn": { "$ref": "#/definitions/stringList" }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "roles": {
+      "description": "Cluster-level roles (CREATE ROLE). Passwords are intentionally unsupported: secrets do not belong in schema YAML.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/role" }
+    },
+    "schemas": {
+      "description": "Map of schema name to its tables (plus optional schema-level grants/comment).",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/schemasEntry" }
+    },
+    "tables": {
+      "description": "Tables in the public schema (unless names are schema-qualified). Map of table name to spec, or a list of specs with explicit name/schema.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/table" }
+        },
+        {
+          "type": "array",
+          "items": { "$ref": "#/definitions/tableListItem" }
+        }
+      ]
+    }
+  },
+  "patternProperties": {
+    "^schema [^\\s].*$": { "$ref": "#/definitions/schemaBlock" }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "columnRefs": {
+      "description": "Column names, either as a list or as a named block: `{ <name>: { columns: [...] } }`.",
+      "oneOf": [
+        { "$ref": "#/definitions/stringList" },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "columns": { "$ref": "#/definitions/stringList" }
+            },
+            "required": ["columns"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "grants": {
+      "description": "Privileges per role: `{ <role>: [select, insert, ...] }`. An empty list revokes all privileges for that role; omitting the grants block leaves live privileges unmanaged.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/stringList" }
+    },
+    "scalar": {
+      "description": "A YAML scalar (string, number, boolean, or date) rendered into SQL.",
+      "type": ["string", "number", "boolean"]
+    },
+    "scalarList": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/scalar" }
+    },
+    "role": {
+      "type": "object",
+      "properties": {
+        "login": { "type": "boolean", "description": "LOGIN / NOLOGIN" },
+        "superuser": { "type": "boolean" },
+        "createdb": { "type": "boolean" },
+        "createrole": { "type": "boolean" },
+        "replication": { "type": "boolean" },
+        "bypassRLS": { "type": "boolean" },
+        "inherit": { "type": "boolean", "description": "false emits NOINHERIT" },
+        "connectionLimit": { "type": "integer" },
+        "inRoles": {
+          "$ref": "#/definitions/stringList",
+          "description": "Role memberships: GRANT <parent> TO <role>"
+        },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "schemasEntry": {
+      "description": "A schema under the `schemas:` map: optional grants/comment plus tables keyed by plain table name.",
+      "type": "object",
+      "properties": {
+        "grants": { "$ref": "#/definitions/grants" },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": { "$ref": "#/definitions/table" }
+    },
+    "schemaBlock": {
+      "description": "A `schema <name>:` block containing table/function/procedure/type/view/sequence/domain declarations.",
+      "type": "object",
+      "properties": {
+        "grants": { "$ref": "#/definitions/grants" },
+        "comment": { "type": "string" }
+      },
+      "patternProperties": {
+        "^table [^\\s].*$": { "$ref": "#/definitions/table" },
+        "^function [^\\s].*$": { "$ref": "#/definitions/function" },
+        "^procedure [^\\s].*$": { "$ref": "#/definitions/procedure" },
+        "^type [^\\s].*$": { "$ref": "#/definitions/typeDef" },
+        "^view [^\\s].*$": { "$ref": "#/definitions/view" },
+        "^materialized view [^\\s].*$": { "$ref": "#/definitions/view" },
+        "^sequence [^\\s].*$": { "$ref": "#/definitions/sequence" },
+        "^domain [^\\s].*$": { "$ref": "#/definitions/domain" }
+      },
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Columns as a map of name to spec, or a list of specs with explicit `name`.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/definitions/column" }
+            },
+            {
+              "type": "array",
+              "items": { "$ref": "#/definitions/columnListItem" }
+            }
+          ]
+        },
+        "primaryKey": { "$ref": "#/definitions/columnRefs" },
+        "indexes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/index" }
+        },
+        "foreignKeys": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/foreignKey" }
+        },
+        "triggers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/trigger" }
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/constraint" }
+        },
+        "policies": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/policy" }
+        },
+        "rowLevelSecurity": {
+          "type": "boolean",
+          "description": "true = ENABLE ROW LEVEL SECURITY, false = DISABLE (requires --unsafe). Omit to leave unmanaged."
+        },
+        "grants": { "$ref": "#/definitions/grants" },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" },
+        "partitionBy": { "$ref": "#/definitions/partitionBy" },
+        "partitionOf": {
+          "type": "string",
+          "description": "Parent table this table is a partition of (schema-qualified or resolved against the current schema)."
+        },
+        "forValues": { "$ref": "#/definitions/partitionSpec" },
+        "default": {
+          "type": "boolean",
+          "description": "DEFAULT partition (used with partitionOf instead of forValues)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "tableListItem": {
+      "description": "Table entry in the `tables:` list format.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "schema": { "type": "string" },
+        "columns": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/definitions/column" }
+            },
+            {
+              "type": "array",
+              "items": { "$ref": "#/definitions/columnListItem" }
+            }
+          ]
+        },
+        "primaryKey": { "$ref": "#/definitions/columnRefs" },
+        "indexes": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/index" }
+        },
+        "foreignKeys": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/foreignKey" }
+        },
+        "triggers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/trigger" }
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/constraint" }
+        },
+        "policies": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/policy" }
+        },
+        "rowLevelSecurity": { "type": "boolean" },
+        "grants": { "$ref": "#/definitions/grants" },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" },
+        "partitionBy": { "$ref": "#/definitions/partitionBy" },
+        "partitionOf": { "type": "string" },
+        "forValues": { "$ref": "#/definitions/partitionSpec" },
+        "default": { "type": "boolean" }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PostgreSQL data type, e.g. uuid, text, timestamptz, numeric(10,2)."
+        },
+        "nullable": { "type": "boolean" },
+        "notNull": { "type": "boolean", "description": "Inverse of nullable." },
+        "default": {
+          "$ref": "#/definitions/scalar",
+          "description": "SQL default expression (e.g. now(), gen_random_uuid()) or literal. Bare booleans/numbers are rendered as SQL literals."
+        },
+        "unique": { "type": "boolean" },
+        "primaryKey": { "type": "boolean" },
+        "identity": {
+          "description": "Identity column: \"always\", \"by default\" (aliases: byDefault, default), or true (= always).",
+          "oneOf": [
+            { "type": "string", "enum": ["always", "byDefault", "by default", "default"] },
+            { "type": "boolean" }
+          ]
+        },
+        "using": {
+          "type": "string",
+          "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
+        },
+        "grants": { "$ref": "#/definitions/grants" },
+        "comment": { "type": "string" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "columnListItem": {
+      "description": "Column entry in the list format; same as the map form plus `name`.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "nullable": { "type": "boolean" },
+        "notNull": { "type": "boolean" },
+        "default": { "$ref": "#/definitions/scalar" },
+        "unique": { "type": "boolean" },
+        "primaryKey": { "type": "boolean" },
+        "identity": {
+          "oneOf": [
+            { "type": "string", "enum": ["always", "byDefault", "by default", "default"] },
+            { "type": "boolean" }
+          ]
+        },
+        "using": { "type": "string" },
+        "grants": { "$ref": "#/definitions/grants" },
+        "comment": { "type": "string" }
+      },
+      "required": ["name", "type"],
+      "additionalProperties": false
+    },
+    "index": {
+      "type": "object",
+      "properties": {
+        "columns": { "$ref": "#/definitions/columnRefs" },
+        "unique": { "type": "boolean" },
+        "using": {
+          "type": "string",
+          "enum": ["btree", "gist", "gin", "brin", "hash", "spgist"],
+          "description": "Index access method (default btree)."
+        },
+        "where": {
+          "type": "string",
+          "description": "Partial index predicate (without the WHERE keyword)."
+        },
+        "opclass": {
+          "type": "string",
+          "description": "Operator class applied to every column (e.g. gin_trgm_ops)."
+        },
+        "opclasses": {
+          "type": "object",
+          "description": "Per-column operator class overrides; keys match entries in columns.",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "required": ["columns"],
+      "additionalProperties": false
+    },
+    "foreignKey": {
+      "type": "object",
+      "properties": {
+        "columns": { "$ref": "#/definitions/columnRefs" },
+        "references": {
+          "type": "object",
+          "properties": {
+            "table": { "type": "string", "minLength": 1 },
+            "columns": { "$ref": "#/definitions/columnRefs" }
+          },
+          "required": ["table", "columns"],
+          "additionalProperties": false
+        },
+        "onDelete": {
+          "type": "string",
+          "description": "ON DELETE action, e.g. cascade, restrict, set null, set default, no action."
+        }
+      },
+      "required": ["columns", "references"],
+      "additionalProperties": false
+    },
+    "trigger": {
+      "type": "object",
+      "properties": {
+        "timing": { "type": "string", "enum": ["before", "after"] },
+        "events": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["insert", "update", "delete", "truncate"] }
+        },
+        "level": { "type": "string", "enum": ["row", "statement"] },
+        "procedure": {
+          "type": "string",
+          "description": "Trigger function to execute, e.g. public.set_updated_at()."
+        },
+        "when": {
+          "type": "string",
+          "description": "WHEN (condition) guard, e.g. old.created_at <= new.created_at."
+        },
+        "constraint": {
+          "type": "boolean",
+          "description": "CREATE CONSTRAINT TRIGGER (must be AFTER ... FOR EACH ROW)."
+        },
+        "deferrable": { "type": "boolean" },
+        "initiallyDeferred": { "type": "boolean", "description": "Implies deferrable." }
+      },
+      "required": ["timing", "events", "procedure"],
+      "additionalProperties": false
+    },
+    "constraint": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["check", "unique", "exclude"] },
+        "expression": {
+          "type": "string",
+          "description": "CHECK or EXCLUDE expression."
+        },
+        "def": {
+          "type": "string",
+          "description": "Alias for expression."
+        },
+        "columns": {
+          "$ref": "#/definitions/columnRefs",
+          "description": "Columns for a unique constraint."
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "for": {
+          "type": "string",
+          "enum": ["select", "insert", "update", "delete", "all"],
+          "description": "Command the policy applies to (default all)."
+        },
+        "to": {
+          "description": "Role name or list of role names (default: all roles).",
+          "oneOf": [
+            { "type": "string" },
+            { "$ref": "#/definitions/stringList" }
+          ]
+        },
+        "using": { "type": "string", "description": "USING expression." },
+        "withCheck": { "type": "string", "description": "WITH CHECK expression." }
+      },
+      "additionalProperties": false
+    },
+    "partitionBy": {
+      "description": "Partitioning strategy: explicit `{type, columns}` or shorthand `{range: [...]}` / `{list: [...]}` / `{hash: [...]}`.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["range", "list", "hash"] },
+        "columns": { "$ref": "#/definitions/stringList" },
+        "range": { "$ref": "#/definitions/stringList" },
+        "list": { "$ref": "#/definitions/stringList" },
+        "hash": { "$ref": "#/definitions/stringList" }
+      },
+      "additionalProperties": false
+    },
+    "partitionSpec": {
+      "description": "Partition bound: `{from, to}` (range), `{in}` (list), or `{modulus, remainder}` (hash).",
+      "type": "object",
+      "properties": {
+        "from": { "$ref": "#/definitions/scalarList" },
+        "to": { "$ref": "#/definitions/scalarList" },
+        "in": { "$ref": "#/definitions/scalarList" },
+        "modulus": { "type": "integer" },
+        "remainder": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "function": {
+      "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
+      "type": "object",
+      "properties": {
+        "returns": { "type": "string", "description": "Return type, e.g. trigger, jsonb, setof record." },
+        "language": { "type": "string", "description": "e.g. sql, plpgsql." },
+        "security": { "type": "string", "enum": ["definer", "invoker"] },
+        "stable": { "type": "boolean", "description": "Marks the function STABLE." },
+        "volatile": { "type": "boolean", "description": "Marks the function VOLATILE." },
+        "immutable": { "type": "boolean", "description": "Marks the function IMMUTABLE." },
+        "strict": { "type": "boolean", "description": "STRICT (returns null on null input). Omit to leave unmanaged." },
+        "leakproof": { "type": "boolean", "description": "LEAKPROOF. Omit to leave unmanaged." },
+        "set": {
+          "type": "object",
+          "description": "SET parameter = value clauses, e.g. search_path: public.",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": { "type": "string", "description": "Function body SQL." },
+        "grants": { "$ref": "#/definitions/grants" },
+        "revokePublic": {
+          "type": "boolean",
+          "description": "Revoke the default PUBLIC execute privilege (security-definer pattern)."
+        },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["returns", "language", "body"],
+      "additionalProperties": false
+    },
+    "procedure": {
+      "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL.",
+      "type": "object",
+      "properties": {
+        "language": { "type": "string" },
+        "security": { "type": "string", "enum": ["definer", "invoker"] },
+        "set": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": { "type": "string" },
+        "grants": { "$ref": "#/definitions/grants" },
+        "revokePublic": { "type": "boolean" },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["language", "body"],
+      "additionalProperties": false
+    },
+    "typeDef": {
+      "description": "Body of a `type <name>:` declaration (enum or composite).",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["enum", "composite"] },
+        "labels": {
+          "$ref": "#/definitions/stringList",
+          "description": "Enum labels, in order."
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Composite attributes: `{ <name>: { type: <sql type> } }`.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "minLength": 1 }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+          }
+        },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "view": {
+      "description": "Body of a `view <name>:` or `materialized view <name>:` declaration.",
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "description": "The SELECT statement defining the view." },
+        "replace": {
+          "type": "boolean",
+          "description": "Always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)."
+        },
+        "grants": { "$ref": "#/definitions/grants" },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    },
+    "sequence": {
+      "description": "Body of a `sequence <name>:` declaration.",
+      "type": "object",
+      "properties": {
+        "as": { "type": "string", "enum": ["smallint", "integer", "bigint"] },
+        "increment": { "type": ["integer", "string"] },
+        "minValue": { "type": ["integer", "string"] },
+        "maxValue": { "type": ["integer", "string"] },
+        "start": { "type": ["integer", "string"] },
+        "cache": { "type": ["integer", "string"] },
+        "cycle": { "type": "boolean" },
+        "ownedBy": {
+          "type": "string",
+          "description": "table.column (or schema.table.column) owning the sequence."
+        },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "domain": {
+      "description": "Body of a `domain <name>:` declaration.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "description": "Underlying base type." },
+        "as": { "type": "string", "description": "Alias for type." },
+        "collate": { "type": "string" },
+        "default": { "$ref": "#/definitions/scalar" },
+        "notNull": { "type": "boolean" },
+        "nullable": { "type": "boolean", "description": "Inverse of notNull." },
+        "check": {
+          "type": "string",
+          "description": "CHECK expression; the value is referenced as VALUE."
+        },
+        "constraintName": {
+          "type": "string",
+          "description": "Optional name for the CHECK constraint."
+        },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "anyOf": [
+        { "required": ["type"] },
+        { "required": ["as"] }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
