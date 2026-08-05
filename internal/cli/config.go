@@ -1,6 +1,7 @@
 package cli
 
 import (
+    "fmt"
     "os"
     "path/filepath"
 
@@ -18,16 +19,36 @@ type FileConfig struct {
     JSON          *bool    `yaml:"json"`
 }
 
-func loadFileConfig(cwd string) (*FileConfig, error) {
-    path := filepath.Join(cwd, ".pgy.yml")
+// configCandidates is the default lookup order when --config is not given.
+// The dot-prefixed names are legacy and kept for backwards compatibility.
+var configCandidates = []string{"pgy.yaml", "pgy.yml", ".pgy.yaml", ".pgy.yml"}
+
+// loadFileConfig loads the config file. If explicit is non-empty it must
+// exist; otherwise the first existing candidate in cwd is used. The returned
+// path is the file that was read ("" if none).
+func loadFileConfig(cwd, explicit string) (*FileConfig, string, error) {
+    var path string
+    if explicit != "" {
+        path = explicit
+    } else {
+        for _, name := range configCandidates {
+            p := filepath.Join(cwd, name)
+            if _, err := os.Stat(p); err == nil {
+                path = p
+                break
+            }
+        }
+        if path == "" {
+            return &FileConfig{}, "", nil
+        }
+    }
     b, err := os.ReadFile(path)
     if err != nil {
-        if os.IsNotExist(err) { return &FileConfig{}, nil }
-        return nil, err
+        return nil, "", fmt.Errorf("reading config %s: %w", path, err)
     }
     var fc FileConfig
-    if err := yaml.Unmarshal(b, &fc); err != nil { return nil, err }
-    return &fc, nil
+    if err := yaml.Unmarshal(b, &fc); err != nil {
+        return nil, "", fmt.Errorf("parsing config %s: %w", path, err)
+    }
+    return &fc, path, nil
 }
-
-

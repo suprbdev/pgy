@@ -12,6 +12,7 @@ import (
 )
 
 type GlobalConfig struct {
+    ConfigPath    string
     DSN           string
     SchemaRoot    string
     Schemas       []string
@@ -32,6 +33,7 @@ func AttachGlobalFlags(root *cobra.Command) {
     }
 
     var cfg GlobalConfig
+    root.PersistentFlags().StringVar(&cfg.ConfigPath, "config", getenv("PGY_CONFIG", ""), "Config file path (default: pgy.yaml, pgy.yml, .pgy.yaml, .pgy.yml)")
     root.PersistentFlags().StringVar(&cfg.DSN, "dsn", getenv("PGY_DSN", ""), "PostgreSQL DSN")
     root.PersistentFlags().StringVar(&cfg.SchemaRoot, "schema-root", getenv("PGY_SCHEMA_ROOT", "."), "Schema root directory")
     root.PersistentFlags().StringSliceVar(&cfg.Schemas, "schemas", splitCSV(getenv("PGY_SCHEMAS", "")), "Comma-separated YAML schema files (relative to schema-root)")
@@ -42,16 +44,19 @@ func AttachGlobalFlags(root *cobra.Command) {
     root.PersistentFlags().BoolVar(&cfg.JSON, "json", os.Getenv("PGY_JSON") == "1", "JSON output where applicable")
 
     // store on context for subcommands
-    root.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+    root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
         // Commands that need no schema/DB config: skip config load and the
         // schema-root walk entirely.
         switch cmd.Name() {
         case "version", "help":
-            return
+            return nil
         }
 
-        // Load .pgy.yml and merge with precedence: flags > env > config > defaults
-        fc, _ := loadFileConfig(".")
+        // Load config file and merge with precedence: flags > env > config > defaults
+        fc, configPath, err := loadFileConfig(".", cfg.ConfigPath)
+        if err != nil {
+            return err
+        }
         f := cmd.Flags()
         // DSN
         if !f.Changed("dsn") && os.Getenv("PGY_DSN") == "" && fc.DSN != "" {
@@ -85,6 +90,11 @@ func AttachGlobalFlags(root *cobra.Command) {
         }
 
         if len(cfg.Schemas) == 0 {
+            // The config file is YAML too; keep it out of the schema list.
+            absConfig := ""
+            if configPath != "" {
+                absConfig, _ = filepath.Abs(configPath)
+            }
             // default: all .yml in schema-root
             _ = filepath.WalkDir(cfg.SchemaRoot, func(path string, d os.DirEntry, err error) error {
                 if err != nil {
@@ -100,6 +110,11 @@ func AttachGlobalFlags(root *cobra.Command) {
                     return nil
                 }
                 if strings.HasSuffix(d.Name(), ".yml") || strings.HasSuffix(d.Name(), ".yaml") {
+                    if absConfig != "" {
+                        if abs, absErr := filepath.Abs(path); absErr == nil && abs == absConfig {
+                            return nil
+                        }
+                    }
                     rel, relErr := filepath.Rel(cfg.SchemaRoot, path)
                     if relErr == nil {
                         cfg.Schemas = append(cfg.Schemas, rel)
@@ -110,6 +125,7 @@ func AttachGlobalFlags(root *cobra.Command) {
         }
         ctx := context.WithValue(cmd.Context(), ctxKey{}, &cfg)
         cmd.SetContext(ctx)
+        return nil
     }
 }
 
