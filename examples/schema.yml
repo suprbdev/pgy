@@ -1,0 +1,390 @@
+# yaml-language-server: $schema=../schemas/pgy.schema.json
+#
+# Kitchen-sink reference schema for pgy.
+#
+# This file demonstrates every YAML option pgy supports, on a small generic
+# commerce-flavored database. It is meant to be read, copied from, and used as
+# a syntax reference; see docs/schema.md for the full documentation and
+# examples/modules/ for ready-made building blocks.
+#
+# pgy supports three YAML formats (they can be mixed across merged files):
+#   1. `schema <name>:` blocks — used here; recommended, preserves column order
+#   2. a `schemas:` map of schema name -> tables
+#   3. a top-level `tables:` map or list
+#
+# The modeline on line 1 enables validation and completion in editors running
+# yaml-language-server (VS Code YAML extension, Neovim, ...).
+
+# ---------------------------------------------------------------------------
+# Extensions
+# ---------------------------------------------------------------------------
+extensions:
+  - pg_trgm                    # string shorthand implies ifNotExists: true
+  - btree_gist                 # needed by the EXCLUDE constraint on app.booking
+  - name: pgcrypto             # full form
+    ifNotExists: true
+
+# ---------------------------------------------------------------------------
+# Roles (cluster-level; passwords are intentionally unsupported — secrets do
+# not belong in schema YAML)
+# ---------------------------------------------------------------------------
+roles:
+  app_base:
+    login: false               # group role, membership only
+    inherit: false             # false emits NOINHERIT
+    comment: Privilege bundle inherited by application roles.
+  app_user:
+    login: true
+    connectionLimit: 100
+    inRoles: [app_base]        # GRANT app_base TO app_user
+    comment: Runtime role the application connects as.
+  app_admin:
+    login: true
+    createdb: true
+    createrole: true
+    superuser: false
+    replication: false
+    bypassRLS: true            # skips row-level security policies
+    inRoles: [app_base]
+
+# ---------------------------------------------------------------------------
+# Main application schema
+# ---------------------------------------------------------------------------
+schema app:
+  comment: Core application objects.
+  grants:                      # schema-level privileges per role
+    app_user: [usage]
+    app_admin: [usage, create]
+
+  # --- Types -----------------------------------------------------------------
+
+  type order_status:           # enum type
+    type: enum
+    labels: [pending, paid, shipped, cancelled]   # order matters; new labels
+    comment: Lifecycle of an order.               # are appended via ALTER TYPE
+
+  type money_amount:           # composite type
+    type: composite
+    attributes:                # attribute order preserved in this format
+      amount:
+        type: numeric(12,2)
+      currency:
+        type: char(3)
+
+  # --- Domains ---------------------------------------------------------------
+
+  domain email:
+    type: text                 # underlying base type (`as` is an alias)
+    check: "VALUE ~ '^[^@]+@[^@]+\\.[^@]+$'"      # value is referenced as VALUE
+    constraintName: email_format_check            # optional CHECK name
+    comment: RFC-lite email address.
+
+  domain country_code:
+    as: char(2)                # `as` alias for `type`
+    default: "'US'"
+    notNull: true              # `nullable: false` is the inverse spelling
+    collate: C
+
+  # --- Sequences -------------------------------------------------------------
+
+  sequence order_number_seq:
+    as: bigint                 # smallint | integer | bigint
+    start: 1000
+    increment: 1
+    minValue: 1000
+    maxValue: 999999999
+    cache: 20
+    cycle: false
+    ownedBy: app.order.order_number   # ties the sequence's lifetime to the
+    comment: Human-facing order numbers. # column (emitted as ALTER SEQUENCE
+                                         # after tables are created)
+
+  # --- Tables ----------------------------------------------------------------
+
+  table customer:
+    comment: A registered customer account.
+    columns:                   # columns are NOT NULL by default; opt out with
+      id:                      # `nullable: true`
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      email:
+        type: app.email        # domain declared above; `unique: true` here
+        comment: Login identifier.   # would add a unique constraint — the
+      display_name:                  # unique index below covers it instead
+        type: text
+      country:
+        type: app.country_code
+      settings:
+        type: jsonb
+        notNull: true
+        default: "'{}'::jsonb"
+      is_active:
+        type: boolean
+        notNull: true
+        default: true          # bare booleans/numbers become SQL literals
+      loyalty_points:
+        type: bigint
+        notNull: true
+        default: 0
+        using: loyalty_points::bigint   # USING expr applied on type changes
+        grants:                # column-level grants
+          app_user: [select]
+      created_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+      updated_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    indexes:
+      customer_email_idx:
+        columns: [email]
+        unique: true
+      customer_name_trgm_idx:  # trigram search over display_name
+        columns: [display_name]
+        using: gin             # btree | gist | gin | brin | hash | spgist
+        opclass: gin_trgm_ops  # applied to every column of the index
+      customer_active_idx:
+        columns: [created_at]
+        where: is_active       # partial index predicate
+    constraints:
+      customer_points_check:
+        type: check
+        expression: "loyalty_points >= 0"
+      customer_name_uniq:
+        type: unique
+        columns: [display_name, country]
+    triggers:
+      customer_set_updated_at:
+        timing: before         # before | after
+        events: [update]       # insert | update | delete | truncate
+        level: row             # row | statement
+        procedure: app.set_updated_at()
+        when: "old.* IS DISTINCT FROM new.*"      # optional WHEN guard
+    rowLevelSecurity: true     # true = ENABLE, false = DISABLE (--unsafe)
+    policies:
+      customer_self_select:
+        for: select            # select | insert | update | delete | all
+        to: [app_user]         # role list (string also accepted)
+        using: "id = current_setting('app.customer_id')::uuid"
+      customer_self_update:
+        for: update
+        to: [app_user]
+        using: "id = current_setting('app.customer_id')::uuid"
+        withCheck: "id = current_setting('app.customer_id')::uuid"
+    grants:
+      app_user: [select, insert, update]
+      app_admin: []            # empty list = REVOKE ALL for this role
+    dependsOn:                 # explicit creation-order hints
+      - domain app.email
+      - domain app.country_code
+      - function app.set_updated_at
+
+  table order:
+    comment: A customer order. Reserved-word names are fine; pgy quotes all identifiers.
+    columns:
+      id:
+        type: bigint
+        primaryKey: true
+        identity: always       # "always" | "by default" | true (= always)
+      order_number:
+        type: bigint
+        notNull: true
+        default: nextval('app.order_number_seq')
+      customer_id:
+        type: uuid
+        notNull: true
+      status:
+        type: app.order_status
+        notNull: true
+        default: "'pending'"
+      total:
+        type: app.money_amount
+        nullable: true         # columns are NOT NULL unless opted out
+      placed_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    primaryKey:                # named block form; a plain list also works:
+      order_pkey:              #   primaryKey: [id]
+        columns: [id]
+    indexes:
+      order_customer_idx:
+        columns: [customer_id, placed_at]
+        opclasses:             # per-column operator class overrides
+          placed_at: timestamptz_ops
+    foreignKeys:
+      order_customer_fkey:
+        columns: [customer_id]
+        references:
+          table: app.customer
+          columns: [id]
+        onDelete: restrict     # cascade | restrict | set null | set default | no action
+    triggers:
+      order_audit:
+        timing: after
+        events: [insert, update, delete]
+        level: row
+        procedure: app.audit_order()
+        constraint: true       # CREATE CONSTRAINT TRIGGER (AFTER ... ROW only)
+        deferrable: true
+        initiallyDeferred: true
+    grants:
+      app_user: [select, insert]
+    dependsOn:
+      - table app.customer
+      - type app.order_status
+      - type app.money_amount
+      - sequence app.order_number_seq
+      - function app.audit_order
+
+  table booking:
+    comment: Demonstrates an EXCLUDE constraint over a range type.
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+        default: gen_random_uuid()
+      room:
+        type: text
+        notNull: true
+      during:
+        type: tstzrange
+        notNull: true
+    constraints:
+      booking_no_overlap:
+        type: exclude
+        expression: "using gist (room with =, during with &&)"
+
+  # --- Functions -------------------------------------------------------------
+
+  function set_updated_at():   # arguments belong in the key, not the body
+    returns: trigger
+    language: plpgsql
+    volatile: true             # volatility: stable | volatile | immutable
+    body: |
+      BEGIN
+        NEW.updated_at = now();
+        RETURN NEW;
+      END;
+
+  function audit_order():
+    returns: trigger
+    language: plpgsql
+    security: definer          # definer | invoker
+    set:                       # SET clauses attached to the function
+      search_path: app, pg_temp
+    revokePublic: true         # revoke default PUBLIC execute (pairs with definer)
+    grants:
+      app_user: [execute]
+    comment: Writes order changes to the audit stream.
+    body: |
+      BEGIN
+        INSERT INTO audit.event (kind, payload)
+        VALUES (TG_OP, to_jsonb(NEW));
+        RETURN NEW;
+      END;
+    dependsOn:
+      - table audit.event
+
+  function normalize_email(addr text):
+    returns: text
+    language: sql
+    immutable: true
+    strict: true               # returns NULL on NULL input; omit = unmanaged
+    leakproof: true            # requires superuser to install; omit = unmanaged
+    body: |
+      SELECT lower(trim(addr));
+
+  # --- Procedures (invoked with CALL; no return type or volatility) ----------
+
+  procedure archive_orders(before timestamptz):
+    language: plpgsql
+    security: definer
+    set:
+      search_path: app, pg_temp
+    revokePublic: true
+    grants:
+      app_admin: [execute]
+    comment: Moves old orders out of the hot table. May commit internally.
+    body: |
+      BEGIN
+        DELETE FROM app."order" WHERE placed_at < before;
+      END;
+    dependsOn:
+      - table app.order
+
+  # --- Views -----------------------------------------------------------------
+
+  view active_customer:
+    query: |
+      SELECT c.id, c.email, c.display_name
+      FROM app.customer c
+      WHERE c.is_active
+    replace: true              # always emit CREATE OR REPLACE
+    grants:
+      app_user: [select]
+    comment: Customers that can currently log in.
+    dependsOn:
+      - table app.customer
+
+  materialized view daily_order_stats:
+    query: |
+      SELECT date_trunc('day', placed_at) AS day,
+             count(*) AS orders,
+             count(DISTINCT customer_id) AS customers
+      FROM app."order"
+      GROUP BY 1
+    grants:
+      app_user: [select]
+    comment: Refreshed out-of-band; pgy only manages the definition.
+    dependsOn:
+      - table app.order
+
+# ---------------------------------------------------------------------------
+# Audit schema: declarative partitioning
+# ---------------------------------------------------------------------------
+schema audit:
+  comment: Append-only audit trail, partitioned by month.
+  grants:
+    app_user: [usage]
+
+  table event:                 # partitioned parent
+    columns:
+      id:
+        type: bigint
+        identity: always
+      kind:
+        type: text
+        notNull: true
+      payload:
+        type: jsonb
+        notNull: true
+      occurred_at:
+        type: timestamptz
+        notNull: true
+        default: now()
+    partitionBy:               # shorthand: strategy keyed by name
+      range: [occurred_at]     # explicit form: {type: range, columns: [occurred_at]}
+    grants:
+      app_user: [insert]
+
+  table event_2026_01:         # range partition child
+    partitionOf: audit.event   # children declare no columns of their own
+    forValues:
+      from: [2026-01-01]       # bare dates/numbers are quoted for SQL as needed
+      to: [2026-02-01]
+    dependsOn:
+      - table audit.event
+
+  table event_default:         # catch-all partition
+    partitionOf: audit.event
+    default: true
+    dependsOn:
+      - table audit.event
+
+  # Other strategies:
+  #   partitionBy: {list: [region]}   child: forValues: {in: [eu, us]}
+  #   partitionBy: {hash: [id]}       child: forValues: {modulus: 4, remainder: 0}

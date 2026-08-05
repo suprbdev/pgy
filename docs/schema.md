@@ -828,7 +828,7 @@ schema public:
 | `start` | integer | `START WITH` value |
 | `cache` | integer | Number of values preallocated per session |
 | `cycle` | boolean | Wrap around when the limit is reached |
-| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Requires the table to exist; add a matching `dependsOn` |
+| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
 | `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 

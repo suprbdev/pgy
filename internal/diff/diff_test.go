@@ -3130,8 +3130,25 @@ func TestSequenceOwnedBy(t *testing.T) {
 		Schema: "public", Name: "order_seq", OwnedBy: "public.orders.order_number",
 	})
 	p := Plan(emptyLive(), desired, false)
-	if !findCreate(p, `owned by "public"."orders"."order_number"`) {
-		t.Errorf("expected owned by clause; creates=%v", p.Creates)
+	// OWNED BY must not be part of CREATE SEQUENCE: sequences are created
+	// before tables, so the owning column may not exist yet.
+	if findCreate(p, "owned by") {
+		t.Errorf("owned by must not appear in creates; creates=%v", p.Creates)
+	}
+	if !findAlter(p, `alter sequence "public"."order_seq" owned by "public"."orders"."order_number";`) {
+		t.Errorf("expected deferred alter sequence owned by; alters=%v", p.Alters)
+	}
+}
+
+func TestSequenceOwnedBySkippedIfSequenceExists(t *testing.T) {
+	live := emptyLive()
+	live.Sequences["public.order_seq"] = true
+	desired := seqDesired("public.order_seq", &schema.Sequence{
+		Schema: "public", Name: "order_seq", OwnedBy: "public.orders.order_number",
+	})
+	p := Plan(live, desired, false)
+	if findAlter(p, "owned by") {
+		t.Errorf("existing sequences are never altered; alters=%v", p.Alters)
 	}
 }
 

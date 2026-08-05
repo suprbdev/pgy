@@ -1145,6 +1145,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             // option introspection is not supported)
             if live.Sequences[e.Key] { continue }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
+            if sq.OwnedBy != "" {
+                // OWNED BY goes into Alters (rendered after all Creates):
+                // the owning table may itself be created by this plan, and
+                // CREATE SEQUENCE ... OWNED BY would fail before it exists.
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(e.Key), ownedByIdent(sq.OwnedBy)))
+            }
         case "view":
             vw, ok := desired.Views[e.Key]
             if !ok || vw == nil || vw.Query == "" { continue }
@@ -1281,7 +1287,9 @@ func renderRole(r *schema.Role) string {
 }
 
 // renderSequence emits CREATE SEQUENCE IF NOT EXISTS with only the options
-// set in YAML (postgres defaults apply otherwise).
+// set in YAML (postgres defaults apply otherwise). OWNED BY is not emitted
+// here: sequences are created before tables, so the owning column may not
+// exist yet — the caller emits a separate ALTER SEQUENCE ... OWNED BY.
 func renderSequence(fq string, sq *schema.Sequence) string {
     parts := []string{"create sequence if not exists", pqIdent(fq)}
     if sq.As != "" { parts = append(parts, "as "+sq.As) }
@@ -1291,7 +1299,6 @@ func renderSequence(fq string, sq *schema.Sequence) string {
     if sq.Start != "" { parts = append(parts, "start with "+sq.Start) }
     if sq.Cache != "" { parts = append(parts, "cache "+sq.Cache) }
     if sq.Cycle { parts = append(parts, "cycle") }
-    if sq.OwnedBy != "" { parts = append(parts, "owned by "+ownedByIdent(sq.OwnedBy)) }
     return strings.Join(parts, " ") + ";"
 }
 
