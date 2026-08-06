@@ -1075,7 +1075,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
-                            pqIdent(e.Key)+f.ArgsSig, strings.Join(clauses, " ")))
+                            pqIdent(e.Key)+grantFuncArgs(f.ArgsSig), strings.Join(clauses, " ")))
                     }
                     continue
                 }

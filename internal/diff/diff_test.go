@@ -1475,6 +1475,25 @@ func TestFunctionAlterOnVolatilityChange(t *testing.T) {
 	}
 }
 
+func TestFunctionAlterStripsArgDefaults(t *testing.T) {
+	live := emptyLive()
+	live.Functions["public.login(email text default null)"] = true
+	live.FunctionDefs[normalizeFunctionSignature("public.login(email text default null)")] = &LiveFunction{
+		Body: "select 1", Volatility: "volatile", Security: "invoker",
+	}
+	f := loginFn("select 1")
+	f.ArgsSig = "(email text default null)"
+	f.Volatility = "stable"
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) stable;`) {
+		t.Errorf("expected ALTER FUNCTION without arg defaults; alters: %v", p.Alters)
+	}
+}
+
 func TestViewReplaceFlag(t *testing.T) {
 	live := emptyLive()
 	live.Views["public.v"] = true
