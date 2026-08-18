@@ -278,6 +278,7 @@ indexes:
     opclass: gin_trgm_ops   # optional operator class applied to every column
     opclasses:              # optional per-column operator classes (override opclass)
       col1: gin_trgm_ops
+    comment: "lookup by col1"   # optional COMMENT ON INDEX (diffed against live)
 ```
 
 If `name` is omitted, an auto-name is derived from the table and column names.
@@ -317,6 +318,7 @@ foreignKeys:
       table: <schema.table>
       columns: [col1]
     onDelete: cascade   # cascade | restrict | set null | set default
+    comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
 
 ### Triggers
@@ -595,6 +597,17 @@ schema app:
       id:
         type: bigint
         comment: "@name orderId"
+      user_id:
+        type: bigint
+    indexes:
+      orders_user_idx:
+        columns: [user_id]
+        comment: "lookup by user"
+    foreignKeys:
+      fk_user:
+        columns: [user_id]
+        references: { table: app.users, columns: [id] }
+        comment: "@fieldName owner"
   function fn():
     returns: int
     language: sql
@@ -602,7 +615,9 @@ schema app:
     body: select 1
 ```
 
-Supported on: schemas, tables, columns, types, functions, views, materialized views, sequences.
+Supported on: schemas, tables, columns, indexes, foreign keys, types, domains, functions, procedures, views, materialized views, sequences, roles.
+
+Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); foreign key comments as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`.
 
 Behavior:
 

@@ -75,6 +75,8 @@ type LiveTable struct{
     IndexOpclasses map[string][]LiveIndexOpclass
     Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
     Policies    map[string]*LivePolicy // policy name -> live definition
+    IndexComments      map[string]string // index name -> comment (absent key = no comment)
+    ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
@@ -169,7 +171,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}
     }
     tableRows.Close()
     
@@ -201,7 +203,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -819,6 +821,54 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         l.SchemaComments[schemaName] = comment
     }
     scRows.Close()
+
+    // Query index comments (pg_description keyed by the index's pg_class oid)
+    icQ := `
+        select n.nspname, t.relname, i.relname, d.description
+        from pg_description d
+        join pg_class i on i.oid = d.objoid and d.classoid = 'pg_class'::regclass
+        join pg_index ix on ix.indexrelid = i.oid
+        join pg_class t on t.oid = ix.indrelid
+        join pg_namespace n on n.oid = t.relnamespace
+        where d.objsubid = 0
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    icRows, err := pool.Query(ctx, icQ)
+    if err != nil { return nil, err }
+    for icRows.Next() {
+        var schemaName, tableName, idxName, comment string
+        if err := icRows.Scan(&schemaName, &tableName, &idxName, &comment); err != nil {
+            icRows.Close()
+            return nil, err
+        }
+        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+            t.IndexComments[idxName] = comment
+        }
+    }
+    icRows.Close()
+
+    // Query constraint comments (pg_description keyed by pg_constraint oid)
+    cncQ := `
+        select n.nspname, c.relname, con.conname, d.description
+        from pg_description d
+        join pg_constraint con on con.oid = d.objoid and d.classoid = 'pg_constraint'::regclass
+        join pg_class c on c.oid = con.conrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    cncRows, err := pool.Query(ctx, cncQ)
+    if err != nil { return nil, err }
+    for cncRows.Next() {
+        var schemaName, tableName, conName, comment string
+        if err := cncRows.Scan(&schemaName, &tableName, &conName, &comment); err != nil {
+            cncRows.Close()
+            return nil, err
+        }
+        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+            t.ConstraintComments[conName] = comment
+        }
+    }
+    cncRows.Close()
 
     return l, nil
 }
@@ -1452,6 +1502,23 @@ func planComments(live *Live, desired *schema.Database) []string {
             }
             comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(cn)), c.Comment, have)
         }
+        lt := live.Tables[k]
+        // COMMENT ON INDEX takes the schema-qualified index name, not the table
+        schemaPrefix := ""
+        if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
+        for _, ix := range dt.Indexes {
+            if ix == nil || ix.Comment == "" || len(ix.Columns) == 0 { continue }
+            name := indexName(k, ix)
+            have := ""
+            if lt != nil { have = lt.IndexComments[name] }
+            comment("index "+pqIdent(schemaPrefix+name), ix.Comment, have)
+        }
+        for _, fk := range dt.ForeignKeys {
+            if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
+            have := ""
+            if lt != nil { have = lt.ConstraintComments[fk.Name] }
+            comment(fmt.Sprintf("constraint %s on %s", pqIdent(fk.Name), pqIdent(k)), fk.Comment, have)
+        }
     }
 
     viewNames := make([]string, 0, len(desired.Views))
@@ -1721,6 +1788,13 @@ func grantFuncArgs(argsSig string) string {
     return "(" + strings.Join(args, ", ") + ")"
 }
 
+// indexName returns the declared index name, or the auto-generated
+// <schema>_<table>_<cols>_idx name when none was given.
+func indexName(fq string, ix *schema.Index) string {
+    if ix.Name != "" { return ix.Name }
+    return strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx"
+}
+
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
 // on a table. lt is the live table state (nil for new tables — skip existence checks).
 // FK statements go to deferredFKs so the caller can emit them after all PK/unique alters.
@@ -1775,8 +1849,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Indexes (always use IF NOT EXISTS)
     for _, ix := range dt.Indexes {
         if ix == nil || len(ix.Columns) == 0 { continue }
-        name := ix.Name
-        if name == "" { name = strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
+        name := indexName(fq, ix)
         uniq := ""
         if ix.Unique { uniq = " unique" }
         using := ""

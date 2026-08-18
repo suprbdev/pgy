@@ -142,6 +142,7 @@ schema app:
       customer_email_idx:
         columns: [email]
         unique: true
+        comment: "one account per email"   # COMMENT ON INDEX, diffed against live
       customer_name_trgm_idx:  # trigram search over display_name
         columns: [display_name]
         using: gin             # btree | gist | gin | brin | hash | spgist
@@ -222,6 +223,7 @@ schema app:
           table: app.customer
           columns: [id]
         onDelete: restrict     # cascade | restrict | set null | set default | no action
+        comment: "@fieldName customer"   # COMMENT ON CONSTRAINT, diffed against live
     triggers:
       order_audit:
         timing: after

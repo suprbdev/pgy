@@ -321,6 +321,10 @@
           "type": "object",
           "description": "Per-column operator class overrides; keys match entries in columns.",
           "additionalProperties": { "type": "string" }
+        },
+        "comment": {
+          "type": "string",
+          "description": "COMMENT ON INDEX text (diffed against live)."
         }
       },
       "required": ["columns"],
@@ -342,6 +346,10 @@
         "onDelete": {
           "type": "string",
           "description": "ON DELETE action, e.g. cascade, restrict, set null, set default, no action."
+        },
+        "comment": {
+          "type": "string",
+          "description": "COMMENT ON CONSTRAINT text (diffed against live)."
         }
       },
       "required": ["columns", "references"],

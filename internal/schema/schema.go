@@ -161,6 +161,7 @@ type Index struct {
     Where     string            // partial index predicate
     Opclass   string            // operator class applied to every column (e.g. gin_trgm_ops)
     Opclasses map[string]string // per-column operator class overrides; key matches the columns entry
+    Comment   string            // empty means unmanaged
 }
 
 type ForeignKey struct {
@@ -169,6 +170,7 @@ type ForeignKey struct {
     RefTable  string
     RefColumns []string
     OnDelete  string
+    Comment   string // empty means unmanaged
 }
 
 type Trigger struct {
@@ -847,6 +849,7 @@ func parseIndexes(v any) []*Index {
                 if m, ok := dm["using"].(string); ok { ix.Using = m }
                 if w, ok := dm["where"].(string); ok { ix.Where = w }
                 if oc, ok := dm["opclass"].(string); ok { ix.Opclass = oc }
+                if cm, ok := dm["comment"].(string); ok { ix.Comment = cm }
                 if ocm, ok := dm["opclasses"].(map[string]any); ok {
                     ix.Opclasses = map[string]string{}
                     for col, v := range ocm {
@@ -873,6 +876,7 @@ func parseForeignKeys(v any) []*ForeignKey {
                     fk.RefColumns = parseStringListFromNode(ref["columns"])
                 }
                 if od, ok := dm["onDelete"].(string); ok { fk.OnDelete = od }
+                if cm, ok := dm["comment"].(string); ok { fk.Comment = cm }
             }
             out = append(out, fk)
         }

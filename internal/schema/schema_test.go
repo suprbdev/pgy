@@ -2551,3 +2551,40 @@ tables:
 		t.Errorf("plain column should have no using, got %q", cols["plain"].Using)
 	}
 }
+
+func TestCommentIndexAndForeignKeyParse(t *testing.T) {
+	yaml := `
+schema app:
+  table orders:
+    columns:
+      id:
+        type: bigint
+      user_id:
+        type: bigint
+    indexes:
+      orders_user_idx:
+        columns: [user_id]
+        comment: "lookup by user"
+    foreignKeys:
+      fk_user:
+        columns: [user_id]
+        references:
+          table: app.users
+          columns: [id]
+        comment: "@fieldName owner"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["app.orders"]
+	if tbl == nil {
+		t.Fatal("missing table")
+	}
+	if len(tbl.Indexes) != 1 || tbl.Indexes[0].Comment != "lookup by user" {
+		t.Errorf("index comment: %+v", tbl.Indexes)
+	}
+	if len(tbl.ForeignKeys) != 1 || tbl.ForeignKeys[0].Comment != "@fieldName owner" {
+		t.Errorf("fk comment: %+v", tbl.ForeignKeys)
+	}
+}

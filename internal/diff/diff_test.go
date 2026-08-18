@@ -4182,3 +4182,89 @@ func TestAddColumnBeforeDependentFunctionCreate(t *testing.T) {
 		t.Errorf("add column must precede dependent function create; creates: %v", p.Creates)
 	}
 }
+
+func TestCommentIndexAndForeignKey(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.orders": {
+			Name:    "orders",
+			Columns: map[string]*schema.Column{"user_id": {Type: "int"}, "status": {Type: "text"}},
+			Indexes: []*schema.Index{
+				{Name: "orders_status_idx", Columns: []string{"status"}, Comment: "lookup by status"},
+				{Columns: []string{"user_id"}, Comment: "auto-named"},
+			},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_user", Columns: []string{"user_id"}, RefTable: "public.users", RefColumns: []string{"id"}, Comment: "@fieldName owner"},
+			},
+		},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	if !findAlter(p, `comment on index "public"."orders_status_idx" is 'lookup by status';`) {
+		t.Errorf("expected named index comment; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `comment on index "public"."public_orders_user_id_idx" is 'auto-named';`) {
+		t.Errorf("expected auto-named index comment; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `comment on constraint "fk_user" on "public"."orders" is '@fieldName owner';`) {
+		t.Errorf("expected fk comment; alters: %v", p.Alters)
+	}
+	fkIdx, cmIdx := -1, -1
+	for i, s := range p.Alters {
+		if strings.Contains(s, `add constraint "fk_user"`) { fkIdx = i }
+		if strings.Contains(s, `comment on constraint "fk_user"`) { cmIdx = i }
+	}
+	if fkIdx < 0 || cmIdx < fkIdx {
+		t.Errorf("fk comment must follow fk creation; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentIndexAndForeignKeySkippedIfSame(t *testing.T) {
+	live := liveWithTable("public.orders", map[string]*LiveColumn{"user_id": {Type: "int"}})
+	lt := live.Tables["public.orders"]
+	lt.Indexes["orders_user_idx"] = true
+	lt.Constraints["fk_user"] = true
+	lt.IndexComments = map[string]string{"orders_user_idx": "same"}
+	lt.ConstraintComments = map[string]string{"fk_user": "same"}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.orders": {
+			Name:    "orders",
+			Columns: map[string]*schema.Column{"user_id": {Type: "int"}},
+			Indexes: []*schema.Index{{Name: "orders_user_idx", Columns: []string{"user_id"}, Comment: "same"}},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_user", Columns: []string{"user_id"}, RefTable: "public.users", RefColumns: []string{"id"}, Comment: "same"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "comment on") {
+		t.Errorf("comments unchanged, should not re-emit; alters: %v", p.Alters)
+	}
+}
+
+func TestCommentIndexAndForeignKeyUpdatedIfChanged(t *testing.T) {
+	live := liveWithTable("public.orders", map[string]*LiveColumn{"user_id": {Type: "int"}})
+	lt := live.Tables["public.orders"]
+	lt.Indexes["orders_user_idx"] = true
+	lt.Constraints["fk_user"] = true
+	lt.IndexComments = map[string]string{"orders_user_idx": "old"}
+	lt.ConstraintComments = map[string]string{"fk_user": "old"}
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.orders": {
+			Name:    "orders",
+			Columns: map[string]*schema.Column{"user_id": {Type: "int"}},
+			Indexes: []*schema.Index{{Name: "orders_user_idx", Columns: []string{"user_id"}, Comment: "new"}},
+			ForeignKeys: []*schema.ForeignKey{
+				{Name: "fk_user", Columns: []string{"user_id"}, RefTable: "public.users", RefColumns: []string{"id"}, Comment: "new"},
+			},
+		},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `comment on index "public"."orders_user_idx" is 'new';`) {
+		t.Errorf("expected updated index comment; alters: %v", p.Alters)
+	}
+	if !findAlter(p, `comment on constraint "fk_user" on "public"."orders" is 'new';`) {
+		t.Errorf("expected updated fk comment; alters: %v", p.Alters)
+	}
+	if findCreate(p, "create index") || findAlter(p, "add constraint") {
+		t.Errorf("existing index/fk must not be recreated; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
