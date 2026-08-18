@@ -1568,14 +1568,14 @@ func TestLoadAndMerge(t *testing.T) {
 
 	f1 := filepath.Join(dir, "a.yaml")
 	f2 := filepath.Join(dir, "b.yaml")
-	os.WriteFile(f1, []byte(`
+	mustWrite(t, f1, `
 tables:
   public.users:
     columns:
       id:
         type: int
-`), 0o644)
-	os.WriteFile(f2, []byte(`
+`)
+	mustWrite(t, f2, `
 tables:
   public.users:
     columns:
@@ -1585,7 +1585,7 @@ tables:
     columns:
       id:
         type: int
-`), 0o644)
+`)
 
 	db, err := LoadAndMerge([]string{f1, f2})
 	if err != nil {
@@ -1608,7 +1608,7 @@ func TestLoadAndMergeLinkFileAddsForeignKeys(t *testing.T) {
 
 	f1 := filepath.Join(dir, "post.yaml")
 	f2 := filepath.Join(dir, "post_user.yaml")
-	os.WriteFile(f1, []byte(`
+	mustWrite(t, f1, `
 schema public:
   table post:
     columns:
@@ -1622,8 +1622,8 @@ schema public:
         columns: [title]
     dependsOn:
       - extension pgcrypto
-`), 0o644)
-	os.WriteFile(f2, []byte(`
+`)
+	mustWrite(t, f2, `
 schema public:
   table post:
     columns:
@@ -1641,7 +1641,7 @@ schema public:
         columns: [author_id]
     dependsOn:
       - table public.user
-`), 0o644)
+`)
 
 	db, err := LoadAndMerge([]string{f1, f2})
 	if err != nil {
@@ -1674,7 +1674,7 @@ func TestLoadAndMergeNamedEntryReplacedByLaterFile(t *testing.T) {
 
 	f1 := filepath.Join(dir, "a.yaml")
 	f2 := filepath.Join(dir, "b.yaml")
-	os.WriteFile(f1, []byte(`
+	mustWrite(t, f1, `
 schema public:
   table item:
     columns:
@@ -1687,15 +1687,15 @@ schema public:
       item_qty_check:
         type: check
         expression: "qty > 0"
-`), 0o644)
-	os.WriteFile(f2, []byte(`
+`)
+	mustWrite(t, f2, `
 schema public:
   table item:
     constraints:
       item_qty_check:
         type: check
         expression: "qty >= 0"
-`), 0o644)
+`)
 
 	db, err := LoadAndMerge([]string{f1, f2})
 	if err != nil {
@@ -1718,18 +1718,18 @@ func TestLoadAndMergeExtensionDedupe(t *testing.T) {
 
 	f1 := filepath.Join(dir, "a.yaml")
 	f2 := filepath.Join(dir, "b.yaml")
-	os.WriteFile(f1, []byte(`
+	mustWrite(t, f1, `
 extensions:
   - name: citext
     ifNotExists: true
-`), 0o644)
-	os.WriteFile(f2, []byte(`
+`)
+	mustWrite(t, f2, `
 extensions:
   - name: citext
     ifNotExists: true
   - name: pgcrypto
     ifNotExists: true
-`), 0o644)
+`)
 
 	db, err := LoadAndMerge([]string{f1, f2})
 	if err != nil {
@@ -1744,12 +1744,12 @@ func TestLoadAndMergeMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	f1 := filepath.Join(dir, "real.yaml")
 	missing := filepath.Join(dir, "ghost.yaml")
-	os.WriteFile(f1, []byte(`tables:
+	mustWrite(t, f1, `tables:
   public.t:
     columns:
       id:
         type: int
-`), 0o644)
+`)
 
 	db, err := LoadAndMerge([]string{f1, missing})
 	if err != nil {
@@ -2586,5 +2586,12 @@ schema app:
 	}
 	if len(tbl.ForeignKeys) != 1 || tbl.ForeignKeys[0].Comment != "@fieldName owner" {
 		t.Errorf("fk comment: %+v", tbl.ForeignKeys)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

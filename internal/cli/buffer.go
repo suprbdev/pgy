@@ -36,8 +36,8 @@ func cmdBuffer() *cobra.Command {
                 fmt.Printf("%s: %d bytes, %d statements\n", cfg.BufferPath, len(b), n)
                 return nil
             }
-            os.Stdout.Write(b)
-            return nil
+            _, err = os.Stdout.Write(b)
+            return err
         },
     }
     c.Flags().BoolVar(&stat, "stat", false, "Show summary only")

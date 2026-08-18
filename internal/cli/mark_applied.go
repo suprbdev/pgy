@@ -4,6 +4,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "strconv"
     "strings"
     "time"
 
@@ -42,8 +43,8 @@ func cmdMarkApplied() *cobra.Command {
             tableName := "migrations"
             if err := db.EnsureMigrationsTable(ctx, pool, schemaName, tableName); err != nil { return err }
             // delete all rows greater than until version
-            var untilVersion int
-            fmt.Sscanf(base, "%d", &untilVersion)
+            untilVersion, err := strconv.Atoi(base)
+            if err != nil { return fmt.Errorf("invalid migration version %q: %w", base, err) }
             _, err = pool.Exec(ctx, fmt.Sprintf("delete from %s.%s where version > $1", dbIdent(schemaName), dbIdent(tableName)), untilVersion)
             if err != nil { return err }
             // insert missing rows up to until

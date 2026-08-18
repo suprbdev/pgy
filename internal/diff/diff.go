@@ -1079,11 +1079,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 }
                 continue
             }
-            if td.Kind == "enum" {
+            switch td.Kind {
+            case "enum":
                 labels := make([]string, 0, len(td.Labels))
                 for _, l := range td.Labels { labels = append(labels, quoteString(l)) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as enum (%s);", pqIdent(e.Key), strings.Join(labels, ", ")))
-            } else if td.Kind == "composite" {
+            case "composite":
                 // preserve YAML declaration order (positional ROW(...)::type casts
                 // depend on it); attributes missing from the order list follow sorted
                 attrs := []string{}

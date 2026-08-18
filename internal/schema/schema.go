@@ -1476,7 +1476,7 @@ func resolveDependency(raw string, d *Database) string {
 
     // Handle "view <name>"
     if strings.HasPrefix(raw, "view ") || strings.HasPrefix(raw, "materialized view ") {
-        viewName := raw
+        var viewName string
         if strings.HasPrefix(raw, "view ") {
             viewName = strings.TrimSpace(strings.TrimPrefix(raw, "view "))
         } else {

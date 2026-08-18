@@ -657,7 +657,7 @@ func TestTriggerEmittedAfterDependentFunction(t *testing.T) {
 	if tableIdx < 0 || fnIdx < 0 || trgIdx < 0 {
 		t.Fatalf("missing statements; creates: %v", p.Creates)
 	}
-	if !(tableIdx < fnIdx && fnIdx < trgIdx) {
+	if tableIdx >= fnIdx || fnIdx >= trgIdx {
 		t.Errorf("want table < function < trigger, got table=%d function=%d trigger=%d; creates: %v", tableIdx, fnIdx, trgIdx, p.Creates)
 	}
 }

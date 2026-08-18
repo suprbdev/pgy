@@ -25,8 +25,9 @@ func TestNextMigrationNumber(t *testing.T) {
     n, err := nextMigrationNumber(dir)
     if err != nil || n != 1 { t.Fatalf("got %d %v", n, err) }
     // create some files
-    os.WriteFile(filepath.Join(dir, "0001_init.sql"), []byte(""), 0o644)
-    os.WriteFile(filepath.Join(dir, "0002_more.sql"), []byte(""), 0o644)
+    for _, name := range []string{"0001_init.sql", "0002_more.sql"} {
+        if err := os.WriteFile(filepath.Join(dir, name), []byte(""), 0o644); err != nil { t.Fatal(err) }
+    }
     n, err = nextMigrationNumber(dir)
     if err != nil || n != 3 { t.Fatalf("got %d %v", n, err) }
 }

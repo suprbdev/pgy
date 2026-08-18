@@ -37,7 +37,7 @@ func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, fn func(context.C
             // run without lock but indicate false
             return fn(ctx)
         }
-        defer conn.Conn().Exec(ctx, "select pg_advisory_unlock($1)", key)
+        defer func() { _, _ = conn.Conn().Exec(ctx, "select pg_advisory_unlock($1)", key) }()
         return fn(ctx)
     })
     return acquired, err

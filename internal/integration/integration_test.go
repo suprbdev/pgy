@@ -2379,11 +2379,11 @@ func TestIntegrationDeferredConstraintTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry values (1)`, sch)); err != nil {
-		tx.Rollback(ctx)
+		_ = tx.Rollback(ctx)
 		t.Fatalf("entry insert should not fire check immediately: %v", err)
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry_tag values (1, 'music')`, sch)); err != nil {
-		tx.Rollback(ctx)
+		_ = tx.Rollback(ctx)
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2396,7 +2396,7 @@ func TestIntegrationDeferredConstraintTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf(`insert into %q.entry values (2)`, sch)); err != nil {
-		tx.Rollback(ctx)
+		_ = tx.Rollback(ctx)
 		t.Fatalf("insert itself should succeed (deferred): %v", err)
 	}
 	if err := tx.Commit(ctx); err == nil {

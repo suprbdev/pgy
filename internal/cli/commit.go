@@ -8,6 +8,7 @@ import (
     "path/filepath"
     "regexp"
     "sort"
+    "strconv"
     "strings"
     "time"
 
@@ -65,8 +66,8 @@ func nextMigrationNumber(dir string) (int, error) {
         if e.IsDir() { continue }
         m := re.FindStringSubmatch(e.Name())
         if len(m) == 2 {
-            var n int
-            fmt.Sscanf(m[1], "%d", &n)
+            n, err := strconv.Atoi(m[1])
+            if err != nil { continue }
             nums = append(nums, n)
         }
     }
