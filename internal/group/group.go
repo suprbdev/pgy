@@ -80,14 +80,21 @@ func dirName(dir string) string {
 }
 
 func Plan(live *diff.Live, paths []string, groups []Group, unsafe bool) ([]Step, error) {
-    full, err := schema.LoadAndMerge(paths)
-    if err != nil { return nil, err }
     files := map[string]*schema.Database{}
     for _, p := range paths {
-        d, err := schema.LoadAndMerge([]string{p})
+        if _, ok := files[p]; ok { continue }
+        d, err := schema.Load(p)
         if err != nil { return nil, err }
         files[p] = d
     }
+    merge := func(include func(string) bool) *schema.Database {
+        dbs := make([]*schema.Database, 0, len(paths))
+        for _, p := range paths {
+            if include(p) { dbs = append(dbs, files[p]) }
+        }
+        return schema.Merge(dbs)
+    }
+    full := merge(func(string) bool { return true })
     ix := newIndex(full)
     ordered := order(groups, files, ix)
 
@@ -96,18 +103,17 @@ func Plan(live *diff.Live, paths []string, groups []Group, unsafe bool) ([]Step,
     var prev *schema.Database
     for i, g := range ordered {
         for _, f := range g.Files { included[f] = true }
-        sel := make([]string, 0, len(paths))
-        for _, p := range paths {
-            if included[p] { sel = append(sel, p) }
-        }
-        cur, err := schema.LoadAndMerge(sel)
-        if err != nil { return nil, err }
+        cur := merge(func(p string) bool { return included[p] })
         cur.Extensions = full.Extensions
         cur.Roles = full.Roles
         (&availability{ix: ix, cur: cur, live: live}).deferUnready()
         if prev != nil {
             for k, vw := range cur.Views {
-                if vw != nil && prev.Views[k] != nil { vw.Replace = false }
+                if vw != nil && vw.Replace && prev.Views[k] != nil {
+                    c := *vw
+                    c.Replace = false
+                    cur.Views[k] = &c
+                }
             }
         }
 

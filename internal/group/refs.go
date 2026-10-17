@@ -316,9 +316,11 @@ func (a *availability) deferUnready() {
 
     for fq, t := range a.cur.Tables {
         if t == nil { continue }
-        for _, c := range t.Columns {
+        for cn, c := range t.Columns {
             if c != nil && c.Default != "" && a.blocked(c.Default, fq, defaultKinds) {
-                c.Default = ""
+                cc := *c
+                cc.Default = ""
+                t.Columns[cn] = &cc
             }
         }
         if a.pendingColumns(fq, t.PrimaryKey) { t.PrimaryKey = nil }

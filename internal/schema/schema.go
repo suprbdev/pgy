@@ -1,6 +1,7 @@
 package schema
 
 import (
+    "container/heap"
     "fmt"
     "io/fs"
     "os"
@@ -238,19 +239,30 @@ type Procedure struct {
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
-    merged := &Database{Tables: map[string]*Table{}}
+    dbs := make([]*Database, 0, len(paths))
     for _, p := range paths {
-        b, err := os.ReadFile(p)
-        if err != nil {
-            if errorsIsNotExist(err) {
-                continue
-            }
-            return nil, err
-        }
-        d, err := parseFlexibleDatabase(b)
-        if err != nil {
-            return nil, fmt.Errorf("%s: %w", p, err)
-        }
+        d, err := Load(p)
+        if err != nil { return nil, err }
+        if d != nil { dbs = append(dbs, d) }
+    }
+    return Merge(dbs), nil
+}
+
+func Load(path string) (*Database, error) {
+    b, err := os.ReadFile(path)
+    if err != nil {
+        if errorsIsNotExist(err) { return nil, nil }
+        return nil, err
+    }
+    d, err := parseFlexibleDatabase(b)
+    if err != nil { return nil, fmt.Errorf("%s: %w", path, err) }
+    return d, nil
+}
+
+func Merge(dbs []*Database) *Database {
+    merged := &Database{Tables: map[string]*Table{}}
+    for _, d := range dbs {
+        if d == nil { continue }
         for name, t := range d.Tables {
             if t != nil {
                 t.Name = name
@@ -292,7 +304,7 @@ func LoadAndMerge(paths []string) (*Database, error) {
                 existing.Triggers = mergeNamed(existing.Triggers, t.Triggers, func(x *Trigger) string { return x.Name })
                 existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
-                merged.Tables[name] = t
+                merged.Tables[name] = cloneTable(t)
             }
         }
         // merge extensions (dedupe by name; first declaration wins)
@@ -352,7 +364,21 @@ func LoadAndMerge(paths []string) (*Database, error) {
             for k, v := range d.SchemaComments { merged.SchemaComments[k] = v }
         }
     }
-    return merged, nil
+    return merged
+}
+
+func cloneTable(t *Table) *Table {
+    if t == nil { return nil }
+    c := *t
+    c.Columns = make(map[string]*Column, len(t.Columns))
+    for k, v := range t.Columns { c.Columns[k] = v }
+    c.PrimaryKey = append([]string(nil), t.PrimaryKey...)
+    c.Indexes = append([]*Index(nil), t.Indexes...)
+    c.ForeignKeys = append([]*ForeignKey(nil), t.ForeignKeys...)
+    c.Constraints = append([]*Constraint(nil), t.Constraints...)
+    c.Triggers = append([]*Trigger(nil), t.Triggers...)
+    c.DependsOn = append([]string(nil), t.DependsOn...)
+    return &c
 }
 
 // parseFlexibleDatabase accepts multiple structures:
@@ -1269,43 +1295,39 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for k := range graph {
         inDegree[k] = 0
     }
+    dependents := map[string][]string{}
     for k, deps := range graph {
         for _, dep := range deps {
             if _, exists := graph[dep]; exists {
                 inDegree[k]++
+                dependents[dep] = append(dependents[dep], k)
             }
         }
     }
 
-    queue := []string{}
+    queue := &entityQueue{less: entityLess}
     for k, deg := range inDegree {
         if deg == 0 {
-            queue = append(queue, k)
+            heap.Push(queue, k)
         }
     }
 
     result := []Entity{}
     visited := map[string]bool{}
 
-    for len(queue) > 0 {
-        sort.Slice(queue, func(i, j int) bool { return entityLess(queue[i], queue[j]) })
-        node := queue[0]
-        queue = queue[1:]
+    for queue.Len() > 0 {
+        node := heap.Pop(queue).(string)
         if visited[node] { continue }
         visited[node] = true
         if e, ok := entityMap[node]; ok {
             result = append(result, e)
         }
         // Find nodes that depend on this one
-        for k, deps := range graph {
+        for _, k := range dependents[node] {
             if visited[k] { continue }
-            for _, dep := range deps {
-                if dep == node {
-                    inDegree[k]--
-                    if inDegree[k] == 0 {
-                        queue = append(queue, k)
-                    }
-                }
+            inDegree[k]--
+            if inDegree[k] == 0 {
+                heap.Push(queue, k)
             }
         }
     }
@@ -1333,6 +1355,22 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
 
     return result, nil
+}
+
+type entityQueue struct {
+    items []string
+    less  func(a, b string) bool
+}
+
+func (q *entityQueue) Len() int           { return len(q.items) }
+func (q *entityQueue) Less(i, j int) bool { return q.less(q.items[i], q.items[j]) }
+func (q *entityQueue) Swap(i, j int)      { q.items[i], q.items[j] = q.items[j], q.items[i] }
+func (q *entityQueue) Push(x any)         { q.items = append(q.items, x.(string)) }
+func (q *entityQueue) Pop() any {
+    n := len(q.items)
+    x := q.items[n-1]
+    q.items = q.items[:n-1]
+    return x
 }
 
 // findCycle returns one concrete dependency cycle (as a path ending on its
