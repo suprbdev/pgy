@@ -13,13 +13,15 @@ import (
     "time"
 
     "github.com/spf13/cobra"
+
+    "github.com/suprbdev/pgy/internal/group"
 )
 
 func cmdCommit() *cobra.Command {
     var allowEmpty bool
     c := &cobra.Command{
         Use:   "commit [name]",
-        Short: "Commit current buffer to a numbered migration file",
+        Short: "Commit current buffer to a numbered migration file (one per group for split diffs)",
         Args:  cobra.MaximumNArgs(1),
         RunE: func(cmd *cobra.Command, args []string) error {
             cfg := FromContext(cmd.Context())
@@ -32,26 +34,49 @@ func cmdCommit() *cobra.Command {
                 }
                 return err
             }
-            if len(b) == 0 && !allowEmpty {
+            parts := []group.Section{{SQL: string(b)}}
+            if sections := group.Parse(string(b)); sections != nil {
+                parts = parts[:0]
+                for _, s := range sections {
+                    if s.SQL != "" { parts = append(parts, s) }
+                }
+                if len(parts) == 0 { parts = []group.Section{{}} }
+            }
+            if len(parts) == 1 && len(parts[0].SQL) == 0 && !allowEmpty {
                 return fmt.Errorf("buffer is empty; use --allow-empty to force")
             }
             if err := os.MkdirAll(cfg.MigrationsDir, 0o755); err != nil { return err }
             next, err := nextMigrationNumber(cfg.MigrationsDir)
             if err != nil { return err }
-            slug := slugify(name)
-            base := fmt.Sprintf("%04d", next)
-            if slug != "" { base = base + "_" + slug }
-            filename := filepath.Join(cfg.MigrationsDir, base+".sql")
-            sum := sha256.Sum256(b)
-            header := fmt.Sprintf("-- pgy %s\n-- created %s\n-- checksum %s\n\n", VersionString(), time.Now().UTC().Format(time.RFC3339), hex.EncodeToString(sum[:]))
-            if err := os.WriteFile(filename, append([]byte(header), b...), 0o644); err != nil { return err }
+            created := time.Now().UTC()
+            written := make([]string, 0, len(parts))
+            for i, part := range parts {
+                filename, err := writeMigration(cfg.MigrationsDir, next+i, slugify(name+" "+part.Name), []byte(part.SQL), created)
+                if err != nil {
+                    for _, f := range written { _ = os.Remove(f) }
+                    return err
+                }
+                written = append(written, filename)
+            }
             _ = os.Remove(cfg.BufferPath)
-            if !cfg.Quiet { fmt.Printf("created %s\n", filename) }
+            if !cfg.Quiet {
+                for _, f := range written { fmt.Printf("created %s\n", f) }
+            }
             return nil
         },
     }
     c.Flags().BoolVar(&allowEmpty, "allow-empty", false, "Commit even if buffer is empty")
     return c
+}
+
+func writeMigration(dir string, num int, slug string, body []byte, created time.Time) (string, error) {
+    base := fmt.Sprintf("%04d", num)
+    if slug != "" { base = base + "_" + slug }
+    filename := filepath.Join(dir, base+".sql")
+    sum := sha256.Sum256(body)
+    header := fmt.Sprintf("-- pgy %s\n-- created %s\n-- checksum %s\n\n", VersionString(), created.Format(time.RFC3339), hex.EncodeToString(sum[:]))
+    if err := os.WriteFile(filename, append([]byte(header), body...), 0o644); err != nil { return "", err }
+    return filename, nil
 }
 
 func nextMigrationNumber(dir string) (int, error) {

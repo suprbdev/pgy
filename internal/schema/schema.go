@@ -1377,6 +1377,8 @@ func findCycle(graph map[string][]string, unvisited []string) []string {
     return nil
 }
 
+func ResolveDependency(raw string, d *Database) string { return resolveDependency(raw, d) }
+
 // resolveDependency converts raw dependency strings like "table private.account" or "schema private"
 // to the actual entity key
 func resolveDependency(raw string, d *Database) string {

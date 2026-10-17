@@ -6,6 +6,7 @@ import (
 
     "github.com/spf13/cobra"
     "github.com/suprbdev/pgy/internal/db"
+    "github.com/suprbdev/pgy/internal/group"
 )
 
 func cmdBuffer() *cobra.Command {
@@ -33,7 +34,17 @@ func cmdBuffer() *cobra.Command {
             }
             if stat {
                 n := len(db.SplitSQLStatements(string(b)))
-                fmt.Printf("%s: %d bytes, %d statements\n", cfg.BufferPath, len(b), n)
+                sections := group.Parse(string(b))
+                if sections == nil {
+                    fmt.Printf("%s: %d bytes, %d statements\n", cfg.BufferPath, len(b), n)
+                    return nil
+                }
+                fmt.Printf("%s: %d bytes, %d statements, %d groups\n", cfg.BufferPath, len(b), n, len(sections))
+                for _, s := range sections {
+                    name := s.Name
+                    if name == "" { name = "(ungrouped)" }
+                    fmt.Printf("  %s: %d statements\n", name, len(db.SplitSQLStatements(s.SQL)))
+                }
                 return nil
             }
             _, err = os.Stdout.Write(b)

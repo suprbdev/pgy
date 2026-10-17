@@ -97,6 +97,17 @@ pgy buffer --clear   # delete buffer file
 pgy commit users_and_auth   # creates ./migrations/0001_users_and_auth.sql
 ```
 
+- Split a diff into grouped migrations (one per schema file or directory):
+
+```
+pgy diff --from-empty --split          # one group per YAML file (same as --split=file)
+pgy diff --from-empty --split=dir      # one group per directory
+pgy buffer --stat                      # per-group statement counts
+pgy commit init                        # 0001_init_core_user.sql, 0002_init_core_org.sql, ...
+```
+
+See [Grouped migrations](#grouped-migrations) below.
+
 - Apply pending migrations (each in its own transaction):
 
 ```
@@ -119,6 +130,48 @@ pgy mark-applied --dsn "$PG_DSN" --force 0003_products
 ```
 pgy status --dsn "$PG_DSN"   # shows current, last, pending (exit 2 if pending)
 ```
+
+## Grouped migrations
+
+When prototyping you often wipe `migrations/` and regenerate from scratch, which
+normally produces one huge initial migration. `pgy diff --split` instead writes
+the buffer as a series of groups, one per schema file (`--split=file`, the
+default) or per directory (`--split=dir`), and `pgy commit` turns each group
+into its own numbered migration. Group names come from the file paths relative
+to their common directory, so `schemas/modules/core/user.yml` becomes
+`0001_modules_core_user.sql` (or `0001_init_modules_core_user.sql` with
+`pgy commit init`).
+
+The buffer marks each group with a `-- pgy:group <name>` line; `pgy commit`
+splits on those markers. A buffer without markers commits to a single file as
+before.
+
+How groups are ordered and filled:
+
+- Each group is diffed against the state the previous groups leave behind, so a
+  file that only adds columns to another file's table (like the link files in
+  `examples/links/`) becomes `alter table ... add column` plus its foreign keys
+  and indexes, in its own migration.
+- Groups keep the order of `--schemas` (or discovery order) unless a dependency
+  forces otherwise. A group always comes after the groups it depends on via
+  `dependsOn`, `partitionOf`, sequence `ownedBy`, column/attribute/domain and
+  function argument/return types, objects named in view queries, SQL-language
+  function bodies and domain checks, and after the file that owns a table it
+  extends (the declaration with the primary key). Groups whose dependencies
+  form a cycle are merged into one migration named `a+b`.
+- Foreign keys (including the unique key they reference), triggers, policies
+  (with the table's `rowLevelSecurity` switch), indexes, constraints and column
+  defaults that reference something a later group creates are moved into that
+  later group, so circular references between files still work.
+- Extensions and roles always go into the first migration.
+- With `--unsafe`, drops are only emitted in the last migration, so a column
+  declared by a later file is never dropped and re-added.
+- Against an existing database, only groups with changes produce migrations.
+
+Object references inside SQL text (view queries, function bodies, defaults,
+checks, policies) are found by name. A name that only looks like a reference
+can, at worst, reorder or merge groups. Use `dependsOn` for any cross-file
+dependency the scan cannot see.
 
 ## YAML schema (minimal model)
 

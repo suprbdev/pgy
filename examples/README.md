@@ -159,5 +159,16 @@ files replace earlier ones). A link file exploits this: it re-declares the
 module's table with only the extra column and foreign key, so the module file
 never has to know about the link.
 
+Add `--split` to `pgy diff` to get one migration per module and per link
+instead of a single initial migration. Each link becomes its own small
+migration (`alter table ... add column` + foreign key + index) placed after
+the modules it connects, whatever order the files are listed in:
+
+```sh
+pgy diff --from-empty --split --schemas examples/modules/core/user.yml,examples/modules/content/post.yml,examples/links/post_author.yml
+pgy commit
+# 0001_modules_core_user.sql, 0002_modules_content_post.sql, 0003_links_post_author.sql
+```
+
 `schema.yml` in this directory is the original kitchen-sink example kept for
 reference; the `modules/` + `links/` files are the recommended starting point.
