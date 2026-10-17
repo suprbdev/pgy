@@ -3946,6 +3946,25 @@ func TestAlterColumnDefaultEquivalentSkipped(t *testing.T) {
 	}
 }
 
+func TestAlterColumnNextvalPublicQualifierEquivalent(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"number": {Type: "bigint", Default: "nextval('order_number_seq'::regclass)"},
+		"quoted": {Type: "bigint", Default: `nextval('"Order_Seq"'::regclass)`},
+		"other":  {Type: "bigint", Default: "nextval('app.other_seq'::regclass)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"number": {Type: "bigint", Default: "nextval('public.order_number_seq')"},
+			"quoted": {Type: "bigint", Default: `nextval('public."Order_Seq"')`},
+			"other":  {Type: "bigint", Default: "nextval('public.other_seq')"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if len(p.Alters) != 1 || !findAlter(p, `alter column "other" set default nextval('public.other_seq');`) {
+		t.Errorf("public-qualified sequence defaults must match live unqualified form, got %+v", p.Alters)
+	}
+}
+
 func TestAlterColumnDropDefault(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"status": {Type: "text", Default: "'active'::text"}})
 	desired := &schema.Database{Tables: map[string]*schema.Table{

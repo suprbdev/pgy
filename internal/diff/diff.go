@@ -2126,6 +2126,7 @@ func normalizeDefaultExpr(s string) string {
     }
     out := strings.Join(strings.Fields(b.String()), " ")
     out = strings.ReplaceAll(out, " (", "(")
+    out = strings.ReplaceAll(out, "nextval('public.", "nextval('")
     return out
 }
 

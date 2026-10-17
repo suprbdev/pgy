@@ -2589,3 +2589,39 @@ func TestIntegrationProcedureWithArgsIdempotent(t *testing.T) {
 		t.Fatalf("expected no changes for an existing procedure with args, got:\n%s", sql)
 	}
 }
+
+func TestIntegrationQualifiedNextvalDefaultIdempotent(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{
+			"public." + sch + "_t": {
+				Name: sch + "_t",
+				Columns: map[string]*schema.Column{
+					"n": {Type: "bigint", Default: fmt.Sprintf("nextval('public.%s_seq')", sch)},
+				},
+			},
+		},
+		Sequences: map[string]*schema.Sequence{
+			"public." + sch + "_seq": {Schema: "public", Name: sch + "_seq"},
+		},
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf(`drop table if exists public.%q; drop sequence if exists public.%q`, sch+"_t", sch+"_seq")) //nolint
+	})
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(diff.Plan(live, desired, false)); sql != "" {
+		t.Fatalf("expected no changes for a public-qualified nextval default, got:\n%s", sql)
+	}
+}
