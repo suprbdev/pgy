@@ -149,6 +149,24 @@ func TestColumnOrderPreservedInSQL(t *testing.T) {
 	}
 }
 
+func TestColumnsMissingFromOrderSorted(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {
+			Name: "t",
+			Columns: map[string]*schema.Column{
+				"z": {Type: "text"}, "y": {Type: "text"}, "b": {Type: "text"}, "a": {Type: "text"}, "m": {Type: "text"},
+			},
+			ColumnOrder: []string{"z", "m"},
+		},
+	}}
+	want := `create table if not exists "public"."t" ("z" text not null, "m" text not null, "a" text not null, "b" text not null, "y" text not null);`
+	for i := 0; i < 20; i++ {
+		if got := Plan(emptyLive(), desired, false).Creates[0]; got != want {
+			t.Fatalf("got %s\nwant %s", got, want)
+		}
+	}
+}
+
 // --- primary key ---
 
 func TestPrimaryKeyTableLevel(t *testing.T) {

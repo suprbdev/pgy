@@ -119,6 +119,60 @@ schema public:
 	}
 }
 
+func TestMergeColumnOrder(t *testing.T) {
+	parse := func(y string) *Database {
+		t.Helper()
+		db, err := parseFlexibleDatabase([]byte(y))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	module := `
+schema public:
+  table post:
+    columns:
+      id:
+        type: uuid
+        primaryKey: true
+      title:
+        type: text
+`
+	link := `
+schema public:
+  table post:
+    columns:
+      author_id:
+        type: uuid
+`
+	extra := `
+schema public:
+  table post:
+    columns:
+      body:
+        type: text
+`
+	for name, c := range map[string]struct {
+		dbs  []*Database
+		want string
+	}{
+		"module first": {[]*Database{parse(module), parse(link), parse(extra)}, "id,title,author_id,body"},
+		"link first":   {[]*Database{parse(link), parse(module), parse(extra)}, "id,title,author_id,body"},
+		"no owner":     {[]*Database{parse(link), parse(extra)}, "author_id,body"},
+	} {
+		got := strings.Join(Merge(c.dbs).Tables["public.post"].ColumnOrder, ",")
+		if got != c.want {
+			t.Errorf("%s: column order %q, want %q", name, got, c.want)
+		}
+	}
+
+	first := parse(link)
+	Merge([]*Database{first, parse(module)})
+	if got := strings.Join(first.Tables["public.post"].ColumnOrder, ","); got != "author_id" {
+		t.Errorf("merge mutated its input: %q", got)
+	}
+}
+
 func TestParseSchemasBlock(t *testing.T) {
 	// schemas: <name>: passes the schema body directly to mergeTablesInto,
 	// so the value must be a tables map (name -> spec), not { tables: {...} }.

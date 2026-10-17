@@ -1235,11 +1235,14 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                         }
                     }
                     // include any remaining columns not listed (fallback)
-                    for cn, c := range dt.Columns {
+                    rest := []string{}
+                    for cn := range dt.Columns {
                         found := false
                         for _, on := range dt.ColumnOrder { if on == cn { found = true; break } }
-                        if !found { cols = append(cols, renderColumn(cn, c)) }
+                        if !found { rest = append(rest, cn) }
                     }
+                    sort.Strings(rest)
+                    for _, cn := range rest { cols = append(cols, renderColumn(cn, dt.Columns[cn])) }
                 } else {
                     for cn, c := range dt.Columns {
                         cols = append(cols, renderColumn(cn, c))

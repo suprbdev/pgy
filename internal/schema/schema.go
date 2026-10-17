@@ -268,6 +268,11 @@ func Merge(dbs []*Database) *Database {
                 t.Name = name
             }
             if existing, ok := merged.Tables[name]; ok {
+                if ownsColumns(t) && !ownsColumns(existing) {
+                    existing.ColumnOrder = appendUnique(append([]string(nil), t.ColumnOrder...), existing.ColumnOrder)
+                } else {
+                    existing.ColumnOrder = appendUnique(existing.ColumnOrder, t.ColumnOrder)
+                }
                 if existing.Columns == nil {
                     existing.Columns = map[string]*Column{}
                 }
@@ -378,7 +383,16 @@ func cloneTable(t *Table) *Table {
     c.Constraints = append([]*Constraint(nil), t.Constraints...)
     c.Triggers = append([]*Trigger(nil), t.Triggers...)
     c.DependsOn = append([]string(nil), t.DependsOn...)
+    c.ColumnOrder = append([]string(nil), t.ColumnOrder...)
     return &c
+}
+
+func ownsColumns(t *Table) bool {
+    if len(t.PrimaryKey) > 0 { return true }
+    for _, c := range t.Columns {
+        if c != nil && c.PrimaryKey { return true }
+    }
+    return false
 }
 
 // parseFlexibleDatabase accepts multiple structures:
