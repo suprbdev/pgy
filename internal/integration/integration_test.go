@@ -188,8 +188,8 @@ func TestIntegrationAddColumn(t *testing.T) {
 	}
 	p := diff.Plan(live, desired, false)
 
-	if len(p.Alters) == 0 {
-		t.Fatal("expected alter to add email column")
+	if !strings.Contains(diff.Render(p), `add column "email"`) {
+		t.Fatalf("expected alter to add email column, got:\n%s", diff.Render(p))
 	}
 
 	applyPlan(t, pool, p)
