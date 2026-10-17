@@ -19,7 +19,7 @@ test: ## Run tests
 	go test ./...
 
 lint: ## Run golangci-lint (falls back to go vet)
-	golangci-lint run ./... || go vet ./...
+	@if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run ./...; else go vet ./...; fi
 
 test-integration-up:
 	docker compose up -d --wait
@@ -54,7 +54,7 @@ release: ## Cut a new release (prompts for version, tags, pushes)
 	printf "New version (vX.Y.Z): "; read -r version; \
 	echo "$$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$$' || { echo "error: invalid version '$$version' (expected vX.Y.Z)"; exit 1; }; \
 	if git rev-parse -q --verify "refs/tags/$$version" >/dev/null; then echo "error: tag $$version already exists"; exit 1; fi; \
-	$(MAKE) test lint; \
+	$(MAKE) test lint || { echo "error: tests or lint failed — not tagging"; exit 1; }; \
 	git tag -a "$$version" -m "$$version"; \
 	git push origin HEAD "$$version"; \
 	url=$$(git remote get-url origin | sed -E 's#^git@github\.com:#https://github.com/#; s#\.git$$##'); \
