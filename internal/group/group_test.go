@@ -499,7 +499,7 @@ schema public:
         t.Fatalf("fk must wait for the unique key it references:\n%s", invites)
     }
     last := stepSQL(t, steps, "users_email")
-    if strings.Index(last, "users_email_key") < 0 || strings.Index(last, "invites_email_fkey") < strings.Index(last, "users_email_key") {
+    if !strings.Contains(last, "users_email_key") ||strings.Index(last, "invites_email_fkey") < strings.Index(last, "users_email_key") {
         t.Fatalf("unique index must precede the deferred fk:\n%s", last)
     }
 }
