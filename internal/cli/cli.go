@@ -36,7 +36,7 @@ func AttachGlobalFlags(root *cobra.Command) {
     root.PersistentFlags().StringVar(&cfg.ConfigPath, "config", getenv("PGY_CONFIG", ""), "Config file path (default: pgy.yaml, pgy.yml, .pgy.yaml, .pgy.yml)")
     root.PersistentFlags().StringVar(&cfg.DSN, "dsn", getenv("PGY_DSN", ""), "PostgreSQL DSN")
     root.PersistentFlags().StringVar(&cfg.SchemaRoot, "schema-root", getenv("PGY_SCHEMA_ROOT", "."), "Schema root directory")
-    root.PersistentFlags().StringSliceVar(&cfg.Schemas, "schemas", splitCSV(getenv("PGY_SCHEMAS", "")), "Comma-separated YAML schema files (relative to schema-root)")
+    root.PersistentFlags().StringSliceVar(&cfg.Schemas, "schemas", splitCSV(getenv("PGY_SCHEMAS", "")), "Comma-separated YAML schema files (relative to schema-root unless absolute)")
     root.PersistentFlags().StringVar(&cfg.MigrationsDir, "migrations-dir", getenv("PGY_MIGRATIONS_DIR", "./migrations"), "Migrations directory")
     root.PersistentFlags().StringVar(&cfg.BufferPath, "buffer", getenv("PGY_BUFFER", "./.pgy.buffer.sql"), "Buffer SQL file path")
     root.PersistentFlags().BoolVar(&cfg.Quiet, "quiet", os.Getenv("PGY_QUIET") == "1", "Suppress non-essential output")

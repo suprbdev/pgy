@@ -46,7 +46,7 @@ Configuration precedence: flags > env > config file > defaults.
   - `--config` / `PGY_CONFIG` (config file path; default lookup: `pgy.yaml`, `pgy.yml`, then legacy `.pgy.yaml`, `.pgy.yml`)
   - `--dsn` / `PGY_DSN` (PostgreSQL DSN)
   - `--schema-root` / `PGY_SCHEMA_ROOT` (root for YAML files)
-  - `--schemas` / `PGY_SCHEMAS` (comma-separated YAML files, relative to schema-root)
+  - `--schemas` / `PGY_SCHEMAS` (comma-separated YAML files, relative to schema-root unless absolute; a missing file is an error)
   - `--migrations-dir` / `PGY_MIGRATIONS_DIR` (default: `./migrations`)
   - `--buffer` / `PGY_BUFFER` (default: `./.pgy.buffer.sql`)
   - `--quiet` / `PGY_QUIET=1`

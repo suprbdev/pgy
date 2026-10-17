@@ -32,8 +32,11 @@ Exit codes:
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)
+            schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
+            if err != nil {
+                return err
+            }
             var conn interface{ Close() }
-            var err error
             var live *diff.Live
             if cfg.DSN == "" {
                 if !fromEmpty {
@@ -60,10 +63,6 @@ Exit codes:
             }
 
             // load and merge schemas in order
-            schemaPaths := make([]string, 0, len(cfg.Schemas))
-            for _, s := range cfg.Schemas {
-                schemaPaths = append(schemaPaths, filepath.Join(cfg.SchemaRoot, s))
-            }
             compiled, err := schema.LoadAndMerge(schemaPaths)
             if err != nil {
                 return err
@@ -126,6 +125,24 @@ Exit codes:
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
     c.Flags().Lookup("split").NoOptDefVal = group.ModeFile
     return c
+}
+
+func resolveSchemaPaths(root string, schemas []string) ([]string, error) {
+    out := make([]string, 0, len(schemas))
+    for _, s := range schemas {
+        p := s
+        if !filepath.IsAbs(p) {
+            p = filepath.Join(root, s)
+        }
+        if _, err := os.Stat(p); err != nil {
+            if os.IsNotExist(err) {
+                return nil, fmt.Errorf("schema file not found: %s", p)
+            }
+            return nil, err
+        }
+        out = append(out, p)
+    }
+    return out, nil
 }
 
 func splitSummary(steps []group.Step) map[string]any {
