@@ -2463,6 +2463,10 @@ func normalizeArgNoDefault(arg string) string {
     // Format: "param_name type_name", "param_name schema.type_name", or an
     // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
     words := strings.Fields(arg)
+    if len(words) >= 2 && strings.EqualFold(words[0], "in") {
+        words = words[1:]
+        arg = strings.Join(words, " ")
+    }
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
         return normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))

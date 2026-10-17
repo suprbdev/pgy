@@ -2559,3 +2559,33 @@ func TestIntegrationCompositeAttributeOrder(t *testing.T) {
 		t.Errorf("want admin, got %q", role)
 	}
 }
+
+func TestIntegrationProcedureWithArgsIdempotent(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Procedures: map[string]*schema.Procedure{
+			sch + ".archive": {
+				Schema: sch, Name: "archive", ArgsSig: "(before timestamptz, keep integer default 10)",
+				Language: "plpgsql", Security: "definer", RevokePublic: true,
+				Comment: "archive old rows", Body: "BEGIN\n  PERFORM before, keep;\nEND;",
+			},
+		},
+	}
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, diff.Plan(live, desired, false))
+
+	live, err = diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(diff.Plan(live, desired, false)); sql != "" {
+		t.Fatalf("expected no changes for an existing procedure with args, got:\n%s", sql)
+	}
+}

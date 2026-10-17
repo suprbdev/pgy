@@ -2259,6 +2259,10 @@ func TestNormalizeFunctionSignature(t *testing.T) {
 		{"public.fn(public.my_type)", "public.fn(my_type)"},
 		{"public.fn(t app.my_type)", "public.fn(t app.my_type)"},
 		{"public.fn(t public.my_type default null)", "public.fn(t my_type)"},
+		{"app.p(IN before timestamp with time zone)", "app.p(before timestamptz)"},
+		{"app.p(in before timestamptz, IN n integer)", "app.p(before timestamptz, n int)"},
+		{"app.p(IN integer)", "app.p(int)"},
+		{"app.p(INOUT n integer)", "app.p(inout n int)"},
 	}
 	for _, c := range cases {
 		got := normalizeFunctionSignature(c.in)
@@ -3555,6 +3559,21 @@ func TestProcedureQualifiedArgSkippedIfExists(t *testing.T) {
 	p := Plan(live, desired, false)
 	if findCreate(p, "procedure") {
 		t.Errorf("qualified arg type should match unqualified live signature, got %v", p.Creates)
+	}
+}
+
+func TestProcedureIntrospectedArgModeSkippedIfExists(t *testing.T) {
+	live := emptyLive()
+	sig := normalizeFunctionSignature("app.archive_orders(IN before timestamp with time zone)")
+	live.Procedures[sig] = true
+	live.ProcedureDefs[sig] = &LiveProcedure{Body: "begin null; end;", Security: "definer"}
+	desired := procDesired("app.archive_orders", &schema.Procedure{
+		Schema: "app", Name: "archive_orders", ArgsSig: "(before timestamptz)",
+		Language: "plpgsql", Security: "definer", Body: "begin null; end;",
+	})
+	p := Plan(live, desired, false)
+	if findCreate(p, "procedure") {
+		t.Errorf("live IN-mode signature should match YAML signature, got %v", p.Creates)
 	}
 }
 
