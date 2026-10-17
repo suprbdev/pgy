@@ -7,7 +7,7 @@ command to get a working database.
 ```sh
 pgy diff --from-empty \
   --schemas examples/modules/core/user.yml,examples/modules/content/post.yml,examples/links/post_author.yml
-pgy commit -m "initial schema"
+pgy commit initial_schema
 pgy migrate
 ```
 
