@@ -82,7 +82,13 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         norm := normalizeFunctionSignature(k + pr.ArgsSig)
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Security: "invoker"}
-        if prev := out.ProcedureDefs[norm]; prev != nil { lp.Security = prev.Security }
+        prev := out.ProcedureDefs[norm]
+        if prev != nil { lp.Security = prev.Security }
+        if prev == nil || procedureChanged(pr, prev) {
+            lp.Config = simulateConfig(pr.Set)
+        } else {
+            lp.Config = prev.Config
+        }
         lp.Body = pr.Body
         if pr.Security != "" { lp.Security = strings.ToLower(pr.Security) }
         out.Procedures[norm] = true
@@ -128,6 +134,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
         if f.Security != "" { lf.Security = strings.ToLower(f.Security) }
         if f.Strict != nil { lf.Strict = *f.Strict }
         if f.Leakproof != nil { lf.Leakproof = *f.Leakproof }
+        if f.Set != nil || replaced { lf.Config = simulateConfig(f.Set) }
         out.Functions[sig] = true
         out.FunctionDefs[norm] = lf
         if prev == nil { out.FunctionPublicExec[norm] = true }
@@ -137,6 +144,14 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     if f.RevokePublic { out.FunctionPublicExec[norm] = false }
     if f.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], f.Grants) }
     if f.Comment != "" { out.FunctionComments[norm] = f.Comment }
+}
+
+// simulateConfig is the proconfig a CREATE OR REPLACE or ALTER ... SET with
+// the given YAML set block leaves behind.
+func simulateConfig(set map[string]string) map[string]string {
+    out := map[string]string{}
+    for k, v := range set { out[strings.ToLower(k)] = normalizeConfigValue(v) }
+    return out
 }
 
 func simulateTable(out *Live, fq string, dt *schema.Table) {

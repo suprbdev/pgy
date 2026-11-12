@@ -3,6 +3,7 @@ package diff
 import (
     "context"
     "fmt"
+    "regexp"
     "sort"
     "strings"
 
@@ -56,10 +57,12 @@ type LiveFunction struct{
     Security   string // definer|invoker
     Strict     bool
     Leakproof  bool
+    Config     map[string]string // proconfig: lower-cased parameter name -> value
 }
 type LiveProcedure struct{
     Body     string
     Security string // definer|invoker
+    Config   map[string]string // proconfig: lower-cased parameter name -> value
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -404,7 +407,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // replace-on-change. prokind routes rows: 'p' = procedure, else function.
     funcQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
-               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text
+               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text,
+               coalesce(p.proconfig, '{}'::text[])
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -414,7 +418,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     for funcRows.Next() {
         var schemaName, funcName, args, src, vol, kind string
         var secdef, strict, leakproof bool
-        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind); err != nil {
+        var config []string
+        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config); err != nil {
             funcRows.Close()
             return nil, err
         }
@@ -422,13 +427,13 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if kind == "p" {
             norm := normalizeFunctionSignature(key)
             l.Procedures[norm] = true
-            lp := &LiveProcedure{Body: src, Security: "invoker"}
+            lp := &LiveProcedure{Body: src, Security: "invoker", Config: parseProconfig(config)}
             if secdef { lp.Security = "definer" }
             l.ProcedureDefs[norm] = lp
             continue
         }
         l.Functions[key] = true
-        lf := &LiveFunction{Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile"}
+        lf := &LiveFunction{Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
         if secdef { lf.Security = "definer" }
         switch vol {
         case "i": lf.Volatility = "immutable"
@@ -879,12 +884,69 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
     if strings.TrimSpace(p.Body) != strings.TrimSpace(lp.Body) { return true }
     if p.Security != "" && strings.ToLower(p.Security) != lp.Security { return true }
+    if len(configClauses(p.Set, lp.Config)) > 0 { return true }
     return false
+}
+
+// parseProconfig turns pg_proc.proconfig entries ("name=value") into a map
+// keyed by lower-cased parameter name.
+func parseProconfig(entries []string) map[string]string {
+    out := map[string]string{}
+    for _, e := range entries {
+        k, v, ok := strings.Cut(e, "=")
+        if !ok { continue }
+        out[strings.ToLower(k)] = v
+    }
+    return out
+}
+
+var configCommaRe = regexp.MustCompile(`\s*,\s*`)
+
+var configQuoteReplacer = strings.NewReplacer("'", "", `"`, "")
+
+// normalizeConfigValue makes a YAML set value comparable with its proconfig
+// form. Quotes are ignored, since postgres stores '64MB' as 64MB and may
+// double-quote list elements ("$user", public), and so is whitespace around
+// list commas.
+func normalizeConfigValue(v string) string {
+    v = configQuoteReplacer.Replace(strings.TrimSpace(v))
+    return configCommaRe.ReplaceAllString(v, ",")
+}
+
+// configClauses returns SET / RESET action clauses that bring a live
+// function's or procedure's configuration in line with a YAML set block. A
+// nil block leaves configuration unmanaged; an empty block resets every
+// live setting. Clauses are sorted for deterministic output.
+func configClauses(desired map[string]string, live map[string]string) []string {
+    if desired == nil { return nil }
+    out := []string{}
+    keys := make([]string, 0, len(desired))
+    managed := map[string]bool{}
+    for k := range desired {
+        keys = append(keys, k)
+        managed[strings.ToLower(k)] = true
+    }
+    sort.Strings(keys)
+    for _, k := range keys {
+        lv, ok := live[strings.ToLower(k)]
+        if !ok || normalizeConfigValue(lv) != normalizeConfigValue(desired[k]) {
+            out = append(out, fmt.Sprintf("set %s = %s", k, desired[k]))
+        }
+    }
+    extra := []string{}
+    for k := range live {
+        if !managed[k] { extra = append(extra, k) }
+    }
+    sort.Strings(extra)
+    for _, k := range extra {
+        out = append(out, "reset "+k)
+    }
+    return out
 }
 
 // functionAttrClauses returns ALTER FUNCTION action clauses for attribute
 // settings the YAML manages (non-empty volatility/security, non-nil
-// strict/leakproof) that differ from live. Used when the body is unchanged
+// strict/leakproof/set) that differ from live. Used when the body is unchanged
 // (or unmanaged) so an attribute flip doesn't require CREATE OR REPLACE —
 // essential for extension-owned functions (e.g. PostGIS LANGUAGE c) whose
 // bodies pgy cannot express.
@@ -910,6 +972,7 @@ func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
             out = append(out, "not leakproof")
         }
     }
+    out = append(out, configClauses(f.Set, lf.Config)...)
     return out
 }
 

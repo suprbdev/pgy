@@ -117,3 +117,28 @@ func TestSimulateFunctionAttributes(t *testing.T) {
         t.Fatalf("expected converged plan, got:\n%s", Render(p))
     }
 }
+
+func TestSimulateFunctionAndProcedureSetConverge(t *testing.T) {
+    d := &schema.Database{
+        Tables: map[string]*schema.Table{},
+        Functions: map[string]*schema.Function{
+            "public.f": {Schema: "public", Name: "f", ArgsSig: "()", Returns: "int", Language: "sql",
+                Set: map[string]string{"work_mem": "'64MB'"}, Body: "select 1"},
+        },
+        Procedures: map[string]*schema.Procedure{
+            "public.p": {Schema: "public", Name: "p", ArgsSig: "()", Language: "plpgsql",
+                Set: map[string]string{"search_path": "public"}, Body: "begin null; end;"},
+        },
+    }
+    if p := Plan(Simulate(emptyLive(), d), d, false); planSize(p) != 0 {
+        t.Fatalf("expected no changes after simulate, got:\n%s", Render(p))
+    }
+
+    live := emptyLive()
+    live.Functions["public.f()"] = true
+    live.FunctionDefs["public.f()"] = &LiveFunction{Body: "select 1", Volatility: "volatile", Security: "invoker",
+        Config: map[string]string{"work_mem": "32MB", "search_path": "public"}}
+    if p := Plan(Simulate(live, d), d, false); planSize(p) != 0 {
+        t.Fatalf("expected simulated SET/RESET to converge, got:\n%s", Render(p))
+    }
+}

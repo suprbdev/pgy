@@ -2092,6 +2092,143 @@ func TestFunctionLeakproofUnmanagedWhenUnset(t *testing.T) {
 	}
 }
 
+func liveLoginConfig(l *Live, config map[string]string) {
+	l.FunctionDefs[normalizeFunctionSignature("public.login(email text)")].Config = config
+}
+
+func TestFunctionAlterOnSetChange(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	f := loginFn("select 1")
+	f.Set = map[string]string{"pg_trgm.word_similarity_threshold": "0.5"}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) set pg_trgm.word_similarity_threshold = 0.5;`) {
+		t.Errorf("expected ALTER FUNCTION SET; alters: %v", p.Alters)
+	}
+	if findCreate(p, "function") {
+		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
+	}
+}
+
+func TestFunctionAlterOnSetValueChange(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	liveLoginConfig(live, map[string]string{"work_mem": "64MB"})
+	f := loginFn("select 1")
+	f.Set = map[string]string{"work_mem": "'128MB'"}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) set work_mem = '128MB';`) {
+		t.Errorf("expected ALTER FUNCTION SET with the new value; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionSetSkippedIfMatches(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	liveLoginConfig(live, map[string]string{
+		"search_path": `"$user", public`,
+		"work_mem":    "64MB",
+		"timezone":    "UTC",
+	})
+	f := loginFn("select 1")
+	f.Set = map[string]string{"search_path": `"$user",public`, "work_mem": "'64MB'", "TimeZone": "'UTC'"}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") || findAlter(p, "function") {
+		t.Errorf("set matches live up to quoting, spacing and key case, should skip; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
+
+func TestFunctionSetResetsRemovedSetting(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	liveLoginConfig(live, map[string]string{"search_path": "public", "work_mem": "64MB"})
+	f := loginFn("select 1")
+	f.Set = map[string]string{"search_path": "public"}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) reset work_mem;`) {
+		t.Errorf("expected ALTER FUNCTION RESET for the removed setting; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionSetEmptyResetsAll(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	liveLoginConfig(live, map[string]string{"work_mem": "64MB", "search_path": "public"})
+	f := loginFn("select 1")
+	f.Set = map[string]string{}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) reset search_path reset work_mem;`) {
+		t.Errorf("expected every live setting reset, sorted; alters: %v", p.Alters)
+	}
+}
+
+func TestFunctionSetUnmanagedWhenUnset(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	liveLoginConfig(live, map[string]string{"work_mem": "64MB"})
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": loginFn("select 1")},
+	}
+	p := Plan(live, desired, false)
+	if findCreate(p, "function") || findAlter(p, "function") {
+		t.Errorf("set absent from YAML, should stay unmanaged; creates: %v alters: %v", p.Creates, p.Alters)
+	}
+}
+
+func TestFunctionSetCombinedWithAttributeAlter(t *testing.T) {
+	live := liveWithLoginFn("select 1")
+	f := loginFn("select 1")
+	f.Volatility = "stable"
+	f.Set = map[string]string{"work_mem": "64MB"}
+	desired := &schema.Database{
+		Tables:    map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{"public.login": f},
+	}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `alter function "public"."login"(email text) stable set work_mem = 64MB;`) {
+		t.Errorf("expected one ALTER FUNCTION with both actions; alters: %v", p.Alters)
+	}
+}
+
+func TestNormalizeConfigValue(t *testing.T) {
+	cases := map[string]string{
+		"0.5":              "0.5",
+		"'64MB'":           "64MB",
+		"  public  ":       "public",
+		`"$user", public`:  "$user,public",
+		"private , public": "private,public",
+		"''":               "",
+		`""`:               "",
+	}
+	for in, want := range cases {
+		if got := normalizeConfigValue(in); got != want {
+			t.Errorf("normalizeConfigValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseProconfig(t *testing.T) {
+	got := parseProconfig([]string{"search_path=public, extensions", "TimeZone=UTC", "bogus"})
+	if len(got) != 2 || got["search_path"] != "public, extensions" || got["timezone"] != "UTC" {
+		t.Errorf("unexpected parse: %v", got)
+	}
+}
+
 // Extension-owned C functions (e.g. PostGIS geometry_overlaps) can't be
 // expressed as dollar-quoted bodies; a bodyless declaration manages
 // attributes only via ALTER FUNCTION.
@@ -3529,6 +3666,35 @@ func TestProcedureReplaceOnSecurityChange(t *testing.T) {
 	p := Plan(live, desired, false)
 	if !findCreate(p, "create or replace procedure") {
 		t.Errorf("changed security should emit CREATE OR REPLACE, got %v", p.Creates)
+	}
+}
+
+func TestProcedureReplaceOnSetChange(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker", Config: map[string]string{"search_path": "public"}}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Set: map[string]string{"search_path": "private, public"},
+		Body: "begin null; end;",
+	})
+	p := Plan(live, desired, false)
+	if !findCreate(p, "create or replace procedure") || !findCreate(p, "set search_path = private, public as $$") {
+		t.Errorf("changed set should emit CREATE OR REPLACE with the new SET clause, got %v", p.Creates)
+	}
+}
+
+func TestProcedureSetSkippedIfMatches(t *testing.T) {
+	live := emptyLive()
+	live.Procedures["public.cleanup()"] = true
+	live.ProcedureDefs["public.cleanup()"] = &LiveProcedure{Body: "begin null; end;", Security: "invoker", Config: map[string]string{"search_path": "private, public"}}
+	desired := procDesired("public.cleanup", &schema.Procedure{
+		Schema: "public", Name: "cleanup", ArgsSig: "()",
+		Language: "plpgsql", Set: map[string]string{"search_path": "private,public"},
+		Body: "begin null; end;",
+	})
+	if p := Plan(live, desired, false); planSize(p) != 0 {
+		t.Errorf("set matches live, expected no changes, got %s", Render(p))
 	}
 }
 

@@ -2625,3 +2625,63 @@ func TestIntegrationQualifiedNextvalDefaultIdempotent(t *testing.T) {
 		t.Fatalf("expected no changes for a public-qualified nextval default, got:\n%s", sql)
 	}
 }
+
+func TestIntegrationFunctionSetClauses(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+
+	mkDesired := func(set map[string]string) *schema.Database {
+		return &schema.Database{
+			Tables: map[string]*schema.Table{},
+			Functions: map[string]*schema.Function{
+				sch + ".login": {
+					Schema: sch, Name: "login", ArgsSig: "(email text)",
+					Returns: "int", Language: "sql", Set: set, Body: "select 1",
+				},
+			},
+		}
+	}
+	plan := func(d *schema.Database) *diff.PlanDiff {
+		t.Helper()
+		live, err := diff.Introspect(ctx, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return diff.Plan(live, d, false)
+	}
+	proconfig := func() []string {
+		t.Helper()
+		var cfg []string
+		err := pool.QueryRow(ctx, `select coalesce(proconfig, '{}') from pg_proc where oid = $1::regprocedure`,
+			fmt.Sprintf("%q.login(text)", sch)).Scan(&cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	first := map[string]string{"search_path": `"$user", public`, "work_mem": "'64MB'", "myapp.flag": "'on'"}
+	applyPlan(t, pool, plan(mkDesired(first)))
+	if sql := diff.Render(plan(mkDesired(first))); sql != "" {
+		t.Fatalf("expected no changes after create, got:\n%s", sql)
+	}
+
+	second := map[string]string{"search_path": "public", "work_mem": "'64MB'"}
+	p := plan(mkDesired(second))
+	if len(p.Creates) != 0 || len(p.Alters) != 1 ||
+		!strings.Contains(p.Alters[0], "set search_path = public") || !strings.Contains(p.Alters[0], "reset myapp.flag") {
+		t.Fatalf("expected one ALTER FUNCTION with SET and RESET; creates=%v alters=%v", p.Creates, p.Alters)
+	}
+	applyPlan(t, pool, p)
+	if sql := diff.Render(plan(mkDesired(second))); sql != "" {
+		t.Fatalf("expected no changes after alter, got:\n%s", sql)
+	}
+	if got := strings.Join(proconfig(), ";"); got != "search_path=public;work_mem=64MB" {
+		t.Errorf("unexpected proconfig after alter: %s", got)
+	}
+
+	if sql := diff.Render(plan(mkDesired(nil))); sql != "" {
+		t.Errorf("set omitted from YAML should leave live settings alone, got:\n%s", sql)
+	}
+}
