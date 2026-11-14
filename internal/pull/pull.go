@@ -611,6 +611,9 @@ func (b *builder) tables() {
 		t := newMap()
 		parent := b.d.PartitionOf[fq]
 		if parent == "" {
+			if len(lt.Inherits) > 0 {
+				add(t, "inherits", list(lt.Inherits))
+			}
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {
 				add(t, "primaryKey", list(pk))
@@ -658,7 +661,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 	cols := newMap()
 	for _, cn := range b.d.ColumnOrder[fq] {
 		lc := lt.Columns[cn]
-		if lc == nil {
+		if lc == nil || lc.Inherited {
 			continue
 		}
 		c := flowMap()

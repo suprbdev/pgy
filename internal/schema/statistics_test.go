@@ -206,3 +206,31 @@ schema app:
 		t.Errorf("range type sorted before its subtype_diff function: %v", sorted)
 	}
 }
+
+func TestInheritsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table base:
+    columns: {id: {type: int}}
+  table child:
+    inherits: [base, other.parent]
+    columns: {extra: {type: int}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Tables["app.child"].Inherits; len(got) != 2 || got[0] != "app.base" || got[1] != "other.parent" {
+		t.Errorf("inherits = %v", got)
+	}
+	sorted, err := TopologicalSort(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, e := range sorted {
+		pos[e.Key] = i
+	}
+	if pos["app.base"] > pos["app.child"] {
+		t.Errorf("child sorted before its parent: %v", sorted)
+	}
+}

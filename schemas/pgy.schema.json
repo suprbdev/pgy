@@ -219,6 +219,7 @@
     "table": {
       "type": "object",
       "properties": {
+        "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "columns": {
@@ -304,6 +305,7 @@
       "description": "Table entry in the `tables:` list format.",
       "type": "object",
       "properties": {
+        "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "name": { "type": "string", "minLength": 1 },

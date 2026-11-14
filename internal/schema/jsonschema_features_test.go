@@ -57,6 +57,10 @@ schema public:
     mappings: {asciiword: [public.nostop], email: []}
   type floatrange: {type: range, subtype: float8, subtypeDiff: float8mi, multirangeTypeName: floatmultirange}
   sequence order_no: {renamedFrom: order_seq, as: bigint, cycle: false, ownedBy: none}
+  table order_archive:
+    inherits: [public.orders]
+    columns:
+      archived_at: {type: timestamptz}
   table orders:
     renamedFrom: old_orders
     owner: app_owner

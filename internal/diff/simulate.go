@@ -434,6 +434,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     if dt.RowLevelSecurity != nil { lt.RLSEnabled = *dt.RowLevelSecurity }
     if dt.Unlogged != nil { lt.Unlogged = *dt.Unlogged }
     if dt.PartitionBy != nil { lt.Partitioned = true }
+    if dt.Inherits != nil { lt.Inherits = append([]string(nil), dt.Inherits...) }
     if dt.With != nil {
         lt.Options = map[string]string{}
         for k, v := range dt.With { lt.Options[strings.ToLower(k)] = v }

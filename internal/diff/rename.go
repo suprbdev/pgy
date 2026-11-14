@@ -170,6 +170,12 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.RelComments, old, new)
     moveKey(l.Owners, "rel:"+old, "rel:"+new)
     moveKey(l.Partitions, old, new)
+    for _, t := range l.Tables {
+        if i := indexOf(t.Inherits, old); i >= 0 {
+            t.Inherits = append([]string(nil), t.Inherits...)
+            t.Inherits[i] = new
+        }
+    }
     for parent, children := range l.Partitions {
         if i := indexOf(children, old); i >= 0 {
             cp := append([]string(nil), children...)
