@@ -201,6 +201,9 @@ type Table struct {
     ForeignKeys []*ForeignKey  `yaml:"-"`
     Triggers   []*Trigger      `yaml:"-"`
     Rules      []*Rule         `yaml:"-"`
+    Statistics []*Statistic    `yaml:"-"`
+    // ReplicaIdentity is default | full | nothing | index <name>; "" = unmanaged.
+    ReplicaIdentity string     `yaml:"-"`
     Constraints []*Constraint  `yaml:"-"`
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
@@ -322,6 +325,16 @@ type Trigger struct {
     OldTable string        // REFERENCING OLD TABLE AS (AFTER triggers)
     NewTable string        // REFERENCING NEW TABLE AS (AFTER triggers)
     Comment  string        // empty means unmanaged
+}
+
+// Statistic is a CREATE STATISTICS object on a table. Kinds is a subset of
+// ndistinct, dependencies, mcv (empty = all); Columns are column names or
+// expressions.
+type Statistic struct {
+    Name    string
+    Kinds   []string
+    Columns []string
+    Comment string
 }
 
 // Rule is a CREATE RULE on a table or view. PostgreSQL rewrites the action
@@ -487,6 +500,10 @@ func Merge(dbs []*Database) *Database {
                 existing.Constraints = mergeNamed(existing.Constraints, t.Constraints, func(x *Constraint) string { return x.Name })
                 existing.Triggers = mergeNamed(existing.Triggers, t.Triggers, func(x *Trigger) string { return x.Name })
                 existing.Rules = mergeNamed(existing.Rules, t.Rules, func(x *Rule) string { return x.Name })
+                existing.Statistics = mergeNamed(existing.Statistics, t.Statistics, func(x *Statistic) string { return x.Name })
+                if t.ReplicaIdentity != "" {
+                    existing.ReplicaIdentity = t.ReplicaIdentity
+                }
                 existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
                 merged.Tables[name] = cloneTable(t)
@@ -588,6 +605,7 @@ func cloneTable(t *Table) *Table {
     c.Constraints = append([]*Constraint(nil), t.Constraints...)
     c.Triggers = append([]*Trigger(nil), t.Triggers...)
     c.Rules = append([]*Rule(nil), t.Rules...)
+    c.Statistics = append([]*Statistic(nil), t.Statistics...)
     c.DependsOn = append([]string(nil), t.DependsOn...)
     c.ColumnOrder = append([]string(nil), t.ColumnOrder...)
     return &c
@@ -779,6 +797,12 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if rRaw, ok := m["rules"]; ok {
                     t.Rules = parseRules(rRaw)
                 }
+                if sRaw, ok := m["statistics"]; ok {
+                    t.Statistics = parseStatistics(sRaw)
+                }
+                if ri, ok := m["replicaIdentity"]; ok {
+                    t.ReplicaIdentity = parseReplicaIdentity(ri)
+                }
                 if conRaw, ok := m["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -827,6 +851,12 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             if rRaw, ok := m["rules"]; ok {
                 t.Rules = parseRules(rRaw)
+            }
+            if sRaw, ok := m["statistics"]; ok {
+                t.Statistics = parseStatistics(sRaw)
+            }
+            if ri, ok := m["replicaIdentity"]; ok {
+                t.ReplicaIdentity = parseReplicaIdentity(ri)
             }
             if conRaw, ok := m["constraints"]; ok {
                 t.Constraints = parseConstraints(conRaw)
@@ -884,6 +914,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if rRaw, ok := inner["rules"]; ok {
                     t.Rules = parseRules(rRaw)
+                }
+                if sRaw, ok := inner["statistics"]; ok {
+                    t.Statistics = parseStatistics(sRaw)
+                }
+                if ri, ok := inner["replicaIdentity"]; ok {
+                    t.ReplicaIdentity = parseReplicaIdentity(ri)
                 }
                 if conRaw, ok := inner["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
@@ -1231,6 +1267,42 @@ func parseTriggers(v any) []*Trigger {
     }
     sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
+}
+
+func parseStatistics(v any) []*Statistic {
+    out := []*Statistic{}
+    m, ok := v.(map[string]any)
+    if !ok { return out }
+    for name, def := range m {
+        st := &Statistic{Name: name}
+        if dm, ok := def.(map[string]any); ok {
+            if k, ok := dm["kinds"]; ok {
+                for _, kind := range parseStringListFromNode(k) { st.Kinds = append(st.Kinds, strings.ToLower(strings.TrimSpace(kind))) }
+            }
+            if c, ok := dm["columns"]; ok { st.Columns = parseStringListFromNode(c) }
+            if s, ok := dm["comment"].(string); ok { st.Comment = s }
+        }
+        out = append(out, st)
+    }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+    return out
+}
+
+// parseReplicaIdentity accepts default, full, nothing, or index <name> /
+// using index <name> / {index: <name>}.
+func parseReplicaIdentity(v any) string {
+    switch x := v.(type) {
+    case string:
+        s := strings.Join(strings.Fields(x), " ")
+        lower := strings.ToLower(s)
+        for _, prefix := range []string{"using index ", "index "} {
+            if strings.HasPrefix(lower, prefix) { return "index " + strings.TrimSpace(s[len(prefix):]) }
+        }
+        return lower
+    case map[string]any:
+        if idx, ok := x["index"].(string); ok { return "index " + strings.TrimSpace(idx) }
+    }
+    return ""
 }
 
 func parseRules(v any) []*Rule {

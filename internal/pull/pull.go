@@ -546,6 +546,10 @@ func (b *builder) tables() {
 		b.constraints(t, fq, lt)
 		b.triggers(t, fq, lt)
 		b.rules(t, lt)
+		b.statistics(t, lt)
+		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" {
+			add(t, "replicaIdentity", str(ri))
+		}
 		if lt.RLSEnabled {
 			add(t, "rowLevelSecurity", boolean(true))
 		}
@@ -831,6 +835,28 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 	if len(trs.Content) > 0 {
 		add(t, "triggers", trs)
 	}
+}
+
+func (b *builder) statistics(t *node, lt *diff.LiveTable) {
+	if len(lt.Statistics) == 0 {
+		return
+	}
+	sts := newMap()
+	for _, name := range sortedKeys(lt.Statistics) {
+		ls := lt.Statistics[name]
+		m := newMap()
+		if len(ls.Kinds) > 0 && len(ls.Kinds) < 3 {
+			add(m, "kinds", list(ls.Kinds))
+		}
+		cols := make([]string, len(ls.Items))
+		for i, it := range ls.Items {
+			cols[i] = strings.Trim(stripParens(it), `"`)
+		}
+		add(m, "columns", list(cols))
+		addStr(m, "comment", ls.Comment)
+		add(sts, name, m)
+	}
+	add(t, "statistics", sts)
 }
 
 var ruleDoRe = regexp.MustCompile(`(?s)\sDO\s+(INSTEAD\s+|ALSO\s+)?(.*?);?\s*$`)

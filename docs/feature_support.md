@@ -48,6 +48,8 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Roles & Users** (Top-level `roles:` block → `CREATE ROLE` with login/superuser/createdb/createrole/replication/bypassRLS/noinherit/connection limit; `inRoles` memberships via `GRANT role TO role`; explicitly set attributes diffed against `pg_roles` → `ALTER ROLE`; never dropped, no passwords)
 - [x] **Sequences** (`sequence <name>:` blocks → `CREATE SEQUENCE IF NOT EXISTS` with as/increment/minValue/maxValue/start/cache/cycle/ownedBy; set options diffed against `pg_sequence` → `ALTER SEQUENCE`; comments diffed)
 - [x] **Table & Column Storage** (`unlogged` → `SET LOGGED/UNLOGGED` under `--unsafe`; `with` storage parameters → `SET/RESET (...)`; column `collate` (changes under `--unsafe`), `compression` and `storage` diffed against live)
+- [x] **Replica Identity** (`replicaIdentity: default|full|nothing|index <name>` → `ALTER TABLE ... REPLICA IDENTITY`, diffed against live)
+- [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, comments, prunable)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
 - [x] **Identity Columns** (Column `identity: always | byDefault` → `GENERATED ... AS IDENTITY`; create-only, existing columns never altered; overrides `default`)
 

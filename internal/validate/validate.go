@@ -228,6 +228,20 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, obj, "column %s sets virtual without generated", cn)
 			}
 		}
+		if idx, ok := strings.CutPrefix(t.ReplicaIdentity, "index "); ok {
+			found := false
+			for _, ix := range t.Indexes {
+				if ix != nil && ix.Name == idx {
+					found = true
+					if !ix.Unique || ix.Where != "" {
+						add(Error, obj, "replica identity index %s must be unique and not partial", idx)
+					}
+				}
+			}
+			if !found {
+				add(Warning, obj, "replica identity index %s is not declared on this table", idx)
+			}
+		}
 		if t.PartitionOf != "" && d.Tables[t.PartitionOf] == nil {
 			add(Warning, obj, "partition of %s, which no schema file declares", t.PartitionOf)
 		}

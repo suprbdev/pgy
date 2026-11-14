@@ -37,6 +37,9 @@ schema public:
   sequence order_no: {as: bigint, cycle: false, ownedBy: none}
   table orders:
     owner: app_owner
+    replicaIdentity: index orders_cover
+    statistics:
+      orders_qty_price: {kinds: [dependencies], columns: [qty, price], comment: correlated}
     unlogged: false
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:

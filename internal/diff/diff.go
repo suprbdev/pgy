@@ -199,6 +199,8 @@ type LiveTable struct{
     IndexComments      map[string]string // index name -> comment (absent key = no comment)
     TriggerComments    map[string]string // trigger name -> comment
     Rules              map[string]*LiveRule // rule name -> definition (excluding views' _RETURN)
+    Statistics         map[string]*LiveStatistic // extended statistics name -> definition
+    ReplicaIdentity    string               // default | full | nothing | index <name>
     RuleComments       map[string]string
     PolicyComments     map[string]string // policy name -> comment
     ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
@@ -233,12 +235,23 @@ func newLiveTable() *LiveTable {
         ConstraintComments: map[string]string{},
         TriggerComments:    map[string]string{},
         Rules:              map[string]*LiveRule{},
+        Statistics:         map[string]*LiveStatistic{},
         RuleComments:       map[string]string{},
         PolicyComments:     map[string]string{},
         ConstraintInherited: map[string]bool{},
         TriggerInherited:    map[string]bool{},
     }
 }
+
+// LiveStatistic is an extended statistics object: its kinds (empty = all)
+// and items (columns and expressions) from pg_get_statisticsobjdef.
+type LiveStatistic struct {
+    Kinds   []string
+    Items   []string
+    Comment string
+}
+
+var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS \S+(?: \(([^)]*)\))? ON (.+) FROM \S+$`)
 
 // LiveRule is a rewrite rule's event, INSTEAD flag and WHERE condition
 // (as pg_get_ruledef prints it, parentheses included).
@@ -399,7 +412,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname, c.relispartition, c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[])
+        select n.nspname, c.relname, c.relispartition, c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[]),
+               case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
+                    when 'i' then 'index ' || coalesce((select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
+                                                        where x.indrelid = c.oid and x.indisreplident), '')
+                    else 'default' end
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind in ('r', 'p')
@@ -411,12 +428,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName string
             var isPartition, unlogged bool
             var reloptions []string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions); err != nil {
+            var replident string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions, &replident); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             lt := newLiveTable()
-            lt.IsPartition, lt.Unlogged, lt.Options = isPartition, unlogged, parseProconfig(reloptions)
+            lt.IsPartition, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, unlogged, parseProconfig(reloptions), replident
             l.Tables[key] = lt
         }
         return nil
@@ -633,6 +651,33 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 t.Triggers[trgName] = trgDef
                 if inherited { t.TriggerInherited[trgName] = true }
             }
+        }
+        return nil
+    })
+
+    statQ := `
+        select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, '')
+        from pg_statistic_ext s
+        join pg_class c on c.oid = s.stxrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        left join pg_description d on d.objoid = s.oid and d.classoid = 'pg_statistic_ext'::regclass
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(statQ, func(statRows pgx.Rows) error {
+        for statRows.Next() {
+            var schemaName, tableName, name, def, comment string
+            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment); err != nil { return err }
+            t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
+            if t == nil { continue }
+            ls := &LiveStatistic{Comment: comment}
+            if m := statisticsDefRe.FindStringSubmatch(def); m != nil {
+                for _, k := range strings.Split(m[1], ",") {
+                    if k = strings.TrimSpace(k); k != "" { ls.Kinds = append(ls.Kinds, k) }
+                }
+                ls.Items = splitTopLevel(m[2])
+            }
+            t.Statistics[name] = ls
         }
         return nil
     })
@@ -2121,6 +2166,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
+                if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 applyTableConstraints(plan, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
@@ -2150,6 +2196,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
                 }
                 if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
@@ -2839,6 +2886,15 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             }
             comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
         }
+        for _, st := range dt.Statistics {
+            if st == nil || st.Comment == "" || len(st.Columns) == 0 { continue }
+            name := truncateIdent(st.Name)
+            have := ""
+            if lt != nil {
+                if ls := lt.Statistics[name]; ls != nil && statisticMatchesLive(st, ls) { have = ls.Comment }
+            }
+            comment("statistics "+pqIdent(schemaPrefixOf(k)+name), st.Comment, have)
+        }
         for _, pol := range dt.Policies {
             if pol == nil || pol.Comment == "" || pol.Name == "" { continue }
             name := truncateIdent(pol.Name)
@@ -3392,6 +3448,19 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         *deferredTriggers = append(*deferredTriggers, stmt)
     }
 
+    for _, st := range dt.Statistics {
+        if st == nil || len(st.Columns) == 0 { continue }
+        name := truncateIdent(st.Name)
+        target := pqIdent(schemaPrefixOf(fq) + name)
+        if lt != nil {
+            if ls := lt.Statistics[name]; ls != nil {
+                if statisticMatchesLive(st, ls) { continue }
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop statistics %s;", target))
+            }
+        }
+        plan.Alters = append(plan.Alters, renderStatistic(fq, st))
+    }
+
     for _, r := range dt.Rules {
         if r == nil || r.Event == "" || r.Do == "" { continue }
         name := truncateIdent(r.Name)
@@ -3400,6 +3469,84 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         }
         *deferredTriggers = append(*deferredTriggers, renderRule(fq, r))
     }
+}
+
+// renderStatistic renders CREATE STATISTICS in the table's schema. Plain
+// columns are quoted; anything else is an expression in parentheses.
+func renderStatistic(fq string, st *schema.Statistic) string {
+    kinds := ""
+    if k := statisticKinds(st.Kinds); len(k) > 0 && len(k) < 3 { kinds = " (" + strings.Join(k, ", ") + ")" }
+    items := make([]string, len(st.Columns))
+    for i, c := range st.Columns {
+        c = strings.TrimSpace(c)
+        if isIndexExpression(c) { items[i] = "(" + c + ")" } else { items[i] = pqIdent(c) }
+    }
+    return fmt.Sprintf("create statistics %s%s on %s from %s;", pqIdent(schemaPrefixOf(fq)+truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
+}
+
+// statisticKinds returns the requested kinds in PostgreSQL's order.
+func statisticKinds(kinds []string) []string {
+    out := []string{}
+    for _, k := range []string{"ndistinct", "dependencies", "mcv"} {
+        for _, want := range kinds {
+            if strings.EqualFold(strings.TrimSpace(want), k) { out = append(out, k); break }
+        }
+    }
+    return out
+}
+
+// statisticMatchesLive compares kinds (empty or all three = all) and items
+// as sets, since PostgreSQL orders columns by position.
+func statisticMatchesLive(st *schema.Statistic, ls *LiveStatistic) bool {
+    want, have := statisticKinds(st.Kinds), statisticKinds(ls.Kinds)
+    if len(want) == 3 { want = nil }
+    if len(have) == 3 { have = nil }
+    if strings.Join(want, ",") != strings.Join(have, ",") || len(st.Columns) != len(ls.Items) { return false }
+    seen := map[string]bool{}
+    for _, it := range ls.Items { seen[normalizeConstraintDef(it)] = true }
+    for _, c := range st.Columns {
+        if !seen[normalizeConstraintDef(c)] { return false }
+    }
+    return true
+}
+
+// replicaIdentityStmt emits ALTER TABLE ... REPLICA IDENTITY when the YAML
+// manages it and it differs from live (new tables start at default).
+func replicaIdentityStmt(fq string, dt *schema.Table, lt *LiveTable) string {
+    want := dt.ReplicaIdentity
+    if want == "" { return "" }
+    have := "default"
+    if lt != nil && lt.ReplicaIdentity != "" { have = lt.ReplicaIdentity }
+    if want == have { return "" }
+    clause := want
+    if idx, ok := strings.CutPrefix(want, "index "); ok { clause = "using index " + pqIdent(truncateIdent(idx)) }
+    return fmt.Sprintf("alter table %s replica identity %s;", pqIdent(fq), clause)
+}
+
+func schemaPrefixOf(fq string) string {
+    if i := strings.IndexByte(fq, '.'); i >= 0 { return fq[:i+1] }
+    return ""
+}
+
+// splitTopLevel splits a comma-separated list outside parentheses and quotes.
+func splitTopLevel(s string) []string {
+    out, depth, start, inQ := []string{}, 0, 0, false
+    for i := 0; i < len(s); i++ {
+        switch c := s[i]; {
+        case c == '\'':
+            inQ = !inQ
+        case inQ:
+        case c == '(':
+            depth++
+        case c == ')':
+            depth--
+        case c == ',' && depth == 0:
+            out = append(out, strings.TrimSpace(s[start:i]))
+            start = i + 1
+        }
+    }
+    if rest := strings.TrimSpace(s[start:]); rest != "" { out = append(out, rest) }
+    return out
 }
 
 // renderRule renders CREATE OR REPLACE RULE for a table or view rule.
