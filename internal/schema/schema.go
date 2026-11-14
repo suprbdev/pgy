@@ -28,6 +28,9 @@ type Database struct {
     // EventTriggers is nil when the YAML has no eventTriggers block (event
     // triggers unmanaged) and authoritative for pruning when present.
     EventTriggers map[string]*EventTrigger `yaml:"-"`
+    // Publications is nil when the YAML has no publications block
+    // (unmanaged) and authoritative for pruning when present.
+    Publications map[string]*Publication `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
 }
@@ -62,6 +65,25 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     Indexes         []*Index // materialized views only
+}
+
+// Publication is a logical replication CREATE PUBLICATION declaration.
+type Publication struct {
+    Name             string
+    AllTables        bool
+    Tables           []*PublicationTable
+    Schemas          []string // FOR TABLES IN SCHEMA
+    Publish          []string // insert | update | delete | truncate; nil = all
+    ViaPartitionRoot *bool    // publish_via_partition_root; nil = unmanaged
+    Comment          string
+}
+
+// PublicationTable is one FOR TABLE entry, optionally limited to some
+// columns and filtered by a row filter (Where).
+type PublicationTable struct {
+    Table   string // schema-qualified
+    Columns []string
+    Where   string
 }
 
 // EventTrigger is a database-wide CREATE EVENT TRIGGER declaration.
@@ -421,6 +443,10 @@ func Merge(dbs []*Database) *Database {
             if merged.Collations == nil { merged.Collations = map[string]*Collation{} }
             for k, v := range d.Collations { merged.Collations[k] = v }
         }
+        if d.Publications != nil {
+            if merged.Publications == nil { merged.Publications = map[string]*Publication{} }
+            for k, v := range d.Publications { merged.Publications[k] = v }
+        }
         if d.EventTriggers != nil {
             if merged.EventTriggers == nil { merged.EventTriggers = map[string]*EventTrigger{} }
             for k, v := range d.EventTriggers { merged.EventTriggers[k] = v }
@@ -544,6 +570,9 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                 mergeTablesInto(out, schemaName, v)
             }
         }
+    }
+    if pubRaw, ok := root["publications"]; ok {
+        out.Publications = parsePublications(pubRaw)
     }
     if etRaw, ok := root["eventTriggers"]; ok {
         out.EventTriggers = parseEventTriggers(etRaw)
@@ -1710,6 +1739,45 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     return sq
+}
+
+// parsePublications parses { name: {allTables, tables, schemas, publish,
+// viaPartitionRoot, comment} }. A tables entry is a table name or
+// {table, columns, where}.
+func parsePublications(v any) map[string]*Publication {
+    m, ok := v.(map[string]any)
+    if !ok { return map[string]*Publication{} }
+    out := map[string]*Publication{}
+    for name, def := range m {
+        p := &Publication{Name: name}
+        if dm, ok := def.(map[string]any); ok {
+            if b, ok := dm["allTables"].(bool); ok { p.AllTables = b }
+            if arr, ok := dm["tables"].([]any); ok {
+                for _, it := range arr {
+                    switch x := it.(type) {
+                    case string:
+                        p.Tables = append(p.Tables, &PublicationTable{Table: qualify("", strings.TrimSpace(x))})
+                    case map[string]any:
+                        tn, _ := x["table"].(string)
+                        if tn == "" { continue }
+                        pt := &PublicationTable{Table: qualify("", strings.TrimSpace(tn))}
+                        if c, ok := x["columns"]; ok { pt.Columns = parseStringListFromNode(c) }
+                        if w, ok := x["where"].(string); ok { pt.Where = strings.TrimSpace(w) }
+                        p.Tables = append(p.Tables, pt)
+                    }
+                }
+            }
+            if sc, ok := dm["schemas"]; ok { p.Schemas = parseStringListFromNode(sc) }
+            if pub, ok := dm["publish"]; ok {
+                p.Publish = parseStringListFromNode(pub)
+                for i := range p.Publish { p.Publish[i] = strings.ToLower(strings.TrimSpace(p.Publish[i])) }
+            }
+            if b, ok := dm["viaPartitionRoot"].(bool); ok { p.ViaPartitionRoot = &b }
+            if s, ok := dm["comment"].(string); ok { p.Comment = s }
+        }
+        out[name] = p
+    }
+    return out
 }
 
 // parseEventTriggers parses { name: {event, tags, function, enabled, comment} }.

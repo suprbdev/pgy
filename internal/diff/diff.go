@@ -31,6 +31,7 @@ type Live struct{
     Collations map[string]bool
     CollationComments map[string]string
     EventTriggers map[string]*LiveEventTrigger
+    Publications  map[string]*LivePublication
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
@@ -69,6 +70,23 @@ type Live struct{
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
+}
+
+// LivePublication is a publication from pg_publication and its table and
+// schema memberships. Tables maps "schema.table" to its column list (nil =
+// all columns, sorted) and row filter.
+type LivePublication struct {
+    AllTables bool
+    Publish   []string // enabled actions in insert, update, delete, truncate order
+    ViaRoot   bool
+    Tables    map[string]LivePublicationTable
+    Schemas   []string
+    Comment   string
+}
+
+type LivePublicationTable struct {
+    Columns []string
+    Where   string
 }
 
 // LiveEventTrigger is an event trigger from pg_event_trigger. Function is
@@ -251,6 +269,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Collations: map[string]bool{},
         CollationComments: map[string]string{},
         EventTriggers: map[string]*LiveEventTrigger{},
+        Publications: map[string]*LivePublication{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
@@ -690,6 +709,70 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     enumRows.Close()
     
+    pubQ := `
+        select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
+               coalesce(d.description, '')
+        from pg_publication p
+        left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
+    `
+    pubRows, err := pool.Query(ctx, pubQ)
+    if err != nil { return nil, err }
+    for pubRows.Next() {
+        var name string
+        var ins, upd, del, trunc bool
+        lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
+        if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment); err != nil {
+            pubRows.Close()
+            return nil, err
+        }
+        for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
+            if a.on { lp.Publish = append(lp.Publish, a.name) }
+        }
+        l.Publications[name] = lp
+    }
+    pubRows.Close()
+
+    pubRelQ := `
+        select p.pubname, n.nspname || '.' || c.relname, coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''),
+               (select array_agg(a.attname::text order by a.attname) from pg_attribute a
+                where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs))
+        from pg_publication_rel pr
+        join pg_publication p on p.oid = pr.prpubid
+        join pg_class c on c.oid = pr.prrelid
+        join pg_namespace n on n.oid = c.relnamespace
+    `
+    pubRelRows, err := pool.Query(ctx, pubRelQ)
+    if err != nil { return nil, err }
+    for pubRelRows.Next() {
+        var pub, table, where string
+        var cols []string
+        if err := pubRelRows.Scan(&pub, &table, &where, &cols); err != nil {
+            pubRelRows.Close()
+            return nil, err
+        }
+        if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where} }
+    }
+    pubRelRows.Close()
+
+    pubNspQ := `
+        select p.pubname, n.nspname
+        from pg_publication_namespace pn
+        join pg_publication p on p.oid = pn.pnpubid
+        join pg_namespace n on n.oid = pn.pnnspid
+        order by 1, 2
+    `
+    pubNspRows, err := pool.Query(ctx, pubNspQ)
+    if err != nil { return nil, err }
+    for pubNspRows.Next() {
+        var pub, nsp string
+        if err := pubNspRows.Scan(&pub, &nsp); err != nil {
+            pubNspRows.Close()
+            return nil, err
+        }
+        if lp := l.Publications[pub]; lp != nil { lp.Schemas = append(lp.Schemas, nsp) }
+    }
+    pubNspRows.Close()
+
     etQ := `
         select e.evtname, e.evtevent, n.nspname || '.' || p.proname,
                case e.evtenabled when 'D' then 'disabled' when 'R' then 'replica' when 'A' then 'always' else 'origin' end,
@@ -1749,6 +1832,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     planEventTriggers(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
+    planPublications(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired)...)
     if opts.Unsafe && opts.Prune {
@@ -2012,6 +2096,110 @@ func isNumericLiteral(s string) bool {
         }
     }
     return s != "-" && s != "." && s != "-."
+}
+
+// planPublications reconciles publications after every table create and
+// alter. Membership changes emit ALTER PUBLICATION ... SET (or DROP when the
+// desired publication has no members); option changes SET (...). Switching
+// to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
+// every table, so it requires --unsafe, as does --prune dropping
+// publications missing from a present publications block.
+func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
+    if desired.Publications == nil { return }
+    for _, name := range sortedKeys(desired.Publications) {
+        p := desired.Publications[name]
+        if p == nil { continue }
+        ident := pqIdent(truncateIdent(name))
+        lp := live.Publications[truncateIdent(name)]
+        if lp != nil && lp.AllTables != p.AllTables {
+            if !opts.Unsafe { continue }
+            plan.Alters = append(plan.Alters, fmt.Sprintf("drop publication %s;", ident))
+            lp = nil
+        }
+        if lp == nil {
+            stmt := "create publication " + ident
+            if p.AllTables {
+                stmt += " for all tables"
+            } else if members := publicationMembers(p); members != "" {
+                stmt += " for " + members
+            }
+            if with := publicationWith(p, nil); with != "" { stmt += " with (" + with + ")" }
+            plan.Alters = append(plan.Alters, stmt+";")
+            if p.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on publication %s is %s;", ident, quoteString(p.Comment))) }
+            continue
+        }
+        if !p.AllTables && !publicationMembersMatch(p, lp) {
+            if members := publicationMembers(p); members != "" {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set %s;", ident, members))
+            } else {
+                if len(lp.Tables) > 0 {
+                    tables := sortedKeys(lp.Tables)
+                    for i, t := range tables { tables[i] = pqIdent(t) }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop table %s;", ident, strings.Join(tables, ", ")))
+                }
+                if len(lp.Schemas) > 0 {
+                    schemas := make([]string, len(lp.Schemas))
+                    for i, s := range lp.Schemas { schemas[i] = pqIdent(s) }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
+                }
+            }
+        }
+        if with := publicationWith(p, lp); with != "" {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set (%s);", ident, with))
+        }
+        if p.Comment != "" && p.Comment != lp.Comment {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("comment on publication %s is %s;", ident, quoteString(p.Comment)))
+        }
+    }
+    if !opts.Unsafe || !opts.Prune { return }
+    for _, name := range sortedKeys(live.Publications) {
+        if desired.Publications[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", pqIdent(name))) }
+    }
+}
+
+// publicationMembers renders the TABLE ... / TABLES IN SCHEMA ... list.
+func publicationMembers(p *schema.Publication) string {
+    parts := []string{}
+    for _, t := range p.Tables {
+        entry := "table " + pqIdent(t.Table)
+        if len(t.Columns) > 0 { entry += " (" + joinIdentList(t.Columns) + ")" }
+        if t.Where != "" { entry += " where (" + t.Where + ")" }
+        parts = append(parts, entry)
+    }
+    for _, s := range p.Schemas { parts = append(parts, "tables in schema "+pqIdent(s)) }
+    return strings.Join(parts, ", ")
+}
+
+func publicationMembersMatch(p *schema.Publication, lp *LivePublication) bool {
+    if len(p.Tables) != len(lp.Tables) { return false }
+    for _, t := range p.Tables {
+        lt, ok := lp.Tables[t.Table]
+        if !ok || !constraintDefsEqual(t.Where, lt.Where) { return false }
+        want := append([]string(nil), t.Columns...)
+        sort.Strings(want)
+        if strings.Join(want, ",") != strings.Join(lt.Columns, ",") { return false }
+    }
+    want := append([]string(nil), p.Schemas...)
+    sort.Strings(want)
+    return strings.Join(want, ",") == strings.Join(lp.Schemas, ",")
+}
+
+// publicationWith renders the WITH options that differ from live (all set
+// options when live is nil).
+func publicationWith(p *schema.Publication, lp *LivePublication) string {
+    out := []string{}
+    if p.Publish != nil {
+        order := map[string]int{"insert": 0, "update": 1, "delete": 2, "truncate": 3}
+        want := append([]string(nil), p.Publish...)
+        sort.Slice(want, func(i, j int) bool { return order[want[i]] < order[want[j]] })
+        if lp == nil || strings.Join(want, ", ") != strings.Join(lp.Publish, ", ") {
+            out = append(out, "publish = "+quoteString(strings.Join(want, ", ")))
+        }
+    }
+    if p.ViaPartitionRoot != nil && (lp == nil || *p.ViaPartitionRoot != lp.ViaRoot) {
+        out = append(out, fmt.Sprintf("publish_via_partition_root = %t", *p.ViaPartitionRoot))
+    }
+    return strings.Join(out, ", ")
 }
 
 // planEventTriggers creates missing event triggers and drops and recreates

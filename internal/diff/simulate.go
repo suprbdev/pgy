@@ -1,6 +1,7 @@
 package diff
 
 import (
+    "sort"
     "strings"
 
     "github.com/suprbdev/pgy/internal/schema"
@@ -68,6 +69,30 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
+    }
+
+    for name, p := range desired.Publications {
+        if p == nil { continue }
+        lp := &LivePublication{AllTables: p.AllTables, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
+        if prev := out.Publications[truncateIdent(name)]; prev != nil && prev.AllTables == p.AllTables {
+            lp.Publish, lp.ViaRoot = prev.Publish, prev.ViaRoot
+            if p.Comment == "" { lp.Comment = prev.Comment }
+        }
+        for _, t := range p.Tables {
+            cols := append([]string(nil), t.Columns...)
+            sort.Strings(cols)
+            if len(cols) == 0 { cols = nil }
+            lp.Tables[t.Table] = LivePublicationTable{Columns: cols, Where: t.Where}
+        }
+        lp.Schemas = append([]string(nil), p.Schemas...)
+        sort.Strings(lp.Schemas)
+        if p.Publish != nil {
+            order := map[string]int{"insert": 0, "update": 1, "delete": 2, "truncate": 3}
+            lp.Publish = append([]string(nil), p.Publish...)
+            sort.Slice(lp.Publish, func(i, j int) bool { return order[lp.Publish[i]] < order[lp.Publish[j]] })
+        }
+        if p.ViaPartitionRoot != nil { lp.ViaRoot = *p.ViaPartitionRoot }
+        out.Publications[truncateIdent(name)] = lp
     }
 
     for name, et := range desired.EventTriggers {
@@ -359,6 +384,7 @@ func cloneLive(l *Live) *Live {
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),
+        Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
         EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),
         SequenceDefs:       cloneMap(l.SequenceDefs, func(s *LiveSequence) *LiveSequence { c := *s; return &c }),
