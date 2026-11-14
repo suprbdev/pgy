@@ -953,7 +953,7 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 		}
 		deferral(tr, middle)
 		addStr(tr, "when", m[8])
-		add(tr, "procedure", str(qualifyRef(m[9], fq)))
+		add(tr, "procedure", str(b.triggerFunction(m[9])))
 		if e := lt.TriggerEnabled[name]; e != "" && e != "origin" {
 			add(tr, "enabled", str(e))
 		}
@@ -1421,6 +1421,27 @@ func qualifyRef(name, fq string) string {
 		return name
 	}
 	return "public." + name
+}
+
+// triggerFunction qualifies the function call of a trigger definition.
+// pg_get_triggerdef leaves it unqualified when it is visible on the
+// search_path: a public function then gets public., while a pg_catalog
+// builtin such as tsvector_update_trigger stays as written.
+func (b *builder) triggerFunction(call string) string {
+	base := call
+	if i := strings.IndexByte(call, '('); i >= 0 {
+		base = call[:i]
+	}
+	if strings.Contains(base, ".") {
+		return call
+	}
+	prefix := "public." + strings.ToLower(unquoteIdent(base)) + "("
+	for norm := range b.live.FunctionDefs {
+		if strings.HasPrefix(norm, prefix) {
+			return "public." + call
+		}
+	}
+	return call
 }
 
 func schemaOf(fq string) string {
