@@ -762,6 +762,9 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 			add(Error, obj, "data key column %s is not declared", k)
 		}
 	}
+	if len(t.Data.Key) > 0 && !uniqueOn(t, key) {
+		add(Warning, obj, "data key (%s) is not the primary key or a unique constraint; rows cannot be upserted, and duplicates are not prevented", strings.Join(key, ", "))
+	}
 	seen := map[string]int{}
 	for i, row := range t.Data.Rows {
 		parts := []string{}
@@ -785,4 +788,43 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 			}
 		}
 	}
+}
+
+// uniqueOn reports whether cols are exactly t's primary key or the columns
+// of one of its unique constraints, unique indexes or unique columns.
+func uniqueOn(t *schema.Table, cols []string) bool {
+	same := func(a []string) bool {
+		if len(a) != len(cols) {
+			return false
+		}
+		set := map[string]bool{}
+		for _, c := range a {
+			set[strings.Fields(c)[0]] = true
+		}
+		for _, c := range cols {
+			if !set[c] {
+				return false
+			}
+		}
+		return true
+	}
+	if same(t.PrimaryKey) {
+		return true
+	}
+	if len(cols) == 1 {
+		if c := t.Columns[cols[0]]; c != nil && (c.Unique || c.PrimaryKey) {
+			return true
+		}
+	}
+	for _, c := range t.Constraints {
+		if c != nil && strings.EqualFold(c.Type, "unique") && same(c.Columns) {
+			return true
+		}
+	}
+	for _, ix := range t.Indexes {
+		if ix != nil && ix.Unique && ix.Where == "" && same(ix.Columns) {
+			return true
+		}
+	}
+	return false
 }

@@ -1724,6 +1724,8 @@ func parseType(schemaName, key string, body any) *TypeDef {
         for k, v := range attrs {
             if mm, ok := v.(map[string]any); ok {
                 if t, ok := mm["type"].(string); ok { td.Attributes[k] = t }
+            } else if t, ok := v.(string); ok && strings.TrimSpace(t) != "" {
+                td.Attributes[k] = strings.TrimSpace(t)
             }
         }
     }

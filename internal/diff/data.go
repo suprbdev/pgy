@@ -60,7 +60,8 @@ func dataRowsJSON(rows []map[string]any) ([]byte, error) {
 // into a record of the table's type with jsonb_populate_record, so values
 // are compared as the column types see them (10 matches a numeric 10.00,
 // enum labels, arrays and jsonb compare by value). Only the columns a row
-// lists are compared. Tables that do not exist yet are skipped.
+// lists are compared. Tables that do not exist yet, or whose key columns do
+// not (they are renamed or added by the plan), are skipped and get upserts.
 func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
@@ -69,7 +70,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         lt := l.Tables[fq]
         if dt == nil || dt.Data == nil || lt == nil { continue }
         key := dt.DataKey()
-        if len(key) == 0 { continue }
+        if len(key) == 0 || !hasColumns(lt, key) { continue }
         rows, err := dataRowsJSON(dt.Data.Rows)
         if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
         tbl := pqIdent(fq)
@@ -145,6 +146,13 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
     return nil
 }
 
+func hasColumns(lt *LiveTable, cols []string) bool {
+    for _, c := range cols {
+        if lt.Columns[c] == nil { return false }
+    }
+    return true
+}
+
 // sqlValue renders a decoded YAML value as a SQL literal that PostgreSQL
 // coerces to the column's type: strings, dates, lists (as array literals)
 // and maps (as JSON) are quoted, numbers and booleans are bare.
@@ -197,6 +205,29 @@ func arrayLiteral(list []any) string {
     return "{" + strings.Join(parts, ",") + "}"
 }
 
+// dataSQL renders column col's value for table fq. Values containing a map
+// (composite types, json and jsonb objects) go through jsonb_populate_record,
+// the same coercion the comparison uses, so a map becomes a record for a
+// composite column and an object for a json column; anything else is a
+// plain literal.
+func dataSQL(fq, col string, v any) string {
+    if !containsMap(v) { return sqlValue(v) }
+    b, _ := json.Marshal(map[string]any{col: dataValue(v)})
+    return fmt.Sprintf("(jsonb_populate_record(null::%s, %s::jsonb)).%s", pqIdent(fq), quoteString(string(b)), pqIdent(col))
+}
+
+func containsMap(v any) bool {
+    switch x := v.(type) {
+    case map[string]any:
+        return true
+    case []any:
+        for _, e := range x {
+            if containsMap(e) { return true }
+        }
+    }
+    return false
+}
+
 // dataColumns returns the columns a row lists, in the table's column order.
 func dataColumns(dt *schema.Table, row map[string]any) []string {
     out := []string{}
@@ -220,7 +251,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
     names, vals := make([]string, len(cols)), make([]string, len(cols))
     overriding := ""
     for i, cn := range cols {
-        names[i], vals[i] = pqIdent(cn), sqlValue(row[cn])
+        names[i], vals[i] = pqIdent(cn), dataSQL(fq, cn, row[cn])
         if c := dt.Columns[cn]; c != nil && c.Identity == "always" { overriding = " overriding system value" }
     }
     return fmt.Sprintf("insert into %s (%s)%s values (%s);", pqIdent(fq), strings.Join(names, ", "), overriding, strings.Join(vals, ", "))
@@ -291,10 +322,10 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 row := dt.Data.Rows[i]
                 set := []string{}
                 for _, cn := range ld.Changed[i] {
-                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), sqlValue(row[cn]))) }
+                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, cn, row[cn]))) }
                 }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", pqIdent(fq), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return sqlValue(row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", pqIdent(fq), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, k, row[k]) })))
             }
         }
     }

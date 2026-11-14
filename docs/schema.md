@@ -634,7 +634,7 @@ schema public:
       - type public.auth_role
 ```
 
-Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts).
+Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts). An attribute can also be written as just its type: `attributes: {role: public.auth_role, exp: bigint}`.
 
 For an existing composite type, attributes the live type lacks are added with `ALTER TYPE ... ADD ATTRIBUTE` (appended, since PostgreSQL cannot insert an attribute in the middle). Under `--unsafe`, a changed attribute type emits `ALTER ATTRIBUTE ... TYPE` and attributes removed from YAML emit `DROP ATTRIBUTE`. PostgreSQL rejects both while a table column uses the type.
 
@@ -1257,10 +1257,10 @@ schema app:
 ```
 
 - A row missing from the table is inserted. A row whose listed columns differ is updated, and only those columns are written. Columns a row doesn't list are left alone. With `--unsafe --prune`, rows the YAML no longer declares are deleted.
-- PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), `jsonb` (maps) and dates compare by value. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
+- PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), maps (for `json`/`jsonb` and composite-type columns) and dates compare by value. Values that contain a map are written through `jsonb_populate_record`, the same conversion the comparison uses. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
 - Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
 - `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
-- `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`.
+- `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`. A `key` that isn't the primary key or a unique constraint gets a warning.
 
 ## Renames
 

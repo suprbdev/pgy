@@ -266,3 +266,18 @@ schema app:
 		t.Errorf("explicit key ignored: %v", k)
 	}
 }
+
+func TestCompositeAttributeShorthand(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  type pair:
+    type: composite
+    attributes: {a: int, b: {type: text}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at := d.Types["app.pair"].Attributes; at["a"] != "int" || at["b"] != "text" {
+		t.Errorf("attributes = %v", at)
+	}
+}

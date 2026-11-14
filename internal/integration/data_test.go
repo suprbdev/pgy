@@ -105,3 +105,53 @@ func TestIntegrationDataChanges(t *testing.T) {
 		t.Errorf("expected 3 plans, got %d (%v)", n, err)
 	}
 }
+
+func TestIntegrationDataSurvivesRenames(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	convergeYAML(t, pool, sch, `
+schema SCH:
+  table status:
+    columns: {code: {type: text}, label: {type: text}}
+    primaryKey: [code]
+    data:
+      rows: [{code: open, label: Open}, {code: done, label: Done}]
+`)
+	sql := convergeYAML(t, pool, sch, `
+schema SCH:
+  table state:
+    renamedFrom: status
+    columns: {key: {type: text, renamedFrom: code}, label: {type: text}}
+    primaryKey: [key]
+    data:
+      rows: [{key: open, label: Open}, {key: done, label: Finished}]
+`)
+	if !contains(sql, `rename column "code" to "key"`) || contains(sql, "drop table") {
+		t.Errorf("expected renames, got:\n%s", sql)
+	}
+	var label string
+	if err := pool.QueryRow(context.Background(), `select label from "`+sch+`".state where key = 'done'`).Scan(&label); err != nil || label != "Finished" {
+		t.Errorf("label = %q (%v)", label, err)
+	}
+}
+
+func TestIntegrationDataKeyColumnRename(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	convergeYAML(t, pool, sch, `
+schema SCH:
+  table status:
+    columns: {code: {type: text}, label: {type: text}}
+    primaryKey: [code]
+    data:
+      rows: [{code: open, label: Open}]
+`)
+	convergeYAML(t, pool, sch, `
+schema SCH:
+  table status:
+    columns: {key: {type: text, renamedFrom: code}, label: {type: text}}
+    primaryKey: [key]
+    data:
+      rows: [{key: open, label: Opened}]
+`)
+}

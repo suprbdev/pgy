@@ -76,3 +76,12 @@ func TestDataFromSnapshot(t *testing.T) {
 		t.Error("without introspected data an existing table gets upserts")
 	}
 }
+
+func TestDataSQLRoutesMapsThroughPopulateRecord(t *testing.T) {
+	if got := dataSQL("app.t", "p", map[string]any{"a": 1}); got != `(jsonb_populate_record(null::"app"."t", '{"p":{"a":1}}'::jsonb))."p"` {
+		t.Errorf("got %s", got)
+	}
+	if got := dataSQL("app.t", "n", 5); got != "5" {
+		t.Errorf("scalars stay literals, got %s", got)
+	}
+}

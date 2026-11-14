@@ -782,14 +782,19 @@
         },
         "attributes": {
           "type": "object",
-          "description": "Composite attributes: `{ <name>: { type: <sql type> } }`.",
+          "description": "Composite attributes: `{ <name>: { type: <sql type> } }`, or the shorthand `{ <name>: <sql type> }`.",
           "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "type": { "type": "string", "minLength": 1 }
-            },
-            "required": ["type"],
-            "additionalProperties": false
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string", "minLength": 1 }
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              }
+            ]
           }
         },
         "dependsOn": { "$ref": "#/definitions/stringList" },

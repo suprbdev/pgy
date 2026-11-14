@@ -332,6 +332,12 @@ schema app:
     columns: {x: {type: int}}
     data:
       rows: [{x: 1}]
+  table loose:
+    columns: {id: {type: int}, label: {type: text}}
+    primaryKey: [id]
+    data:
+      key: [label]
+      rows: [{id: 1, label: a}]
 `)
 	got := messages(Files([]string{p}))
 	for _, want := range []string{
@@ -340,6 +346,7 @@ schema app:
 		"data row 4 sets undeclared column nme",
 		"data row 5 sets generated column twice",
 		"table app.nokey: data needs a key",
+		"data key (label) is not the primary key or a unique constraint",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
