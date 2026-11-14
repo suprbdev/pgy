@@ -610,3 +610,25 @@ func TestTokens(t *testing.T) {
     }
     if !reflect.DeepEqual(got, want) { t.Fatalf("got %+v", got) }
 }
+
+func TestPlanDomainChecksComeAfterTheirFunctions(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "domains.yml": `
+schema public:
+  domain code:
+    type: text
+    checks:
+      code_valid: public.is_code(VALUE)
+`,
+        "fns.yml": `
+schema public:
+  function is_code(v text):
+    returns: boolean
+    language: sql
+    immutable: true
+    body: select v ~ '^[A-Z]+$'
+`,
+    })
+    steps := planFiles(t, nil, p("domains.yml", "fns.yml"), ModeFile, false)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"fns", "domains"}) { t.Fatalf("got %v", got) }
+}
