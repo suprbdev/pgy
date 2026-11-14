@@ -662,6 +662,26 @@ schema public:
 
 ---
 
+## Aggregate Definitions
+
+Aggregates are defined inside `schema <name>:` blocks with `aggregate <name>(<args>):` keys (`(*)` for `count(*)`-style aggregates) and emitted as `CREATE OR REPLACE AGGREGATE` after the functions they use. A definition that differs from `pg_aggregate` is replaced in place.
+
+```yaml
+schema app:
+  function add2(a int, b int):
+    returns: int
+    language: sql
+    immutable: true
+    body: select a + b
+  aggregate total(int):
+    sfunc: app.add2          # state transition function (required)
+    stype: int               # state type (required)
+    initcond: "0"            # optional initial state, as a string
+    combinefunc: app.add2    # optional: enables parallel aggregation
+    parallel: safe           # safe | restricted | unsafe
+    comment: sum of ints
+```
+
 ## Procedure Definitions
 
 Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted.

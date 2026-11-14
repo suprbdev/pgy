@@ -29,6 +29,7 @@ schema public:
   owner: app_owner
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
+  aggregate mysum(int): {sfunc: public.add2, stype: int, initcond: "0", combinefunc: public.add2, parallel: safe, comment: sum}
   text search dictionary nostop: {template: snowball, options: {language: english}}
   text search configuration english_custom:
     copy: pg_catalog.english

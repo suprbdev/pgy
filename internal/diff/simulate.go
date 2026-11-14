@@ -208,6 +208,16 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if pr.Comment != "" { out.FunctionComments[norm] = pr.Comment }
     }
 
+    for k, ag := range desired.Aggregates {
+        if ag == nil || ag.SFunc == "" { continue }
+        norm := normalizeFunctionSignature(schema.RoutineName(k) + aggregateArgs(ag.ArgsSig))
+        parallel := ag.Parallel
+        if parallel == "" { parallel = "unsafe" }
+        out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, CombineFunc: ag.CombineFunc, Parallel: parallel}
+        out.FunctionDefs[norm] = &LiveFunction{Signature: schema.RoutineName(k) + aggregateArgs(ag.ArgsSig), Kind: "a"}
+        if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
+    }
+
     for k, vw := range desired.Views {
         if vw == nil || vw.Query == "" { continue }
         if vw.Materialized {
@@ -489,6 +499,7 @@ func cloneLive(l *Live) *Live {
             return &c
         }),
         EnumLabels: cloneMap(l.EnumLabels, func(v []string) []string { return append([]string(nil), v...) }),
+        AggregateDefs: cloneMap(l.AggregateDefs, func(a *LiveAggregate) *LiveAggregate { c := *a; return &c }),
         CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),

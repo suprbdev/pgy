@@ -83,6 +83,8 @@ type Live struct{
     Procedures map[string]bool
     // ProcedureDefs: normalized signature -> live definition, for replace-on-change
     ProcedureDefs map[string]*LiveProcedure
+    // AggregateDefs: normalized signature -> aggregate definition
+    AggregateDefs map[string]*LiveAggregate
     // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
     EnumLabels map[string][]string
     // CompositeAttributes: "schema.type" -> attribute name -> format_type, for
@@ -243,6 +245,13 @@ func newLiveTable() *LiveTable {
     }
 }
 
+// LiveAggregate is an aggregate's definition from pg_aggregate. Function
+// fields are regproc text ("" when unset); Parallel is safe | restricted |
+// unsafe.
+type LiveAggregate struct {
+    SFunc, SType, FinalFunc, InitCond, CombineFunc, Parallel string
+}
+
 // LiveStatistic is an extended statistics object: its kinds (empty = all)
 // and items (columns and expressions) from pg_get_statisticsobjdef.
 type LiveStatistic struct {
@@ -385,6 +394,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Procedures: map[string]bool{},
         ProcedureDefs: map[string]*LiveProcedure{},
         EnumLabels: map[string][]string{},
+        AggregateDefs: map[string]*LiveAggregate{},
         CompositeAttributes: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
         OwnedSequences: map[string]bool{},
@@ -651,6 +661,28 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 t.Triggers[trgName] = trgDef
                 if inherited { t.TriggerInherited[trgName] = true }
             }
+        }
+        return nil
+    })
+
+    aggQ := `
+        select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
+               a.aggtransfn::text, format_type(a.aggtranstype, null), coalesce(nullif(a.aggfinalfn::text, '-'), ''),
+               coalesce(a.agginitval, ''), coalesce(nullif(a.aggcombinefn::text, '-'), ''),
+               case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end
+        from pg_aggregate a
+        join pg_proc p on p.oid = a.aggfnoid
+        join pg_namespace n on n.oid = p.pronamespace
+        where a.aggkind = 'n'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(aggQ, func(aggRows pgx.Rows) error {
+        for aggRows.Next() {
+            var schemaName, name, args string
+            la := &LiveAggregate{}
+            if err := aggRows.Scan(&schemaName, &name, &args, &la.SFunc, &la.SType, &la.FinalFunc, &la.InitCond, &la.CombineFunc, &la.Parallel); err != nil { return err }
+            l.AggregateDefs[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, name, args))] = la
         }
         return nil
     })
@@ -1861,6 +1893,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
+    for k := range desired.Aggregates {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
+    }
     for k := range desired.Procedures {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
@@ -2062,6 +2097,12 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace procedure" }
             stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
             plan.Creates = append(plan.Creates, stmt)
+        case "aggregate":
+            ag := desired.Aggregates[e.Key]
+            if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
+            name := schema.RoutineName(e.Key)
+            if la := live.AggregateDefs[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))]; la != nil && aggregateMatchesLive(ag, la) { continue }
+            plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
             if td == nil || td.Template == "" || live.TSDictionaries[e.Key] { continue }
@@ -2672,6 +2713,36 @@ func qualifyName(s string) string {
     return "public." + s
 }
 
+// aggregateArgs maps the (*) argument list of a count(*)-style aggregate to
+// the empty list PostgreSQL reports for it.
+func aggregateArgs(args string) string {
+    if strings.ReplaceAll(args, " ", "") == "(*)" { return "()" }
+    return args
+}
+
+// renderAggregate emits CREATE OR REPLACE AGGREGATE with the options set.
+func renderAggregate(name string, ag *schema.Aggregate) string {
+    opts := []string{"sfunc = " + ag.SFunc, "stype = " + ag.SType}
+    if ag.FinalFunc != "" { opts = append(opts, "finalfunc = "+ag.FinalFunc) }
+    if ag.CombineFunc != "" { opts = append(opts, "combinefunc = "+ag.CombineFunc) }
+    if ag.InitCond != "" { opts = append(opts, "initcond = "+quoteString(ag.InitCond)) }
+    if ag.Parallel != "" { opts = append(opts, "parallel = "+ag.Parallel) }
+    return fmt.Sprintf("create or replace aggregate %s%s (%s);", pqIdent(name), ag.ArgsSig, strings.Join(opts, ", "))
+}
+
+// aggregateMatchesLive compares an aggregate's functions (ignoring public
+// and pg_catalog qualifiers), state type, initial condition and, when set,
+// parallel safety.
+func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
+    fn := func(s string) string {
+        s = strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(s), "()"), `"`, ""))
+        return strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog.")
+    }
+    return fn(ag.SFunc) == fn(la.SFunc) && normalizeColumnType(ag.SType) == normalizeColumnType(la.SType) &&
+        fn(ag.FinalFunc) == fn(la.FinalFunc) && fn(ag.CombineFunc) == fn(la.CombineFunc) &&
+        ag.InitCond == la.InitCond && (ag.Parallel == "" || ag.Parallel == la.Parallel)
+}
+
 // tsConfigStmts creates a missing text search configuration (as a copy or
 // from a parser) and reconciles the token type mappings the YAML manages.
 // For a new configuration the copied mappings are unknown, so each managed
@@ -2982,6 +3053,12 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         norm := normalizeFunctionSignature(name + pr.ArgsSig)
         comment("procedure "+pqIdent(name)+grantFuncArgs(pr.ArgsSig), pr.Comment, live.FunctionComments[norm])
     }
+    for _, k := range sortedKeys(desired.Aggregates) {
+        ag := desired.Aggregates[k]
+        if ag == nil { continue }
+        name := schema.RoutineName(k)
+        comment("aggregate "+pqIdent(name)+ag.ArgsSig, ag.Comment, live.FunctionComments[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))])
+    }
     return stmts
 }
 
@@ -3028,6 +3105,12 @@ func planOwners(live *Live, desired *schema.Database) []string {
         if f := desired.Functions[k]; f != nil {
             name := schema.RoutineName(k)
             owner("function", pqIdent(name)+grantFuncArgs(f.ArgsSig), f.Owner, "proc:"+normalizeFunctionSignature(name+f.ArgsSig))
+        }
+    }
+    for _, k := range sortedKeys(desired.Aggregates) {
+        if ag := desired.Aggregates[k]; ag != nil {
+            name := schema.RoutineName(k)
+            owner("aggregate", pqIdent(name)+ag.ArgsSig, ag.Owner, "proc:"+normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig)))
         }
     }
     for _, k := range sortedKeys(desired.Procedures) {
