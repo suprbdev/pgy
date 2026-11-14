@@ -325,7 +325,6 @@ indexes:
     where: deleted_at is null
 ```
 
-
 ### Foreign Keys
 
 ```yaml
