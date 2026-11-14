@@ -80,8 +80,8 @@ func TestIntegrationExtensionSchemaAndVersion(t *testing.T) {
 	first := &schema.Extension{Name: "ltree", Schema: sch + "_a", Version: "1.1"}
 	applyPlan(t, pool, plan(first))
 	t.Cleanup(func() {
-		pool.Exec(context.Background(), fmt.Sprintf("drop schema if exists %q, %q cascade", sch+"_a", sch+"_b"))
-	}) //nolint
+		pool.Exec(context.Background(), fmt.Sprintf("drop schema if exists %q, %q cascade", sch+"_a", sch+"_b")) //nolint
+	})
 	if sql := diff.Render(plan(first)); sql != "" {
 		t.Fatalf("expected no changes after create, got:\n%s", sql)
 	}
