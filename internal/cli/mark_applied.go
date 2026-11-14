@@ -33,8 +33,7 @@ func cmdMarkApplied() *cobra.Command {
             if len(files) == 0 { return fmt.Errorf("no migrations found in %s", cfg.MigrationsDir) }
             sel, err := filterUntil(files, target)
             if err != nil { return err }
-            schemaName := "pgy"
-            tableName := "migrations"
+            schemaName, tableName := cfg.migrationsTable()
             if err := db.EnsureMigrationsTable(ctx, pool, schemaName, tableName); err != nil { return err }
             untilVersion := db.MigrationVersion(filepath.Base(sel[len(sel)-1]))
             _, err = pool.Exec(ctx, fmt.Sprintf("delete from %s.%s where version > $1", dbIdent(schemaName), dbIdent(tableName)), untilVersion)

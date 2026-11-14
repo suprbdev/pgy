@@ -19,11 +19,12 @@ func cmdInit() *cobra.Command {
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)
+            defSchema, defTable := cfg.migrationsTable()
             if schema == "" {
-                schema = "pgy"
+                schema = defSchema
             }
             if table == "" {
-                table = "migrations"
+                table = defTable
             }
             if cfg.DSN == "" {
                 return fmt.Errorf("--dsn or PGY_DSN is required")
@@ -46,8 +47,8 @@ func cmdInit() *cobra.Command {
             return nil
         },
     }
-    c.Flags().StringVar(&schema, "schema", "", "Schema for migrations table (default pgy)")
-    c.Flags().StringVar(&table, "table", "", "Migrations table name (default migrations)")
+    c.Flags().StringVar(&schema, "schema", "", "Schema for the migrations table (overrides --migrations-table)")
+    c.Flags().StringVar(&table, "table", "", "Migrations table name (overrides --migrations-table)")
     return c
 }
 

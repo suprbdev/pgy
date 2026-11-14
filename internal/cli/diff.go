@@ -36,7 +36,8 @@ Exit codes:
             if prune && !unsafe {
                 return fmt.Errorf("--prune drops objects and requires --unsafe")
             }
-            opts := diff.Options{Unsafe: unsafe, Prune: prune}
+            migSchema, migTable := cfg.migrationsTable()
+            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err

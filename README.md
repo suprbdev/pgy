@@ -48,6 +48,7 @@ Configuration precedence: flags > env > config file > defaults.
   - `--schema-root` / `PGY_SCHEMA_ROOT` (root for YAML files)
   - `--schemas` / `PGY_SCHEMAS` (comma-separated YAML files, relative to schema-root unless absolute; a missing file is an error)
   - `--migrations-dir` / `PGY_MIGRATIONS_DIR` (default: `./migrations`)
+  - `--migrations-table` / `PGY_MIGRATIONS_TABLE` (table recording applied migrations, `schema.table`; default: `pgy.migrations`, an unqualified name goes in schema `pgy`)
   - `--buffer` / `PGY_BUFFER` (default: `./.pgy.buffer.sql`)
   - `--quiet` / `PGY_QUIET=1`
   - `--verbose` / `PGY_VERBOSE=1`
@@ -60,6 +61,7 @@ dsn: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 schema_root: ./schemas
 schemas: ["base.yml", "ext.yml"]
 migrations_dir: ./migrations
+migrations_table: pgy.migrations
 buffer: ./.pgy.buffer.sql
 quiet: false
 verbose: false
@@ -73,7 +75,7 @@ If `--schemas`/`PGY_SCHEMAS`/config are not set, pgy auto-discovers all `.yml`/`
 - Init migrations table (idempotent):
 
 ```
-pgy init --dsn "$PG_DSN"            # defaults: schema pgy, table migrations
+pgy init --dsn "$PG_DSN"            # creates --migrations-table (default pgy.migrations)
 ```
 
 - Generate diff from YAML to DB (writes SQL to buffer):

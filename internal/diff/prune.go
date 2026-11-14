@@ -18,10 +18,10 @@ type Options struct {
     // procedures, sequences, domains and types in managed schemas, and
     // triggers, constraints and indexes on declared tables. See planPrune.
     Prune bool
+    // MigrationsTable is pgy's own bookkeeping table ("schema.table"), never
+    // pruned. Empty means pgy.migrations.
+    MigrationsTable string
 }
-
-// migrationsTable is pgy's own bookkeeping table, never pruned.
-const migrationsTable = "pgy.migrations"
 
 // planPrune returns the DROP statements for live objects the desired schema
 // no longer declares. Only schemas that contain at least one desired object
@@ -34,7 +34,8 @@ const migrationsTable = "pgy.migrations"
 // objects may still reference until then (tables, routines, sequences,
 // domains, types). Objects of one kind are dropped in a single statement so
 // dependencies among them do not dictate an order.
-func planPrune(live *Live, desired *schema.Database) (early, late []string) {
+func planPrune(live *Live, desired *schema.Database, migrationsTable string) (early, late []string) {
+    if migrationsTable == "" { migrationsTable = "pgy.migrations" }
     managed := managedSchemas(desired)
     inScope := func(key string) bool {
         i := strings.IndexByte(key, '.')
