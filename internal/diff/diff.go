@@ -2,12 +2,15 @@ package diff
 
 import (
     "context"
+    "errors"
     "fmt"
     "regexp"
     "sort"
     "strconv"
     "strings"
 
+    "github.com/jackc/pgx/v5"
+    "github.com/jackc/pgx/v5/pgconn"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/suprbdev/pgy/internal/db"
     "github.com/suprbdev/pgy/internal/schema"
@@ -299,7 +302,33 @@ type LiveColumn struct{
     Storage     string // plain | external | extended | main
 }
 
+// Introspect reads the live database's schema. All catalog queries are sent
+// in one pipelined batch; when DDL committed by another session invalidates
+// an object mid-introspection (PostgreSQL then reports it as an internal
+// error such as "could not open relation with OID"), the read is retried.
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
+    var err error
+    for attempt := 0; attempt < 3; attempt++ {
+        var l *Live
+        if l, err = introspectOnce(ctx, pool); err == nil || !isCatalogRace(err) {
+            return l, err
+        }
+    }
+    return nil, err
+}
+
+// isCatalogRace reports whether err comes from a catalog object being
+// dropped or altered by another session while it was being read.
+func isCatalogRace(err error) bool {
+    var pgErr *pgconn.PgError
+    if !errors.As(err, &pgErr) { return false }
+    if pgErr.Code == "XX000" {
+        return strings.Contains(pgErr.Message, "could not open relation") || strings.Contains(pgErr.Message, "cache lookup failed")
+    }
+    return pgErr.Code == "42P01" || pgErr.Code == "42704"
+}
+
+func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     l := &Live{
         Schemas: map[string]bool{},
         Tables: map[string]*LiveTable{},
@@ -347,6 +376,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         ExtensionMembers: map[string]bool{},
         OwnedSequences: map[string]bool{},
     }
+    batch := &queryBatch{}
     
     // Query existing schemas
     schemaQ := `
@@ -355,17 +385,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    schemaRows, err := pool.Query(ctx, schemaQ)
-    if err != nil { return nil, err }
-    for schemaRows.Next() {
-        var schemaName string
-        if err := schemaRows.Scan(&schemaName); err != nil { 
-            schemaRows.Close()
-            return nil, err 
+    batch.add(schemaQ, func(schemaRows pgx.Rows) error {
+        for schemaRows.Next() {
+            var schemaName string
+            if err := schemaRows.Scan(&schemaName); err != nil { 
+                return err 
+            }
+            l.Schemas[schemaName] = true
         }
-        l.Schemas[schemaName] = true
-    }
-    schemaRows.Close()
+        return nil
+    })
     
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
@@ -377,22 +406,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    tableRows, err := pool.Query(ctx, tableQ)
-    if err != nil { return nil, err }
-    for tableRows.Next() {
-        var schemaName, tableName string
-        var isPartition, unlogged bool
-        var reloptions []string
-        if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions); err != nil {
-            tableRows.Close()
-            return nil, err
+    batch.add(tableQ, func(tableRows pgx.Rows) error {
+        for tableRows.Next() {
+            var schemaName, tableName string
+            var isPartition, unlogged bool
+            var reloptions []string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            lt := newLiveTable()
+            lt.IsPartition, lt.Unlogged, lt.Options = isPartition, unlogged, parseProconfig(reloptions)
+            l.Tables[key] = lt
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        lt := newLiveTable()
-        lt.IsPartition, lt.Unlogged, lt.Options = isPartition, unlogged, parseProconfig(reloptions)
-        l.Tables[key] = lt
-    }
-    tableRows.Close()
+        return nil
+    })
     
     // Query existing materialized views
     matViewQ := `
@@ -401,19 +429,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and schemaname !~ '^pg_(toast_)?temp_'
     `
-    matViewRows, err := pool.Query(ctx, matViewQ)
-    if err != nil { return nil, err }
-    for matViewRows.Next() {
-        var schemaName, viewName string
-        if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
-            matViewRows.Close()
-            return nil, err
+    batch.add(matViewQ, func(matViewRows pgx.Rows) error {
+        for matViewRows.Next() {
+            var schemaName, viewName string
+            if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, viewName)
+            l.MatViews[key] = true
+            l.MatViewTables[key] = newLiveTable()
         }
-        key := fmt.Sprintf("%s.%s", schemaName, viewName)
-        l.MatViews[key] = true
-        l.MatViewTables[key] = newLiveTable()
-    }
-    matViewRows.Close()
+        return nil
+    })
 
     // Query columns to enrich table info. Uses pg_catalog rather than
     // information_schema so format_type keeps type modifiers (varchar(255))
@@ -440,22 +467,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, c.relname, a.attnum
     `
-    rows, err := pool.Query(ctx, q)
-    if err != nil { return nil, err }
-    defer rows.Close()
-    for rows.Next() {
-        var schemaName, tableName, colName, dataType, def, identity string
-        var nullable bool
-        var generated, collation, compression, storage string
-        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage); err != nil { return nil, err }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        t := l.Tables[key]
-        if t == nil { t = newLiveTable(); l.Tables[key] = t }
-        lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage}
-        if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
-        t.Columns[colName] = lc
-    }
-    if err := rows.Err(); err != nil { return nil, err }
+    batch.add(q, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var schemaName, tableName, colName, dataType, def, identity string
+            var nullable bool
+            var generated, collation, compression, storage string
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage); err != nil { return err }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            t := l.Tables[key]
+            if t == nil { t = newLiveTable(); l.Tables[key] = t }
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage}
+            if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
+            t.Columns[colName] = lc
+        }
+        return nil
+    })
 
     // Query existing table constraints (pk, fk, check, unique, exclude) with
     // their full definitions so redefined constraints can be detected. Uses
@@ -471,26 +497,25 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    conRows, err := pool.Query(ctx, conQ)
-    if err != nil { return nil, err }
-    for conRows.Next() {
-        var schemaName, tableName, conName, conType, conDef string
-        var inherited bool
-        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType, &conDef, &inherited); err != nil {
-            conRows.Close()
-            return nil, err
-        }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
-            t.Constraints[conName] = true
-            t.ConstraintDefs[conName] = conDef
-            if inherited { t.ConstraintInherited[conName] = true }
-            if conType == "p" {
-                t.HasPK = true
+    batch.add(conQ, func(conRows pgx.Rows) error {
+        for conRows.Next() {
+            var schemaName, tableName, conName, conType, conDef string
+            var inherited bool
+            if err := conRows.Scan(&schemaName, &tableName, &conName, &conType, &conDef, &inherited); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            if t := l.Tables[key]; t != nil {
+                t.Constraints[conName] = true
+                t.ConstraintDefs[conName] = conDef
+                if inherited { t.ConstraintInherited[conName] = true }
+                if conType == "p" {
+                    t.HasPK = true
+                }
             }
         }
-    }
-    conRows.Close()
+        return nil
+    })
 
     // Query existing indexes
     idxQ := `
@@ -499,19 +524,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and schemaname !~ '^pg_(toast_)?temp_'
     `
-    idxRows, err := pool.Query(ctx, idxQ)
-    if err != nil { return nil, err }
-    for idxRows.Next() {
-        var schemaName, tableName, idxName string
-        if err := idxRows.Scan(&schemaName, &tableName, &idxName); err != nil {
-            idxRows.Close()
-            return nil, err
+    batch.add(idxQ, func(idxRows pgx.Rows) error {
+        for idxRows.Next() {
+            var schemaName, tableName, idxName string
+            if err := idxRows.Scan(&schemaName, &tableName, &idxName); err != nil {
+                return err
+            }
+            if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
+                t.Indexes[idxName] = true
+            }
         }
-        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-            t.Indexes[idxName] = true
-        }
-    }
-    idxRows.Close()
+        return nil
+    })
 
     // Query per-key-column operator classes so redefined opclasses can be
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
@@ -528,20 +552,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, t.relname, i.relname, k.ord
     `
-    opcRows, err := pool.Query(ctx, opcQ)
-    if err != nil { return nil, err }
-    for opcRows.Next() {
-        var schemaName, tableName, idxName, opcName string
-        var opcDefault bool
-        if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault); err != nil {
-            opcRows.Close()
-            return nil, err
+    batch.add(opcQ, func(opcRows pgx.Rows) error {
+        for opcRows.Next() {
+            var schemaName, tableName, idxName, opcName string
+            var opcDefault bool
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault); err != nil {
+                return err
+            }
+            if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault})
+            }
         }
-        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-            t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault})
-        }
-    }
-    opcRows.Close()
+        return nil
+    })
 
     // Query structured index definitions so changed indexes can be detected.
     idefQ := `
@@ -561,28 +584,27 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    idefRows, err := pool.Query(ctx, idefQ)
-    if err != nil { return nil, err }
-    for idefRows.Next() {
-        var schemaName, tableName, idxName, method, predicate string
-        var unique, nullsNotDistinct, constraint, inherited bool
-        var nKey int16
-        var cols, reloptions []string
-        var indoption []int16
-        if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited); err != nil {
-            idefRows.Close()
-            return nil, err
+    batch.add(idefQ, func(idefRows pgx.Rows) error {
+        for idefRows.Next() {
+            var schemaName, tableName, idxName, method, predicate string
+            var unique, nullsNotDistinct, constraint, inherited bool
+            var nKey int16
+            var cols, reloptions []string
+            var indoption []int16
+            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited); err != nil {
+                return err
+            }
+            t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
+            if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
+            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited}
+            for _, opt := range indoption[:nKey] {
+                li.Descending = append(li.Descending, opt&1 != 0)
+                li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
+            }
+            t.IndexDefs[idxName] = li
         }
-        t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
-        if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-        li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited}
-        for _, opt := range indoption[:nKey] {
-            li.Descending = append(li.Descending, opt&1 != 0)
-            li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
-        }
-        t.IndexDefs[idxName] = li
-    }
-    idefRows.Close()
+        return nil
+    })
 
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
@@ -595,26 +617,25 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    trgRows, err := pool.Query(ctx, trgQ)
-    if err != nil { return nil, err }
-    for trgRows.Next() {
-        var schemaName, tableName, trgName, trgDef string
-        var inherited, onView bool
-        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited, &onView); err != nil {
-            trgRows.Close()
-            return nil, err
+    batch.add(trgQ, func(trgRows pgx.Rows) error {
+        for trgRows.Next() {
+            var schemaName, tableName, trgName, trgDef string
+            var inherited, onView bool
+            if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited, &onView); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            t := l.Tables[key]
+            if onView {
+                if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
+            }
+            if t != nil {
+                t.Triggers[trgName] = trgDef
+                if inherited { t.TriggerInherited[trgName] = true }
+            }
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        t := l.Tables[key]
-        if onView {
-            if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
-        }
-        if t != nil {
-            t.Triggers[trgName] = trgDef
-            if inherited { t.TriggerInherited[trgName] = true }
-        }
-    }
-    trgRows.Close()
+        return nil
+    })
 
     ruleQ := `
         select n.nspname, c.relname, r.rulename, c.relkind = 'v',
@@ -628,28 +649,27 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    ruleRows, err := pool.Query(ctx, ruleQ)
-    if err != nil { return nil, err }
-    for ruleRows.Next() {
-        var schemaName, relName, ruleName, def, comment string
-        var onView bool
-        lr := &LiveRule{}
-        if err := ruleRows.Scan(&schemaName, &relName, &ruleName, &onView, &lr.Event, &lr.Instead, &def, &comment); err != nil {
-            ruleRows.Close()
-            return nil, err
+    batch.add(ruleQ, func(ruleRows pgx.Rows) error {
+        for ruleRows.Next() {
+            var schemaName, relName, ruleName, def, comment string
+            var onView bool
+            lr := &LiveRule{}
+            if err := ruleRows.Scan(&schemaName, &relName, &ruleName, &onView, &lr.Event, &lr.Instead, &def, &comment); err != nil {
+                return err
+            }
+            if m := ruleWhereRe.FindStringSubmatch(def); m != nil { lr.Where = m[1] }
+            lr.Def = def
+            key := fmt.Sprintf("%s.%s", schemaName, relName)
+            t := l.Tables[key]
+            if onView {
+                if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
+            }
+            if t == nil { continue }
+            t.Rules[ruleName] = lr
+            if comment != "" { t.RuleComments[ruleName] = comment }
         }
-        if m := ruleWhereRe.FindStringSubmatch(def); m != nil { lr.Where = m[1] }
-        lr.Def = def
-        key := fmt.Sprintf("%s.%s", schemaName, relName)
-        t := l.Tables[key]
-        if onView {
-            if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
-        }
-        if t == nil { continue }
-        t.Rules[ruleName] = lr
-        if comment != "" { t.RuleComments[ruleName] = comment }
-    }
-    ruleRows.Close()
+        return nil
+    })
 
     // Query row level security state
     rlsQ := `
@@ -660,21 +680,20 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    rlsRows, err := pool.Query(ctx, rlsQ)
-    if err != nil { return nil, err }
-    for rlsRows.Next() {
-        var schemaName, tableName string
-        var enabled bool
-        if err := rlsRows.Scan(&schemaName, &tableName, &enabled); err != nil {
-            rlsRows.Close()
-            return nil, err
+    batch.add(rlsQ, func(rlsRows pgx.Rows) error {
+        for rlsRows.Next() {
+            var schemaName, tableName string
+            var enabled bool
+            if err := rlsRows.Scan(&schemaName, &tableName, &enabled); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            if t := l.Tables[key]; t != nil {
+                t.RLSEnabled = enabled
+            }
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
-            t.RLSEnabled = enabled
-        }
-    }
-    rlsRows.Close()
+        return nil
+    })
 
     // Query existing policies, including their expressions and roles so a
     // redefined policy can be detected. polroles is '{0}' for PUBLIC (no TO
@@ -694,29 +713,28 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    polRows, err := pool.Query(ctx, polQ)
-    if err != nil { return nil, err }
-    for polRows.Next() {
-        var schemaName, tableName, polName, polCmd string
-        var roles []string
-        var using, withCheck string
-        var restrictive bool
-        if err := polRows.Scan(&schemaName, &tableName, &polName, &polCmd, &restrictive, &roles, &using, &withCheck); err != nil {
-            polRows.Close()
-            return nil, err
-        }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
-            t.Policies[polName] = &LivePolicy{
-                Restrictive: restrictive,
-                Cmd:         expandPolicyCmd(polCmd),
-                Roles:       roles,
-                Using:       using,
-                WithCheck:   withCheck,
+    batch.add(polQ, func(polRows pgx.Rows) error {
+        for polRows.Next() {
+            var schemaName, tableName, polName, polCmd string
+            var roles []string
+            var using, withCheck string
+            var restrictive bool
+            if err := polRows.Scan(&schemaName, &tableName, &polName, &polCmd, &restrictive, &roles, &using, &withCheck); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            if t := l.Tables[key]; t != nil {
+                t.Policies[polName] = &LivePolicy{
+                    Restrictive: restrictive,
+                    Cmd:         expandPolicyCmd(polCmd),
+                    Roles:       roles,
+                    Using:       using,
+                    WithCheck:   withCheck,
+                }
             }
         }
-    }
-    polRows.Close()
+        return nil
+    })
 
     // Query existing types
     typeQ := `
@@ -728,18 +746,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and t.typtype in ('e', 'c', 'r')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
-    typeRows, err := pool.Query(ctx, typeQ)
-    if err != nil { return nil, err }
-    for typeRows.Next() {
-        var schemaName, typeName string
-        if err := typeRows.Scan(&schemaName, &typeName); err != nil {
-            typeRows.Close()
-            return nil, err
+    batch.add(typeQ, func(typeRows pgx.Rows) error {
+        for typeRows.Next() {
+            var schemaName, typeName string
+            if err := typeRows.Scan(&schemaName, &typeName); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, typeName)
+            l.Types[key] = true
         }
-        key := fmt.Sprintf("%s.%s", schemaName, typeName)
-        l.Types[key] = true
-    }
-    typeRows.Close()
+        return nil
+    })
     
     // Query existing functions and procedures with definition details for
     // replace-on-change. prokind routes rows: 'p' = procedure, else function.
@@ -753,35 +770,34 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    funcRows, err := pool.Query(ctx, funcQ)
-    if err != nil { return nil, err }
-    for funcRows.Next() {
-        var schemaName, funcName, args, src, vol, kind string
-        var secdef, strict, leakproof, internal bool
-        var config []string
-        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal); err != nil {
-            funcRows.Close()
-            return nil, err
+    batch.add(funcQ, func(funcRows pgx.Rows) error {
+        for funcRows.Next() {
+            var schemaName, funcName, args, src, vol, kind string
+            var secdef, strict, leakproof, internal bool
+            var config []string
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
+            if kind == "p" {
+                norm := normalizeFunctionSignature(key)
+                l.Procedures[norm] = true
+                lp := &LiveProcedure{Signature: key, Body: src, Security: "invoker", Config: parseProconfig(config)}
+                if secdef { lp.Security = "definer" }
+                l.ProcedureDefs[norm] = lp
+                continue
+            }
+            l.Functions[key] = true
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
+            if secdef { lf.Security = "definer" }
+            switch vol {
+            case "i": lf.Volatility = "immutable"
+            case "s": lf.Volatility = "stable"
+            }
+            l.FunctionDefs[normalizeFunctionSignature(key)] = lf
         }
-        key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
-        if kind == "p" {
-            norm := normalizeFunctionSignature(key)
-            l.Procedures[norm] = true
-            lp := &LiveProcedure{Signature: key, Body: src, Security: "invoker", Config: parseProconfig(config)}
-            if secdef { lp.Security = "definer" }
-            l.ProcedureDefs[norm] = lp
-            continue
-        }
-        l.Functions[key] = true
-        lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
-        if secdef { lf.Security = "definer" }
-        switch vol {
-        case "i": lf.Volatility = "immutable"
-        case "s": lf.Volatility = "stable"
-        }
-        l.FunctionDefs[normalizeFunctionSignature(key)] = lf
-    }
-    funcRows.Close()
+        return nil
+    })
 
     // Query enum labels in sort order
     enumQ := `
@@ -793,18 +809,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         order by t.oid, e.enumsortorder
     `
-    enumRows, err := pool.Query(ctx, enumQ)
-    if err != nil { return nil, err }
-    for enumRows.Next() {
-        var schemaName, typeName, label string
-        if err := enumRows.Scan(&schemaName, &typeName, &label); err != nil {
-            enumRows.Close()
-            return nil, err
+    batch.add(enumQ, func(enumRows pgx.Rows) error {
+        for enumRows.Next() {
+            var schemaName, typeName, label string
+            if err := enumRows.Scan(&schemaName, &typeName, &label); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, typeName)
+            l.EnumLabels[key] = append(l.EnumLabels[key], label)
         }
-        key := fmt.Sprintf("%s.%s", schemaName, typeName)
-        l.EnumLabels[key] = append(l.EnumLabels[key], label)
-    }
-    enumRows.Close()
+        return nil
+    })
     
     pubQ := `
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
@@ -812,22 +827,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_publication p
         left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
     `
-    pubRows, err := pool.Query(ctx, pubQ)
-    if err != nil { return nil, err }
-    for pubRows.Next() {
-        var name string
-        var ins, upd, del, trunc bool
-        lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
-        if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment); err != nil {
-            pubRows.Close()
-            return nil, err
+    batch.add(pubQ, func(pubRows pgx.Rows) error {
+        for pubRows.Next() {
+            var name string
+            var ins, upd, del, trunc bool
+            lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
+            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment); err != nil {
+                return err
+            }
+            for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
+                if a.on { lp.Publish = append(lp.Publish, a.name) }
+            }
+            l.Publications[name] = lp
         }
-        for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
-            if a.on { lp.Publish = append(lp.Publish, a.name) }
-        }
-        l.Publications[name] = lp
-    }
-    pubRows.Close()
+        return nil
+    })
 
     pubRelQ := `
         select p.pubname, n.nspname || '.' || c.relname, coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''),
@@ -838,18 +852,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_class c on c.oid = pr.prrelid
         join pg_namespace n on n.oid = c.relnamespace
     `
-    pubRelRows, err := pool.Query(ctx, pubRelQ)
-    if err != nil { return nil, err }
-    for pubRelRows.Next() {
-        var pub, table, where string
-        var cols []string
-        if err := pubRelRows.Scan(&pub, &table, &where, &cols); err != nil {
-            pubRelRows.Close()
-            return nil, err
+    batch.add(pubRelQ, func(pubRelRows pgx.Rows) error {
+        for pubRelRows.Next() {
+            var pub, table, where string
+            var cols []string
+            if err := pubRelRows.Scan(&pub, &table, &where, &cols); err != nil {
+                return err
+            }
+            if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where} }
         }
-        if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where} }
-    }
-    pubRelRows.Close()
+        return nil
+    })
 
     pubNspQ := `
         select p.pubname, n.nspname
@@ -858,17 +871,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = pn.pnnspid
         order by 1, 2
     `
-    pubNspRows, err := pool.Query(ctx, pubNspQ)
-    if err != nil { return nil, err }
-    for pubNspRows.Next() {
-        var pub, nsp string
-        if err := pubNspRows.Scan(&pub, &nsp); err != nil {
-            pubNspRows.Close()
-            return nil, err
+    batch.add(pubNspQ, func(pubNspRows pgx.Rows) error {
+        for pubNspRows.Next() {
+            var pub, nsp string
+            if err := pubNspRows.Scan(&pub, &nsp); err != nil {
+                return err
+            }
+            if lp := l.Publications[pub]; lp != nil { lp.Schemas = append(lp.Schemas, nsp) }
         }
-        if lp := l.Publications[pub]; lp != nil { lp.Schemas = append(lp.Schemas, nsp) }
-    }
-    pubNspRows.Close()
+        return nil
+    })
 
     etQ := `
         select e.evtname, e.evtevent, n.nspname || '.' || p.proname,
@@ -880,18 +892,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = p.pronamespace
         left join pg_description d on d.objoid = e.oid and d.classoid = 'pg_event_trigger'::regclass
     `
-    etRows, err := pool.Query(ctx, etQ)
-    if err != nil { return nil, err }
-    for etRows.Next() {
-        var name string
-        et := &LiveEventTrigger{}
-        if err := etRows.Scan(&name, &et.Event, &et.Function, &et.Enabled, &et.Tags, &et.Comment, &et.Extension); err != nil {
-            etRows.Close()
-            return nil, err
+    batch.add(etQ, func(etRows pgx.Rows) error {
+        for etRows.Next() {
+            var name string
+            et := &LiveEventTrigger{}
+            if err := etRows.Scan(&name, &et.Event, &et.Function, &et.Enabled, &et.Tags, &et.Comment, &et.Extension); err != nil {
+                return err
+            }
+            l.EventTriggers[name] = et
         }
-        l.EventTriggers[name] = et
-    }
-    etRows.Close()
+        return nil
+    })
 
     tsQ := `
         select 'config', n.nspname || '.' || c.cfgname, coalesce(d.description, '')
@@ -906,18 +917,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_description d on d.objoid = t.oid and d.classoid = 'pg_ts_dict'::regclass
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
     `
-    tsRows, err := pool.Query(ctx, tsQ)
-    if err != nil { return nil, err }
-    for tsRows.Next() {
-        var kind, key, comment string
-        if err := tsRows.Scan(&kind, &key, &comment); err != nil {
-            tsRows.Close()
-            return nil, err
+    batch.add(tsQ, func(tsRows pgx.Rows) error {
+        for tsRows.Next() {
+            var kind, key, comment string
+            if err := tsRows.Scan(&kind, &key, &comment); err != nil {
+                return err
+            }
+            if kind == "config" { l.TSConfigs[key] = map[string][]string{} } else { l.TSDictionaries[key] = true }
+            if comment != "" { l.TSComments[kind+":"+key] = comment }
         }
-        if kind == "config" { l.TSConfigs[key] = map[string][]string{} } else { l.TSDictionaries[key] = true }
-        if comment != "" { l.TSComments[kind+":"+key] = comment }
-    }
-    tsRows.Close()
+        return nil
+    })
 
     tsMapQ := `
         select n.nspname || '.' || c.cfgname, t.alias, array_agg(dd.dictname::text order by m.mapseqno)
@@ -930,18 +940,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         group by 1, 2
     `
-    tsMapRows, err := pool.Query(ctx, tsMapQ)
-    if err != nil { return nil, err }
-    for tsMapRows.Next() {
-        var cfg, alias string
-        var dicts []string
-        if err := tsMapRows.Scan(&cfg, &alias, &dicts); err != nil {
-            tsMapRows.Close()
-            return nil, err
+    batch.add(tsMapQ, func(tsMapRows pgx.Rows) error {
+        for tsMapRows.Next() {
+            var cfg, alias string
+            var dicts []string
+            if err := tsMapRows.Scan(&cfg, &alias, &dicts); err != nil {
+                return err
+            }
+            if l.TSConfigs[cfg] != nil { l.TSConfigs[cfg][alias] = dicts }
         }
-        if l.TSConfigs[cfg] != nil { l.TSConfigs[cfg][alias] = dicts }
-    }
-    tsMapRows.Close()
+        return nil
+    })
 
     collQ := `
         select n.nspname, c.collname, coalesce(d.description, '')
@@ -951,19 +960,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    collRows, err := pool.Query(ctx, collQ)
-    if err != nil { return nil, err }
-    for collRows.Next() {
-        var schemaName, collName, comment string
-        if err := collRows.Scan(&schemaName, &collName, &comment); err != nil {
-            collRows.Close()
-            return nil, err
+    batch.add(collQ, func(collRows pgx.Rows) error {
+        for collRows.Next() {
+            var schemaName, collName, comment string
+            if err := collRows.Scan(&schemaName, &collName, &comment); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, collName)
+            l.Collations[key] = true
+            if comment != "" { l.CollationComments[key] = comment }
         }
-        key := fmt.Sprintf("%s.%s", schemaName, collName)
-        l.Collations[key] = true
-        if comment != "" { l.CollationComments[key] = comment }
-    }
-    collRows.Close()
+        return nil
+    })
 
     attrQ := `
         select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod)
@@ -974,19 +982,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    attrRows, err := pool.Query(ctx, attrQ)
-    if err != nil { return nil, err }
-    for attrRows.Next() {
-        var schemaName, typeName, attName, attType string
-        if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType); err != nil {
-            attrRows.Close()
-            return nil, err
+    batch.add(attrQ, func(attrRows pgx.Rows) error {
+        for attrRows.Next() {
+            var schemaName, typeName, attName, attType string
+            if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, typeName)
+            if l.CompositeAttributes[key] == nil { l.CompositeAttributes[key] = map[string]string{} }
+            l.CompositeAttributes[key][attName] = attType
         }
-        key := fmt.Sprintf("%s.%s", schemaName, typeName)
-        if l.CompositeAttributes[key] == nil { l.CompositeAttributes[key] = map[string]string{} }
-        l.CompositeAttributes[key][attName] = attType
-    }
-    attrRows.Close()
+        return nil
+    })
 
     // Query existing domains
     domQ := `
@@ -1000,25 +1007,24 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         and t.typtype = 'd'
     `
-    domRows, err := pool.Query(ctx, domQ)
-    if err != nil { return nil, err }
-    for domRows.Next() {
-        var schemaName, domName, def string
-        var notNull bool
-        var conNames, conDefs []string
-        if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs); err != nil {
-            domRows.Close()
-            return nil, err
+    batch.add(domQ, func(domRows pgx.Rows) error {
+        for domRows.Next() {
+            var schemaName, domName, def string
+            var notNull bool
+            var conNames, conDefs []string
+            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, domName)
+            l.Domains[key] = true
+            ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}}
+            for i := range conNames {
+                if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
+            }
+            l.DomainDefs[key] = ld
         }
-        key := fmt.Sprintf("%s.%s", schemaName, domName)
-        l.Domains[key] = true
-        ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}}
-        for i := range conNames {
-            if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
-        }
-        l.DomainDefs[key] = ld
-    }
-    domRows.Close()
+        return nil
+    })
 
     // Query existing extensions
     extQ := `
@@ -1026,19 +1032,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
     `
-    extRows, err := pool.Query(ctx, extQ)
-    if err != nil { return nil, err }
-    for extRows.Next() {
-        var extName, extSchema, extVersion string
-        var relocatable bool
-        if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable); err != nil {
-            extRows.Close()
-            return nil, err
+    batch.add(extQ, func(extRows pgx.Rows) error {
+        for extRows.Next() {
+            var extName, extSchema, extVersion string
+            var relocatable bool
+            if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable); err != nil {
+                return err
+            }
+            l.Extensions[extName] = true
+            l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable}
         }
-        l.Extensions[extName] = true
-        l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable}
-    }
-    extRows.Close()
+        return nil
+    })
 
     // Query existing views
     viewQ := `
@@ -1049,20 +1054,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    viewRows, err := pool.Query(ctx, viewQ)
-    if err != nil { return nil, err }
-    for viewRows.Next() {
-        var schemaName, viewName string
-        var reloptions []string
-        if err := viewRows.Scan(&schemaName, &viewName, &reloptions); err != nil {
-            viewRows.Close()
-            return nil, err
+    batch.add(viewQ, func(viewRows pgx.Rows) error {
+        for viewRows.Next() {
+            var schemaName, viewName string
+            var reloptions []string
+            if err := viewRows.Scan(&schemaName, &viewName, &reloptions); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, viewName)
+            l.Views[key] = true
+            l.ViewOptions[key] = parseProconfig(reloptions)
         }
-        key := fmt.Sprintf("%s.%s", schemaName, viewName)
-        l.Views[key] = true
-        l.ViewOptions[key] = parseProconfig(reloptions)
-    }
-    viewRows.Close()
+        return nil
+    })
 
     // Query existing sequences (includes serial/identity-owned sequences,
     // which is fine: presence only guards against duplicate CREATE SEQUENCE)
@@ -1084,20 +1088,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    seqRows, err := pool.Query(ctx, seqQ)
-    if err != nil { return nil, err }
-    for seqRows.Next() {
-        var schemaName, seqName string
-        ls := &LiveSequence{}
-        if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner); err != nil {
-            seqRows.Close()
-            return nil, err
+    batch.add(seqQ, func(seqRows pgx.Rows) error {
+        for seqRows.Next() {
+            var schemaName, seqName string
+            ls := &LiveSequence{}
+            if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, seqName)
+            l.Sequences[key] = true
+            l.SequenceDefs[key] = ls
         }
-        key := fmt.Sprintf("%s.%s", schemaName, seqName)
-        l.Sequences[key] = true
-        l.SequenceDefs[key] = ls
-    }
-    seqRows.Close()
+        return nil
+    })
 
     // Query relation grants (explicit ACL entries, owner excluded).
     // Views ('v') and materialized views ('m') share pg_class.relacl with
@@ -1114,18 +1117,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
     `
-    tgRows, err := pool.Query(ctx, tgQ)
-    if err != nil { return nil, err }
-    for tgRows.Next() {
-        var schemaName, tableName, role, priv string
-        if err := tgRows.Scan(&schemaName, &tableName, &role, &priv); err != nil {
-            tgRows.Close()
-            return nil, err
+    batch.add(tgQ, func(tgRows pgx.Rows) error {
+        for tgRows.Next() {
+            var schemaName, tableName, role, priv string
+            if err := tgRows.Scan(&schemaName, &tableName, &role, &priv); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            addLiveGrant(l.TableGrants, key, role, priv)
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        addLiveGrant(l.TableGrants, key, role, priv)
-    }
-    tgRows.Close()
+        return nil
+    })
 
     // Query column grants (explicit column ACL entries, owner excluded)
     cgQ := `
@@ -1141,19 +1143,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
     `
-    cgRows, err := pool.Query(ctx, cgQ)
-    if err != nil { return nil, err }
-    for cgRows.Next() {
-        var schemaName, tableName, colName, role, priv string
-        if err := cgRows.Scan(&schemaName, &tableName, &colName, &role, &priv); err != nil {
-            cgRows.Close()
-            return nil, err
+    batch.add(cgQ, func(cgRows pgx.Rows) error {
+        for cgRows.Next() {
+            var schemaName, tableName, colName, role, priv string
+            if err := cgRows.Scan(&schemaName, &tableName, &colName, &role, &priv); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            if l.ColumnGrants[key] == nil { l.ColumnGrants[key] = map[string]map[string]map[string]bool{} }
+            addLiveGrant(l.ColumnGrants[key], colName, role, priv)
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if l.ColumnGrants[key] == nil { l.ColumnGrants[key] = map[string]map[string]map[string]bool{} }
-        addLiveGrant(l.ColumnGrants[key], colName, role, priv)
-    }
-    cgRows.Close()
+        return nil
+    })
 
     // Query function grants; left join keeps NULL-acl functions (default privileges,
     // meaning PUBLIC still has EXECUTE) visible for FunctionPublicExec.
@@ -1169,23 +1170,22 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    fgRows, err := pool.Query(ctx, fgQ)
-    if err != nil { return nil, err }
-    for fgRows.Next() {
-        var schemaName, funcName, args, role, priv string
-        var aclNull, isOwner bool
-        if err := fgRows.Scan(&schemaName, &funcName, &args, &role, &priv, &aclNull, &isOwner); err != nil {
-            fgRows.Close()
-            return nil, err
+    batch.add(fgQ, func(fgRows pgx.Rows) error {
+        for fgRows.Next() {
+            var schemaName, funcName, args, role, priv string
+            var aclNull, isOwner bool
+            if err := fgRows.Scan(&schemaName, &funcName, &args, &role, &priv, &aclNull, &isOwner); err != nil {
+                return err
+            }
+            key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+            if aclNull || (role == "public" && priv == "execute") {
+                l.FunctionPublicExec[key] = true
+            }
+            if role == "" || isOwner { continue }
+            addLiveGrant(l.FunctionGrants, key, role, priv)
         }
-        key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
-        if aclNull || (role == "public" && priv == "execute") {
-            l.FunctionPublicExec[key] = true
-        }
-        if role == "" || isOwner { continue }
-        addLiveGrant(l.FunctionGrants, key, role, priv)
-    }
-    fgRows.Close()
+        return nil
+    })
 
     // Query schema grants (owner excluded)
     sgQ := `
@@ -1198,36 +1198,34 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> n.nspowner
     `
-    sgRows, err := pool.Query(ctx, sgQ)
-    if err != nil { return nil, err }
-    for sgRows.Next() {
-        var schemaName, role, priv string
-        if err := sgRows.Scan(&schemaName, &role, &priv); err != nil {
-            sgRows.Close()
-            return nil, err
+    batch.add(sgQ, func(sgRows pgx.Rows) error {
+        for sgRows.Next() {
+            var schemaName, role, priv string
+            if err := sgRows.Scan(&schemaName, &role, &priv); err != nil {
+                return err
+            }
+            addLiveGrant(l.SchemaGrants, schemaName, role, priv)
         }
-        addLiveGrant(l.SchemaGrants, schemaName, role, priv)
-    }
-    sgRows.Close()
+        return nil
+    })
 
     // Query existing roles (skip pg_* system roles)
     roleQ := `
         select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit
         from pg_roles where rolname not like 'pg\_%'
     `
-    roleRows, err := pool.Query(ctx, roleQ)
-    if err != nil { return nil, err }
-    for roleRows.Next() {
-        var roleName string
-        lr := &LiveRole{}
-        if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit); err != nil {
-            roleRows.Close()
-            return nil, err
+    batch.add(roleQ, func(roleRows pgx.Rows) error {
+        for roleRows.Next() {
+            var roleName string
+            lr := &LiveRole{}
+            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit); err != nil {
+                return err
+            }
+            l.Roles[roleName] = true
+            l.RoleDefs[roleName] = lr
         }
-        l.Roles[roleName] = true
-        l.RoleDefs[roleName] = lr
-    }
-    roleRows.Close()
+        return nil
+    })
 
     // Query role memberships
     memQ := `
@@ -1237,18 +1235,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_roles r on r.oid = am.roleid
         where m.rolname not like 'pg\_%'
     `
-    memRows, err := pool.Query(ctx, memQ)
-    if err != nil { return nil, err }
-    for memRows.Next() {
-        var member, parent string
-        if err := memRows.Scan(&member, &parent); err != nil {
-            memRows.Close()
-            return nil, err
+    batch.add(memQ, func(memRows pgx.Rows) error {
+        for memRows.Next() {
+            var member, parent string
+            if err := memRows.Scan(&member, &parent); err != nil {
+                return err
+            }
+            if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
+            l.RoleMembers[member][parent] = true
         }
-        if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
-        l.RoleMembers[member][parent] = true
-    }
-    memRows.Close()
+        return nil
+    })
 
     // Query role comments (shared catalog)
     rcmQ := `
@@ -1257,17 +1254,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_roles r on r.oid = d.objoid
         where d.classoid = 'pg_authid'::regclass
     `
-    rcmRows, err := pool.Query(ctx, rcmQ)
-    if err != nil { return nil, err }
-    for rcmRows.Next() {
-        var roleName, comment string
-        if err := rcmRows.Scan(&roleName, &comment); err != nil {
-            rcmRows.Close()
-            return nil, err
+    batch.add(rcmQ, func(rcmRows pgx.Rows) error {
+        for rcmRows.Next() {
+            var roleName, comment string
+            if err := rcmRows.Scan(&roleName, &comment); err != nil {
+                return err
+            }
+            l.RoleComments[roleName] = comment
         }
-        l.RoleComments[roleName] = comment
-    }
-    rcmRows.Close()
+        return nil
+    })
 
     // Query comments on relations (tables, views, matviews)
     rcQ := `
@@ -1280,17 +1276,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    rcRows, err := pool.Query(ctx, rcQ)
-    if err != nil { return nil, err }
-    for rcRows.Next() {
-        var schemaName, relName, comment string
-        if err := rcRows.Scan(&schemaName, &relName, &comment); err != nil {
-            rcRows.Close()
-            return nil, err
+    batch.add(rcQ, func(rcRows pgx.Rows) error {
+        for rcRows.Next() {
+            var schemaName, relName, comment string
+            if err := rcRows.Scan(&schemaName, &relName, &comment); err != nil {
+                return err
+            }
+            l.RelComments[fmt.Sprintf("%s.%s", schemaName, relName)] = comment
         }
-        l.RelComments[fmt.Sprintf("%s.%s", schemaName, relName)] = comment
-    }
-    rcRows.Close()
+        return nil
+    })
 
     // Query column comments
     ccQ := `
@@ -1303,20 +1298,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    ccRows, err := pool.Query(ctx, ccQ)
-    if err != nil { return nil, err }
-    for ccRows.Next() {
-        var schemaName, relName, colName, comment string
-        if err := ccRows.Scan(&schemaName, &relName, &colName, &comment); err != nil {
-            ccRows.Close()
-            return nil, err
+    batch.add(ccQ, func(ccRows pgx.Rows) error {
+        for ccRows.Next() {
+            var schemaName, relName, colName, comment string
+            if err := ccRows.Scan(&schemaName, &relName, &colName, &comment); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, relName)
+            if t := l.Tables[key]; t != nil {
+                if c := t.Columns[colName]; c != nil { c.Comment = comment }
+            }
         }
-        key := fmt.Sprintf("%s.%s", schemaName, relName)
-        if t := l.Tables[key]; t != nil {
-            if c := t.Columns[colName]; c != nil { c.Comment = comment }
-        }
-    }
-    ccRows.Close()
+        return nil
+    })
 
     // Query function comments
     fcQ := `
@@ -1328,18 +1322,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    fcRows, err := pool.Query(ctx, fcQ)
-    if err != nil { return nil, err }
-    for fcRows.Next() {
-        var schemaName, funcName, args, comment string
-        if err := fcRows.Scan(&schemaName, &funcName, &args, &comment); err != nil {
-            fcRows.Close()
-            return nil, err
+    batch.add(fcQ, func(fcRows pgx.Rows) error {
+        for fcRows.Next() {
+            var schemaName, funcName, args, comment string
+            if err := fcRows.Scan(&schemaName, &funcName, &args, &comment); err != nil {
+                return err
+            }
+            key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+            l.FunctionComments[key] = comment
         }
-        key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
-        l.FunctionComments[key] = comment
-    }
-    fcRows.Close()
+        return nil
+    })
 
     // Query type comments
     tcQ := `
@@ -1351,17 +1344,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    tcRows, err := pool.Query(ctx, tcQ)
-    if err != nil { return nil, err }
-    for tcRows.Next() {
-        var schemaName, typeName, comment string
-        if err := tcRows.Scan(&schemaName, &typeName, &comment); err != nil {
-            tcRows.Close()
-            return nil, err
+    batch.add(tcQ, func(tcRows pgx.Rows) error {
+        for tcRows.Next() {
+            var schemaName, typeName, comment string
+            if err := tcRows.Scan(&schemaName, &typeName, &comment); err != nil {
+                return err
+            }
+            l.TypeComments[fmt.Sprintf("%s.%s", schemaName, typeName)] = comment
         }
-        l.TypeComments[fmt.Sprintf("%s.%s", schemaName, typeName)] = comment
-    }
-    tcRows.Close()
+        return nil
+    })
 
     // Query schema comments
     scQ := `
@@ -1372,17 +1364,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    scRows, err := pool.Query(ctx, scQ)
-    if err != nil { return nil, err }
-    for scRows.Next() {
-        var schemaName, comment string
-        if err := scRows.Scan(&schemaName, &comment); err != nil {
-            scRows.Close()
-            return nil, err
+    batch.add(scQ, func(scRows pgx.Rows) error {
+        for scRows.Next() {
+            var schemaName, comment string
+            if err := scRows.Scan(&schemaName, &comment); err != nil {
+                return err
+            }
+            l.SchemaComments[schemaName] = comment
         }
-        l.SchemaComments[schemaName] = comment
-    }
-    scRows.Close()
+        return nil
+    })
 
     // Query index comments (pg_description keyed by the index's pg_class oid)
     icQ := `
@@ -1396,19 +1387,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    icRows, err := pool.Query(ctx, icQ)
-    if err != nil { return nil, err }
-    for icRows.Next() {
-        var schemaName, tableName, idxName, comment string
-        if err := icRows.Scan(&schemaName, &tableName, &idxName, &comment); err != nil {
-            icRows.Close()
-            return nil, err
+    batch.add(icQ, func(icRows pgx.Rows) error {
+        for icRows.Next() {
+            var schemaName, tableName, idxName, comment string
+            if err := icRows.Scan(&schemaName, &tableName, &idxName, &comment); err != nil {
+                return err
+            }
+            if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
+                t.IndexComments[idxName] = comment
+            }
         }
-        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-            t.IndexComments[idxName] = comment
-        }
-    }
-    icRows.Close()
+        return nil
+    })
 
     // Query trigger and policy comments
     tpcQ := `
@@ -1426,22 +1416,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
     `
-    tpcRows, err := pool.Query(ctx, tpcQ)
-    if err != nil { return nil, err }
-    for tpcRows.Next() {
-        var kind, schemaName, tableName, name, comment string
-        if err := tpcRows.Scan(&kind, &schemaName, &tableName, &name, &comment); err != nil {
-            tpcRows.Close()
-            return nil, err
+    batch.add(tpcQ, func(tpcRows pgx.Rows) error {
+        for tpcRows.Next() {
+            var kind, schemaName, tableName, name, comment string
+            if err := tpcRows.Scan(&kind, &schemaName, &tableName, &name, &comment); err != nil {
+                return err
+            }
+            key := fmt.Sprintf("%s.%s", schemaName, tableName)
+            t := l.Tables[key]
+            if t == nil && kind == "trigger" { t = l.ViewTables[key] }
+            if t != nil {
+                if kind == "trigger" { t.TriggerComments[name] = comment } else { t.PolicyComments[name] = comment }
+            }
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        t := l.Tables[key]
-        if t == nil && kind == "trigger" { t = l.ViewTables[key] }
-        if t != nil {
-            if kind == "trigger" { t.TriggerComments[name] = comment } else { t.PolicyComments[name] = comment }
-        }
-    }
-    tpcRows.Close()
+        return nil
+    })
 
     // Query constraint comments (pg_description keyed by pg_constraint oid)
     cncQ := `
@@ -1453,19 +1442,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    cncRows, err := pool.Query(ctx, cncQ)
-    if err != nil { return nil, err }
-    for cncRows.Next() {
-        var schemaName, tableName, conName, comment string
-        if err := cncRows.Scan(&schemaName, &tableName, &conName, &comment); err != nil {
-            cncRows.Close()
-            return nil, err
+    batch.add(cncQ, func(cncRows pgx.Rows) error {
+        for cncRows.Next() {
+            var schemaName, tableName, conName, comment string
+            if err := cncRows.Scan(&schemaName, &tableName, &conName, &comment); err != nil {
+                return err
+            }
+            if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+                t.ConstraintComments[conName] = comment
+            }
         }
-        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
-            t.ConstraintComments[conName] = comment
-        }
-    }
-    cncRows.Close()
+        return nil
+    })
 
     ownerQ := `
         select 'rel:' || n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner)
@@ -1486,18 +1474,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
-    ownerRows, err := pool.Query(ctx, ownerQ)
-    if err != nil { return nil, err }
-    for ownerRows.Next() {
-        var key, owner string
-        if err := ownerRows.Scan(&key, &owner); err != nil {
-            ownerRows.Close()
-            return nil, err
+    batch.add(ownerQ, func(ownerRows pgx.Rows) error {
+        for ownerRows.Next() {
+            var key, owner string
+            if err := ownerRows.Scan(&key, &owner); err != nil {
+                return err
+            }
+            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+            l.Owners[key] = owner
         }
-        if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
-        l.Owners[key] = owner
-    }
-    ownerRows.Close()
+        return nil
+    })
 
     dAclQ := `
         select pg_get_userbyid(d.defaclrole), coalesce(n.nspname, ''),
@@ -1509,22 +1496,26 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_namespace n on n.oid = d.defaclnamespace
         left join lateral aclexplode(d.defaclacl) a on true
     `
-    dAclRows, err := pool.Query(ctx, dAclQ)
-    if err != nil { return nil, err }
-    for dAclRows.Next() {
-        var role, nsp, kind, grantee, priv string
-        var isOwner bool
-        if err := dAclRows.Scan(&role, &nsp, &kind, &grantee, &priv, &isOwner); err != nil {
-            dAclRows.Close()
-            return nil, err
+    batch.add(dAclQ, func(dAclRows pgx.Rows) error {
+        for dAclRows.Next() {
+            var role, nsp, kind, grantee, priv string
+            var isOwner bool
+            if err := dAclRows.Scan(&role, &nsp, &kind, &grantee, &priv, &isOwner); err != nil {
+                return err
+            }
+            key := role + "|" + nsp + "|" + kind
+            l.DefaultACLRows[key] = true
+            if grantee == "" || isOwner { continue }
+            addLiveGrant(l.DefaultACLs, key, grantee, priv)
         }
-        key := role + "|" + nsp + "|" + kind
-        l.DefaultACLRows[key] = true
-        if grantee == "" || isOwner { continue }
-        addLiveGrant(l.DefaultACLs, key, grantee, priv)
-    }
-    dAclRows.Close()
-    if err := pool.QueryRow(ctx, "select current_user").Scan(&l.CurrentUser); err != nil { return nil, err }
+        return nil
+    })
+    batch.add("select current_user", func(rows pgx.Rows) error {
+        for rows.Next() {
+            if err := rows.Scan(&l.CurrentUser); err != nil { return err }
+        }
+        return nil
+    })
 
     extMemQ := `
         select 'rel:' || n.nspname || '.' || c.relname
@@ -1551,18 +1542,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_depend d join pg_proc p on p.oid = d.objid join pg_namespace n on n.oid = p.pronamespace
         where d.deptype = 'e' and d.classid = 'pg_proc'::regclass
     `
-    extMemRows, err := pool.Query(ctx, extMemQ)
-    if err != nil { return nil, err }
-    for extMemRows.Next() {
-        var key string
-        if err := extMemRows.Scan(&key); err != nil {
-            extMemRows.Close()
-            return nil, err
+    batch.add(extMemQ, func(extMemRows pgx.Rows) error {
+        for extMemRows.Next() {
+            var key string
+            if err := extMemRows.Scan(&key); err != nil {
+                return err
+            }
+            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+            l.ExtensionMembers[key] = true
         }
-        if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
-        l.ExtensionMembers[key] = true
-    }
-    extMemRows.Close()
+        return nil
+    })
 
     ownedQ := `
         select n.nspname || '.' || s.relname
@@ -1572,18 +1562,18 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
         and d.refobjsubid > 0 and d.deptype in ('a', 'i')
     `
-    ownedRows, err := pool.Query(ctx, ownedQ)
-    if err != nil { return nil, err }
-    for ownedRows.Next() {
-        var key string
-        if err := ownedRows.Scan(&key); err != nil {
-            ownedRows.Close()
-            return nil, err
+    batch.add(ownedQ, func(ownedRows pgx.Rows) error {
+        for ownedRows.Next() {
+            var key string
+            if err := ownedRows.Scan(&key); err != nil {
+                return err
+            }
+            l.OwnedSequences[key] = true
         }
-        l.OwnedSequences[key] = true
-    }
-    ownedRows.Close()
+        return nil
+    })
 
+    if err := batch.run(ctx, pool); err != nil { return nil, err }
     return l, nil
 }
 
