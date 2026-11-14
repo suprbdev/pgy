@@ -1030,6 +1030,16 @@ func enumAddValueStmts(key string, desired, liveLabels []string) []string {
     return out
 }
 
+// normalizedLiveFunctions returns the set of live function signatures in
+// normalizeFunctionSignature form.
+func normalizedLiveFunctions(live *Live) map[string]bool {
+    out := make(map[string]bool, len(live.Functions))
+    for sig, ok := range live.Functions {
+        if ok { out[normalizeFunctionSignature(sig)] = true }
+    }
+    return out
+}
+
 func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv string) {
     if m[key] == nil { m[key] = map[string]map[string]bool{} }
     if m[key][role] == nil { m[key][role] = map[string]bool{} }
@@ -1157,6 +1167,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     // name order) — use it as-is; the CLI surfaces the cycle error before
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
+    liveFuncs := normalizedLiveFunctions(live)
     
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
@@ -1199,18 +1210,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
         case "function":
             f, ok := desired.Functions[e.Key]
             if !ok || f == nil { continue }
-            // Check if function already exists - normalize signature for comparison
-            // ArgsSig already includes parentheses, e.g., "(key text, default_value jsonb default null)"
-            desiredSig := e.Key + f.ArgsSig
-            normalizedDesired := normalizeFunctionSignature(desiredSig)
-            found := false
-            for liveSig := range live.Functions {
-                normalizedLive := normalizeFunctionSignature(liveSig)
-                if normalizedLive == normalizedDesired {
-                    found = true
-                    break
-                }
-            }
+            fname := schema.RoutineName(e.Key)
+            normalizedDesired := normalizeFunctionSignature(fname + f.ArgsSig)
+            found := liveFuncs[normalizedDesired]
             if found {
                 lf := live.FunctionDefs[normalizedDesired]
                 if lf == nil { continue }
@@ -1221,7 +1223,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
-                            pqIdent(e.Key)+grantFuncArgs(f.ArgsSig), strings.Join(clauses, " ")))
+                            pqIdent(fname)+grantFuncArgs(f.ArgsSig), strings.Join(clauses, " ")))
                     }
                     continue
                 }
@@ -1250,12 +1252,13 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             body := f.Body
             verb := "create function"
             if found { verb = "create or replace function" }
-            stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
+            stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(fname)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
             plan.Creates = append(plan.Creates, stmt)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
             if !ok || pr == nil { continue }
-            norm := normalizeFunctionSignature(e.Key + pr.ArgsSig)
+            prname := schema.RoutineName(e.Key)
+            norm := normalizeFunctionSignature(prname + pr.ArgsSig)
             found := live.Procedures[norm]
             if found {
                 lp := live.ProcedureDefs[norm]
@@ -1275,7 +1278,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
-            stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(e.Key)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
+            stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
             plan.Creates = append(plan.Creates, stmt)
         case "domain":
             dm, ok := desired.Domains[e.Key]
@@ -1654,8 +1657,9 @@ func planComments(live *Live, desired *schema.Database) []string {
     for _, k := range funcNames {
         f := desired.Functions[k]
         if f == nil { continue }
-        norm := normalizeFunctionSignature(k + f.ArgsSig)
-        comment("function "+pqIdent(k)+grantFuncArgs(f.ArgsSig), f.Comment, live.FunctionComments[norm])
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + f.ArgsSig)
+        comment("function "+pqIdent(name)+grantFuncArgs(f.ArgsSig), f.Comment, live.FunctionComments[norm])
     }
 
     procNames := make([]string, 0, len(desired.Procedures))
@@ -1665,8 +1669,9 @@ func planComments(live *Live, desired *schema.Database) []string {
         pr := desired.Procedures[k]
         if pr == nil { continue }
         // procedure comments share pg_proc's pg_description entries
-        norm := normalizeFunctionSignature(k + pr.ArgsSig)
-        comment("procedure "+pqIdent(k)+grantFuncArgs(pr.ArgsSig), pr.Comment, live.FunctionComments[norm])
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + pr.ArgsSig)
+        comment("procedure "+pqIdent(name)+grantFuncArgs(pr.ArgsSig), pr.Comment, live.FunctionComments[norm])
     }
     return stmts
 }
@@ -1681,6 +1686,7 @@ func planComments(live *Live, desired *schema.Database) []string {
 // table-wide grant to per-column grants in one migration must revoke first or
 // the table revoke wipes the column grants issued above it.
 func planGrants(live *Live, desired *schema.Database) []string {
+    liveFuncs := normalizedLiveFunctions(live)
     revokes := []string{}
     grants := []string{}
     add := func(rv, gr []string) {
@@ -1732,15 +1738,12 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range funcNames {
         f := desired.Functions[k]
         if f == nil { continue }
-        norm := normalizeFunctionSignature(k + f.ArgsSig)
-        target := "function " + pqIdent(k) + grantFuncArgs(f.ArgsSig)
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + f.ArgsSig)
+        target := "function " + pqIdent(name) + grantFuncArgs(f.ArgsSig)
         if f.RevokePublic {
             // new function (not live yet) has default PUBLIC execute
-            liveExists := false
-            for liveSig := range live.Functions {
-                if normalizeFunctionSignature(liveSig) == norm { liveExists = true; break }
-            }
-            if !liveExists || live.FunctionPublicExec[norm] {
+            if !liveFuncs[norm] || live.FunctionPublicExec[norm] {
                 revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
             }
         }
@@ -1756,8 +1759,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
         pr := desired.Procedures[k]
         if pr == nil { continue }
         // procedure ACLs share pg_proc's live maps (FunctionGrants/PublicExec)
-        norm := normalizeFunctionSignature(k + pr.ArgsSig)
-        target := "procedure " + pqIdent(k) + grantFuncArgs(pr.ArgsSig)
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + pr.ArgsSig)
+        target := "procedure " + pqIdent(name) + grantFuncArgs(pr.ArgsSig)
         if pr.RevokePublic {
             // new procedure (not live yet) has default PUBLIC execute
             if !live.Procedures[norm] || live.FunctionPublicExec[norm] {

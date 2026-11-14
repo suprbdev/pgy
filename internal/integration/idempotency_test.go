@@ -43,6 +43,27 @@ schema SCH:
       t_created_desc:
         columns: [created desc nulls last, lower(name) asc]
 `,
+		"overloads": `
+schema SCH:
+  function area(r float8):
+    returns: float8
+    language: sql
+    body: select pi() * r * r
+  function area(w float8, h float8):
+    returns: float8
+    language: sql
+    body: select w * h
+    comment: rectangle
+  procedure note(msg text):
+    language: sql
+    body: select 1
+  procedure note(msg text, n int):
+    language: sql
+    body: select 1
+  view areas:
+    dependsOn: [function SCH.area]
+    query: select SCH.area(1) as c, SCH.area(2, 3) as r
+`,
 		"defaults": `
 schema SCH:
   table t:

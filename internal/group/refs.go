@@ -100,9 +100,9 @@ func existsLive(l *diff.Live, r ref) bool {
     case kindSequence:
         return l.Sequences[r.key]
     case kindFunction:
-        return hasSignaturePrefix(l.Functions, r.key)
+        return hasSignaturePrefix(l.Functions, schema.RoutineName(r.key))
     case kindProcedure:
-        return hasSignaturePrefix(l.Procedures, r.key)
+        return hasSignaturePrefix(l.Procedures, schema.RoutineName(r.key))
     }
     return false
 }
@@ -140,7 +140,7 @@ type index struct {
 func newIndex(full *schema.Database) *index {
     ix := &index{full: full, byName: map[string][]ref{}}
     for _, r := range declared(full) {
-        name := strings.ToLower(r.key)
+        name := strings.ToLower(schema.RoutineName(r.key))
         if i := strings.LastIndexByte(name, '.'); i >= 0 { name = name[i+1:] }
         ix.byName[name] = append(ix.byName[name], r)
     }
@@ -150,13 +150,13 @@ func newIndex(full *schema.Database) *index {
 func (ix *index) resolveDeps(deps []string) []ref {
     var out []ref
     for _, raw := range deps {
-        key := schema.ResolveDependency(raw, ix.full)
-        if key == "" { continue }
-        for _, kind := range allKinds {
-            r := ref{kind, key}
-            if !isDeclared(ix.full, r) { continue }
-            if kind == kindFunction && strings.EqualFold(strings.TrimSpace(ix.full.Functions[key].Returns), "trigger") { continue }
-            out = append(out, r)
+        for _, key := range schema.ResolveDependencyKeys(raw, ix.full) {
+            for _, kind := range allKinds {
+                r := ref{kind, key}
+                if !isDeclared(ix.full, r) { continue }
+                if kind == kindFunction && strings.EqualFold(strings.TrimSpace(ix.full.Functions[key].Returns), "trigger") { continue }
+                out = append(out, r)
+            }
         }
     }
     return out
@@ -176,7 +176,7 @@ func (ix *index) match(t token, kinds []string) []ref {
         if t.lit && r.kind != kindSequence { continue }
         if !containsKind(kinds, r.kind) { continue }
         if t.qual != "" {
-            schemaName := strings.ToLower(r.key)
+            schemaName := strings.ToLower(schema.RoutineName(r.key))
             if i := strings.LastIndexByte(schemaName, '.'); i >= 0 { schemaName = schemaName[:i] }
             if schemaName != t.qual { continue }
         }

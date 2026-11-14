@@ -1925,6 +1925,38 @@ func TestFunctionCreate(t *testing.T) {
 	}
 }
 
+func TestFunctionOverloadsCreatedIndependently(t *testing.T) {
+	l := emptyLive()
+	l.Schemas["app"] = true
+	l.Functions["app.area(r double precision)"] = true
+	l.FunctionDefs["app.area(r float8)"] = &LiveFunction{Body: "select pi() * r * r", Volatility: "volatile", Security: "invoker"}
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Functions: map[string]*schema.Function{
+			"app.area(r float8)": {
+				Name: "area", Schema: "app", ArgsSig: "(r float8)", Returns: "float8", Language: "sql",
+				Body: "select pi() * r * r", Comment: "circle",
+			},
+			"app.area(w float8, h float8)": {
+				Name: "area", Schema: "app", ArgsSig: "(w float8, h float8)", Returns: "float8", Language: "sql",
+				Body: "select w * h", Grants: map[string][]string{"app": {"execute"}},
+			},
+		},
+	}
+	p := Plan(l, desired, false)
+	if len(p.Creates) != 1 || !findCreate(p, `create function "app"."area"(w float8, h float8) returns float8`) {
+		t.Errorf("only the missing overload should be created, got %+v", p.Creates)
+	}
+	for _, want := range []string{
+		`comment on function "app"."area"(r float8) is 'circle';`,
+		`grant execute on function "app"."area"(w float8, h float8) to "app";`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %q in %+v", want, p.Alters)
+		}
+	}
+}
+
 func TestFunctionSkippedIfExists(t *testing.T) {
 	l := emptyLive()
 	l.Functions["public.hello()"] = true

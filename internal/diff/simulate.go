@@ -79,7 +79,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 
     for k, pr := range desired.Procedures {
         if pr == nil { continue }
-        norm := normalizeFunctionSignature(k + pr.ArgsSig)
+        norm := normalizeFunctionSignature(schema.RoutineName(k) + pr.ArgsSig)
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Security: "invoker"}
         prev := out.ProcedureDefs[norm]
@@ -121,7 +121,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 }
 
 func simulateFunction(out *Live, k string, f *schema.Function) {
-    sig := k + f.ArgsSig
+    sig := schema.RoutineName(k) + f.ArgsSig
     norm := normalizeFunctionSignature(sig)
     prev := out.FunctionDefs[norm]
     hasBody := strings.TrimSpace(f.Body) != ""

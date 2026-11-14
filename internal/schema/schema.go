@@ -5,6 +5,7 @@ import (
     "fmt"
     "io/fs"
     "os"
+    "regexp"
     "sort"
     "strings"
     "time"
@@ -666,14 +667,12 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
         } else if strings.HasPrefix(key, "function ") {
             fn := parseFunction(schemaName, key, body)
             if fn != nil {
-                full := qualify(schemaName, fn.Name)
-                db.Functions[full] = fn
+                db.Functions[FunctionKey(qualify(schemaName, fn.Name), fn.ArgsSig)] = fn
             }
         } else if strings.HasPrefix(key, "procedure ") {
             pr := parseProcedure(schemaName, key, body)
             if pr != nil {
-                full := qualify(schemaName, pr.Name)
-                db.Procedures[full] = pr
+                db.Procedures[FunctionKey(qualify(schemaName, pr.Name), pr.ArgsSig)] = pr
             }
         } else if strings.HasPrefix(key, "type ") {
             td := parseType(schemaName, key, body)
@@ -1279,17 +1278,18 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for _, e := range entities {
         graph[e.Key] = []string{}
         for _, rawDep := range e.DependsOn {
-            resolvedKey := resolveDependency(rawDep, d)
-            if resolvedKey == "" { continue }
-            // Edges to trigger-returning functions are dropped: triggers are
-            // emitted after every other create, so no CREATE statement can
-            // reference such a function, and keeping the edge manufactures
-            // false cycles (table -> its trigger function -> the tables the
-            // function body reads).
-            if fn, ok := d.Functions[resolvedKey]; ok && fn != nil && strings.EqualFold(strings.TrimSpace(fn.Returns), "trigger") {
-                continue
+            for _, resolvedKey := range ResolveDependencyKeys(rawDep, d) {
+                if resolvedKey == e.Key { continue }
+                // Edges to trigger-returning functions are dropped: triggers are
+                // emitted after every other create, so no CREATE statement can
+                // reference such a function, and keeping the edge manufactures
+                // false cycles (table -> its trigger function -> the tables the
+                // function body reads).
+                if fn, ok := d.Functions[resolvedKey]; ok && fn != nil && strings.EqualFold(strings.TrimSpace(fn.Returns), "trigger") {
+                    continue
+                }
+                graph[e.Key] = append(graph[e.Key], resolvedKey)
             }
-            graph[e.Key] = append(graph[e.Key], resolvedKey)
         }
     }
 
@@ -1429,142 +1429,111 @@ func findCycle(graph map[string][]string, unvisited []string) []string {
     return nil
 }
 
-func ResolveDependency(raw string, d *Database) string { return resolveDependency(raw, d) }
-
-// resolveDependency converts raw dependency strings like "table private.account" or "schema private"
-// to the actual entity key
-func resolveDependency(raw string, d *Database) string {
-    raw = strings.TrimSpace(raw)
-    if raw == "" { return "" }
-    
-    // Handle "schema <name>"
-    if strings.HasPrefix(raw, "schema ") {
-        // Schema dependencies are not currently resolved to specific entities
-        // In practice, we might want to track schema dependencies separately
-        return ""
-    }
-    
-    // Handle "table <name>"
-    if strings.HasPrefix(raw, "table ") {
-        tableName := strings.TrimSpace(strings.TrimPrefix(raw, "table "))
-        if !strings.Contains(tableName, ".") {
-            tableName = "public." + tableName
-        }
-        if _, ok := d.Tables[tableName]; ok {
-            return tableName
-        }
-        return ""
-    }
-    
-    // Handle "function <name>(args)"
-    if strings.HasPrefix(raw, "function ") {
-        fnSig := strings.TrimSpace(strings.TrimPrefix(raw, "function "))
-        // Function map keys carry no argument list; strip "(...)" so both
-        // "function public.fn" and "function public.fn(int)" resolve.
-        if i := strings.Index(fnSig, "("); i >= 0 {
-            fnSig = fnSig[:i]
-        }
-        if _, ok := d.Functions[fnSig]; ok {
-            return fnSig
-        }
-        for k := range d.Functions {
-            if strings.Contains(k, fnSig) || strings.HasPrefix(k, fnSig) {
-                return k
-            }
-        }
-        return ""
-    }
-
-    // Handle "procedure <name>(args)"
-    if strings.HasPrefix(raw, "procedure ") {
-        prSig := strings.TrimSpace(strings.TrimPrefix(raw, "procedure "))
-        if i := strings.Index(prSig, "("); i >= 0 {
-            prSig = prSig[:i]
-        }
-        if _, ok := d.Procedures[prSig]; ok {
-            return prSig
-        }
-        for k := range d.Procedures {
-            if strings.Contains(k, prSig) || strings.HasPrefix(k, prSig) {
-                return k
-            }
-        }
-        return ""
-    }
-
-    // Handle "type <name>"
-    if strings.HasPrefix(raw, "type ") {
-        typeName := strings.TrimSpace(strings.TrimPrefix(raw, "type "))
-        if !strings.Contains(typeName, ".") {
-            typeName = "public." + typeName
-        }
-        if _, ok := d.Types[typeName]; ok {
-            return typeName
-        }
-        return ""
-    }
-    
-    // Handle "domain <name>"
-    if strings.HasPrefix(raw, "domain ") {
-        domName := strings.TrimSpace(strings.TrimPrefix(raw, "domain "))
-        if !strings.Contains(domName, ".") {
-            domName = "public." + domName
-        }
-        if _, ok := d.Domains[domName]; ok {
-            return domName
-        }
-        return ""
-    }
-
-    // Handle "sequence <name>"
-    if strings.HasPrefix(raw, "sequence ") {
-        seqName := strings.TrimSpace(strings.TrimPrefix(raw, "sequence "))
-        if !strings.Contains(seqName, ".") {
-            seqName = "public." + seqName
-        }
-        if _, ok := d.Sequences[seqName]; ok {
-            return seqName
-        }
-        return ""
-    }
-
-    // Handle "view <name>"
-    if strings.HasPrefix(raw, "view ") || strings.HasPrefix(raw, "materialized view ") {
-        var viewName string
-        if strings.HasPrefix(raw, "view ") {
-            viewName = strings.TrimSpace(strings.TrimPrefix(raw, "view "))
-        } else {
-            viewName = strings.TrimSpace(strings.TrimPrefix(raw, "materialized view "))
-        }
-        if !strings.Contains(viewName, ".") {
-            viewName = "public." + viewName
-        }
-        if _, ok := d.Views[viewName]; ok {
-            return viewName
-        }
-        return ""
-    }
-
-    // Direct name match
-    if _, ok := d.Tables[raw]; ok { return raw }
-    if _, ok := d.Types[raw]; ok { return raw }
-    if _, ok := d.Functions[raw]; ok { return raw }
-    if _, ok := d.Procedures[raw]; ok { return raw }
-    if _, ok := d.Views[raw]; ok { return raw }
-    if _, ok := d.Sequences[raw]; ok { return raw }
-    if _, ok := d.Domains[raw]; ok { return raw }
-
-    // Try with public schema
-    pub := "public." + raw
-    if _, ok := d.Tables[pub]; ok { return pub }
-    if _, ok := d.Types[pub]; ok { return pub }
-    if _, ok := d.Functions[pub]; ok { return pub }
-    if _, ok := d.Procedures[pub]; ok { return pub }
-    if _, ok := d.Views[pub]; ok { return pub }
-    if _, ok := d.Sequences[pub]; ok { return pub }
-    if _, ok := d.Domains[pub]; ok { return pub }
-
+// ResolveDependency resolves a dependsOn entry to the key of the entity it
+// names, or "" when nothing matches. For a routine reference that matches
+// several overloads it returns the first; use ResolveDependencyKeys for all.
+func ResolveDependency(raw string, d *Database) string {
+    if keys := ResolveDependencyKeys(raw, d); len(keys) > 0 { return keys[0] }
     return ""
+}
+
+// ResolveDependencyKeys resolves a dependsOn entry such as "table
+// private.account", "function app.f(int)" or a bare name to the keys of the
+// entities it names. A routine reference without an argument list names every
+// overload; one whose argument list matches no overload falls back to all of
+// them. "schema <name>" entries resolve to nothing.
+func ResolveDependencyKeys(raw string, d *Database) []string {
+    raw = strings.TrimSpace(raw)
+    if raw == "" || strings.HasPrefix(raw, "schema ") { return nil }
+
+    if strings.HasPrefix(raw, "function ") {
+        return resolveRoutine(strings.TrimPrefix(raw, "function "), d.Functions)
+    }
+    if strings.HasPrefix(raw, "procedure ") {
+        return resolveRoutine(strings.TrimPrefix(raw, "procedure "), d.Procedures)
+    }
+    for _, p := range []struct {
+        prefix string
+        has    func(string) bool
+    }{
+        {"table ", func(k string) bool { return d.Tables[k] != nil }},
+        {"type ", func(k string) bool { return d.Types[k] != nil }},
+        {"domain ", func(k string) bool { return d.Domains[k] != nil }},
+        {"sequence ", func(k string) bool { return d.Sequences[k] != nil }},
+        {"materialized view ", func(k string) bool { return d.Views[k] != nil }},
+        {"view ", func(k string) bool { return d.Views[k] != nil }},
+    } {
+        if strings.HasPrefix(raw, p.prefix) {
+            key := qualify("", strings.TrimSpace(strings.TrimPrefix(raw, p.prefix)))
+            if p.has(key) { return []string{key} }
+            return nil
+        }
+    }
+
+    for _, key := range []string{raw, qualify("", raw)} {
+        if d.Tables[key] != nil || d.Types[key] != nil || d.Views[key] != nil ||
+            d.Sequences[key] != nil || d.Domains[key] != nil {
+            return []string{key}
+        }
+    }
+    if keys := resolveRoutine(raw, d.Functions); len(keys) > 0 { return keys }
+    return resolveRoutine(raw, d.Procedures)
+}
+
+// resolveRoutine finds the Functions/Procedures keys a routine reference
+// names: an exact qualified name, else (for an unqualified reference) the
+// same name in public, else the same name in any schema.
+func resolveRoutine[T any](ref string, m map[string]T) []string {
+    ref = strings.TrimSpace(ref)
+    name, args := ref, ""
+    if i := strings.IndexByte(ref, '('); i >= 0 { name, args = strings.TrimSpace(ref[:i]), ref[i:] }
+    match := func(want func(string) bool) []string {
+        out := []string{}
+        for k := range m {
+            if want(RoutineName(k)) { out = append(out, k) }
+        }
+        sort.Strings(out)
+        return out
+    }
+    keys := match(func(n string) bool { return n == name })
+    if len(keys) == 0 && !strings.Contains(name, ".") {
+        keys = match(func(n string) bool { return n == "public."+name })
+        if len(keys) == 0 {
+            keys = match(func(n string) bool { return strings.HasSuffix(n, "."+name) })
+        }
+    }
+    if args != "" {
+        want := compactArgs(args)
+        for _, k := range keys {
+            if compactArgs(k[len(RoutineName(k)):]) == want { return []string{k} }
+        }
+    }
+    return keys
+}
+
+// FunctionKey returns the Database.Functions / Database.Procedures map key
+// for a routine: its qualified name followed by its argument list, so
+// overloads (same name, different arguments) are distinct entries.
+func FunctionKey(qualifiedName, argsSig string) string {
+    return qualifiedName + compactArgs(argsSig)
+}
+
+// RoutineName returns the qualified name part of a Functions/Procedures key,
+// i.e. the key without its argument list.
+func RoutineName(key string) string {
+    if i := strings.IndexByte(key, '('); i >= 0 { return key[:i] }
+    return key
+}
+
+var (
+    argsCommaRe       = regexp.MustCompile(`\s*,\s*`)
+    argsSpaceReplacer = strings.NewReplacer("( ", "(", " )", ")")
+)
+
+func compactArgs(args string) string {
+    args = strings.Join(strings.Fields(strings.TrimSpace(args)), " ")
+    if args == "" { return "()" }
+    return argsSpaceReplacer.Replace(argsCommaRe.ReplaceAllString(args, ", "))
 }
 
 func parseView(schemaName, key string, body any) *View {

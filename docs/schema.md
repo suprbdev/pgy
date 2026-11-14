@@ -504,6 +504,8 @@ Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (re
 
 Functions are defined inside `schema <name>:` blocks. The key format is `function <name>(<args>):`.
 
+Overloads — functions sharing a name but taking different arguments — are separate declarations: `function area(r float8):` and `function area(w float8, h float8):` are created, compared, granted and commented independently. The same applies to procedures.
+
 Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. An unqualified type is treated as `public` — `fn(t my_type)` and `fn(t public.my_type)` refer to the same function. Note: if the connection's `search_path` includes a non-`public` schema, introspection may report that schema's types unqualified, which will not match a qualified declaration; keep non-`public` types qualified in YAML and off the `search_path`.
 
 ```yaml
@@ -925,6 +927,8 @@ Two kinds of `dependsOn` are never needed (and can only manufacture cycles):
 
 - **On trigger functions** (`returns: trigger`). Triggers are emitted after every other create, and no `CREATE` statement can call a trigger function, so edges pointing at trigger-returning functions are silently ignored. Declare `dependsOn` the other way if the trigger function's body needs a table (required for `language: sql`; `plpgsql` bodies are not validated at `CREATE`).
 - **On functions referenced only by row-level-security policies or grants.** `CREATE POLICY`, `GRANT`, and `COMMENT` statements are all emitted after every create, so a table never needs `dependsOn` for functions its policies call.
+
+A `function`/`procedure` dependency without an argument list (`function public.area`) depends on every overload of that name; with an argument list (`function public.area(w float8, h float8)`) it depends on the matching overload only, falling back to all overloads if none matches. An unqualified name resolves to `public` first, then to that name in any schema.
 
 A genuine dependency cycle is a hard error; the message shows one concrete cycle path (`a -> b -> a`) to remove.
 

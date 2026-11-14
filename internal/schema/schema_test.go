@@ -307,7 +307,7 @@ schema public:
 	if err != nil {
 		t.Fatal(err)
 	}
-	fn := db.Functions["public.secret_fn"]
+	fn := db.Functions["public.secret_fn()"]
 	if fn == nil {
 		t.Fatal("expected function parsed")
 	}
@@ -558,8 +558,8 @@ schema app:
 	if tbl.Columns["id"].Comment != "@name orderId" {
 		t.Errorf("column comment: %q", tbl.Columns["id"].Comment)
 	}
-	if db.Functions["app.fn"].Comment != "computes" {
-		t.Errorf("function comment: %q", db.Functions["app.fn"].Comment)
+	if db.Functions["app.fn()"].Comment != "computes" {
+		t.Errorf("function comment: %q", db.Functions["app.fn()"].Comment)
 	}
 	if db.Types["app.status"].Comment != "status enum" {
 		t.Errorf("type comment: %q", db.Types["app.status"].Comment)
@@ -1600,7 +1600,7 @@ schema public:
 	}
 	fnIdx, tableIdx := -1, -1
 	for i, e := range sorted {
-		if e.Kind == "function" && e.Key == "public.set_updated_at" {
+		if e.Kind == "function" && e.Key == "public.set_updated_at()" {
 			fnIdx = i
 		}
 		if e.Kind == "table" && e.Key == "public.setting" {
@@ -2313,7 +2313,7 @@ schema public:
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr, ok := db.Procedures["public.archive_user"]
+	pr, ok := db.Procedures["public.archive_user(user_id bigint)"]
 	if !ok {
 		t.Fatal("expected public.archive_user procedure")
 	}
@@ -2357,7 +2357,7 @@ schema public:
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr, ok := db.Procedures["public.cleanup"]
+	pr, ok := db.Procedures["public.cleanup()"]
 	if !ok {
 		t.Fatal("expected public.cleanup procedure")
 	}
@@ -2386,7 +2386,7 @@ func TestProcedureMerge(t *testing.T) {
 	if len(db.Procedures) != 2 {
 		t.Fatalf("want 2 merged procedures, got %d", len(db.Procedures))
 	}
-	if p := db.Procedures["public.p1"]; p == nil || p.Language != "sql" {
+	if p := db.Procedures["public.p1()"]; p == nil || p.Language != "sql" {
 		t.Errorf("p1 lost in merge: %+v", p)
 	}
 }
