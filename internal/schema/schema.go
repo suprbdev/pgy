@@ -71,7 +71,7 @@ type Sequence struct {
     MaxValue  string
     Start     string
     Cache     string
-    Cycle     bool
+    Cycle     *bool  // nil = unmanaged
     OwnedBy   string // table.column (or schema.table.column)
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
@@ -1649,7 +1649,7 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     if v, ok := m["maxValue"]; ok { sq.MaxValue = defaultToString(v) }
     if v, ok := m["start"]; ok { sq.Start = defaultToString(v) }
     if v, ok := m["cache"]; ok { sq.Cache = defaultToString(v) }
-    if b, ok := m["cycle"].(bool); ok { sq.Cycle = b }
+    if b, ok := m["cycle"].(bool); ok { sq.Cycle = &b }
     if ob, ok := m["ownedBy"].(string); ok { sq.OwnedBy = ob }
     if dep, ok := m["dependsOn"]; ok {
         sq.DependsOn = parseStringListFromNode(dep)

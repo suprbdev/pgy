@@ -900,7 +900,7 @@ schema public:
 
 ## Sequence Definitions
 
-Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`; existing sequences are never altered or dropped (forward-only). Only the options set in YAML are emitted — PostgreSQL defaults apply to the rest.
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
 
 ```yaml
 schema public:
@@ -950,7 +950,7 @@ schema public:
 
 ## Domain Definitions
 
-Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with optional default, `NOT NULL`, and a `CHECK` constraint (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`; existing domains are never altered or dropped (forward-only). Comments are diffed against live.
+Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with optional default, `NOT NULL`, and a `CHECK` constraint (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`. For an existing domain, `default` and `notNull` are diffed (`ALTER DOMAIN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`; removing `default` drops it). The `check` constraint is matched by `constraintName`, or by PostgreSQL's default `<domain>_check` name: a missing one is added, while a changed or removed one is dropped and re-added only under `--unsafe`, since adding a domain constraint validates every column that uses the domain. The base type and collation cannot be changed in place. Comments are diffed against live.
 
 ```yaml
 schema public:

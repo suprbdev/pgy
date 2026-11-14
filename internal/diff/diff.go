@@ -28,6 +28,9 @@ type Live struct{
     MatViewTables map[string]*LiveTable
     Sequences  map[string]bool
     Domains    map[string]bool
+    // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
+    SequenceDefs map[string]*LiveSequence
+    DomainDefs   map[string]*LiveDomain
     Roles      map[string]bool
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
@@ -63,6 +66,28 @@ type Live struct{
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
+}
+
+// LiveSequence is a sequence's options from pg_sequence. Numeric options are
+// decimal strings. Owner is "schema.table.column" for a sequence owned by a
+// column, else "".
+type LiveSequence struct {
+    Type      string
+    Increment string
+    MinValue  string
+    MaxValue  string
+    Start     string
+    Cache     string
+    Cycle     bool
+    Owner     string
+}
+
+// LiveDomain is a domain's default, NOT NULL flag and CHECK constraints
+// (constraint name -> pg_get_constraintdef output).
+type LiveDomain struct {
+    Default string
+    NotNull bool
+    Checks  map[string]string
 }
 
 // LiveExtension is an installed extension's schema, version and whether it
@@ -208,6 +233,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         MatViewTables: map[string]*LiveTable{},
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
+        SequenceDefs: map[string]*LiveSequence{},
+        DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
@@ -648,7 +675,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     
     // Query existing domains
     domQ := `
-        select n.nspname, t.typname
+        select n.nspname, t.typname,
+               coalesce(pg_get_expr(t.typdefaultbin, 0), t.typdefault, ''), t.typnotnull,
+               coalesce((select array_agg(c.conname order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
+               coalesce((select array_agg(pg_get_constraintdef(c.oid) order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -658,12 +688,20 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     domRows, err := pool.Query(ctx, domQ)
     if err != nil { return nil, err }
     for domRows.Next() {
-        var schemaName, domName string
-        if err := domRows.Scan(&schemaName, &domName); err != nil {
+        var schemaName, domName, def string
+        var notNull bool
+        var conNames, conDefs []string
+        if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs); err != nil {
             domRows.Close()
             return nil, err
         }
-        l.Domains[fmt.Sprintf("%s.%s", schemaName, domName)] = true
+        key := fmt.Sprintf("%s.%s", schemaName, domName)
+        l.Domains[key] = true
+        ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}}
+        for i := range conNames {
+            if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
+        }
+        l.DomainDefs[key] = ld
     }
     domRows.Close()
 
@@ -714,9 +752,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query existing sequences (includes serial/identity-owned sequences,
     // which is fine: presence only guards against duplicate CREATE SEQUENCE)
     seqQ := `
-        select n.nspname, c.relname
+        select n.nspname, c.relname, format_type(s.seqtypid, null), s.seqincrement::text, s.seqmin::text,
+               s.seqmax::text, s.seqstart::text, s.seqcache::text, s.seqcycle,
+               coalesce((select tn.nspname || '.' || t.relname || '.' || a.attname
+                         from pg_depend d
+                         join pg_class t on t.oid = d.refobjid
+                         join pg_namespace tn on tn.oid = t.relnamespace
+                         join pg_attribute a on a.attrelid = t.oid and a.attnum = d.refobjsubid
+                         where d.classid = 'pg_class'::regclass and d.objid = c.oid
+                         and d.refclassid = 'pg_class'::regclass and d.refobjsubid > 0 and d.deptype = 'a'
+                         limit 1), '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
+        join pg_sequence s on s.seqrelid = c.oid
         where c.relkind = 'S'
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
@@ -725,11 +773,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for seqRows.Next() {
         var schemaName, seqName string
-        if err := seqRows.Scan(&schemaName, &seqName); err != nil {
+        ls := &LiveSequence{}
+        if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner); err != nil {
             seqRows.Close()
             return nil, err
         }
-        l.Sequences[fmt.Sprintf("%s.%s", schemaName, seqName)] = true
+        key := fmt.Sprintf("%s.%s", schemaName, seqName)
+        l.Sequences[key] = true
+        l.SequenceDefs[key] = ls
     }
     seqRows.Close()
 
@@ -1492,16 +1543,18 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         case "domain":
             dm, ok := desired.Domains[e.Key]
             if !ok || dm == nil || dm.Type == "" { continue }
-            // Existing domains are never altered (forward-only; constraint
-            // changes would need DROP/ADD CONSTRAINT with table validation)
-            if live.Domains[e.Key] { continue }
+            if live.Domains[e.Key] {
+                plan.Alters = append(plan.Alters, domainAlterStmts(e.Key, dm, live.DomainDefs[e.Key], unsafe)...)
+                continue
+            }
             plan.Creates = append(plan.Creates, renderDomain(e.Key, dm))
         case "sequence":
             sq, ok := desired.Sequences[e.Key]
             if !ok || sq == nil { continue }
-            // Existing sequences are never altered (forward-only, and live
-            // option introspection is not supported)
-            if live.Sequences[e.Key] { continue }
+            if live.Sequences[e.Key] {
+                plan.Alters = append(plan.Alters, sequenceAlterStmts(e.Key, sq, live.SequenceDefs[e.Key])...)
+                continue
+            }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
             if sq.OwnedBy != "" {
                 // OWNED BY goes into Alters (rendered after all Creates):
@@ -1749,8 +1802,78 @@ func renderSequence(fq string, sq *schema.Sequence) string {
     if sq.MaxValue != "" { parts = append(parts, "maxvalue "+sq.MaxValue) }
     if sq.Start != "" { parts = append(parts, "start with "+sq.Start) }
     if sq.Cache != "" { parts = append(parts, "cache "+sq.Cache) }
-    if sq.Cycle { parts = append(parts, "cycle") }
+    if sq.Cycle != nil && *sq.Cycle { parts = append(parts, "cycle") }
     return strings.Join(parts, " ") + ";"
+}
+
+// sequenceAlterStmts emits ALTER SEQUENCE for options the YAML sets that
+// differ from the live sequence, and OWNED BY when the owner differs.
+func sequenceAlterStmts(fq string, sq *schema.Sequence, ls *LiveSequence) []string {
+    if ls == nil { return nil }
+    opts := []string{}
+    if sq.As != "" && normalizeColumnType(sq.As) != normalizeColumnType(ls.Type) { opts = append(opts, "as "+sq.As) }
+    for _, o := range []struct{ clause, want, have string }{
+        {"increment by", sq.Increment, ls.Increment},
+        {"minvalue", sq.MinValue, ls.MinValue},
+        {"maxvalue", sq.MaxValue, ls.MaxValue},
+        {"start with", sq.Start, ls.Start},
+        {"cache", sq.Cache, ls.Cache},
+    } {
+        if o.want != "" && strings.TrimSpace(o.want) != o.have { opts = append(opts, o.clause+" "+o.want) }
+    }
+    if sq.Cycle != nil && *sq.Cycle != ls.Cycle {
+        if *sq.Cycle { opts = append(opts, "cycle") } else { opts = append(opts, "no cycle") }
+    }
+    out := []string{}
+    if len(opts) > 0 { out = append(out, fmt.Sprintf("alter sequence %s %s;", pqIdent(fq), strings.Join(opts, " "))) }
+    if sq.OwnedBy != "" && qualifyOwnedBy(sq.OwnedBy) != ls.Owner {
+        out = append(out, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(fq), ownedByIdent(sq.OwnedBy)))
+    }
+    return out
+}
+
+// qualifyOwnedBy returns an OWNED BY target as "schema.table.column" (public
+// when unqualified), or "" for none.
+func qualifyOwnedBy(s string) string {
+    s = strings.TrimSpace(s)
+    if strings.EqualFold(s, "none") { return "" }
+    if strings.Count(s, ".") == 1 { return "public." + s }
+    return s
+}
+
+// domainAlterStmts reconciles an existing domain's default, NOT NULL and
+// CHECK constraint. The CHECK is matched by constraintName, or PostgreSQL's
+// default <domain>_check name. Replacing or dropping a changed CHECK
+// requires --unsafe (adding one validates every column using the domain);
+// a missing CHECK is added. The base type and collation cannot be altered.
+func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool) []string {
+    if ld == nil { return nil }
+    target := "alter domain " + pqIdent(fq)
+    out := []string{}
+    switch {
+    case dm.Default != "" && !defaultsEqual(dm.Default, ld.Default):
+        out = append(out, fmt.Sprintf("%s set default %s;", target, dm.Default))
+    case dm.Default == "" && ld.Default != "":
+        out = append(out, target+" drop default;")
+    }
+    if dm.NotNull != ld.NotNull {
+        if dm.NotNull { out = append(out, target+" set not null;") } else { out = append(out, target+" drop not null;") }
+    }
+    name := dm.ConstraintName
+    if name == "" { name = fq[strings.IndexByte(fq, '.')+1:] + "_check" }
+    name = truncateIdent(name)
+    liveDef, exists := ld.Checks[name]
+    add := fmt.Sprintf("%s add constraint %s check (%s);", target, pqIdent(name), dm.Check)
+    drop := fmt.Sprintf("%s drop constraint %s;", target, pqIdent(name))
+    switch {
+    case dm.Check != "" && !exists:
+        out = append(out, add)
+    case dm.Check != "" && unsafe && !constraintDefsEqual("check ("+dm.Check+")", liveDef):
+        out = append(out, drop, add)
+    case dm.Check == "" && exists && unsafe:
+        out = append(out, drop)
+    }
+    return out
 }
 
 // renderPartitionBy renders "range ("col1", "col2")" etc. for PARTITION BY.

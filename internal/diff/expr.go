@@ -45,6 +45,7 @@ func canonicalizeExpr(s string) string {
     masked, lits := maskStringLiterals(s)
     masked = exprCastRe.ReplaceAllString(masked, "")
     masked = strings.ReplaceAll(masked, "!=", "<>")
+    masked = maskPositionIn(masked)
     masked = exprNotInListRe.ReplaceAllStringFunc(masked, func(m string) string {
         return rewriteInList(exprNotInListRe.FindStringSubmatch(m)[1], "<>", "all", m)
     })
@@ -61,6 +62,7 @@ func canonicalizeExpr(s string) string {
         return op
     })
     masked = exprTypedLiteralRe.ReplaceAllString(masked, "$1")
+    masked = strings.ReplaceAll(masked, "\x01", "in")
     return exprPlaceholderRe.ReplaceAllStringFunc(masked, func(m string) string {
         i, _ := strconv.Atoi(exprPlaceholderRe.FindStringSubmatch(m)[1])
         lit := lits[i]
@@ -69,6 +71,41 @@ func canonicalizeExpr(s string) string {
         }
         return lit
     })
+}
+
+// maskPositionIn replaces the IN keyword of position(a IN b) calls with \x01
+// so it is not mistaken for an IN list (PostgreSQL deparses the call as
+// POSITION((a) IN (b))).
+func maskPositionIn(s string) string {
+    lower := strings.ToLower(s)
+    out := []byte(s)
+    for start := 0; ; {
+        i := strings.Index(lower[start:], "position")
+        if i < 0 { break }
+        i += start
+        j := i + len("position")
+        for j < len(s) && s[j] == ' ' { j++ }
+        start = j
+        if (i > 0 && isWordByte(s[i-1])) || j >= len(s) || s[j] != '(' { continue }
+        depth := 0
+        for k := j; k < len(s); k++ {
+            switch s[k] {
+            case '(':
+                depth++
+            case ')':
+                depth--
+            }
+            if depth == 0 { break }
+            if depth == 1 && k+2 <= len(s) && strings.EqualFold(s[k:k+2], "in") && !isWordByte(s[k-1]) && (k+2 == len(s) || !isWordByte(s[k+2])) {
+                out[k], out[k+1] = 0x01, ' '
+            }
+        }
+    }
+    return string(out)
+}
+
+func isWordByte(c byte) bool {
+    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func rewriteInList(list, op, quantifier, orig string) string {
