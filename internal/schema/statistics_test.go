@@ -25,3 +25,39 @@ schema app:
 		t.Errorf("unexpected replica identity: %q", db.Tables["app.u"].ReplicaIdentity)
 	}
 }
+
+func TestTableOptionsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    clusterOn: t_a_idx
+    columns:
+      a: {type: int, statisticsTarget: 500}
+    triggers:
+      t_trg: {timing: before, events: [insert], level: row, procedure: app.f(), enabled: false}
+      t_rep: {timing: before, events: [insert], level: row, procedure: app.f(), enabled: replica}
+  view v:
+    query: select 1 as one
+    columnComments: {one: the number one}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := d.Tables["app.t"]
+	if tbl.ClusterOn != "t_a_idx" {
+		t.Errorf("clusterOn = %q", tbl.ClusterOn)
+	}
+	if st := tbl.Columns["a"].StatisticsTarget; st == nil || *st != 500 {
+		t.Errorf("statisticsTarget = %v", st)
+	}
+	got := map[string]string{}
+	for _, tr := range tbl.Triggers {
+		got[tr.Name] = tr.Enabled
+	}
+	if got["t_trg"] != "disabled" || got["t_rep"] != "replica" {
+		t.Errorf("trigger enabled = %v", got)
+	}
+	if d.Views["app.v"].ColumnComments["one"] != "the number one" {
+		t.Errorf("columnComments = %v", d.Views["app.v"].ColumnComments)
+	}
+}

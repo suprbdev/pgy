@@ -266,6 +266,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if vw.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], vw.Grants) }
         if vw.Comment != "" { out.RelComments[k] = vw.Comment }
+        for col, cm := range vw.ColumnComments {
+            if out.ViewColumnComments[k] == nil { out.ViewColumnComments[k] = map[string]string{} }
+            out.ViewColumnComments[k][col] = cm
+        }
     }
 
     for fq, dt := range desired.Tables {
@@ -336,6 +340,10 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             lc.Compression = c.Compression
         }
         if c.Storage != "" { lc.Storage = c.Storage }
+        if c.StatisticsTarget != nil {
+            lc.StatisticsTarget = nil
+            if v := *c.StatisticsTarget; v >= 0 { lc.StatisticsTarget = &v }
+        }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {
             lt.Constraints[uniqueKeyName(fq, cn)] = true
@@ -373,6 +381,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
         lt.Triggers[truncateIdent(tr.Name)] = ""
+        if tr.Enabled != "" { lt.TriggerEnabled[truncateIdent(tr.Name)] = tr.Enabled }
         if tr.Comment != "" { lt.TriggerComments[truncateIdent(tr.Name)] = tr.Comment }
     }
     for _, st := range dt.Statistics {
@@ -380,6 +389,12 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment}
     }
     if dt.ReplicaIdentity != "" { lt.ReplicaIdentity = dt.ReplicaIdentity }
+    switch {
+    case strings.EqualFold(dt.ClusterOn, "none"):
+        lt.ClusteredOn = ""
+    case dt.ClusterOn != "":
+        lt.ClusteredOn = truncateIdent(dt.ClusterOn)
+    }
     for _, r := range dt.Rules {
         if r == nil || r.Event == "" || r.Do == "" { continue }
         lt.Rules[truncateIdent(r.Name)] = &LiveRule{Event: strings.ToLower(r.Event), Instead: r.Instead, Where: r.Where}
@@ -461,6 +476,7 @@ func cloneLive(l *Live) *Live {
         MatViews:           cloneSet(l.MatViews),
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
+        ViewColumnComments: cloneMap(l.ViewColumnComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ViewTables:         cloneMap(l.ViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),
@@ -548,6 +564,7 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     c.TriggerComments = cloneMap(t.TriggerComments, nil)
     c.Rules = cloneMap(t.Rules, func(r *LiveRule) *LiveRule { cp := *r; return &cp })
     c.Statistics = cloneMap(t.Statistics, func(s *LiveStatistic) *LiveStatistic { cp := *s; return &cp })
+    c.TriggerEnabled = cloneMap(t.TriggerEnabled, nil)
     c.RuleComments = cloneMap(t.RuleComments, nil)
     c.PolicyComments = cloneMap(t.PolicyComments, nil)
     return &c
@@ -563,6 +580,7 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.TriggerComments == nil { t.TriggerComments = map[string]string{} }
     if t.Rules == nil { t.Rules = map[string]*LiveRule{} }
     if t.Statistics == nil { t.Statistics = map[string]*LiveStatistic{} }
+    if t.TriggerEnabled == nil { t.TriggerEnabled = map[string]string{} }
     if t.RuleComments == nil { t.RuleComments = map[string]string{} }
     if t.PolicyComments == nil { t.PolicyComments = map[string]string{} }
     if t.TriggerInherited == nil { t.TriggerInherited = map[string]bool{} }

@@ -28,6 +28,8 @@ type Live struct{
     MatViews   map[string]bool
     // ViewOptions: "schema.view" -> reloptions (security_invoker, security_barrier, check_option)
     ViewOptions map[string]map[string]string
+    // ViewColumnComments: "schema.view" -> column -> comment
+    ViewColumnComments map[string]map[string]string
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
     // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)
@@ -204,6 +206,8 @@ type LiveTable struct{
     Rules              map[string]*LiveRule // rule name -> definition (excluding views' _RETURN)
     Statistics         map[string]*LiveStatistic // extended statistics name -> definition
     ReplicaIdentity    string               // default | full | nothing | index <name>
+    ClusteredOn        string               // index marked for CLUSTER ("" = none)
+    TriggerEnabled     map[string]string    // trigger name -> origin | disabled | replica | always
     RuleComments       map[string]string
     PolicyComments     map[string]string // policy name -> comment
     ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
@@ -239,6 +243,7 @@ func newLiveTable() *LiveTable {
         TriggerComments:    map[string]string{},
         Rules:              map[string]*LiveRule{},
         Statistics:         map[string]*LiveStatistic{},
+        TriggerEnabled:     map[string]string{},
         RuleComments:       map[string]string{},
         PolicyComments:     map[string]string{},
         ConstraintInherited: map[string]bool{},
@@ -321,6 +326,7 @@ type LiveColumn struct{
     Generated string // generation expression of a generated column ("" = not generated)
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
     Collation   string // explicit collation differing from the type's default ("" = default)
+    StatisticsTarget *int // attstattarget; nil = default
     Compression string // pglz | lz4 | "" (default)
     Storage     string // plain | external | extended | main
 }
@@ -363,6 +369,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         MatViews: map[string]bool{},
         ViewOptions: map[string]map[string]string{},
         MatViewTables: map[string]*LiveTable{},
+        ViewColumnComments: map[string]map[string]string{},
         ViewTables: map[string]*LiveTable{},
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
@@ -486,7 +493,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce((select co.collname from pg_collation co join pg_type ty on ty.oid = a.atttypid
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
                case a.attcompression when 'p' then 'pglz' when 'l' then 'lz4' else '' end,
-               case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
+               case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
+               nullif(coalesce(a.attstattarget::int, -1), -1)
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -502,11 +510,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, colName, dataType, def, identity string
             var nullable bool
             var generated, collation, compression, storage string
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage); err != nil { return err }
+            var statTarget *int
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, StatisticsTarget: statTarget}
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             t.Columns[colName] = lc
         }
@@ -605,7 +614,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                x.indnullsnotdistinct,
                coalesce(i.reloptions, '{}'::text[]),
                exists (select 1 from pg_constraint con where con.conindid = x.indexrelid and con.contype in ('p', 'u', 'x')),
-               i.relispartition
+               i.relispartition,
+               x.indisclustered
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
@@ -617,11 +627,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(idefQ, func(idefRows pgx.Rows) error {
         for idefRows.Next() {
             var schemaName, tableName, idxName, method, predicate string
-            var unique, nullsNotDistinct, constraint, inherited bool
+            var unique, nullsNotDistinct, constraint, inherited, clustered bool
             var nKey int16
             var cols, reloptions []string
             var indoption []int16
-            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited); err != nil {
+            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered); err != nil {
                 return err
             }
             t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
@@ -632,6 +642,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
             }
             t.IndexDefs[idxName] = li
+            if clustered { t.ClusteredOn = idxName }
         }
         return nil
     })
@@ -639,7 +650,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
     trgQ := `
-        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgparentid <> 0, c.relkind = 'v'
+        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgparentid <> 0, c.relkind = 'v',
+               case t.tgenabled when 'D' then 'disabled' when 'R' then 'replica' when 'A' then 'always' else 'origin' end
         from pg_trigger t
         join pg_class c on c.oid = t.tgrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -651,7 +663,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for trgRows.Next() {
             var schemaName, tableName, trgName, trgDef string
             var inherited, onView bool
-            if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited, &onView); err != nil {
+            var enabled string
+            if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited, &onView, &enabled); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
@@ -661,6 +674,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             }
             if t != nil {
                 t.Triggers[trgName] = trgDef
+                t.TriggerEnabled[trgName] = enabled
                 if inherited { t.TriggerInherited[trgName] = true }
             }
         }
@@ -1389,7 +1403,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query column comments
     ccQ := `
-        select n.nspname, c.relname, a.attname, d.description
+        select n.nspname, c.relname, a.attname, d.description, c.relkind in ('v', 'm')
         from pg_description d
         join pg_class c on c.oid = d.objoid
         join pg_namespace n on n.oid = c.relnamespace
@@ -1401,12 +1415,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(ccQ, func(ccRows pgx.Rows) error {
         for ccRows.Next() {
             var schemaName, relName, colName, comment string
-            if err := ccRows.Scan(&schemaName, &relName, &colName, &comment); err != nil {
+            var onView bool
+            if err := ccRows.Scan(&schemaName, &relName, &colName, &comment, &onView); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, relName)
             if t := l.Tables[key]; t != nil {
                 if c := t.Columns[colName]; c != nil { c.Comment = comment }
+            } else if onView {
+                if l.ViewColumnComments[key] == nil { l.ViewColumnComments[key] = map[string]string{} }
+                l.ViewColumnComments[key][colName] = comment
             }
         }
         return nil
@@ -2231,6 +2249,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
+                if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 applyTableConstraints(plan, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
@@ -2261,6 +2280,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
+                if stmt := clusterOnStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
@@ -3009,6 +3029,9 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         kind := "view "
         if vw.Materialized { kind = "materialized view " }
         comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
+        for _, col := range sortedKeys(vw.ColumnComments) {
+            comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(col)), vw.ColumnComments[col], live.ViewColumnComments[k][col])
+        }
         if vt := live.ViewTables[k]; !vw.Materialized {
             for _, tr := range vw.Triggers {
                 if tr == nil || tr.Comment == "" || tr.Procedure == "" { continue }
@@ -3561,13 +3584,19 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if tr == nil || tr.Procedure == "" { continue }
         trName := truncateIdent(tr.Name)
         stmt := renderTrigger(fq, tr)
+        liveEnabled := "origin"
         if liveDef, ok := liveTriggers[trName]; ok {
             // "" means the live definition is unknown — fall back to
             // name-only matching and skip rather than churn.
-            if liveDef == "" || triggerDefsEqual(stmt, liveDef) { continue }
+            if liveDef == "" || triggerDefsEqual(stmt, liveDef) {
+                if lt != nil && lt.TriggerEnabled[trName] != "" { liveEnabled = lt.TriggerEnabled[trName] }
+                if s := triggerEnableStmt(fq, trName, tr.Enabled, liveEnabled); s != "" { *deferredTriggers = append(*deferredTriggers, s) }
+                continue
+            }
             *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", pqIdent(trName), pqIdent(fq)))
         }
         *deferredTriggers = append(*deferredTriggers, stmt)
+        if s := triggerEnableStmt(fq, trName, tr.Enabled, liveEnabled); s != "" { *deferredTriggers = append(*deferredTriggers, s) }
     }
 
     for _, st := range dt.Statistics {
@@ -3645,6 +3674,29 @@ func replicaIdentityStmt(fq string, dt *schema.Table, lt *LiveTable) string {
     return fmt.Sprintf("alter table %s replica identity %s;", pqIdent(fq), clause)
 }
 
+// statisticsTargetOf returns a live column's statistics target, -1 for the
+// default.
+func statisticsTargetOf(lc *LiveColumn) int {
+    if lc.StatisticsTarget == nil { return -1 }
+    return *lc.StatisticsTarget
+}
+
+// clusterOnStmt emits ALTER TABLE ... CLUSTER ON / SET WITHOUT CLUSTER when
+// the YAML manages it ("none" removes the mark) and it differs from live.
+// It only marks the index; running CLUSTER is left to the operator.
+func clusterOnStmt(fq string, dt *schema.Table, lt *LiveTable) string {
+    want := dt.ClusterOn
+    if want == "" { return "" }
+    have := ""
+    if lt != nil { have = lt.ClusteredOn }
+    if strings.EqualFold(want, "none") {
+        if have == "" { return "" }
+        return fmt.Sprintf("alter table %s set without cluster;", pqIdent(fq))
+    }
+    if truncateIdent(want) == have { return "" }
+    return fmt.Sprintf("alter table %s cluster on %s;", pqIdent(fq), pqIdent(truncateIdent(want)))
+}
+
 func schemaPrefixOf(fq string) string {
     if i := strings.IndexByte(fq, '.'); i >= 0 { return fq[:i+1] }
     return ""
@@ -3684,6 +3736,15 @@ func renderRule(fq string, r *schema.Rule) string {
 // the action is not compared because PostgreSQL rewrites it when storing.
 func ruleMatchesLive(r *schema.Rule, lr *LiveRule) bool {
     return strings.ToLower(r.Event) == lr.Event && r.Instead == lr.Instead && constraintDefsEqual(r.Where, lr.Where)
+}
+
+// triggerEnableStmt emits ALTER TABLE ... ENABLE / DISABLE [REPLICA | ALWAYS]
+// TRIGGER when the YAML manages the trigger's state and it differs.
+func triggerEnableStmt(fq, name, want, have string) string {
+    if want == "" || want == have { return "" }
+    action := map[string]string{"origin": "enable", "disabled": "disable", "replica": "enable replica", "always": "enable always"}[want]
+    if action == "" { return "" }
+    return fmt.Sprintf("alter table %s %s trigger %s;", pqIdent(fq), action, pqIdent(name))
 }
 
 // renderTrigger renders a table trigger's CREATE [CONSTRAINT] TRIGGER statement.
@@ -3825,6 +3886,9 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     if c.Storage != "" && c.Storage != lc.Storage {
         out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
     }
+    if c.StatisticsTarget != nil && *c.StatisticsTarget != statisticsTargetOf(lc) {
+        out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
+    }
 
     if c.Generated != "" || lc.Generated != "" {
         switch {
@@ -3886,8 +3950,13 @@ func renderStorageParams(with map[string]string) string {
 func columnStorageStmts(fq string, dt *schema.Table) []string {
     out := []string{}
     for _, cn := range sortedKeys(dt.Columns) {
-        if c := dt.Columns[cn]; c != nil && c.Storage != "" {
+        c := dt.Columns[cn]
+        if c == nil { continue }
+        if c.Storage != "" {
             out = append(out, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage))
+        }
+        if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
+            out = append(out, fmt.Sprintf("alter table %s alter column %s set statistics %d;", pqIdent(fq), pqIdent(cn), *c.StatisticsTarget))
         }
     }
     return out

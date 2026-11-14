@@ -77,6 +77,7 @@ type View struct {
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
+    ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
 }
 
 // Publication is a logical replication CREATE PUBLICATION declaration.
@@ -205,6 +206,7 @@ type Table struct {
     Triggers   []*Trigger      `yaml:"-"`
     Rules      []*Rule         `yaml:"-"`
     Statistics []*Statistic    `yaml:"-"`
+    ClusterOn  string          `yaml:"-"` // index to CLUSTER ON; "none" = SET WITHOUT CLUSTER; "" = unmanaged
     // ReplicaIdentity is default | full | nothing | index <name>; "" = unmanaged.
     ReplicaIdentity string     `yaml:"-"`
     Constraints []*Constraint  `yaml:"-"`
@@ -281,6 +283,7 @@ type Column struct {
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
     Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
+    StatisticsTarget *int `yaml:"statisticsTarget"` // SET STATISTICS; -1 = default; nil = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
 }
@@ -328,6 +331,7 @@ type Trigger struct {
     OldTable string        // REFERENCING OLD TABLE AS (AFTER triggers)
     NewTable string        // REFERENCING NEW TABLE AS (AFTER triggers)
     Comment  string        // empty means unmanaged
+    Enabled  string        // origin | disabled | replica | always; "" = unmanaged
 }
 
 // Statistic is a CREATE STATISTICS object on a table. Kinds is a subset of
@@ -524,6 +528,9 @@ func Merge(dbs []*Database) *Database {
                 existing.Statistics = mergeNamed(existing.Statistics, t.Statistics, func(x *Statistic) string { return x.Name })
                 if t.ReplicaIdentity != "" {
                     existing.ReplicaIdentity = t.ReplicaIdentity
+                }
+                if t.ClusterOn != "" {
+                    existing.ClusterOn = t.ClusterOn
                 }
                 existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
@@ -829,6 +836,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if ri, ok := m["replicaIdentity"]; ok {
                     t.ReplicaIdentity = parseReplicaIdentity(ri)
                 }
+                if co, ok := m["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
                 if conRaw, ok := m["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -884,6 +892,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             if ri, ok := m["replicaIdentity"]; ok {
                 t.ReplicaIdentity = parseReplicaIdentity(ri)
             }
+            if co, ok := m["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
             if conRaw, ok := m["constraints"]; ok {
                 t.Constraints = parseConstraints(conRaw)
             }
@@ -947,6 +956,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if ri, ok := inner["replicaIdentity"]; ok {
                     t.ReplicaIdentity = parseReplicaIdentity(ri)
                 }
+                if co, ok := inner["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
                 if conRaw, ok := inner["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -1071,6 +1081,7 @@ func parseColumnSpec(spec any) *Column {
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }
+    if v, ok := m["statisticsTarget"].(int); ok { c.StatisticsTarget = &v }
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }
@@ -1287,6 +1298,13 @@ func parseTriggers(v any) []*Trigger {
                 if d, ok := dm["deferrable"].(bool); ok { tr.Deferrable = d }
                 if id, ok := dm["initiallyDeferred"].(bool); ok { tr.InitiallyDeferred = id }
                 if cm, ok := dm["comment"].(string); ok { tr.Comment = cm }
+                switch e := dm["enabled"].(type) {
+                case bool:
+                    tr.Enabled = "origin"
+                    if !e { tr.Enabled = "disabled" }
+                case string:
+                    tr.Enabled = strings.ToLower(strings.TrimSpace(e))
+                }
                 if ref, ok := dm["referencing"].(map[string]any); ok {
                     if s, ok := ref["old"].(string); ok { tr.OldTable = strings.TrimSpace(s) }
                     if s, ok := ref["new"].(string); ok { tr.NewTable = strings.TrimSpace(s) }
@@ -2059,6 +2077,12 @@ func parseView(schemaName, key string, body any) *View {
     if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
     if trRaw, ok := m["triggers"]; ok { vw.Triggers = parseTriggers(trRaw) }
     if rRaw, ok := m["rules"]; ok { vw.Rules = parseRules(rRaw) }
+    if cc, ok := m["columnComments"].(map[string]any); ok {
+        vw.ColumnComments = map[string]string{}
+        for col, v := range cc {
+            if s, ok := v.(string); ok { vw.ColumnComments[col] = s }
+        }
+    }
     return vw
 }
 

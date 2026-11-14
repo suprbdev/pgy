@@ -594,6 +594,7 @@ func (b *builder) tables() {
 		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" {
 			add(t, "replicaIdentity", str(ri))
 		}
+		addStr(t, "clusterOn", lt.ClusteredOn)
 		if lt.RLSEnabled {
 			add(t, "rowLevelSecurity", boolean(true))
 		}
@@ -623,6 +624,9 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		}
 		addStr(c, "collate", lc.Collation)
 		addStr(c, "compression", lc.Compression)
+		if lc.StatisticsTarget != nil {
+			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
+		}
 		if lc.Nullable {
 			add(c, "nullable", boolean(true))
 		}
@@ -873,6 +877,9 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 		deferral(tr, middle)
 		addStr(tr, "when", m[8])
 		add(tr, "procedure", str(qualifyRef(m[9], fq)))
+		if e := lt.TriggerEnabled[name]; e != "" && e != "origin" {
+			add(tr, "enabled", str(e))
+		}
 		addStr(tr, "comment", lt.TriggerComments[name])
 		add(trs, name, tr)
 	}
@@ -1053,6 +1060,13 @@ func (b *builder) views() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
+		if cc := b.live.ViewColumnComments[k]; len(cc) > 0 {
+			cm := newMap()
+			for _, col := range sortedKeys(cc) {
+				add(cm, col, str(cc[col]))
+			}
+			add(m, "columnComments", cm)
+		}
 		b.owner(m, "rel:"+k)
 		add(blk, key, m)
 	}
