@@ -9,6 +9,7 @@ import (
     "strings"
 
     "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/suprbdev/pgy/internal/db"
     "github.com/suprbdev/pgy/internal/schema"
 )
 
@@ -1761,6 +1762,10 @@ type PlanDiff struct{
     Creates []string
     Alters  []string
     Drops   []string
+    // Concurrent holds statements that cannot run inside a transaction
+    // (CREATE / DROP INDEX CONCURRENTLY). They belong in a separate
+    // no-transaction migration that runs after the rest of the plan.
+    Concurrent []string
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -1768,6 +1773,7 @@ func (p *PlanDiff) Summary() map[string]int {
         "creates": len(p.Creates),
         "alters": len(p.Alters),
         "drops": len(p.Drops),
+        "concurrent": len(p.Concurrent),
     }
 }
 
@@ -3311,7 +3317,10 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ix.Unique { uniq = " unique" }
         using := ""
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
-        stmt := fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), renderIndexTail(ix))
+        concurrent := ix.Concurrently && lt != nil
+        how := " index"
+        if concurrent { how = " index concurrently" }
+        stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), renderIndexTail(ix))
         if liveIndexes[name] {
             // Changed definition → drop + recreate. Rebuilding an index can be
             // expensive and briefly leaves queries without it, so gate behind
@@ -3322,11 +3331,19 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
             if unsafe && changed {
                 idxFq := name
                 if i := strings.IndexByte(fq, '.'); i >= 0 { idxFq = fq[:i] + "." + name }
-                plan.Alters = append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt)
+                if concurrent {
+                    plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
+                } else {
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt)
+                }
             }
             continue
         }
-        plan.Creates = append(plan.Creates, stmt)
+        if concurrent {
+            plan.Concurrent = append(plan.Concurrent, stmt)
+        } else {
+            plan.Creates = append(plan.Creates, stmt)
+        }
     }
 
     // Named constraints (check, unique, exclude)
@@ -3494,6 +3511,15 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
     }
 }
 
+// RenderConcurrent renders the plan's Concurrent statements as the body of
+// a no-transaction migration, or "" when there are none.
+func RenderConcurrent(p *PlanDiff) string {
+    if len(p.Concurrent) == 0 { return "" }
+    return db.NoTransactionDirective + "\n" + strings.Join(p.Concurrent, "\n") + "\n"
+}
+
+// Render renders the plan's transactional statements: Creates, then Alters,
+// then Drops. Concurrent statements are rendered by RenderConcurrent.
 func Render(p *PlanDiff) string {
     statements := make([]string, 0, len(p.Creates)+len(p.Alters)+len(p.Drops))
     statements = append(statements, p.Creates...)

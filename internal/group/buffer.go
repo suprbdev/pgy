@@ -13,12 +13,24 @@ type Section struct {
     SQL  string
 }
 
+// Render renders steps as buffer sections, one per step. A step with
+// statements that cannot run in a transaction gets a second
+// "<name>_concurrent" section holding them behind the no-transaction
+// directive, so commit writes them to their own migration file.
 func Render(steps []Step) string {
     var b strings.Builder
-    for i, s := range steps {
-        if i > 0 { b.WriteString("\n") }
-        b.WriteString(marker + " " + s.Name + "\n")
-        b.WriteString(diff.Render(s.Plan))
+    section := func(name, sql string) {
+        if b.Len() > 0 { b.WriteString("\n") }
+        b.WriteString(strings.TrimRight(marker+" "+name, " ") + "\n")
+        b.WriteString(sql)
+    }
+    for _, s := range steps {
+        if sql := diff.Render(s.Plan); sql != "" || len(s.Plan.Concurrent) == 0 { section(s.Name, sql) }
+        if c := diff.RenderConcurrent(s.Plan); c != "" {
+            name := "concurrent"
+            if s.Name != "" { name = s.Name + "_concurrent" }
+            section(name, c)
+        }
     }
     return b.String()
 }

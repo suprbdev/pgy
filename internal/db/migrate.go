@@ -38,6 +38,23 @@ type Migration struct {
     LockTimeout      string // transaction-local lock_timeout, e.g. "5s"; empty = server default
     StatementTimeout string // transaction-local statement_timeout; empty = server default
     RecordIn         string // "schema.table" migrations table to record the migration in; empty = not recorded
+    NoTransaction    bool   // run statements one by one outside a transaction (see NoTransactionDirective)
+}
+
+// NoTransactionDirective, as a comment line before a migration's first
+// statement, makes migrate run it without a transaction, as statements such
+// as CREATE INDEX CONCURRENTLY require.
+const NoTransactionDirective = "-- pgy:no-transaction"
+
+// HasNoTransactionDirective reports whether the comment lines leading a
+// migration contain NoTransactionDirective.
+func HasNoTransactionDirective(sql string) bool {
+    for _, ln := range strings.Split(sql, "\n") {
+        t := strings.TrimSpace(ln)
+        if t == NoTransactionDirective { return true }
+        if t != "" && !strings.HasPrefix(t, "--") { return false }
+    }
+    return false
 }
 
 // ApplyMigration runs m.SQL statement by statement in a single transaction.
@@ -46,6 +63,7 @@ type Migration struct {
 // can never be applied without being recorded (or vice versa). Recording
 // fails if the version parsed from Name is already taken.
 func ApplyMigration(ctx context.Context, pool *PoolShim, m Migration) error {
+    if m.NoTransaction { return applyWithoutTransaction(ctx, pool, m) }
     tx, err := pool.Begin(ctx)
     if err != nil { return err }
     defer func() { _ = tx.Rollback(ctx) }()
@@ -68,6 +86,40 @@ func ApplyMigration(ctx context.Context, pool *PoolShim, m Migration) error {
         }
     }
     return tx.Commit(ctx)
+}
+
+// applyWithoutTransaction runs a no-transaction migration statement by
+// statement on one connection (timeouts set for the session and reset
+// afterwards) and records it only once every statement succeeded. A failure
+// leaves the earlier statements applied.
+func applyWithoutTransaction(ctx context.Context, pool *PoolShim, m Migration) error {
+    conn, err := pool.Acquire(ctx)
+    if err != nil { return err }
+    defer conn.Release()
+    for _, setting := range [][2]string{{"lock_timeout", m.LockTimeout}, {"statement_timeout", m.StatementTimeout}} {
+        if setting[1] == "" { continue }
+        if _, err := conn.Exec(ctx, "select set_config($1, $2, false)", setting[0], setting[1]); err != nil {
+            return fmt.Errorf("set %s: %w", setting[0], err)
+        }
+        defer func(name string) { _, _ = conn.Exec(context.WithoutCancel(ctx), "reset "+name) }(setting[0])
+    }
+    stmts := []string{}
+    for _, stmt := range SplitSQLStatements(m.SQL) {
+        if strings.TrimSpace(stmt) != "" { stmts = append(stmts, stmt) }
+    }
+    for i, stmt := range stmts {
+        if _, err := conn.Exec(ctx, stmt); err != nil {
+            return fmt.Errorf("statement %d of %d failed; this migration runs without a transaction, so statements before it stay applied: %w", i+1, len(stmts), err)
+        }
+    }
+    if m.RecordIn != "" {
+        schema, table, _ := strings.Cut(m.RecordIn, ".")
+        q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1, $2, $3, now())", pqIdent(schema), pqIdent(table))
+        if _, err := conn.Exec(ctx, q, MigrationVersion(m.Name), m.Name, m.Checksum); err != nil {
+            return fmt.Errorf("record %s: %w", m.Name, err)
+        }
+    }
+    return nil
 }
 
 // MigrationVersion returns the number a migration file name starts with

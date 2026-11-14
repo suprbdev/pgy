@@ -50,7 +50,7 @@ schema public:
       valid: {type: tstzrange}
     primaryKey: [id, valid without overlaps]
     indexes:
-      orders_cover: {columns: [id desc nulls last], unique: true, include: [price], nullsNotDistinct: true, with: {fillfactor: 70}}
+      orders_cover: {columns: [id desc nulls last], unique: true, include: [price], nullsNotDistinct: true, with: {fillfactor: 70}, concurrently: true}
     foreignKeys:
       orders_pid_fkey:
         columns: [pid, period valid]

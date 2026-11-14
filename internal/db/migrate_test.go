@@ -115,3 +115,18 @@ select ')' as paren; select 1;`
 		t.Errorf("multi-action rule split mid-statement: %q", got[0])
 	}
 }
+
+func TestHasNoTransactionDirective(t *testing.T) {
+	cases := map[string]bool{
+		"-- pgy 1.0\n-- checksum x\n\n-- pgy:no-transaction\ncreate index concurrently i on t (a);\n": true,
+		"-- pgy:no-transaction\nselect 1;\n":                 true,
+		"select 1;\n-- pgy:no-transaction\n":                 false,
+		"-- pgy 1.0\n\ncreate table t (a int);\n":            false,
+		"  -- pgy:no-transaction  \n\nvacuum t;":             true,
+	}
+	for sql, want := range cases {
+		if got := HasNoTransactionDirective(sql); got != want {
+			t.Errorf("HasNoTransactionDirective(%q) = %v, want %v", sql, got, want)
+		}
+	}
+}

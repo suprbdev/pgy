@@ -451,6 +451,10 @@
           "type": "boolean",
           "description": "Unique indexes: treat NULLs as equal (NULLS NOT DISTINCT, PostgreSQL 15+)."
         },
+        "concurrently": {
+          "type": "boolean",
+          "description": "On an existing table, build (and rebuild) the index with CREATE INDEX CONCURRENTLY in a separate no-transaction migration."
+        },
         "with": {
           "type": "object",
           "description": "Index storage parameters, e.g. {fillfactor: 70} or {fastupdate: false}.",
