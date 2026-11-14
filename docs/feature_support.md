@@ -12,7 +12,7 @@ These are the foundational elements required for almost any relational database 
 - [x] **Columns** (Data types, nullability, defaults)
 - [x] **Primary Keys**
 - [x] **Foreign Keys**
-- [x] **Indexes** (Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, and expression indexes)
+- [x] **Indexes** (Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, expression indexes, and per-column sort order — `desc`, `nulls last`. Names over 63 bytes are truncated the way PostgreSQL stores them)
 - [x] **UNIQUE Constraints** (Table-level and column-level)
 - [x] **CHECK Constraints**
 - [x] **NOT NULL Constraints** (Via column `nullable` property)

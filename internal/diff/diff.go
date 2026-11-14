@@ -1581,16 +1581,19 @@ func planComments(live *Live, desired *schema.Database) []string {
         if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
         for _, ix := range dt.Indexes {
             if ix == nil || ix.Comment == "" || len(ix.Columns) == 0 { continue }
-            name := indexName(k, ix)
+            var liveIdx map[string]bool
+            if lt != nil { liveIdx = lt.Indexes }
+            name := LiveIndexName(k, ix, liveIdx)
             have := ""
             if lt != nil { have = lt.IndexComments[name] }
             comment("index "+pqIdent(schemaPrefix+name), ix.Comment, have)
         }
         for _, fk := range dt.ForeignKeys {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
+            fkName := truncateIdent(fk.Name)
             have := ""
-            if lt != nil { have = lt.ConstraintComments[fk.Name] }
-            comment(fmt.Sprintf("constraint %s on %s", pqIdent(fk.Name), pqIdent(k)), fk.Comment, have)
+            if lt != nil { have = lt.ConstraintComments[fkName] }
+            comment(fmt.Sprintf("constraint %s on %s", pqIdent(fkName), pqIdent(k)), fk.Comment, have)
         }
     }
 
@@ -1861,13 +1864,6 @@ func grantFuncArgs(argsSig string) string {
     return "(" + strings.Join(args, ", ") + ")"
 }
 
-// indexName returns the declared index name, or the auto-generated
-// <schema>_<table>_<cols>_idx name when none was given.
-func indexName(fq string, ix *schema.Index) string {
-    if ix.Name != "" { return ix.Name }
-    return strings.ReplaceAll(fq+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx"
-}
-
 // applyTableConstraints emits SQL for primary keys, foreign keys, indexes, constraints, and triggers
 // on a table. lt is the live table state (nil for new tables — skip existence checks).
 // FK statements go to deferredFKs so the caller can emit them after all PK/unique alters.
@@ -1909,10 +1905,11 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     for _, fk := range dt.ForeignKeys {
         if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
         def := renderFKDef(fk)
-        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fk.Name), def)
-        if liveConstraints[fk.Name] {
-            if liveDef, ok := liveConstraintDefs[fk.Name]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
-                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fk.Name)), stmt)
+        fkName := truncateIdent(fk.Name)
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), def)
+        if liveConstraints[fkName] {
+            if liveDef, ok := liveConstraintDefs[fkName]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fkName)), stmt)
             }
             continue
         }
@@ -1922,7 +1919,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Indexes (always use IF NOT EXISTS)
     for _, ix := range dt.Indexes {
         if ix == nil || len(ix.Columns) == 0 { continue }
-        name := indexName(fq, ix)
+        name := LiveIndexName(fq, ix, liveIndexes)
         uniq := ""
         if ix.Unique { uniq = " unique" }
         using := ""
@@ -1949,10 +1946,11 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ct == nil || ct.Type == "" { continue }
         def := renderConstraintDef(ct)
         if def == "" { continue }
-        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ct.Name), def)
-        if liveConstraints[ct.Name] {
-            if liveDef, ok := liveConstraintDefs[ct.Name]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
-                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ct.Name)), stmt)
+        ctName := truncateIdent(ct.Name)
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), def)
+        if liveConstraints[ctName] {
+            if liveDef, ok := liveConstraintDefs[ctName]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ctName)), stmt)
             }
             continue
         }
@@ -1960,9 +1958,13 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     }
 
     // Column-level unique flags — emit as named unique constraints
+    uniqueCols := []string{}
     for cn, c := range dt.Columns {
-        if !c.Unique { continue }
-        name := strings.ReplaceAll(fq+"_"+cn, ".", "_") + "_key"
+        if c != nil && c.Unique { uniqueCols = append(uniqueCols, cn) }
+    }
+    sort.Strings(uniqueCols)
+    for _, cn := range uniqueCols {
+        name := LiveUniqueKeyName(fq, cn, liveConstraints)
         if liveConstraints[name] { continue }
         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), pqIdent(name), pqIdent(cn)))
     }
@@ -1974,6 +1976,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // recreate runs in the same migration transaction.
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
+        trName := truncateIdent(tr.Name)
         events := strings.ToUpper(strings.Join(canonicalTriggerEvents(tr.Events), " or "))
         when := ""
         if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
@@ -1986,15 +1989,15 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
             } else if tr.Deferrable {
                 deferral = " deferrable"
             }
-            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(tr.Name), events, pqIdent(fq), deferral, when, tr.Procedure)
+            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
         } else {
-            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s%s execute procedure %s;", pqIdent(tr.Name), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), when, tr.Procedure)
+            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), when, tr.Procedure)
         }
-        if liveDef, ok := liveTriggers[tr.Name]; ok {
+        if liveDef, ok := liveTriggers[trName]; ok {
             // "" means the live definition is unknown — fall back to
             // name-only matching and skip rather than churn.
             if liveDef == "" || triggerDefsEqual(stmt, liveDef) { continue }
-            *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", pqIdent(tr.Name), pqIdent(fq)))
+            *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", pqIdent(trName), pqIdent(fq)))
         }
         *deferredTriggers = append(*deferredTriggers, stmt)
     }
@@ -2038,12 +2041,13 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
         desiredPolicies := map[string]bool{}
         for _, pol := range dt.Policies {
             if pol == nil || pol.Name == "" { continue }
-            desiredPolicies[pol.Name] = true
-            if lp := livePolicies[pol.Name]; lp != nil {
+            polName := truncateIdent(pol.Name)
+            desiredPolicies[polName] = true
+            if lp := livePolicies[polName]; lp != nil {
                 if policyMatchesLive(pol, lp) { continue }
-                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(pol.Name), pqIdent(fq)))
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(polName), pqIdent(fq)))
             }
-            stmt := fmt.Sprintf("create policy %s on %s", pqIdent(pol.Name), pqIdent(fq))
+            stmt := fmt.Sprintf("create policy %s on %s", pqIdent(polName), pqIdent(fq))
             if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
             if len(pol.To) > 0 {
                 roles := make([]string, 0, len(pol.To))
@@ -2406,16 +2410,17 @@ func pqIdent(fq string) string {
 
 // renderIndexElems renders index column entries: plain identifiers are quoted,
 // entries containing non-identifier characters are treated as expressions and
-// wrapped in parentheses, and operator classes (per-index or per-column) are
-// appended unquoted.
+// wrapped in parentheses, operator classes (per-index or per-column) are
+// appended unquoted, and a trailing ASC/DESC/NULLS FIRST/NULLS LAST ordering
+// is kept after the opclass.
 func renderIndexElems(ix *schema.Index) string {
     parts := make([]string, 0, len(ix.Columns))
     for _, c := range ix.Columns {
-        elem := pqIdent(c)
-        if isIndexExpression(c) { elem = "(" + c + ")" }
-        oc := ix.Opclass
-        if v, ok := ix.Opclasses[c]; ok { oc = v }
-        if oc != "" { elem += " " + oc }
+        base, ordering := splitIndexOrdering(c)
+        elem := pqIdent(base)
+        if isIndexExpression(base) { elem = "(" + base + ")" }
+        if oc := indexColumnOpclass(ix, c); oc != "" { elem += " " + oc }
+        if ordering != "" { elem += " " + ordering }
         parts = append(parts, elem)
     }
     return strings.Join(parts, ", ")
@@ -2434,8 +2439,7 @@ func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
 func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
     if len(ix.Columns) != len(live) { return false }
     for i, c := range ix.Columns {
-        oc := ix.Opclass
-        if v, ok := ix.Opclasses[c]; ok { oc = v }
+        oc := indexColumnOpclass(ix, c)
         if oc == "" {
             if !live[i].Default { return true }
         } else if !strings.EqualFold(oc, live[i].Name) {
@@ -2443,6 +2447,17 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
         }
     }
     return false
+}
+
+// indexColumnOpclass returns the operator class for one index column entry:
+// a per-column override keyed by the entry (with or without its ordering
+// suffix), else the index-wide opclass.
+func indexColumnOpclass(ix *schema.Index, col string) string {
+    if v, ok := ix.Opclasses[col]; ok { return v }
+    if base, _ := splitIndexOrdering(col); base != col {
+        if v, ok := ix.Opclasses[base]; ok { return v }
+    }
+    return ix.Opclass
 }
 
 func isIndexExpression(s string) bool {

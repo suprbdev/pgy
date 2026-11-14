@@ -391,15 +391,13 @@ func hasKey(t *schema.Table, cols []string) bool {
 
 func liveHasKey(table string, lt *diff.LiveTable, ft *schema.Table, cols []string) bool {
     if lt.HasPK && sameColumns(primaryKey(ft), cols) { return true }
-    if len(cols) == 1 && lt.Constraints[strings.ReplaceAll(table+"_"+cols[0], ".", "_")+"_key"] { return true }
+    if len(cols) == 1 && lt.Constraints[diff.LiveUniqueKeyName(table, cols[0], lt.Constraints)] { return true }
     for _, ct := range ft.Constraints {
         if ct != nil && strings.EqualFold(ct.Type, "unique") && sameColumns(ct.Columns, cols) && lt.Constraints[ct.Name] { return true }
     }
     for _, ix := range ft.Indexes {
         if ix == nil || !ix.Unique || ix.Where != "" || !sameColumns(ix.Columns, cols) { continue }
-        name := ix.Name
-        if name == "" { name = strings.ReplaceAll(table+"_"+strings.Join(ix.Columns, "_"), ".", "_") + "_idx" }
-        if lt.Indexes[name] { return true }
+        if lt.Indexes[diff.LiveIndexName(table, ix, lt.Indexes)] { return true }
     }
     return false
 }

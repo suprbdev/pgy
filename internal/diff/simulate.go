@@ -175,7 +175,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if c.Identity != "" { lc.Identity = c.Identity }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {
-            lt.Constraints[strings.ReplaceAll(fq+"_"+cn, ".", "_")+"_key"] = true
+            lt.Constraints[uniqueKeyName(fq, cn)] = true
         }
         if c.PrimaryKey { lt.HasPK = true }
         if c.Grants != nil {
@@ -187,9 +187,10 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
 
     for _, fk := range dt.ForeignKeys {
         if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
-        lt.Constraints[fk.Name] = true
-        delete(lt.ConstraintDefs, fk.Name)
-        if fk.Comment != "" { lt.ConstraintComments[fk.Name] = fk.Comment }
+        name := truncateIdent(fk.Name)
+        lt.Constraints[name] = true
+        delete(lt.ConstraintDefs, name)
+        if fk.Comment != "" { lt.ConstraintComments[name] = fk.Comment }
     }
     for _, ix := range dt.Indexes {
         if ix == nil || len(ix.Columns) == 0 { continue }
@@ -200,20 +201,25 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     }
     for _, ct := range dt.Constraints {
         if ct == nil || ct.Type == "" || renderConstraintDef(ct) == "" { continue }
-        lt.Constraints[ct.Name] = true
-        delete(lt.ConstraintDefs, ct.Name)
+        name := truncateIdent(ct.Name)
+        lt.Constraints[name] = true
+        delete(lt.ConstraintDefs, name)
     }
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
-        lt.Triggers[tr.Name] = ""
+        lt.Triggers[truncateIdent(tr.Name)] = ""
     }
     for _, pol := range dt.Policies {
         if pol == nil || pol.Name == "" { continue }
         cmd := strings.ToLower(pol.For)
         if cmd == "" { cmd = "all" }
-        lt.Policies[pol.Name] = &LivePolicy{
+        roles := []string{}
+        for _, r := range pol.To {
+            if !strings.EqualFold(r, "public") { roles = append(roles, r) }
+        }
+        lt.Policies[truncateIdent(pol.Name)] = &LivePolicy{
             Cmd:       cmd,
-            Roles:     append([]string(nil), pol.To...),
+            Roles:     roles,
             Using:     pol.Using,
             WithCheck: pol.WithCheck,
         }

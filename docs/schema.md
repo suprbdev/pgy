@@ -281,11 +281,13 @@ indexes:
     comment: "lookup by col1"   # optional COMMENT ON INDEX (diffed against live)
 ```
 
-If `name` is omitted, an auto-name is derived from the table and column names.
+If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from the table and column names. Names longer than PostgreSQL's 63-byte identifier limit are truncated the way the server would store them; for auto-names the table/column part is shortened so the `_idx` (or `_key`, for column-level `unique`) suffix survives and the two never collide.
 
 `using: btree` is the PostgreSQL default and is omitted from the generated SQL. The `where` expression is emitted verbatim (wrapped in parentheses), so any valid predicate works.
 
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
+
+A `columns` entry may end in a sort order — `asc`, `desc`, `nulls first`, `nulls last`, or a combination such as `created_at desc nulls last`. The suffix is emitted after any operator class, and an `opclasses` key may name the column with or without it.
 
 Example — a GIN trigram index (requires the `pg_trgm` extension), an expression index, a PostGIS spatial index, and a partial unique index:
 

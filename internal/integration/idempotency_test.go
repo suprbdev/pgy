@@ -16,6 +16,33 @@ import (
 // the YAML is replaced by the per-case schema name.
 func TestIntegrationYAMLIdempotent(t *testing.T) {
 	cases := map[string]string{
+		"long_names": `
+schema SCH:
+  table a_really_quite_long_table_name_for_testing:
+    columns:
+      some_really_long_column_name_here: {type: text, unique: true}
+      other: {type: text}
+    indexes:
+      "":
+        columns: [some_really_long_column_name_here]
+        comment: auto-named
+      an_index_name_that_is_definitely_longer_than_sixty_three_bytes_long:
+        columns: [other]
+    constraints:
+      a_check_constraint_name_that_is_definitely_longer_than_sixty_three:
+        type: check
+        expression: "other <> ''"
+`,
+		"index_ordering": `
+schema SCH:
+  table t:
+    columns:
+      created: {type: timestamptz}
+      name: {type: text}
+    indexes:
+      t_created_desc:
+        columns: [created desc nulls last, lower(name) asc]
+`,
 		"defaults": `
 schema SCH:
   table t:
