@@ -359,6 +359,13 @@ schema SCH:
   table Order Items:
     columns:
       Weird Col: {type: int}
+      Other Col: {type: int}
+    indexes:
+      Weird Idx: {columns: [Weird Col desc, Other Col]}
+    statistics:
+      Weird Stats: {kinds: [dependencies], columns: [Weird Col, Other Col]}
+    rules:
+      No Big Upd: {event: update, instead: true, where: 'old."Weird Col" > 100', do: nothing}
     triggers:
       Upd Trg: {timing: before, events: [update of "Weird Col"], level: row, when: "old.\"Weird Col\" is distinct from new.\"Weird Col\"", procedure: SCH.touch()}
       Ref Trg: {timing: after, events: [update], referencing: {old: Old Rows, new: new_rows}, procedure: SCH.touch()}

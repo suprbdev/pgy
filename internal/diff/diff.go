@@ -270,7 +270,7 @@ type LiveStatistic struct {
     Comment string
 }
 
-var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS \S+(?: \(([^)]*)\))? ON (.+) FROM \S+$`)
+var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS ` + catalogName + `(?: \(([^)]*)\))? ON (.+) FROM ` + catalogName + `$`)
 
 // LiveRule is a rewrite rule's event, INSTEAD flag and WHERE condition
 // (as pg_get_ruledef prints it, parentheses included).
@@ -281,7 +281,11 @@ type LiveRule struct {
     Def     string // pg_get_ruledef output
 }
 
-var ruleWhereRe = regexp.MustCompile(`(?s)\bON\s+\w+\s+TO\s+\S+\s+WHERE\s+(.*?)\s+DO\s`)
+var ruleWhereRe = regexp.MustCompile(`(?s)\bON\s+\w+\s+TO\s+` + catalogName + `\s+WHERE\s+(.*?)\s+DO\s`)
+
+// catalogName matches a possibly qualified name as catalog functions print
+// it, each part bare or double-quoted.
+const catalogName = `(?:"(?:[^"]|"")*"|[^\s".]+)(?:\.(?:"(?:[^"]|"")*"|[^\s".]+))?`
 
 // LiveIndex is an index definition as introspected from pg_index. Keys holds
 // each key column's name or expression (pg_get_indexdef per column, without
@@ -3599,7 +3603,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         concurrent := ix.Concurrently && lt != nil
         how := " index"
         if concurrent { how = " index concurrently" }
-        stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), renderIndexTail(ix))
+        stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix, dt.Columns), renderIndexTail(ix))
         if liveIndexes[name] {
             // Changed definition → drop + recreate. Rebuilding an index can be
             // expensive and briefly leaves queries without it, so gate behind
@@ -3687,7 +3691,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop statistics %s;", target))
             }
         }
-        plan.Alters = append(plan.Alters, renderStatistic(fq, st))
+        plan.Alters = append(plan.Alters, renderStatistic(fq, st, dt.Columns))
     }
 
     for _, r := range dt.Rules {
@@ -3701,14 +3705,15 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
 }
 
 // renderStatistic renders CREATE STATISTICS in the table's schema. Plain
-// columns are quoted; anything else is an expression in parentheses.
-func renderStatistic(fq string, st *schema.Statistic) string {
+// or declared columns are quoted; anything else is an expression in
+// parentheses.
+func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Column) string {
     kinds := ""
     if k := statisticKinds(st.Kinds); len(k) > 0 && len(k) < 3 { kinds = " (" + strings.Join(k, ", ") + ")" }
     items := make([]string, len(st.Columns))
     for i, c := range st.Columns {
         c = strings.TrimSpace(c)
-        if isIndexExpression(c) { items[i] = "(" + c + ")" } else { items[i] = pqIdent(c) }
+        if isIndexExpression(c) && cols[c] == nil { items[i] = "(" + c + ")" } else { items[i] = pqIdent(c) }
     }
     return fmt.Sprintf("create statistics %s%s on %s from %s;", pqIdent(schemaPrefixOf(fq)+truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
 }
@@ -4539,12 +4544,12 @@ func quoteIdent(s string) string {
 // wrapped in parentheses, operator classes (per-index or per-column) are
 // appended unquoted, and a trailing ASC/DESC/NULLS FIRST/NULLS LAST ordering
 // is kept after the opclass.
-func renderIndexElems(ix *schema.Index) string {
+func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
     parts := make([]string, 0, len(ix.Columns))
     for _, c := range ix.Columns {
         base, ordering := splitIndexOrdering(c)
         elem := pqIdent(base)
-        if isIndexExpression(base) { elem = "(" + base + ")" }
+        if isIndexExpression(base) && cols[base] == nil { elem = "(" + base + ")" }
         if oc := indexColumnOpclass(ix, c); oc != "" { elem += " " + oc }
         if ordering != "" { elem += " " + ordering }
         parts = append(parts, elem)
