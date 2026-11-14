@@ -273,6 +273,10 @@
           "minLength": 1,
           "description": "Generated column expression: GENERATED ALWAYS AS (expr) STORED. Overrides default and identity."
         },
+        "virtual": {
+          "type": "boolean",
+          "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
+        },
         "using": {
           "type": "string",
           "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
@@ -301,6 +305,7 @@
           ]
         },
         "generated": { "type": "string", "minLength": 1 },
+        "virtual": { "type": "boolean" },
         "using": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
@@ -377,6 +382,7 @@
         "deferrable": { "type": "boolean" },
         "initiallyDeferred": { "type": "boolean", "description": "Implies deferrable." },
         "notValid": { "type": "boolean", "description": "Add the constraint NOT VALID: existing rows are not checked." },
+        "enforced": { "type": "boolean", "description": "false: NOT ENFORCED (PostgreSQL 18+). Default true." },
         "comment": {
           "type": "string",
           "description": "COMMENT ON CONSTRAINT text (diffed against live)."
@@ -432,7 +438,8 @@
         "deferrable": { "type": "boolean", "description": "Unique/exclude only." },
         "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
         "noInherit": { "type": "boolean", "description": "Check only: NO INHERIT." },
-        "notValid": { "type": "boolean", "description": "Check only: add NOT VALID (existing rows are not checked)." }
+        "notValid": { "type": "boolean", "description": "Check only: add NOT VALID (existing rows are not checked)." },
+        "enforced": { "type": "boolean", "description": "Check only: false emits NOT ENFORCED (PostgreSQL 18+). Default true." }
       },
       "required": ["type"],
       "additionalProperties": false

@@ -156,6 +156,7 @@ type LiveColumn struct{
     Comment   string
     Identity  string // "" (none), "always", or "by default"
     Generated string // generation expression of a generated column ("" = not generated)
+    Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -240,7 +241,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                not a.attnotnull,
                coalesce(pg_get_expr(ad.adbin, ad.adrelid), ''),
                case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end,
-               a.attgenerated <> ''
+               a.attgenerated::text
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -256,13 +257,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     defer rows.Close()
     for rows.Next() {
         var schemaName, tableName, colName, dataType, def, identity string
-        var nullable, generated bool
+        var nullable bool
+        var generated string
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
         if t == nil { t = newLiveTable(); l.Tables[key] = t }
         lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
-        if generated { lc.Generated, lc.Default = def, "" }
+        if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
         t.Columns[colName] = lc
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -1453,7 +1455,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 // existing table: add missing columns, reconcile attributes
                 // of columns present in both
                 pkCols := map[string]bool{}
-                for _, pc := range dt.PrimaryKey { pkCols[pc] = true }
+                for _, pc := range dt.PrimaryKey { pkCols[constraintColumnName(pc)] = true }
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -2020,7 +2022,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     // Primary key — check by type, not name (Postgres auto-names it tablename_pkey)
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(dt.PrimaryKey)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), constraintColumns(dt.PrimaryKey)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
@@ -2380,13 +2382,55 @@ func normalizeDefaultExpr(s string) string {
 // pg_get_constraintdef() order and defaults (MATCH SIMPLE, NO ACTION) are
 // omitted as it omits them, so a live definition compares equal.
 func renderFKDef(fk *schema.ForeignKey) string {
-    def := fmt.Sprintf("foreign key (%s) references %s(%s)", joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
+    def := fmt.Sprintf("foreign key (%s) references %s(%s)", constraintColumns(fk.Columns), pqIdent(fk.RefTable), constraintColumns(fk.RefColumns))
     if m := strings.ToLower(strings.TrimSpace(fk.Match)); m != "" && m != "simple" { def += " match " + m }
     if a := fkAction(fk.OnUpdate); a != "" { def += " on update " + a }
     if a := fkAction(fk.OnDelete); a != "" { def += " on delete " + a }
     def += deferralClause(fk.Deferrable, fk.InitiallyDeferred)
-    if fk.NotValid { def += " not valid" }
-    return def
+    return def + validityClause(fk.NotValid, fk.NotEnforced)
+}
+
+// validityClause renders NOT VALID / NOT ENFORCED. A constraint that is not
+// enforced is never validated, and pg_get_constraintdef() then prints only
+// NOT ENFORCED.
+func validityClause(notValid, notEnforced bool) string {
+    switch {
+    case notEnforced:
+        return " not enforced"
+    case notValid:
+        return " not valid"
+    }
+    return ""
+}
+
+// constraintColumns renders a PRIMARY KEY / UNIQUE / FOREIGN KEY column list,
+// quoting each column while keeping the temporal markers of PostgreSQL 18:
+// a trailing WITHOUT OVERLAPS ("valid without overlaps") and a leading
+// PERIOD ("period valid").
+func constraintColumns(cols []string) string {
+    parts := make([]string, 0, len(cols))
+    for _, c := range cols {
+        lc := strings.ToLower(strings.TrimSpace(c))
+        switch {
+        case strings.HasSuffix(lc, " without overlaps"):
+            parts = append(parts, pqIdent(constraintColumnName(c))+" without overlaps")
+        case strings.HasPrefix(lc, "period "):
+            parts = append(parts, "period "+pqIdent(constraintColumnName(c)))
+        default:
+            parts = append(parts, pqIdent(constraintColumnName(c)))
+        }
+    }
+    return strings.Join(parts, ", ")
+}
+
+// constraintColumnName strips the PERIOD / WITHOUT OVERLAPS markers from a
+// constraint column entry.
+func constraintColumnName(c string) string {
+    c = strings.TrimSpace(c)
+    lc := strings.ToLower(c)
+    if strings.HasSuffix(lc, " without overlaps") { return strings.TrimSpace(c[:len(c)-len(" without overlaps")]) }
+    if strings.HasPrefix(lc, "period ") { return strings.TrimSpace(c[len("period "):]) }
+    return c
 }
 
 func fkAction(a string) string {
@@ -2412,12 +2456,11 @@ func renderConstraintDef(ct *schema.Constraint) string {
     case "check":
         def := fmt.Sprintf("check (%s)", ct.Expression)
         if ct.NoInherit { def += " no inherit" }
-        if ct.NotValid { def += " not valid" }
-        return def
+        return def + validityClause(ct.NotValid, ct.NotEnforced)
     case "unique":
         nulls := ""
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
-        return fmt.Sprintf("unique%s (%s)", nulls, joinIdentList(ct.Columns)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
         return fmt.Sprintf("exclude %s", ct.Expression) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
@@ -2563,7 +2606,9 @@ func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
     if !c.Nullable { parts = append(parts, "not null") }
     if c.Generated != "" {
-        parts = append(parts, "generated always as ("+c.Generated+") stored")
+        kind := "stored"
+        if c.Virtual { kind = "virtual" }
+        parts = append(parts, "generated always as ("+c.Generated+") "+kind)
     } else if c.Identity != "" {
         // identity columns cannot also have a default expression
         parts = append(parts, "generated "+c.Identity+" as identity")

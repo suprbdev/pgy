@@ -3,7 +3,7 @@
 [![CI](https://github.com/suprbdev/pgy/actions/workflows/ci.yaml/badge.svg)](https://github.com/suprbdev/pgy/actions/workflows/ci.yaml)
 [![Release](https://img.shields.io/github/v/release/suprbdev/pgy)](https://github.com/suprbdev/pgy/releases/latest)
 
-Forward-only PostgreSQL migration tool. It reads YAML schema files, diffs against a live DB, writes SQL to a buffer, and commits/applies migrations. No rollbacks.
+Forward-only PostgreSQL migration tool. It reads YAML schema files, diffs against a live DB, writes SQL to a buffer, and commits/applies migrations. No rollbacks. Supports PostgreSQL 15–18.
 
 ## Install
 
