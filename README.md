@@ -101,7 +101,7 @@ pgy diff --dsn "$PG_DSN" --schema-root ./schemas --schemas "base.yml,ext.yml"
 pgy diff --dsn "$PG_DSN" --buffer - | less   # print the SQL instead of writing the buffer file
 ```
 
-  `pgy diff` warns on stderr about statements that lock or rewrite a table that already exists. They are listed in [Lock warnings](#lock-warnings) below.
+  `pgy diff` warns on stderr about statements that lock or rewrite a table that already exists. They are listed in [Lock warnings](#lock-warnings) below. It also prints the errors `pgy validate` would report. One example is `{type: numeric(12,2)}` in a flow mapping, where the comma ends the value. Quote it as `"numeric(12,2)"`.
 
 - Inspect or clear buffer:
 

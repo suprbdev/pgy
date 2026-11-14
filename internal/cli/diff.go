@@ -12,6 +12,7 @@ import (
     "github.com/suprbdev/pgy/internal/diff"
     "github.com/suprbdev/pgy/internal/group"
     "github.com/suprbdev/pgy/internal/schema"
+    "github.com/suprbdev/pgy/internal/validate"
 )
 
 func cmdDiff() *cobra.Command {
@@ -29,7 +30,8 @@ func cmdDiff() *cobra.Command {
 Statements that lock or rewrite an existing table (an index built without
 concurrently, a foreign key or check added without notValid, SET NOT NULL, a
 rewriting type change, SET LOGGED/UNLOGGED, an added column whose value is
-computed per row) are reported on stderr. Use --no-warnings to silence them.
+computed per row) are reported on stderr, as are the errors pgy validate would
+report. Use --no-warnings to silence them.
 
 With --buffer - the SQL is printed to stdout instead of written to the
 buffer file, and status messages go to stderr.
@@ -81,6 +83,11 @@ Exit codes:
                 }
             }
 
+            if !noWarnings {
+                for _, is := range validate.Files(schemaPaths) {
+                    if is.Severity == validate.Error { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
+                }
+            }
             // load and merge schemas in order
             compiled, err := schema.LoadAndMerge(schemaPaths)
             if err != nil {
@@ -166,7 +173,7 @@ Exit codes:
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
     c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in. Run it with ALL schema files: objects declared only in files left out are dropped")
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
-    c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report statements that lock or rewrite existing tables")
+    c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report schema problems or statements that lock or rewrite existing tables")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
     c.Flags().Lookup("split").NoOptDefVal = group.ModeFile

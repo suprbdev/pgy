@@ -79,7 +79,9 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
             notValid := strings.Contains(stmt, " not valid")
             switch m[3] {
             case "foreign key":
-                if !notValid {
+                if lt := live.Tables[fq]; !notValid && lt != nil && lt.Partitioned && live.ServerVersion > 0 && live.ServerVersion < 180000 {
+                    warn(fq, stmt, "adding foreign key %s checks every row of %s while blocking writes to it and to the referenced table; PostgreSQL %d cannot add it NOT VALID to a partitioned table, so run it when that lock is acceptable", name, fq, live.ServerVersion/10000)
+                } else if !notValid {
                     warn(fq, stmt, "adding foreign key %s checks every row of %s while blocking writes to it and to the referenced table; add it with notValid: true and remove notValid in a later migration, which validates it without blocking writes", name, fq)
                 }
             case "check":

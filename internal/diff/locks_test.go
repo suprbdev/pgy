@@ -179,3 +179,36 @@ func TestInvalidConcurrentIndexRebuilt(t *testing.T) {
 		t.Errorf("an index left invalid by an interrupted build must be rebuilt, got:\n%s", got)
 	}
 }
+
+func TestNotValidForeignKeyOnPartitionedTableBefore18(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"app.c": {Name: "c", Columns: map[string]*schema.Column{"id": {Type: "int"}}, PrimaryKey: []string{"id"}},
+		"app.o": {Name: "o", PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"at"}},
+			Columns:     map[string]*schema.Column{"cid": {Type: "int"}, "at": {Type: "date"}},
+			ForeignKeys: []*schema.ForeignKey{{Name: "o_c_fkey", Columns: []string{"cid"}, RefTable: "app.c", RefColumns: []string{"id"}, NotValid: true}}},
+	}}
+	live := emptyLive()
+	live.ServerVersion = 170004
+	if p := Plan(live, d, false); !findAlter(p, `alter table "app"."o" add constraint "o_c_fkey" foreign key ("cid") references "app"."c"("id");`) {
+		t.Errorf("a new partitioned table gets the foreign key validated:\n%s", Render(p))
+	}
+	live.Schemas["app"] = true
+	for _, k := range []string{"app.c", "app.o"} {
+		lt := newLiveTable()
+		live.Tables[k] = lt
+	}
+	live.Tables["app.c"].Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.c"].HasPK = true
+	live.Tables["app.c"].Constraints["c_pkey"] = true
+	live.Tables["app.o"].Columns["cid"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.o"].Columns["at"] = &LiveColumn{Type: "date"}
+	live.Tables["app.o"].Partitioned = true
+	p := Plan(live, d, false)
+	if strings.Contains(Render(p), "o_c_fkey") || len(p.Warnings) == 0 || !strings.Contains(p.Warnings[0].Message, "cannot add a NOT VALID foreign key to a partitioned table") {
+		t.Errorf("an existing partitioned table must only warn:\n%s\n%+v", Render(p), p.Warnings)
+	}
+	live.ServerVersion = 180000
+	if p := Plan(live, d, false); !findAlter(p, `alter table "app"."o" add constraint "o_c_fkey" foreign key ("cid") references "app"."c"("id") not valid;`) {
+		t.Errorf("PostgreSQL 18 supports NOT VALID here:\n%s", Render(p))
+	}
+}

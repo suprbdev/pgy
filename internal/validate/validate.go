@@ -218,6 +218,8 @@ func Database(d *schema.Database) []Issue {
 			}
 			if strings.TrimSpace(c.Type) == "" {
 				add(Error, obj, "column %s has no type", cn)
+			} else if strings.Count(c.Type, "(") != strings.Count(c.Type, ")") {
+				add(Error, obj, "column %s has type %q with unbalanced parentheses; in a flow mapping a comma ends the value, so quote it: {type: \"numeric(12,2)\"}", cn, c.Type)
 			}
 			if c.Generated != "" && (c.Default != "" || c.Identity != "") {
 				add(Warning, obj, "column %s is generated; its default/identity is ignored", cn)
@@ -262,6 +264,13 @@ func Database(d *schema.Database) []Issue {
 		for _, p := range t.Inherits {
 			if d.Tables[p] == nil {
 				add(Warning, obj, "inherits %s, which no schema file declares", p)
+			}
+		}
+		if t.PartitionBy != nil {
+			for _, fk := range t.ForeignKeys {
+				if fk != nil && fk.NotValid {
+					add(Warning, obj, "foreign key %s: PostgreSQL before 18 cannot add a NOT VALID foreign key to a partitioned table", fk.Name)
+				}
 			}
 		}
 		if len(t.Inherits) > 0 && (t.PartitionOf != "" || t.PartitionBy != nil) {

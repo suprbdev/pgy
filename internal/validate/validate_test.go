@@ -289,3 +289,25 @@ schema app:
 		t.Errorf("a column inherited from a parent is known:\n%s", got)
 	}
 }
+
+func TestValidateUnbalancedTypeAndPartitionedNotValidFK(t *testing.T) {
+	p := write(t, t.TempDir(), "u.yml", `
+schema app:
+  table c:
+    columns: {id: {type: int}}
+  table o:
+    partitionBy: {type: range, columns: [at]}
+    columns:
+      at: {type: date}
+      cid: {type: int}
+      total: {type: "numeric(12"}
+    foreignKeys:
+      o_c_fkey: {columns: [cid], references: {table: app.c, columns: [id]}, notValid: true}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{`column total has type "numeric(12" with unbalanced parentheses`, "PostgreSQL before 18 cannot add a NOT VALID foreign key to a partitioned table"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

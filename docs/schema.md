@@ -409,7 +409,7 @@ foreignKeys:
     comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
 
-`no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. `notValid: true` adds the constraint without checking existing rows, so the only lock taken is a brief one. To validate it later, remove `notValid` in a later migration. pgy then emits `ALTER TABLE ... VALIDATE CONSTRAINT`, which checks the rows without blocking writes. This applies to check constraints too. A constraint validated outside pgy while the YAML still says `notValid: true` is not treated as a change.
+`no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. `notValid: true` adds the constraint without checking existing rows, so the only lock taken is a brief one. Before PostgreSQL 18, a NOT VALID foreign key can't be added to a partitioned table. `pgy diff` then adds it validated if the table is new in the same migration, and otherwise emits nothing and prints a warning. To validate it later, remove `notValid` in a later migration. pgy then emits `ALTER TABLE ... VALIDATE CONSTRAINT`, which checks the rows without blocking writes. This applies to check constraints too. A constraint validated outside pgy while the YAML still says `notValid: true` is not treated as a change.
 
 ### Triggers
 

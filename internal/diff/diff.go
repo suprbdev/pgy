@@ -2704,10 +2704,15 @@ func joinBoundList(vals []string) string {
     return strings.Join(out, ", ")
 }
 
+var sqlLiteralRe = regexp.MustCompile(`^'(?:[^']|'')*'(?:::[\w ."\[\]()]+)?$`)
+
 // partitionBoundLiteral renders one bound value: MINVALUE/MAXVALUE keywords,
-// numbers, booleans, and NULL stay bare; everything else becomes a string literal.
+// numbers, booleans, NULL and values already written as SQL string literals
+// ('2024-01-01', optionally with a cast) stay as they are; everything else
+// becomes a string literal.
 func partitionBoundLiteral(v string) string {
     t := strings.TrimSpace(v)
+    if sqlLiteralRe.MatchString(t) { return t }
     switch strings.ToLower(t) {
     case "minvalue", "maxvalue", "true", "false", "null":
         return strings.ToLower(t)
@@ -3641,6 +3646,15 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     // Foreign keys
     for _, fk := range dt.ForeignKeys {
         if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
+        if fk.NotValid && dt.PartitionBy != nil && live.ServerVersion > 0 && live.ServerVersion < 180000 && !liveConstraints[truncateIdent(fk.Name)] {
+            if lt != nil {
+                plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("foreign key %s not added: PostgreSQL %d cannot add a NOT VALID foreign key to a partitioned table (supported from 18); drop notValid to add it validated, which locks the partitions while it checks them", fk.Name, live.ServerVersion/10000)})
+                continue
+            }
+            c := *fk
+            c.NotValid = false
+            fk = &c
+        }
         def := renderFKDef(fk)
         fkName := truncateIdent(fk.Name)
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), def)
