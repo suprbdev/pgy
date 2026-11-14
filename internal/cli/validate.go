@@ -34,8 +34,8 @@ Exit codes:
                 enc.SetIndent("", "  ")
                 if err := enc.Encode(issues); err != nil { return err }
             } else {
-                for _, i := range issues { fmt.Fprintln(cmd.OutOrStdout(), i) }
-                if !cfg.Quiet && len(issues) == 0 { fmt.Fprintf(cmd.OutOrStdout(), "%d schema files OK\n", len(paths)) }
+                for _, i := range issues { fmt.Println(i) }
+                if !cfg.Quiet && len(issues) == 0 { fmt.Printf("%d schema files OK\n", len(paths)) }
             }
             if validate.HasErrors(issues) {
                 cmd.SilenceUsage = true
