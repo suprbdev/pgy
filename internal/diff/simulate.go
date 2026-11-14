@@ -13,7 +13,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 
     for _, keys := range [][]string{
         mapKeys(desired.Types), mapKeys(desired.Functions), mapKeys(desired.Procedures),
-        mapKeys(desired.Tables), mapKeys(desired.Views), mapKeys(desired.Sequences), mapKeys(desired.Domains), mapKeys(desired.Collations),
+        mapKeys(desired.Tables), mapKeys(desired.Views), mapKeys(desired.Sequences), mapKeys(desired.Domains), mapKeys(desired.Collations), mapKeys(desired.TSConfigs), mapKeys(desired.TSDictionaries),
     } {
         for _, k := range keys {
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
@@ -121,6 +121,22 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         for _, t := range et.Tags { le.Tags = append(le.Tags, strings.ToUpper(strings.TrimSpace(t))) }
         if et.Enabled != "" { le.Enabled = et.Enabled }
         out.EventTriggers[truncateIdent(name)] = le
+    }
+
+    for k, td := range desired.TSDictionaries {
+        if td == nil || td.Template == "" { continue }
+        out.TSDictionaries[k] = true
+        if td.Comment != "" { out.TSComments["dict:"+k] = td.Comment }
+    }
+    for k, tc := range desired.TSConfigs {
+        if tc == nil || (tc.Copy == "" && tc.Parser == "" && out.TSConfigs[k] == nil) { continue }
+        m := map[string][]string{}
+        for tok, d := range out.TSConfigs[k] { m[tok] = d }
+        for tok, d := range tc.Mappings {
+            if len(d) == 0 { delete(m, tok) } else { m[tok] = append([]string(nil), d...) }
+        }
+        out.TSConfigs[k] = m
+        if tc.Comment != "" { out.TSComments["config:"+k] = tc.Comment }
     }
 
     for k, co := range desired.Collations {
@@ -418,6 +434,9 @@ func cloneLive(l *Live) *Live {
         ViewTables:         cloneMap(l.ViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),
+        TSConfigs:          cloneMap(l.TSConfigs, func(m map[string][]string) map[string][]string { return cloneMap(m, func(v []string) []string { return append([]string(nil), v...) }) }),
+        TSDictionaries:     cloneSet(l.TSDictionaries),
+        TSComments:         cloneMap(l.TSComments, nil),
         Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
         EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),

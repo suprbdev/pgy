@@ -1042,6 +1042,34 @@ eventTriggers:
 
 Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension.
 
+## Text Search
+
+Text search configurations and dictionaries are declared inside `schema <name>:` blocks with `text search configuration <name>:` and `text search dictionary <name>:` keys. Both are created before types and tables, so generated `tsvector` columns and indexes can use them.
+
+```yaml
+extensions: [unaccent]
+schema app:
+  text search dictionary english_nostop:
+    template: snowball
+    options: {language: english}
+  text search configuration english_unaccent:
+    copy: pg_catalog.english          # or parser: default
+    mappings:
+      asciiword: [unaccent, app.english_nostop]
+      word: [unaccent, app.english_nostop]
+      email: []                       # remove the mapping
+    comment: accent-insensitive english
+  table docs:
+    columns:
+      body: {type: text}
+      tsv:
+        type: tsvector
+        nullable: true
+        generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
+```
+
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. Dictionaries are create-only. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+
 ## Collation Definitions
 
 Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.

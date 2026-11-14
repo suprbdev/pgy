@@ -25,6 +25,8 @@ type Database struct {
     Domains map[string]*Domain `yaml:"-"`
     Roles map[string]*Role `yaml:"-"`
     Collations map[string]*Collation `yaml:"-"`
+    TSDictionaries map[string]*TSDictionary `yaml:"-"`
+    TSConfigs      map[string]*TSConfig     `yaml:"-"`
     // EventTriggers is nil when the YAML has no eventTriggers block (event
     // triggers unmanaged) and authoritative for pruning when present.
     EventTriggers map[string]*EventTrigger `yaml:"-"`
@@ -99,6 +101,30 @@ type EventTrigger struct {
     Function string   // function returning event_trigger, e.g. public.log_ddl()
     Enabled  string   // origin (default) | disabled | replica | always
     Comment  string
+}
+
+// TSDictionary is a CREATE TEXT SEARCH DICTIONARY declaration (create-only).
+type TSDictionary struct {
+    Schema    string
+    Name      string
+    Template  string
+    Options   map[string]string
+    DependsOn []string `yaml:"dependsOn"`
+    Comment   string
+}
+
+// TSConfig is a CREATE TEXT SEARCH CONFIGURATION declaration: a copy of an
+// existing configuration or a parser, plus token type -> dictionary mapping
+// overrides. Mappings lists only the token types the YAML manages; an empty
+// dictionary list drops that token type's mapping.
+type TSConfig struct {
+    Schema    string
+    Name      string
+    Copy      string
+    Parser    string
+    Mappings  map[string][]string
+    DependsOn []string `yaml:"dependsOn"`
+    Comment   string
 }
 
 // Collation is a CREATE COLLATION declaration, either from provider options
@@ -461,6 +487,14 @@ func Merge(dbs []*Database) *Database {
             if merged.Sequences == nil { merged.Sequences = map[string]*Sequence{} }
             for k, v := range d.Sequences { merged.Sequences[k] = v }
         }
+        if len(d.TSDictionaries) > 0 {
+            if merged.TSDictionaries == nil { merged.TSDictionaries = map[string]*TSDictionary{} }
+            for k, v := range d.TSDictionaries { merged.TSDictionaries[k] = v }
+        }
+        if len(d.TSConfigs) > 0 {
+            if merged.TSConfigs == nil { merged.TSConfigs = map[string]*TSConfig{} }
+            for k, v := range d.TSConfigs { merged.TSConfigs[k] = v }
+        }
         if len(d.Collations) > 0 {
             if merged.Collations == nil { merged.Collations = map[string]*Collation{} }
             for k, v := range d.Collations { merged.Collations[k] = v }
@@ -541,6 +575,8 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.Sequences = map[string]*Sequence{}
     out.Domains = map[string]*Domain{}
     out.Collations = map[string]*Collation{}
+    out.TSDictionaries = map[string]*TSDictionary{}
+    out.TSConfigs = map[string]*TSConfig{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
@@ -828,6 +864,14 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if sq != nil {
                 full := qualify(schemaName, sq.Name)
                 db.Sequences[full] = sq
+            }
+        } else if strings.HasPrefix(key, "text search configuration ") {
+            if c := parseTSConfig(schemaName, key, body); c != nil {
+                db.TSConfigs[qualify(schemaName, c.Name)] = c
+            }
+        } else if strings.HasPrefix(key, "text search dictionary ") {
+            if d := parseTSDictionary(schemaName, key, body); d != nil {
+                db.TSDictionaries[qualify(schemaName, d.Name)] = d
             }
         } else if strings.HasPrefix(key, "collation ") {
             if co := parseCollation(schemaName, key, body); co != nil {
@@ -1428,6 +1472,24 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, td := range d.TSDictionaries {
+        if td == nil { continue }
+        e := Entity{Key: k, Kind: "tsdictionary", DependsOn: td.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
+    for k, tc := range d.TSConfigs {
+        if tc == nil { continue }
+        deps := tc.DependsOn
+        for _, dicts := range tc.Mappings {
+            for _, dict := range dicts {
+                if dk := qualify("", dict); d.TSDictionaries[dk] != nil { deps = append(append([]string{}, deps...), "text search dictionary "+dk) }
+            }
+        }
+        e := Entity{Key: k, Kind: "tsconfig", DependsOn: deps}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, dm := range d.Domains {
         if dm == nil { continue }
         e := Entity{Key: k, Kind: "domain", DependsOn: dm.DependsOn}
@@ -1495,7 +1557,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     // natural create order), then name. Without this, Kahn's queue would
     // follow Go's randomized map iteration and the buffer would differ
     // between runs on identical input.
-    kindRank := map[string]int{"extension": 0, "collation": 1, "type": 2, "domain": 3, "sequence": 4, "function": 5, "procedure": 6, "table": 7, "view": 8}
+    kindRank := map[string]int{"extension": 0, "collation": 1, "tsdictionary": 2, "tsconfig": 3, "type": 4, "domain": 5, "sequence": 6, "function": 7, "procedure": 8, "table": 9, "view": 10}
     entityLess := func(a, b string) bool {
         ra, rb := kindRank[entityMap[a].Kind], kindRank[entityMap[b].Kind]
         if ra != rb { return ra < rb }
@@ -1658,6 +1720,8 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
         {"type ", func(k string) bool { return d.Types[k] != nil }},
         {"domain ", func(k string) bool { return d.Domains[k] != nil }},
         {"collation ", func(k string) bool { return d.Collations[k] != nil }},
+        {"text search configuration ", func(k string) bool { return d.TSConfigs[k] != nil }},
+        {"text search dictionary ", func(k string) bool { return d.TSDictionaries[k] != nil }},
         {"sequence ", func(k string) bool { return d.Sequences[k] != nil }},
         {"materialized view ", func(k string) bool { return d.Views[k] != nil }},
         {"view ", func(k string) bool { return d.Views[k] != nil }},
@@ -1844,6 +1908,35 @@ func parseEventTriggers(v any) map[string]*EventTrigger {
         out[name] = et
     }
     return out
+}
+
+func parseTSConfig(schemaName, key string, body any) *TSConfig {
+    c := &TSConfig{Schema: schemaName, Name: strings.TrimSpace(strings.TrimPrefix(key, "text search configuration "))}
+    m, ok := body.(map[string]any)
+    if !ok { return c }
+    if s, ok := m["copy"].(string); ok { c.Copy = strings.TrimSpace(s) }
+    if s, ok := m["parser"].(string); ok { c.Parser = strings.TrimSpace(s) }
+    if mm, ok := m["mappings"].(map[string]any); ok {
+        c.Mappings = map[string][]string{}
+        for tok, dicts := range mm { c.Mappings[strings.ToLower(strings.TrimSpace(tok))] = parseStringListFromNode(dicts) }
+    }
+    if dep, ok := m["dependsOn"]; ok { c.DependsOn = parseStringListFromNode(dep) }
+    if s, ok := m["comment"].(string); ok { c.Comment = s }
+    return c
+}
+
+func parseTSDictionary(schemaName, key string, body any) *TSDictionary {
+    d := &TSDictionary{Schema: schemaName, Name: strings.TrimSpace(strings.TrimPrefix(key, "text search dictionary "))}
+    m, ok := body.(map[string]any)
+    if !ok { return d }
+    if s, ok := m["template"].(string); ok { d.Template = strings.TrimSpace(s) }
+    if om, ok := m["options"].(map[string]any); ok {
+        d.Options = map[string]string{}
+        for k, v := range om { d.Options[k] = scalarToString(v) }
+    }
+    if dep, ok := m["dependsOn"]; ok { d.DependsOn = parseStringListFromNode(dep) }
+    if s, ok := m["comment"].(string); ok { d.Comment = s }
+    return d
 }
 
 func parseCollation(schemaName, key string, body any) *Collation {

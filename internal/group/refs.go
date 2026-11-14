@@ -17,15 +17,17 @@ const (
     kindFunction  = "function"
     kindProcedure = "procedure"
     kindCollation = "collation"
+    kindTSConfig  = "tsconfig"
+    kindTSDict    = "tsdictionary"
 )
 
 var (
-    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure, kindCollation}
+    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure, kindCollation, kindTSConfig, kindTSDict}
     collationKinds = []string{kindCollation}
     typeKinds   = []string{kindType, kindDomain}
     callKinds    = []string{kindFunction}
-    exprKinds    = []string{kindFunction, kindType, kindDomain}
-    defaultKinds = []string{kindFunction, kindSequence, kindType, kindDomain}
+    exprKinds    = []string{kindFunction, kindType, kindDomain, kindTSConfig}
+    defaultKinds = []string{kindFunction, kindSequence, kindType, kindDomain, kindTSConfig}
     returnKinds  = []string{kindType, kindDomain, kindTable, kindView}
     policyKinds  = []string{kindTable, kindView, kindFunction, kindProcedure, kindType, kindDomain}
 )
@@ -56,6 +58,8 @@ func declared(d *schema.Database) []ref {
     add(kindFunction, nonNilKeys(d.Functions))
     add(kindProcedure, nonNilKeys(d.Procedures))
     add(kindCollation, nonNilKeys(d.Collations))
+    add(kindTSConfig, nonNilKeys(d.TSConfigs))
+    add(kindTSDict, nonNilKeys(d.TSDictionaries))
     return out
 }
 
@@ -87,6 +91,10 @@ func isDeclared(d *schema.Database, r ref) bool {
         return d.Procedures[r.key] != nil
     case kindCollation:
         return d.Collations[r.key] != nil
+    case kindTSConfig:
+        return d.TSConfigs[r.key] != nil
+    case kindTSDict:
+        return d.TSDictionaries[r.key] != nil
     }
     return false
 }
@@ -110,6 +118,10 @@ func existsLive(l *diff.Live, r ref) bool {
         return hasSignaturePrefix(l.Procedures, schema.RoutineName(r.key))
     case kindCollation:
         return l.Collations[r.key]
+    case kindTSConfig:
+        return l.TSConfigs[r.key] != nil
+    case kindTSDict:
+        return l.TSDictionaries[r.key]
     }
     return false
 }
@@ -180,7 +192,7 @@ func (ix *index) mentions(text string, kinds []string) []ref {
 func (ix *index) match(t token, kinds []string) []ref {
     var out []ref
     for _, r := range ix.byName[t.name] {
-        if t.lit && r.kind != kindSequence { continue }
+        if t.lit && r.kind != kindSequence && r.kind != kindTSConfig { continue }
         if !containsKind(kinds, r.kind) { continue }
         if t.qual != "" {
             schemaName := strings.ToLower(schema.RoutineName(r.key))

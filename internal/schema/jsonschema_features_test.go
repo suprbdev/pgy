@@ -22,6 +22,10 @@ eventTriggers:
 schema public:
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
+  text search dictionary nostop: {template: snowball, options: {language: english}}
+  text search configuration english_custom:
+    copy: pg_catalog.english
+    mappings: {asciiword: [public.nostop], email: []}
   type floatrange: {type: range, subtype: float8, subtypeDiff: float8mi, multirangeTypeName: floatmultirange}
   sequence order_no: {as: bigint, cycle: false, ownedBy: none}
   table orders:

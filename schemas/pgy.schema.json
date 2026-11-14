@@ -190,7 +190,9 @@
         "^materialized view [^\\s].*$": { "$ref": "#/definitions/view" },
         "^sequence [^\\s].*$": { "$ref": "#/definitions/sequence" },
         "^domain [^\\s].*$": { "$ref": "#/definitions/domain" },
-        "^collation [^\\s].*$": { "$ref": "#/definitions/collation" }
+        "^collation [^\\s].*$": { "$ref": "#/definitions/collation" },
+        "^text search configuration [^\\s].*$": { "$ref": "#/definitions/tsConfig" },
+        "^text search dictionary [^\\s].*$": { "$ref": "#/definitions/tsDictionary" }
       },
       "additionalProperties": false
     },
@@ -713,6 +715,34 @@
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
+      "additionalProperties": false
+    },
+    "tsConfig": {
+      "description": "Body of a `text search configuration <name>:` declaration.",
+      "type": "object",
+      "properties": {
+        "copy": { "type": "string", "description": "Configuration to copy, e.g. pg_catalog.english." },
+        "parser": { "type": "string", "description": "Parser to start from instead (usually default)." },
+        "mappings": {
+          "type": "object",
+          "description": "Token type -> dictionaries in order; [] removes the mapping. Unlisted token types are unmanaged.",
+          "additionalProperties": { "$ref": "#/definitions/stringList" }
+        },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "tsDictionary": {
+      "description": "Body of a `text search dictionary <name>:` declaration (create-only).",
+      "type": "object",
+      "properties": {
+        "template": { "type": "string", "minLength": 1, "description": "e.g. simple, snowball, ispell, synonym, thesaurus." },
+        "options": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["template"],
       "additionalProperties": false
     },
     "collation": {
