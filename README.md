@@ -98,6 +98,7 @@ pgy validate --json          # findings as JSON
 ```
 pgy diff --dsn "$PG_DSN" --schema-root ./schemas --schemas "base.yml,ext.yml"
 # exit code 2 when changes are detected
+pgy diff --dsn "$PG_DSN" --buffer - | less   # print the SQL instead of writing the buffer file
 ```
 
   `pgy diff` warns on stderr about statements that lock or rewrite a table that already exists. They are listed in [Lock warnings](#lock-warnings) below.
