@@ -138,10 +138,15 @@ type Policy struct {
 }
 
 type Constraint struct {
-    Name       string
-    Type       string   // check, unique, exclude
-    Expression string   // for check or exclude
-    Columns    []string // for unique
+    Name              string
+    Type              string   // check, unique, exclude
+    Expression        string   // for check or exclude
+    Columns           []string // for unique
+    NullsNotDistinct  bool     // unique: NULLS NOT DISTINCT (PostgreSQL 15+)
+    Deferrable        bool     // unique/exclude
+    InitiallyDeferred bool     // unique/exclude; implies Deferrable
+    NoInherit         bool     // check: NO INHERIT
+    NotValid          bool     // check: added NOT VALID (existing rows not checked)
 }
 
 type Column struct {
@@ -168,12 +173,17 @@ type Index struct {
 }
 
 type ForeignKey struct {
-    Name      string
-    Columns   []string
-    RefTable  string
-    RefColumns []string
-    OnDelete  string
-    Comment   string // empty means unmanaged
+    Name              string
+    Columns           []string
+    RefTable          string
+    RefColumns        []string
+    OnDelete          string
+    OnUpdate          string
+    Match             string // full | simple | partial (empty = simple)
+    Deferrable        bool
+    InitiallyDeferred bool   // implies Deferrable
+    NotValid          bool   // added NOT VALID (existing rows not checked)
+    Comment           string // empty means unmanaged
 }
 
 type Trigger struct {
@@ -923,6 +933,11 @@ func parseForeignKeys(v any) []*ForeignKey {
                     fk.RefColumns = parseStringListFromNode(ref["columns"])
                 }
                 if od, ok := dm["onDelete"].(string); ok { fk.OnDelete = od }
+                if ou, ok := dm["onUpdate"].(string); ok { fk.OnUpdate = ou }
+                if mt, ok := dm["match"].(string); ok { fk.Match = strings.ToLower(strings.TrimSpace(mt)) }
+                if b, ok := dm["deferrable"].(bool); ok { fk.Deferrable = b }
+                if b, ok := dm["initiallyDeferred"].(bool); ok { fk.InitiallyDeferred = b }
+                if b, ok := dm["notValid"].(bool); ok { fk.NotValid = b }
                 if cm, ok := dm["comment"].(string); ok { fk.Comment = cm }
             }
             out = append(out, fk)
@@ -964,6 +979,11 @@ func parseConstraints(v any) []*Constraint {
                 if e, ok := dm["expression"].(string); ok { c.Expression = e }
                 if e, ok := dm["def"].(string); ok { c.Expression = e } // alias
                 if cols, ok := dm["columns"]; ok { c.Columns = parseStringListFromNode(cols) }
+                if b, ok := dm["nullsNotDistinct"].(bool); ok { c.NullsNotDistinct = b }
+                if b, ok := dm["deferrable"].(bool); ok { c.Deferrable = b }
+                if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
+                if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
+                if b, ok := dm["notValid"].(bool); ok { c.NotValid = b }
             }
             out = append(out, c)
         }

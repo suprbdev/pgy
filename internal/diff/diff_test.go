@@ -2811,6 +2811,86 @@ func TestConstraintAlterFKEquivalentSkipped(t *testing.T) {
 	}
 }
 
+func TestFKOptionsRendered(t *testing.T) {
+	fk := &schema.ForeignKey{Name: "f", Columns: []string{"pid"}, RefTable: "app.p", RefColumns: []string{"id"},
+		Match: "full", OnUpdate: "CASCADE", OnDelete: "set null", InitiallyDeferred: true, NotValid: true}
+	want := `foreign key ("pid") references "app"."p"("id") match full on update cascade on delete set null deferrable initially deferred not valid`
+	if got := renderFKDef(fk); got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+	fk = &schema.ForeignKey{Name: "f", Columns: []string{"pid"}, RefTable: "app.p", RefColumns: []string{"id"},
+		Match: "simple", OnUpdate: "no action", OnDelete: "NO  ACTION", Deferrable: true}
+	want = `foreign key ("pid") references "app"."p"("id") deferrable`
+	if got := renderFKDef(fk); got != want {
+		t.Errorf("defaults must be omitted: got %s", got)
+	}
+}
+
+func TestFKOptionsEquivalentToLiveSkipped(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"f1": "FOREIGN KEY (id) REFERENCES orgs(id) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED NOT VALID",
+		"f2": "FOREIGN KEY (id) REFERENCES orgs(id) DEFERRABLE",
+		"f3": "FOREIGN KEY (id) REFERENCES orgs(id) ON UPDATE RESTRICT",
+	})
+	desired := constraintAlterDesired(nil, []*schema.ForeignKey{
+		{Name: "f1", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}, Match: "full", OnUpdate: "cascade", OnDelete: "set null", InitiallyDeferred: true, NotValid: true},
+		{Name: "f2", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}, OnDelete: "no action", Deferrable: true},
+		{Name: "f3", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}, OnUpdate: "restrict", NotValid: true},
+	})
+	if p := Plan(live, desired, true); len(p.Alters) != 0 {
+		t.Errorf("equivalent FKs (NOT VALID ignored) must emit no SQL; alters: %v", p.Alters)
+	}
+}
+
+func TestFKOnUpdateChangeRecreatedUnsafe(t *testing.T) {
+	live := constraintAlterLive(map[string]string{"f": "FOREIGN KEY (id) REFERENCES orgs(id) ON UPDATE CASCADE"})
+	desired := constraintAlterDesired(nil, []*schema.ForeignKey{
+		{Name: "f", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}},
+	})
+	p := Plan(live, desired, true)
+	if !findAlter(p, `drop constraint "f"`) || !findAlter(p, `add constraint "f" foreign key ("id") references "orgs"("id");`) {
+		t.Errorf("dropping ON UPDATE CASCADE is a definition change; alters: %v", p.Alters)
+	}
+}
+
+func TestConstraintOptionsRendered(t *testing.T) {
+	cases := map[string]*schema.Constraint{
+		`check (a > 0) no inherit not valid`:              {Type: "check", Expression: "a > 0", NoInherit: true, NotValid: true},
+		`unique nulls not distinct ("a", "b") deferrable`: {Type: "unique", Columns: []string{"a", "b"}, NullsNotDistinct: true, Deferrable: true},
+		`unique ("a") deferrable initially deferred`:      {Type: "unique", Columns: []string{"a"}, InitiallyDeferred: true},
+		`exclude using gist (a with =) deferrable`:        {Type: "exclude", Expression: "using gist (a with =)", Deferrable: true},
+	}
+	for want, ct := range cases {
+		if got := renderConstraintDef(ct); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestConstraintOptionsEquivalentToLiveSkipped(t *testing.T) {
+	live := constraintAlterLive(map[string]string{
+		"c1": "CHECK ((id > 0)) NO INHERIT NOT VALID",
+		"c2": "CHECK ((id > 0))",
+		"u1": "UNIQUE (id, email) DEFERRABLE INITIALLY DEFERRED",
+		"u2": "UNIQUE NULLS NOT DISTINCT (email)",
+		"x1": "EXCLUDE USING gist (id WITH =) DEFERRABLE",
+	})
+	desired := constraintAlterDesired([]*schema.Constraint{
+		{Name: "c1", Type: "check", Expression: "id > 0", NoInherit: true},
+		{Name: "c2", Type: "check", Expression: "id > 0", NotValid: true},
+		{Name: "u1", Type: "unique", Columns: []string{"id", "email"}, InitiallyDeferred: true},
+		{Name: "u2", Type: "unique", Columns: []string{"email"}, NullsNotDistinct: true},
+		{Name: "x1", Type: "exclude", Expression: "using gist (id with =)", Deferrable: true},
+	}, nil)
+	if p := Plan(live, desired, true); len(p.Alters) != 0 {
+		t.Errorf("equivalent constraints must emit no SQL; alters: %v", p.Alters)
+	}
+	desired.Tables["public.users"].Constraints[3].NullsNotDistinct = false
+	if p := Plan(live, desired, true); !findAlter(p, `add constraint "u2" unique ("email");`) {
+		t.Errorf("dropping NULLS NOT DISTINCT is a definition change; alters: %v", p.Alters)
+	}
+}
+
 func TestConstraintAlterNoDefRecordedNoChange(t *testing.T) {
 	// live constraint known by name only (no definition captured) — keep old
 	// name-only behavior and emit nothing even under --unsafe

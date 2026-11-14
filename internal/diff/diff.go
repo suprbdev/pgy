@@ -2289,11 +2289,33 @@ func normalizeDefaultExpr(s string) string {
 }
 
 // renderFKDef renders the definition body of a foreign key constraint
-// (everything after "add constraint <name>").
+// (everything after "add constraint <name>"). Clauses are emitted in
+// pg_get_constraintdef() order and defaults (MATCH SIMPLE, NO ACTION) are
+// omitted as it omits them, so a live definition compares equal.
 func renderFKDef(fk *schema.ForeignKey) string {
     def := fmt.Sprintf("foreign key (%s) references %s(%s)", joinIdentList(fk.Columns), pqIdent(fk.RefTable), joinIdentList(fk.RefColumns))
-    if fk.OnDelete != "" { def += " on delete " + strings.ToLower(fk.OnDelete) }
+    if m := strings.ToLower(strings.TrimSpace(fk.Match)); m != "" && m != "simple" { def += " match " + m }
+    if a := fkAction(fk.OnUpdate); a != "" { def += " on update " + a }
+    if a := fkAction(fk.OnDelete); a != "" { def += " on delete " + a }
+    def += deferralClause(fk.Deferrable, fk.InitiallyDeferred)
+    if fk.NotValid { def += " not valid" }
     return def
+}
+
+func fkAction(a string) string {
+    a = strings.Join(strings.Fields(strings.ToLower(a)), " ")
+    if a == "no action" { return "" }
+    return a
+}
+
+func deferralClause(deferrable, initiallyDeferred bool) string {
+    switch {
+    case initiallyDeferred:
+        return " deferrable initially deferred"
+    case deferrable:
+        return " deferrable"
+    }
+    return ""
 }
 
 // renderConstraintDef renders the definition body of a named check/unique/
@@ -2301,11 +2323,16 @@ func renderFKDef(fk *schema.ForeignKey) string {
 func renderConstraintDef(ct *schema.Constraint) string {
     switch strings.ToLower(ct.Type) {
     case "check":
-        return fmt.Sprintf("check (%s)", ct.Expression)
+        def := fmt.Sprintf("check (%s)", ct.Expression)
+        if ct.NoInherit { def += " no inherit" }
+        if ct.NotValid { def += " not valid" }
+        return def
     case "unique":
-        return fmt.Sprintf("unique (%s)", joinIdentList(ct.Columns))
+        nulls := ""
+        if ct.NullsNotDistinct { nulls = " nulls not distinct" }
+        return fmt.Sprintf("unique%s (%s)", nulls, joinIdentList(ct.Columns)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
-        return fmt.Sprintf("exclude %s", ct.Expression)
+        return fmt.Sprintf("exclude %s", ct.Expression) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
     return ""
 }
@@ -2406,7 +2433,8 @@ func canonicalTriggerEvents(events []string) []string {
 // against pg_get_constraintdef() output: after canonicalizeExpr (IN/BETWEEN/
 // LIKE rewrites, cast removal), outside single-quoted strings it strips
 // double quotes, parentheses, whitespace, and "public." qualifiers, and
-// lowercases. Stripping parentheses and whitespace can make
+// lowercases. A trailing NOT VALID is ignored: validating the constraint
+// later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
 func normalizeConstraintDef(s string) string {
@@ -2436,7 +2464,7 @@ func normalizeConstraintDef(s string) string {
         if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
         b.WriteRune(r)
     }
-    return strings.ReplaceAll(b.String(), "public.", "")
+    return strings.TrimSuffix(strings.ReplaceAll(b.String(), "public.", ""), "notvalid")
 }
 
 func isCastTypeChar(r rune) bool {
