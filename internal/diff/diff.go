@@ -9,6 +9,7 @@ import (
     "sort"
     "strconv"
     "strings"
+    "sync"
 
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgconn"
@@ -4220,7 +4221,11 @@ var columnTypeAliases = [][2]string{
 // spellings (varchar(255)) and live format_type output (character varying(255)).
 // serial types normalize to their base integer type so a YAML `serial` column
 // never diffs against its live `integer` + nextval default form.
-func normalizeColumnType(t string) string {
+func normalizeColumnType(t string) string { return memoized(&normalizeColumnTypeCache, t, normalizeColumnTypeUncached) }
+
+var normalizeColumnTypeCache sync.Map
+
+func normalizeColumnTypeUncached(t string) string {
     s := strings.ToLower(strings.TrimSpace(t))
     s = strings.ReplaceAll(s, `"`, "")
     s = strings.Join(strings.Fields(s), " ")
@@ -4279,11 +4284,25 @@ func defaultsEqual(desired, live string) bool {
         normalizeConstraintDef(desired) == normalizeConstraintDef(live)
 }
 
+// memoized returns f(s), caching it in cache. The normalizers it wraps are
+// pure and see the same strings many times, especially in split plans,
+// which re-diff every earlier group at each step.
+func memoized(cache *sync.Map, s string, f func(string) string) string {
+    if v, ok := cache.Load(s); ok { return v.(string) }
+    v := f(s)
+    cache.Store(s, v)
+    return v
+}
+
 // normalizeDefaultExpr canonicalizes a default expression for comparison:
 // runs canonicalizeExpr (live defaults come back as 'x'::text, '-1'::integer
 // or nextval('s'::regclass)), lowercases everything outside single-quoted
 // strings, and collapses whitespace.
-func normalizeDefaultExpr(s string) string {
+func normalizeDefaultExpr(s string) string { return memoized(&normalizeDefaultExprCache, s, normalizeDefaultExprUncached) }
+
+var normalizeDefaultExprCache sync.Map
+
+func normalizeDefaultExprUncached(s string) string {
     var b strings.Builder
     inQ := false
     rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
@@ -4534,7 +4553,11 @@ func canonicalTriggerEvents(events []string) []string {
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
-func normalizeConstraintDef(s string) string {
+func normalizeConstraintDef(s string) string { return memoized(&normalizeConstraintDefCache, s, normalizeConstraintDefUncached) }
+
+var normalizeConstraintDefCache sync.Map
+
+func normalizeConstraintDefUncached(s string) string {
     var b strings.Builder
     inQ := false
     rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
