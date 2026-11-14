@@ -11,9 +11,6 @@ import (
 	"github.com/suprbdev/pgy/internal/schema"
 )
 
-// TestIntegrationYAMLIdempotent applies each YAML schema to a fresh schema
-// and asserts that a second --unsafe diff against the result is empty. SCH in
-// the YAML is replaced by the per-case schema name.
 func TestIntegrationYAMLIdempotent(t *testing.T) {
 	cases := map[string]string{
 		"long_names": `
@@ -223,6 +220,14 @@ schema SCH:
         using: "id <> 0"
 `,
 	}
+	assertYAMLIdempotent(t, cases)
+}
+
+// assertYAMLIdempotent applies each YAML case (SCH replaced by a fresh
+// per-case schema) with an --unsafe plan and fails if a second --unsafe plan
+// against the result is not empty.
+func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
+	t.Helper()
 	pool := connect(t)
 	ctx := context.Background()
 	for name, y := range cases {
