@@ -141,7 +141,7 @@ func filterUntil(files []string, until string) ([]string, error) {
 
 func checksumBody(b []byte) string {
     // ignore header comment lines starting with -- up to first blank line
-    s := string(b)
+    s := strings.ReplaceAll(string(b), "\r\n", "\n")
     lines := strings.Split(s, "\n")
     body := []string{}
     headerDone := false

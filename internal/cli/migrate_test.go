@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+    "strings"
+    "testing"
+)
 
 func TestChecksumParseAndBody(t *testing.T) {
     sql := "-- pgy 0.1.0\n-- checksum deadbeef\n\ncreate table t(id int);\n"
@@ -14,3 +17,11 @@ func TestChecksumParseAndBody(t *testing.T) {
 }
 
 
+
+func TestChecksumIgnoresCRLF(t *testing.T) {
+    lf := "-- pgy\n-- checksum x\n\ncreate table a (id int);\ncreate table b (id int);\n"
+    crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+    if checksumBody([]byte(lf)) != checksumBody([]byte(crlf)) {
+        t.Error("a migration checked out with CRLF line endings must keep its checksum")
+    }
+}
