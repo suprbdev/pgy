@@ -3356,7 +3356,7 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
     revokes, grants := []string{}, []string{}
     for _, dp := range desired.DefaultPrivileges {
         if dp == nil { continue }
-        role := dp.ForRole
+        role := resolveRole(dp.ForRole, live.CurrentUser)
         if role == "" { role = live.CurrentUser }
         schemas := dp.Schemas
         if len(schemas) == 0 { schemas = []string{""} }
@@ -3374,7 +3374,7 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
                 for _, grantee := range sortedKeys(dp.Grants[kind]) {
                     want := map[string]bool{}
                     for _, p := range dp.Grants[kind][grantee] { want[strings.ToLower(p)] = true }
-                    have := liveG[strings.ToLower(grantee)]
+                    have := liveG[strings.ToLower(resolveRole(grantee, live.CurrentUser))]
                     missing, extra := []string{}, []string{}
                     for _, p := range sortedKeys(want) {
                         if !have[p] { missing = append(missing, p) }

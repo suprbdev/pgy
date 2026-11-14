@@ -1,6 +1,9 @@
 package integration
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIntegrationRoleKeywordsIdempotent(t *testing.T) {
 	assertYAMLIdempotent(t, map[string]string{
@@ -15,5 +18,21 @@ schema SCH:
     grants:
       current_user: [select, insert]
 `,
+	})
+}
+
+func TestIntegrationDefaultPrivilegesRoleKeywordsIdempotent(t *testing.T) {
+	pool := connect(t)
+	reader := freshRole(t, pool, "kwreader")
+	assertYAMLIdempotent(t, map[string]string{
+		"defaults": strings.ReplaceAll(`
+defaultPrivileges:
+  - for: current_user
+    in: [SCH]
+    tables: {READER: [select]}
+schema SCH:
+  table t:
+    columns: {id: {type: int}}
+`, "READER", reader),
 	})
 }

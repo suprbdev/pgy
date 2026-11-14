@@ -633,7 +633,7 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
     for _, dp := range desired.DefaultPrivileges {
         if dp == nil { continue }
         for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }
-        role := dp.ForRole
+        role := resolveRole(dp.ForRole, out.CurrentUser)
         if role == "" { role = out.CurrentUser }
         schemas := dp.Schemas
         if len(schemas) == 0 { schemas = []string{""} }
@@ -648,7 +648,7 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
                 for grantee, privs := range grants {
                     set := map[string]bool{}
                     for _, p := range privs { set[strings.ToLower(p)] = true }
-                    out.DefaultACLs[key][strings.ToLower(grantee)] = set
+                    out.DefaultACLs[key][strings.ToLower(resolveRole(grantee, out.CurrentUser))] = set
                 }
             }
         }
