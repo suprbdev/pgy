@@ -4623,6 +4623,73 @@ func TestAlterColumnIdentityNeverAltered(t *testing.T) {
 	}
 }
 
+func TestGeneratedColumnCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", ColumnOrder: []string{"price", "qty", "total"}, Columns: map[string]*schema.Column{
+			"price": {Type: "numeric"},
+			"qty":   {Type: "int"},
+			"total": {Type: "numeric", Nullable: true, Generated: "price * qty", Default: "0"},
+		}},
+	}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create table if not exists "public"."t" ("price" numeric not null, "qty" int not null, "total" numeric generated always as (price * qty) stored);`
+	if !findCreate(p, want) {
+		t.Errorf("want %q, got %+v", want, p.Creates)
+	}
+	live := liveWithTable("public.t", map[string]*LiveColumn{"price": {Type: "numeric"}, "qty": {Type: "integer"}})
+	if p := Plan(live, desired, false); !findCreate(p, `alter table "public"."t" add column "total" numeric generated always as (price * qty) stored;`) {
+		t.Errorf("expected add generated column, got %+v", p.Creates)
+	}
+}
+
+func TestGeneratedColumnSkippedIfSame(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"price": {Type: "numeric"}, "qty": {Type: "integer"},
+		"total": {Type: "numeric", Nullable: true, Generated: "(price * (qty)::numeric)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"price": {Type: "numeric"}, "qty": {Type: "int"},
+			"total": {Type: "numeric", Nullable: true, Generated: "price * qty"},
+		}},
+	}}
+	if sql := Render(Plan(live, desired, true)); sql != "" {
+		t.Errorf("equivalent generated column must not diff, got:\n%s", sql)
+	}
+}
+
+func TestGeneratedColumnLiveNotTreatedAsDefault(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"total": {Type: "numeric", Nullable: true, Generated: "(price * (qty)::numeric)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"total": {Type: "numeric", Nullable: true}}},
+	}}
+	if sql := Render(Plan(live, desired, false)); sql != "" {
+		t.Errorf("a live generated column must never get DROP DEFAULT, got:\n%s", sql)
+	}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 1 || !findAlter(p, `alter column "total" drop expression;`) {
+		t.Errorf("removing generated under --unsafe should drop the expression, got %+v", p.Alters)
+	}
+}
+
+func TestGeneratedColumnExpressionChangedUnsafe(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"total": {Type: "numeric", Nullable: true, Generated: "(price * (qty)::numeric)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"total": {Type: "numeric", Nullable: true, Generated: "price * qty * 2"}}},
+	}}
+	if p := Plan(live, desired, false); len(p.Alters) != 0 {
+		t.Errorf("expression change is gated behind --unsafe, got %+v", p.Alters)
+	}
+	p := Plan(live, desired, true)
+	if !findAlter(p, `alter table "public"."t" alter column "total" set expression as (price * qty * 2);`) {
+		t.Errorf("expected set expression, got %+v", p.Alters)
+	}
+}
+
 func TestAlterColumnNoChangeNoSQL(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{
 		"email": {Type: "text", Nullable: false, Default: "'x'::text"},

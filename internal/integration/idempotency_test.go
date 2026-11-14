@@ -104,6 +104,19 @@ schema SCH:
         columns: [b]
         nullsNotDistinct: true
 `,
+		"generated_columns": `
+schema SCH:
+  table t:
+    columns:
+      price: {type: numeric}
+      qty: {type: int}
+      name: {type: text}
+      total: {type: numeric, nullable: true, generated: "price * qty"}
+      lname: {type: text, nullable: true, generated: "lower(name)"}
+    indexes:
+      t_total:
+        columns: [total desc]
+`,
 		"defaults": `
 schema SCH:
   table t:
