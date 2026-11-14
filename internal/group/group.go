@@ -237,6 +237,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         for _, c := range t.Columns {
             if c == nil { continue }
             hard(ix.mentions(c.Type, typeKinds))
+            hard(ix.mentions(c.Generated, exprKinds))
             soft(ix.mentions(c.Default, defaultKinds))
         }
         for _, fk := range t.ForeignKeys {

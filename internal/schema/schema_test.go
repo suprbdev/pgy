@@ -1336,6 +1336,21 @@ schema app:
 	}
 }
 
+func TestGeneratedColumnParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema public:
+  table t:
+    columns:
+      total: {type: numeric, generated: " price * qty "}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := db.Tables["public.t"].Columns["total"].Generated; got != "price * qty" {
+		t.Errorf("generated = %q", got)
+	}
+}
+
 func TestExtensionsStringShorthand(t *testing.T) {
 	yaml := `
 extensions: [pg_trgm, pgcrypto]

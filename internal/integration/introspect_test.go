@@ -100,3 +100,48 @@ func TestIntegrationExtensionSchemaAndVersion(t *testing.T) {
 		t.Errorf("ltree in %s version %s", nsp, ver)
 	}
 }
+
+func TestIntegrationGeneratedColumnAlter(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+	desired := func(generated string) *schema.Database {
+		return &schema.Database{Tables: map[string]*schema.Table{
+			sch + ".t": {Name: "t", ColumnOrder: []string{"a", "b"}, Columns: map[string]*schema.Column{
+				"a": {Type: "int"},
+				"b": {Type: "int", Nullable: true, Generated: generated},
+			}},
+		}}
+	}
+	plan := func(d *schema.Database) *diff.PlanDiff {
+		t.Helper()
+		live, err := diff.Introspect(ctx, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return diff.Plan(live, d, true)
+	}
+	applyPlan(t, pool, plan(desired("a * 2")))
+	if sql := diff.Render(plan(desired("a * 2"))); sql != "" {
+		t.Fatalf("expected no changes after create, got:\n%s", sql)
+	}
+
+	var version int
+	if err := pool.QueryRow(ctx, "select current_setting('server_version_num')::int").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version >= 170000 {
+		applyPlan(t, pool, plan(desired("a * 3")))
+		if sql := diff.Render(plan(desired("a * 3"))); sql != "" {
+			t.Fatalf("expected no changes after set expression, got:\n%s", sql)
+		}
+	}
+
+	applyPlan(t, pool, plan(desired("")))
+	if sql := diff.Render(plan(desired(""))); sql != "" {
+		t.Fatalf("expected no changes after drop expression, got:\n%s", sql)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`insert into %q.t (a, b) values (1, 42)`, sch)); err != nil {
+		t.Errorf("column should accept writes once no longer generated: %v", err)
+	}
+}

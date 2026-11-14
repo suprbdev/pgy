@@ -116,11 +116,12 @@ type LivePolicy struct {
 }
 
 type LiveColumn struct{
-    Type     string
-    Nullable bool
-    Default  string
-    Comment  string
-    Identity string // "" (none), "always", or "by default"
+    Type      string
+    Nullable  bool
+    Default   string
+    Comment   string
+    Identity  string // "" (none), "always", or "by default"
+    Generated string // generation expression of a generated column ("" = not generated)
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -204,7 +205,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                format_type(a.atttypid, a.atttypmod),
                not a.attnotnull,
                coalesce(pg_get_expr(ad.adbin, ad.adrelid), ''),
-               case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end
+               case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end,
+               a.attgenerated <> ''
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -220,12 +222,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     defer rows.Close()
     for rows.Next() {
         var schemaName, tableName, colName, dataType, def, identity string
-        var nullable bool
-        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
+        var nullable, generated bool
+        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
         if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}; l.Tables[key] = t }
-        t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
+        lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
+        if generated { lc.Generated, lc.Default = def, "" }
+        t.Columns[colName] = lc
     }
     if err := rows.Err(); err != nil { return nil, err }
 
@@ -2150,7 +2154,16 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
         out = append(out, stmt+";")
     }
 
-    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type)
+    if c.Generated != "" || lc.Generated != "" {
+        switch {
+        case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
+            if unsafe { out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated)) }
+        case c.Generated == "" && lc.Generated != "":
+            if unsafe { out = append(out, target+" drop expression;") }
+        }
+    }
+
+    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
     if !generated {
         switch {
         case c.Default != "" && !defaultsEqual(c.Default, lc.Default):
@@ -2475,7 +2488,9 @@ func isCastTypeChar(r rune) bool {
 func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
     if !c.Nullable { parts = append(parts, "not null") }
-    if c.Identity != "" {
+    if c.Generated != "" {
+        parts = append(parts, "generated always as ("+c.Generated+") stored")
+    } else if c.Identity != "" {
         // identity columns cannot also have a default expression
         parts = append(parts, "generated "+c.Identity+" as identity")
     } else if c.Default != "" {
