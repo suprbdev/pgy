@@ -169,6 +169,14 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.ColumnGrants, old, new)
     moveKey(l.RelComments, old, new)
     moveKey(l.Owners, "rel:"+old, "rel:"+new)
+    moveKey(l.Partitions, old, new)
+    for parent, children := range l.Partitions {
+        if i := indexOf(children, old); i >= 0 {
+            cp := append([]string(nil), children...)
+            cp[i] = new
+            l.Partitions[parent] = cp
+        }
+    }
     for k, ls := range l.SequenceDefs {
         if ls != nil && strings.HasPrefix(ls.Owner, old+".") {
             cp := *ls
