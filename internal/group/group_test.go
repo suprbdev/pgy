@@ -30,7 +30,7 @@ func planFiles(t *testing.T, live *diff.Live, paths []string, mode string, unsaf
     t.Helper()
     groups, err := Split(paths, mode)
     if err != nil { t.Fatal(err) }
-    steps, err := Plan(live, paths, groups, unsafe)
+    steps, err := Plan(live, paths, groups, diff.Options{Unsafe: unsafe})
     if err != nil { t.Fatal(err) }
     return steps
 }

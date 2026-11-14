@@ -165,7 +165,8 @@ How groups are ordered and filled:
   later group, so circular references between files still work.
 - Extensions and roles always go into the first migration.
 - With `--unsafe`, drops are only emitted in the last migration, so a column
-  declared by a later file is never dropped and re-added.
+  declared by a later file is never dropped and re-added. The same goes for
+  `--prune`.
 - Against an existing database, only groups with changes produce migrations.
 
 Object references inside SQL text (view queries, function bodies, defaults,
@@ -206,6 +207,18 @@ Diff behavior highlights:
 - Creates missing schemas, extensions, tables, types, functions, views, triggers, and more; skips objects already live.
 - Adds missing columns to existing tables; alters changed columns and constraints (type/default/nullability changes gated behind `--unsafe`).
 - Drops columns only with `--unsafe`.
+- Drops whole objects removed from YAML only with `--unsafe --prune` (see below).
+
+### Pruning removed objects
+
+`pgy diff --unsafe --prune` also drops what the YAML no longer declares, in every schema the YAML declares at least one object in:
+
+- tables, views, materialized views, functions, procedures, sequences, domains and enum/composite types
+- triggers, foreign keys, check/unique/exclude constraints and indexes on tables (and indexes on materialized views) that are declared
+
+These are never dropped: objects in other schemas, extension members, partitions (dropping the partitioned parent drops them), primary keys, indexes that back a constraint, constraints/triggers/indexes a partition inherits from its parent, sequences owned by a column, aggregates and window functions, roles, schemas, extensions, and pgy's own `pgy.migrations` table.
+
+> **Warning:** run `--prune` with **all** of your schema files. Running it with an explicit `--schemas` subset drops every object those files don't mention in the schemas they touch, including whole tables and their data. Always review the buffer before committing it.
 
 See `docs/feature_support.md` for the full capability matrix.
 

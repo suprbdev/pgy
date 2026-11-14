@@ -56,6 +56,13 @@ type Live struct{
     ProcedureDefs map[string]*LiveProcedure
     // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
     EnumLabels map[string][]string
+    // ExtensionMembers: objects belonging to an extension, which are never
+    // pruned. Keys are "rel:schema.name", "type:schema.name" and
+    // "proc:<normalized signature>".
+    ExtensionMembers map[string]bool
+    // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
+    // OWNED BY), so it goes away with its column
+    OwnedSequences map[string]bool
 }
 
 // LiveExtension is an installed extension's schema, version and whether it
@@ -67,6 +74,8 @@ type LiveExtension struct {
 }
 
 type LiveFunction struct{
+    Signature  string // "schema.name(identity args)" as introspected
+    Kind       string // pg_proc.prokind: f (function), w (window), a (aggregate)
     Body       string
     Volatility string // volatile|stable|immutable
     Security   string // definer|invoker
@@ -75,6 +84,7 @@ type LiveFunction struct{
     Config     map[string]string // proconfig: lower-cased parameter name -> value
 }
 type LiveProcedure struct{
+    Signature string // "schema.name(identity args)" as introspected
     Body     string
     Security string // definer|invoker
     Config   map[string]string // proconfig: lower-cased parameter name -> value
@@ -99,6 +109,11 @@ type LiveTable struct{
     Policies    map[string]*LivePolicy // policy name -> live definition
     IndexComments      map[string]string // index name -> comment (absent key = no comment)
     ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
+    // ConstraintInherited / TriggerInherited: names cloned from a partitioned
+    // parent or inherited from a parent table; never pruned on their own
+    ConstraintInherited map[string]bool
+    TriggerInherited    map[string]bool
+    IsPartition bool            // relispartition: a partition of a partitioned table
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
@@ -121,6 +136,8 @@ func newLiveTable() *LiveTable {
         Policies:           map[string]*LivePolicy{},
         IndexComments:      map[string]string{},
         ConstraintComments: map[string]string{},
+        ConstraintInherited: map[string]bool{},
+        TriggerInherited:    map[string]bool{},
     }
 }
 
@@ -137,6 +154,8 @@ type LiveIndex struct {
     Predicate        string
     NullsNotDistinct bool
     Options          map[string]string // reloptions: lower-cased name -> value
+    Constraint       bool              // backs a primary key, unique or exclusion constraint
+    Inherited        bool              // a partition's copy of an index on its parent
 }
 
 // LiveIndexOpclass is the operator class of one index key column. Default is
@@ -200,6 +219,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Procedures: map[string]bool{},
         ProcedureDefs: map[string]*LiveProcedure{},
         EnumLabels: map[string][]string{},
+        ExtensionMembers: map[string]bool{},
+        OwnedSequences: map[string]bool{},
     }
     
     // Query existing schemas
@@ -224,7 +245,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname
+        select n.nspname, c.relname, c.relispartition
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind in ('r', 'p')
@@ -235,12 +256,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for tableRows.Next() {
         var schemaName, tableName string
-        if err := tableRows.Scan(&schemaName, &tableName); err != nil {
+        var isPartition bool
+        if err := tableRows.Scan(&schemaName, &tableName, &isPartition); err != nil {
             tableRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         l.Tables[key] = newLiveTable()
+        l.Tables[key].IsPartition = isPartition
     }
     tableRows.Close()
     
@@ -309,7 +332,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // available (and NOT NULL pseudo-constraints are excluded).
     conQ := `
         select n.nspname, c.relname, con.conname, con.contype::text,
-               pg_get_constraintdef(con.oid)
+               pg_get_constraintdef(con.oid), con.conparentid <> 0 or con.coninhcount > 0
         from pg_constraint con
         join pg_class c on c.oid = con.conrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -321,7 +344,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for conRows.Next() {
         var schemaName, tableName, conName, conType, conDef string
-        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType, &conDef); err != nil {
+        var inherited bool
+        if err := conRows.Scan(&schemaName, &tableName, &conName, &conType, &conDef, &inherited); err != nil {
             conRows.Close()
             return nil, err
         }
@@ -329,6 +353,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if t := l.Tables[key]; t != nil {
             t.Constraints[conName] = true
             t.ConstraintDefs[conName] = conDef
+            if inherited { t.ConstraintInherited[conName] = true }
             if conType == "p" {
                 t.HasPK = true
             }
@@ -394,7 +419,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                x.indoption::int2[],
                coalesce(pg_get_expr(x.indpred, x.indrelid, true), ''),
                x.indnullsnotdistinct,
-               coalesce(i.reloptions, '{}'::text[])
+               coalesce(i.reloptions, '{}'::text[]),
+               exists (select 1 from pg_constraint con where con.conindid = x.indexrelid and con.contype in ('p', 'u', 'x')),
+               i.relispartition
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
@@ -407,17 +434,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for idefRows.Next() {
         var schemaName, tableName, idxName, method, predicate string
-        var unique, nullsNotDistinct bool
+        var unique, nullsNotDistinct, constraint, inherited bool
         var nKey int16
         var cols, reloptions []string
         var indoption []int16
-        if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions); err != nil {
+        if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited); err != nil {
             idefRows.Close()
             return nil, err
         }
         t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
         if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-        li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions)}
+        li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited}
         for _, opt := range indoption[:nKey] {
             li.Descending = append(li.Descending, opt&1 != 0)
             li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
@@ -429,7 +456,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
     trgQ := `
-        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid)
+        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgparentid <> 0
         from pg_trigger t
         join pg_class c on c.oid = t.tgrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -441,13 +468,15 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for trgRows.Next() {
         var schemaName, tableName, trgName, trgDef string
-        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef); err != nil {
+        var inherited bool
+        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited); err != nil {
             trgRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         if t := l.Tables[key]; t != nil {
             t.Triggers[trgName] = trgDef
+            if inherited { t.TriggerInherited[trgName] = true }
         }
     }
     trgRows.Close()
@@ -527,6 +556,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and t.typtype in ('e', 'c')
+        and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
     typeRows, err := pool.Query(ctx, typeQ)
     if err != nil { return nil, err }
@@ -566,13 +596,13 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if kind == "p" {
             norm := normalizeFunctionSignature(key)
             l.Procedures[norm] = true
-            lp := &LiveProcedure{Body: src, Security: "invoker", Config: parseProconfig(config)}
+            lp := &LiveProcedure{Signature: key, Body: src, Security: "invoker", Config: parseProconfig(config)}
             if secdef { lp.Security = "definer" }
             l.ProcedureDefs[norm] = lp
             continue
         }
         l.Functions[key] = true
-        lf := &LiveFunction{Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
+        lf := &LiveFunction{Signature: key, Kind: kind, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
         if secdef { lf.Security = "definer" }
         switch vol {
         case "i": lf.Volatility = "immutable"
@@ -1022,6 +1052,52 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     cncRows.Close()
 
+    extMemQ := `
+        select 'rel:' || n.nspname || '.' || c.relname
+        from pg_depend d join pg_class c on c.oid = d.objid join pg_namespace n on n.oid = c.relnamespace
+        where d.deptype = 'e' and d.classid = 'pg_class'::regclass
+        union all
+        select 'type:' || n.nspname || '.' || t.typname
+        from pg_depend d join pg_type t on t.oid = d.objid join pg_namespace n on n.oid = t.typnamespace
+        where d.deptype = 'e' and d.classid = 'pg_type'::regclass
+        union all
+        select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+        from pg_depend d join pg_proc p on p.oid = d.objid join pg_namespace n on n.oid = p.pronamespace
+        where d.deptype = 'e' and d.classid = 'pg_proc'::regclass
+    `
+    extMemRows, err := pool.Query(ctx, extMemQ)
+    if err != nil { return nil, err }
+    for extMemRows.Next() {
+        var key string
+        if err := extMemRows.Scan(&key); err != nil {
+            extMemRows.Close()
+            return nil, err
+        }
+        if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+        l.ExtensionMembers[key] = true
+    }
+    extMemRows.Close()
+
+    ownedQ := `
+        select n.nspname || '.' || s.relname
+        from pg_depend d
+        join pg_class s on s.oid = d.objid and s.relkind = 'S'
+        join pg_namespace n on n.oid = s.relnamespace
+        where d.classid = 'pg_class'::regclass and d.refclassid = 'pg_class'::regclass
+        and d.refobjsubid > 0 and d.deptype in ('a', 'i')
+    `
+    ownedRows, err := pool.Query(ctx, ownedQ)
+    if err != nil { return nil, err }
+    for ownedRows.Next() {
+        var key string
+        if err := ownedRows.Scan(&key); err != nil {
+            ownedRows.Close()
+            return nil, err
+        }
+        l.OwnedSequences[key] = true
+    }
+    ownedRows.Close()
+
     return l, nil
 }
 
@@ -1175,7 +1251,15 @@ func (p *PlanDiff) Summary() map[string]int {
     }
 }
 
+// Plan diffs desired against live. unsafe enables destructive changes; see
+// Options.
 func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
+    return PlanWith(live, desired, Options{Unsafe: unsafe})
+}
+
+// PlanWith diffs desired against live with the given options.
+func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
+    unsafe := opts.Unsafe
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -1524,6 +1608,10 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     planPolicies(plan, live, desired, unsafe)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired)...)
+    if opts.Unsafe && opts.Prune {
+        early, late := planPrune(live, desired)
+        plan.Drops = append(append(early, plan.Drops...), late...)
+    }
     return plan
 }
 

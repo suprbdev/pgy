@@ -102,7 +102,7 @@ func TestIntegrationSplitMatchesSingleMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	steps, err := group.Plan(live, paths, groups, false)
+	steps, err := group.Plan(live, paths, groups, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestIntegrationSplitMatchesSingleMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := group.Plan(live, paths, groups, false)
+	again, err := group.Plan(live, paths, groups, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

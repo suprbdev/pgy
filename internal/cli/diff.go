@@ -16,6 +16,7 @@ import (
 
 func cmdDiff() *cobra.Command {
     var unsafe bool
+    var prune bool
     var jsonOut bool
     var fromEmpty bool
     var split string
@@ -32,6 +33,10 @@ Exit codes:
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)
+            if prune && !unsafe {
+                return fmt.Errorf("--prune drops objects and requires --unsafe")
+            }
+            opts := diff.Options{Unsafe: unsafe, Prune: prune}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err
@@ -80,7 +85,7 @@ Exit codes:
                 if err != nil {
                     return err
                 }
-                steps, err := group.Plan(live, schemaPaths, g, unsafe)
+                steps, err := group.Plan(live, schemaPaths, g, opts)
                 if err != nil {
                     return err
                 }
@@ -88,7 +93,7 @@ Exit codes:
                 groups = len(steps)
                 summary = splitSummary(steps)
             } else {
-                plan := diff.Plan(live, compiled, unsafe)
+                plan := diff.PlanWith(live, compiled, opts)
                 sql = diff.Render(plan)
                 summary = plan.Summary()
             }
@@ -123,6 +128,7 @@ Exit codes:
         },
     }
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
+    c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in. Run it with ALL schema files: objects declared only in files left out are dropped")
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
