@@ -2944,6 +2944,8 @@ func TestNormalizeConstraintDefDeparsedForms(t *testing.T) {
 		{"CHECK ((e !~~* '%x%'::text))", "check (e not ilike '%x%')"},
 		{"CHECK ((ne <> 3))", "check (ne != 3)"},
 		{"CHECK ((id IN ( SELECT 1)))", "check (id in (select 1))"},
+		{"CHECK ((POSITION(('@'::text) IN (VALUE)) > 0))", "check (position('@' in value) > 0)"},
+		{"CHECK ((POSITION(('@'::text) IN (email)) > 0) AND (s = ANY (ARRAY['a'::text, 'b'::text])))", "check (position('@' in email) > 0 and s in ('a', 'b'))"},
 	}
 	for _, c := range cases {
 		if normalizeConstraintDef(c[0]) != normalizeConstraintDef(c[1]) {
@@ -3587,7 +3589,7 @@ func TestSequenceOptions(t *testing.T) {
 	desired := seqDesired("public.order_seq", &schema.Sequence{
 		Schema: "public", Name: "order_seq",
 		As: "bigint", Increment: "5", MinValue: "10", MaxValue: "99999",
-		Start: "100", Cache: "20", Cycle: true,
+		Start: "100", Cache: "20", Cycle: schema.BoolPtr(true),
 	})
 	p := Plan(emptyLive(), desired, false)
 	for _, want := range []string{

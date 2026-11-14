@@ -73,6 +73,13 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     for k, dm := range desired.Domains {
         if dm == nil || dm.Type == "" { continue }
         out.Domains[k] = true
+        ld := &LiveDomain{Default: dm.Default, NotNull: dm.NotNull, Checks: map[string]string{}}
+        if dm.Check != "" {
+            name := dm.ConstraintName
+            if name == "" { name = k[strings.IndexByte(k, '.')+1:] + "_check" }
+            ld.Checks[truncateIdent(name)] = "CHECK (" + dm.Check + ")"
+        }
+        out.DomainDefs[k] = ld
         if dm.Comment != "" { out.TypeComments[k] = dm.Comment }
     }
 
@@ -80,6 +87,17 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if sq == nil { continue }
         out.Sequences[k] = true
         if sq.OwnedBy != "" && !strings.EqualFold(strings.TrimSpace(sq.OwnedBy), "none") { out.OwnedSequences[k] = true }
+        ls := &LiveSequence{}
+        if prev := out.SequenceDefs[k]; prev != nil { *ls = *prev }
+        for _, o := range []struct{ dst *string; v string }{
+            {&ls.Type, sq.As}, {&ls.Increment, sq.Increment}, {&ls.MinValue, sq.MinValue},
+            {&ls.MaxValue, sq.MaxValue}, {&ls.Start, sq.Start}, {&ls.Cache, sq.Cache},
+        } {
+            if o.v != "" { *o.dst = strings.TrimSpace(o.v) }
+        }
+        if sq.Cycle != nil { ls.Cycle = *sq.Cycle }
+        if sq.OwnedBy != "" { ls.Owner = qualifyOwnedBy(sq.OwnedBy) }
+        out.SequenceDefs[k] = ls
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
     }
 
@@ -326,6 +344,8 @@ func cloneLive(l *Live) *Live {
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
+        SequenceDefs:       cloneMap(l.SequenceDefs, func(s *LiveSequence) *LiveSequence { c := *s; return &c }),
+        DomainDefs:         cloneMap(l.DomainDefs, func(d *LiveDomain) *LiveDomain { c := *d; c.Checks = cloneMap(d.Checks, nil); return &c }),
         Domains:            cloneSet(l.Domains),
         Roles:              cloneSet(l.Roles),
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),

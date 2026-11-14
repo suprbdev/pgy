@@ -2164,7 +2164,7 @@ schema public:
 	if sq.Cache != "20" {
 		t.Errorf("cache: want 20, got %q", sq.Cache)
 	}
-	if !sq.Cycle {
+	if sq.Cycle == nil || !*sq.Cycle {
 		t.Error("cycle: want true")
 	}
 	if sq.OwnedBy != "orders.order_number" {
@@ -2188,7 +2188,7 @@ schema billing:
 	if !ok {
 		t.Fatal("expected billing.invoice_seq sequence")
 	}
-	if sq.As != "" || sq.Increment != "" || sq.MinValue != "" || sq.MaxValue != "" || sq.Start != "" || sq.Cache != "" || sq.Cycle || sq.OwnedBy != "" {
+	if sq.As != "" || sq.Increment != "" || sq.MinValue != "" || sq.MaxValue != "" || sq.Start != "" || sq.Cache != "" || sq.Cycle != nil || sq.OwnedBy != "" {
 		t.Errorf("all options should be unset: %+v", sq)
 	}
 }
