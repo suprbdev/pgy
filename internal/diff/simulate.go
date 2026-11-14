@@ -425,8 +425,8 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         cmd := strings.ToLower(pol.For)
         if cmd == "" { cmd = "all" }
         roles := []string{}
-        for _, r := range pol.To {
-            if !strings.EqualFold(r, "public") { roles = append(roles, r) }
+        if !policyToPublic(pol.To) {
+            for _, r := range pol.To { roles = append(roles, resolveRole(r, out.CurrentUser)) }
         }
         if pol.Comment != "" { lt.PolicyComments[truncateIdent(pol.Name)] = pol.Comment }
         lt.Policies[truncateIdent(pol.Name)] = &LivePolicy{

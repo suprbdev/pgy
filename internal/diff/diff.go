@@ -3190,7 +3190,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             name := truncateIdent(pol.Name)
             have := ""
             if lt != nil {
-                if lp := lt.Policies[name]; lp != nil && policyMatchesLive(pol, lp) { have = lt.PolicyComments[name] }
+                if lp := lt.Policies[name]; lp != nil && policyMatchesLive(pol, lp, live.CurrentUser) { have = lt.PolicyComments[name] }
             }
             comment(fmt.Sprintf("policy %s on %s", pqIdent(name), pqIdent(k)), pol.Comment, have)
         }
@@ -3417,7 +3417,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
-        add(grantDiffStmts("schema "+pqIdent(s), desired.SchemaGrants[s], live.SchemaGrants[s]))
+        add(grantDiffStmts("schema "+pqIdent(s), resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser), live.SchemaGrants[s]))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -3427,7 +3427,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
         dt := desired.Tables[k]
         if dt == nil { continue }
         if dt.Grants != nil {
-            add(grantDiffStmts("table "+pqIdent(k), dt.Grants, live.TableGrants[k]))
+            add(grantDiffStmts("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), live.TableGrants[k]))
         }
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -3435,23 +3435,23 @@ func planGrants(live *Live, desired *schema.Database) []string {
         for _, cn := range colNames {
             c := dt.Columns[cn]
             if c == nil || c.Grants == nil { continue }
-            add(columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn]))
+            add(columnGrantDiffStmts(k, cn, resolveGrantRoles(c.Grants, live.CurrentUser), live.ColumnGrants[k][cn]))
         }
     }
 
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
-            add(grantDiffStmts("sequence "+pqIdent(k), sq.Grants, live.TableGrants[k]))
+            add(grantDiffStmts("sequence "+pqIdent(k), resolveGrantRoles(sq.Grants, live.CurrentUser), live.TableGrants[k]))
         }
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil && td.Grants != nil {
-            add(grantDiffStmts("type "+pqIdent(k), td.Grants, live.TypeGrants[k]))
+            add(grantDiffStmts("type "+pqIdent(k), resolveGrantRoles(td.Grants, live.CurrentUser), live.TypeGrants[k]))
         }
     }
     for _, k := range sortedKeys(desired.Domains) {
         if dm := desired.Domains[k]; dm != nil && dm.Grants != nil {
-            add(grantDiffStmts("domain "+pqIdent(k), dm.Grants, live.TypeGrants[k]))
+            add(grantDiffStmts("domain "+pqIdent(k), resolveGrantRoles(dm.Grants, live.CurrentUser), live.TypeGrants[k]))
         }
     }
 
@@ -3464,7 +3464,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range viewNames {
         vw := desired.Views[k]
         if vw == nil || vw.Grants == nil { continue }
-        add(grantDiffStmts("table "+pqIdent(k), vw.Grants, live.TableGrants[k]))
+        add(grantDiffStmts("table "+pqIdent(k), resolveGrantRoles(vw.Grants, live.CurrentUser), live.TableGrants[k]))
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -3483,7 +3483,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if f.Grants != nil {
-            add(grantDiffStmts(target, f.Grants, live.FunctionGrants[norm]))
+            add(grantDiffStmts(target, resolveGrantRoles(f.Grants, live.CurrentUser), live.FunctionGrants[norm]))
         }
     }
 
@@ -3504,7 +3504,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if pr.Grants != nil {
-            add(grantDiffStmts(target, pr.Grants, live.FunctionGrants[norm]))
+            add(grantDiffStmts(target, resolveGrantRoles(pr.Grants, live.CurrentUser), live.FunctionGrants[norm]))
         }
     }
     return append(revokes, grants...)
@@ -3598,7 +3598,42 @@ func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liv
 // grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.
 func grantRole(role string) string {
     if strings.EqualFold(role, "public") { return "public" }
+    if isRoleKeyword(role) { return strings.ToLower(strings.TrimSpace(role)) }
     return quoteIdent(role)
+}
+
+// isRoleKeyword reports whether role is CURRENT_USER, CURRENT_ROLE or
+// SESSION_USER, which role specifications accept unquoted.
+func isRoleKeyword(role string) bool {
+    switch strings.ToLower(strings.TrimSpace(role)) {
+    case "current_user", "current_role", "session_user":
+        return true
+    }
+    return false
+}
+
+// resolveRole returns the role a keyword stands for in the connected session
+// (PostgreSQL stores the resolved role, not the keyword), or role itself.
+func resolveRole(role, currentUser string) string {
+    if isRoleKeyword(role) && currentUser != "" { return currentUser }
+    return role
+}
+
+// resolveGrantRoles returns grants with role keywords replaced by the
+// connected role, so they compare with live ACLs.
+func resolveGrantRoles(grants map[string][]string, currentUser string) map[string][]string {
+    if grants == nil || currentUser == "" { return grants }
+    changed := false
+    for r := range grants {
+        if isRoleKeyword(r) { changed = true }
+    }
+    if !changed { return grants }
+    out := make(map[string][]string, len(grants))
+    for r, privs := range grants {
+        k := resolveRole(r, currentUser)
+        out[k] = append(out[k], privs...)
+    }
+    return out
 }
 
 // grantFuncArgs strips default clauses from an args signature — GRANT/REVOKE
@@ -4057,13 +4092,16 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             polName := truncateIdent(pol.Name)
             desiredPolicies[polName] = true
             if lp := livePolicies[polName]; lp != nil {
-                if policyMatchesLive(pol, lp) { continue }
+                if policyMatchesLive(pol, lp, live.CurrentUser) { continue }
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(polName), pqIdent(fq)))
             }
             stmt := fmt.Sprintf("create policy %s on %s", pqIdent(polName), pqIdent(fq))
             if pol.As == "restrictive" { stmt += " as restrictive" }
             if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
-            if len(pol.To) > 0 {
+            switch {
+            case policyToPublic(pol.To):
+                stmt += " to public"
+            case len(pol.To) > 0:
                 roles := make([]string, 0, len(pol.To))
                 for _, r := range pol.To { roles = append(roles, grantRole(r)) }
                 stmt += " to " + strings.Join(roles, ", ")
@@ -4564,15 +4602,24 @@ func expandPolicyCmd(c string) string {
 // empty desired To means PUBLIC, which is how the live side reports a policy
 // with no TO clause. An explicit public entry in To is ignored for the same
 // reason (polroles' 0 entry is dropped).
-func policyMatchesLive(pol *schema.Policy, live *LivePolicy) bool {
+// policyToPublic reports whether a policy's roles include PUBLIC, which
+// makes PostgreSQL ignore the others.
+func policyToPublic(roles []string) bool {
+    for _, r := range roles {
+        if strings.EqualFold(strings.TrimSpace(r), "public") { return true }
+    }
+    return false
+}
+
+func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string) bool {
     if (pol.As == "restrictive") != live.Restrictive { return false }
     wantCmd := strings.ToLower(pol.For)
     if wantCmd == "" { wantCmd = "all" }
     if wantCmd != live.Cmd { return false }
 
     wantRoles := []string{}
-    for _, r := range pol.To {
-        if !strings.EqualFold(r, "public") { wantRoles = append(wantRoles, strings.ToLower(r)) }
+    if !policyToPublic(pol.To) {
+        for _, r := range pol.To { wantRoles = append(wantRoles, strings.ToLower(resolveRole(r, currentUser))) }
     }
     liveRoles := append([]string{}, live.Roles...)
     for i, r := range liveRoles { liveRoles[i] = strings.ToLower(r) }
