@@ -266,6 +266,9 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, obj, "inherits %s, which no schema file declares", p)
 			}
 		}
+		if t.Data != nil {
+			checkData(d, fq, t, add)
+		}
 		if t.PartitionBy != nil {
 			for _, fk := range t.ForeignKeys {
 				if fk != nil && fk.NotValid {
@@ -744,4 +747,42 @@ func tableHasColumn(d *schema.Database, fq, c string, depth int) bool {
 		}
 	}
 	return false
+}
+
+// checkData checks a table's data: rows against its key and columns.
+func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity, string, string, ...any)) {
+	obj := "table " + fq
+	key := t.DataKey()
+	if len(key) == 0 {
+		add(Error, obj, "data needs a key: declare data.key or a primary key")
+		return
+	}
+	for _, k := range key {
+		if !tableHasColumn(d, fq, k, 0) {
+			add(Error, obj, "data key column %s is not declared", k)
+		}
+	}
+	seen := map[string]int{}
+	for i, row := range t.Data.Rows {
+		parts := []string{}
+		for _, k := range key {
+			v, ok := row[k]
+			if !ok || v == nil {
+				add(Error, obj, "data row %d has no value for key column %s", i+1, k)
+			}
+			parts = append(parts, fmt.Sprint(v))
+		}
+		id := strings.Join(parts, "\x00")
+		if prev, dup := seen[id]; dup {
+			add(Error, obj, "data rows %d and %d have the same key", prev, i+1)
+		}
+		seen[id] = i + 1
+		for _, col := range sortedKeys(row) {
+			if !tableHasColumn(d, fq, col, 0) {
+				add(Error, obj, "data row %d sets undeclared column %s", i+1, col)
+			} else if c := t.Columns[col]; c != nil && c.Generated != "" {
+				add(Error, obj, "data row %d sets generated column %s", i+1, col)
+			}
+		}
+	}
 }

@@ -57,6 +57,13 @@ schema public:
     mappings: {asciiword: [public.nostop], email: []}
   type floatrange: {type: range, subtype: float8, subtypeDiff: float8mi, multirangeTypeName: floatmultirange}
   sequence order_no: {renamedFrom: order_seq, as: bigint, cycle: false, ownedBy: none}
+  table status:
+    columns: {code: {type: text}, label: {type: text}}
+    data:
+      key: [code]
+      rows:
+        - {code: open, label: Open}
+        - {code: closed, label: Closed}
   table order_archive:
     inherits: [public.orders]
     columns:

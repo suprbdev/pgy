@@ -11,6 +11,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live)
     if desired == nil { return out }
     out, _ = applyRenames(out, desired)
+    for fq, dt := range desired.Tables {
+        if dt != nil && dt.Data != nil {
+            if out.TableData == nil { out.TableData = map[string]*LiveTableData{} }
+            out.TableData[fq] = &LiveTableData{Changed: map[int][]string{}}
+        }
+    }
 
     for _, keys := range [][]string{
         mapKeys(desired.Types), mapKeys(desired.Functions), mapKeys(desired.Procedures),
@@ -541,6 +547,7 @@ func cloneLive(l *Live) *Live {
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),
+        TableData:          cloneMap(l.TableData, func(d *LiveTableData) *LiveTableData { c := *d; return &c }),
     }
 }
 

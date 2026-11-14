@@ -253,20 +253,13 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 			t.Cleanup(func() {
 				pool.Exec(context.Background(), "drop table if exists public."+sch+"_t; drop type if exists public."+sch+"_status") //nolint
 			})
-			live, err := diff.Introspect(ctx, pool)
-			if err != nil {
-				t.Fatal(err)
-			}
-			plan := diff.Plan(live, d, true)
+			plan := diff.Plan(introspect(t, pool, d), d, true)
 			for _, s := range append(append(append(plan.Creates, plan.Alters...), plan.Drops...), plan.Concurrent...) {
 				if _, err := pool.Exec(ctx, s); err != nil {
 					t.Fatalf("apply %q: %v", s, err)
 				}
 			}
-			live, err = diff.Introspect(ctx, pool)
-			if err != nil {
-				t.Fatal(err)
-			}
+			live := introspect(t, pool, d)
 			if sql := diff.Render(diff.Plan(live, d, true)); sql != "" {
 				t.Errorf("second plan not empty:\n%s", sql)
 			}
@@ -284,7 +277,17 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	if err := diff.IntrospectDetails(ctx, pool, live); err != nil {
 		t.Fatal(err)
 	}
-	res, err := pull.Build(live, pull.Options{Schemas: []string{sch}})
+	data := map[string][]map[string]any{}
+	for fq, dt := range desired.Tables {
+		if dt != nil && dt.Data != nil {
+			rows, err := diff.TableRows(ctx, pool, fq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[fq] = rows
+		}
+	}
+	res, err := pull.Build(live, pull.Options{Schemas: []string{sch}, Data: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,10 +329,7 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 			t.Fatalf("rebuilding from pulled YAML: %q: %v", s, err)
 		}
 	}
-	rebuilt, err := diff.Introspect(ctx, pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rebuilt := introspect(t, pool, desired)
 	if sql := diff.Render(diff.Plan(rebuilt, desired, true)); sql != "" {
 		for _, f := range res.Files {
 			t.Logf("%s:\n%s", f.Name, f.Content)

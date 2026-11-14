@@ -311,3 +311,38 @@ schema app:
 		}
 	}
 }
+
+func TestValidateData(t *testing.T) {
+	p := write(t, t.TempDir(), "d.yml", `
+schema app:
+  table plan:
+    columns:
+      code: {type: text}
+      name: {type: text}
+      twice: {type: int, generated: length(name) * 2}
+    primaryKey: [code]
+    data:
+      rows:
+        - {code: a, name: A}
+        - {code: a, name: Again}
+        - {name: No key}
+        - {code: b, nme: typo}
+        - {code: c, twice: 4}
+  table nokey:
+    columns: {x: {type: int}}
+    data:
+      rows: [{x: 1}]
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"data rows 1 and 2 have the same key",
+		"data row 3 has no value for key column code",
+		"data row 4 sets undeclared column nme",
+		"data row 5 sets generated column twice",
+		"table app.nokey: data needs a key",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

@@ -84,6 +84,7 @@ pgy init --dsn "$PG_DSN"            # creates --migrations-table (default pgy.mi
 pgy pull --dsn "$PG_DSN" --out ./schemas                 # all schemas
 pgy pull --dsn "$PG_DSN" --schema app --schema billing   # print selected schemas to stdout
 pgy pull --dsn "$PG_DSN" --out ./schemas --owners --roles --force
+pgy pull --dsn "$PG_DSN" --schema app --data app.plan       # include the rows of lookup tables
 ```
 
 - Check schema files offline (JSON Schema, missing columns, unresolvable `dependsOn`, cycles; no database needed). Exits 1 on errors, so it works as a pre-commit hook or CI step:
