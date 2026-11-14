@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "fmt"
+    "math"
     "regexp"
     "sort"
     "strconv"
@@ -175,6 +176,9 @@ type LiveFunction struct{
     Security   string // definer|invoker
     Strict     bool
     Leakproof  bool
+    Parallel   string  // safe|restricted|unsafe
+    Cost       float64 // procost
+    Rows       float64 // prorows (0 unless set-returning)
     Config     map[string]string // proconfig: lower-cased parameter name -> value
 }
 type LiveProcedure struct{
@@ -878,7 +882,9 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
                coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text,
                coalesce(p.proconfig, '{}'::text[]),
-               exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i')
+               exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i'),
+               case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
+               p.procost::float8, p.prorows::float8
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -886,10 +892,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
-            var schemaName, funcName, args, src, vol, kind string
+            var schemaName, funcName, args, src, vol, kind, parallel string
             var secdef, strict, leakproof, internal bool
             var config []string
-            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal); err != nil {
+            var cost, rows float64
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
@@ -902,7 +909,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -1789,9 +1796,26 @@ func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
             out = append(out, "not leakproof")
         }
     }
+    if f.Parallel != "" && f.Parallel != lf.Parallel {
+        out = append(out, "parallel "+f.Parallel)
+    }
+    if f.Cost != nil && !float4Equal(*f.Cost, lf.Cost) {
+        out = append(out, "cost "+formatFloat(*f.Cost))
+    }
+    if f.Rows != nil && !float4Equal(*f.Rows, lf.Rows) {
+        out = append(out, "rows "+formatFloat(*f.Rows))
+    }
     out = append(out, configClauses(f.Set, lf.Config)...)
     return out
 }
+
+// float4Equal compares a YAML number with a value PostgreSQL stored as real,
+// allowing for float4 rounding.
+func float4Equal(want, have float64) bool {
+    return math.Abs(want-have) <= 1e-6*math.Max(1, math.Abs(want))
+}
+
+func formatFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 
 // compositeAlterStmts adds attributes a live composite type lacks. Under
 // --unsafe it also changes attribute types and drops attributes the YAML no
@@ -2105,6 +2129,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if f.Volatility != "" { attrs = append(attrs, f.Volatility) }
             if f.Strict != nil && *f.Strict { attrs = append(attrs, "strict") }
             if f.Leakproof != nil && *f.Leakproof { attrs = append(attrs, "leakproof") }
+            if f.Parallel != "" { attrs = append(attrs, "parallel "+f.Parallel) }
+            if f.Cost != nil { attrs = append(attrs, "cost "+formatFloat(*f.Cost)) }
+            if f.Rows != nil { attrs = append(attrs, "rows "+formatFloat(*f.Rows)) }
             attrsStr := strings.Join(attrs, " ")
             if attrsStr != "" { attrsStr = " " + attrsStr }
             body := f.Body

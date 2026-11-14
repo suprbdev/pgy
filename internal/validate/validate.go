@@ -289,6 +289,9 @@ func Database(d *schema.Database) []Issue {
 			if strings.TrimSpace(f.Body) != "" && (f.Returns == "" || f.Language == "") {
 				add(Error, "function "+k, "needs returns and language")
 			}
+			if r := strings.ToLower(strings.TrimSpace(f.Returns)); f.Rows != nil && r != "" && !strings.HasPrefix(r, "setof ") && !strings.HasPrefix(r, "table") {
+				add(Error, "function "+k, "rows applies only to set-returning functions (returns setof or table)")
+			}
 		}
 	}
 	for _, k := range sortedKeys(d.Procedures) {

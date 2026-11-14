@@ -29,6 +29,13 @@ schema public:
   owner: app_owner
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
+  function fast_one():
+    returns: setof int
+    language: sql
+    parallel: safe
+    cost: 0.5
+    rows: 10
+    body: select 1
   aggregate mysum(int): {sfunc: public.add2, stype: int, initcond: "0", combinefunc: public.add2, parallel: safe, comment: sum}
   text search dictionary nostop: {template: snowball, options: {language: english}}
   text search configuration english_custom:

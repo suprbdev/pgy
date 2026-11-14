@@ -189,3 +189,26 @@ schema app:
 		t.Errorf("valid clusterOn flagged:\n%s", got)
 	}
 }
+
+func TestValidateFunctionRows(t *testing.T) {
+	p := write(t, t.TempDir(), "f.yml", `
+schema app:
+  function scalar():
+    returns: int
+    language: sql
+    rows: 10
+    body: select 1
+  function srf():
+    returns: setof int
+    language: sql
+    rows: 10
+    body: select 1
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "function app.scalar(): rows applies only to set-returning functions") {
+		t.Errorf("missing rows error in:\n%s", got)
+	}
+	if strings.Contains(got, "srf") {
+		t.Errorf("set-returning function flagged:\n%s", got)
+	}
+}

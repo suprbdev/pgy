@@ -402,6 +402,9 @@ type Function struct {
     Volatility string // stable/volatile/immutable
     Strict *bool    // nil = unmanaged
     Leakproof *bool // nil = unmanaged
+    Parallel string // safe | restricted | unsafe; "" = unmanaged
+    Cost *float64   // nil = unmanaged
+    Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
     Body string
     DependsOn []string `yaml:"dependsOn"`
@@ -1476,6 +1479,19 @@ func parseScalarList(v any) []string {
 
 // scalarToString renders a YAML scalar as a string. yaml.v3 resolves bare
 // dates like 2024-01-01 to time.Time; format those back as date/timestamp.
+// floatPtr returns a YAML integer or float as a *float64, or nil for
+// anything else.
+func floatPtr(v any) *float64 {
+    switch n := v.(type) {
+    case int:
+        f := float64(n)
+        return &f
+    case float64:
+        return &n
+    }
+    return nil
+}
+
 func scalarToString(v any) string {
     switch x := v.(type) {
     case string:
@@ -1512,6 +1528,9 @@ func parseFunction(schemaName, key string, body any) *Function {
     if _, ok := m["immutable"].(bool); ok { fn.Volatility = "immutable" }
     if st, ok := m["strict"].(bool); ok { fn.Strict = &st }
     if lp, ok := m["leakproof"].(bool); ok { fn.Leakproof = &lp }
+    if p, ok := m["parallel"].(string); ok { fn.Parallel = strings.ToLower(strings.TrimSpace(p)) }
+    fn.Cost = floatPtr(m["cost"])
+    fn.Rows = floatPtr(m["rows"])
     if set, ok := m["set"].(map[string]any); ok {
         fn.Set = map[string]string{}
         for k, v := range set {

@@ -285,7 +285,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     prev := out.FunctionDefs[norm]
     hasBody := strings.TrimSpace(f.Body) != ""
     if prev != nil || hasBody {
-        lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker"}
+        lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: defaultFunctionCost(f.Language), Rows: defaultFunctionRows(f.Returns)}
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body))
         if prev != nil && !replaced { *lf = *prev }
         if hasBody { lf.Body = f.Body }
@@ -293,6 +293,12 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
         if f.Security != "" { lf.Security = strings.ToLower(f.Security) }
         if f.Strict != nil { lf.Strict = *f.Strict }
         if f.Leakproof != nil { lf.Leakproof = *f.Leakproof }
+        if replaced {
+            lf.Parallel, lf.Cost, lf.Rows = "unsafe", defaultFunctionCost(f.Language), defaultFunctionRows(f.Returns)
+        }
+        if f.Parallel != "" { lf.Parallel = f.Parallel }
+        if f.Cost != nil { lf.Cost = *f.Cost }
+        if f.Rows != nil { lf.Rows = *f.Rows }
         if f.Set != nil || replaced { lf.Config = simulateConfig(f.Set) }
         out.Functions[sig] = true
         out.FunctionDefs[norm] = lf
@@ -628,4 +634,24 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
             }
         }
     }
+}
+
+// defaultFunctionCost is the COST PostgreSQL assigns when none is given: 1
+// for C and internal functions, 100 otherwise.
+func defaultFunctionCost(language string) float64 {
+    switch strings.ToLower(strings.TrimSpace(language)) {
+    case "c", "internal":
+        return 1
+    }
+    return 100
+}
+
+// defaultFunctionRows is the ROWS PostgreSQL assigns when none is given:
+// 1000 for set-returning functions, 0 otherwise.
+func defaultFunctionRows(returns string) float64 {
+    r := strings.ToLower(strings.TrimSpace(returns))
+    if strings.HasPrefix(r, "setof ") || strings.HasPrefix(r, "table") {
+        return 1000
+    }
+    return 0
 }
