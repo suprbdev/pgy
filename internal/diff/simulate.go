@@ -333,7 +333,18 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if c.Type != "" { lc.Type = c.Type }
         lc.Nullable = c.Nullable
         lc.Default = c.Default
-        if c.Identity != "" { lc.Identity = c.Identity }
+        if c.Identity != "" {
+            lc.Identity = c.Identity
+            ls := &LiveSequence{}
+            if lc.IdentitySequence != nil { *ls = *lc.IdentitySequence }
+            if o := c.IdentityOptions; o != nil {
+                for _, f := range []struct{ dst *string; v string }{{&ls.Increment, o.Increment}, {&ls.MinValue, o.MinValue}, {&ls.MaxValue, o.MaxValue}, {&ls.Start, o.Start}, {&ls.Cache, o.Cache}} {
+                    if v := strings.TrimSpace(f.v); v != "" { *f.dst = v }
+                }
+                if o.Cycle != nil { ls.Cycle = *o.Cycle }
+            }
+            lc.IdentitySequence = ls
+        }
         if c.Generated != "" { lc.Generated, lc.Default, lc.Virtual = c.Generated, "", c.Virtual }
         if c.Collate != "" { lc.Collation = collationName(c.Collate) }
         if c.Compression == "default" {

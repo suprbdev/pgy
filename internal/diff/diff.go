@@ -327,6 +327,7 @@ type LiveColumn struct{
     Default   string
     Comment   string
     Identity  string // "" (none), "always", or "by default"
+    IdentitySequence *LiveSequence // the identity's sequence options; nil when unknown
     Generated string // generation expression of a generated column ("" = not generated)
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
     Collation   string // explicit collation differing from the type's default ("" = default)
@@ -1201,8 +1202,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                          join pg_attribute a on a.attrelid = t.oid and a.attnum = d.refobjsubid
                          where d.classid = 'pg_class'::regclass and d.objid = c.oid
                          and d.refclassid = 'pg_class'::regclass and d.refobjsubid > 0 and d.deptype = 'a'
-                         limit 1), '')
+                         limit 1), ''),
+               coalesce(idn.nspname, ''), coalesce(idt.relname, ''), coalesce(ida.attname, '')
         from pg_class c
+        left join pg_depend idd on idd.classid = 'pg_class'::regclass and idd.objid = c.oid
+             and idd.refclassid = 'pg_class'::regclass and idd.refobjsubid > 0 and idd.deptype = 'i'
+        left join pg_class idt on idt.oid = idd.refobjid
+        left join pg_namespace idn on idn.oid = idt.relnamespace
+        left join pg_attribute ida on ida.attrelid = idt.oid and ida.attnum = idd.refobjsubid
         join pg_namespace n on n.oid = c.relnamespace
         join pg_sequence s on s.seqrelid = c.oid
         where c.relkind = 'S'
@@ -1211,14 +1218,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(seqQ, func(seqRows pgx.Rows) error {
         for seqRows.Next() {
-            var schemaName, seqName string
+            var schemaName, seqName, idSchema, idTable, idColumn string
             ls := &LiveSequence{}
-            if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner); err != nil {
+            if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner, &idSchema, &idTable, &idColumn); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, seqName)
             l.Sequences[key] = true
             l.SequenceDefs[key] = ls
+            if t := l.Tables[idSchema+"."+idTable]; t != nil && idColumn != "" {
+                if lc := t.Columns[idColumn]; lc != nil { lc.IdentitySequence = ls }
+            }
         }
         return nil
     })
@@ -3916,8 +3926,9 @@ func Render(p *PlanDiff) string {
 // alterColumnStmts reconciles an existing column's live attributes with its
 // desired definition. Type changes can rewrite the table or fail on cast, so
 // they are gated behind --unsafe (with an optional USING expression from the
-// column's `using` property). Identity is create-only and never altered;
-// identity/serial columns keep their generated defaults and implicit NOT NULL.
+// column's `using` property). Identity changes go through
+// identityAlterStmts; identity/serial columns keep their generated defaults
+// and implicit NOT NULL.
 func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
@@ -3968,7 +3979,69 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     } else if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && lc.Identity == "" {
         out = append(out, target+" drop not null;")
     }
-    return out
+    return append(out, identityAlterStmts(target, c, lc, unsafe)...)
+}
+
+// identityAlterStmts reconciles an identity column: SET GENERATED for a
+// changed kind and SET <option> for changed sequence options. Under --unsafe
+// it also adds an identity to an existing column (dropping its default
+// first; the new sequence starts at start, not past existing values) and
+// drops one the YAML no longer declares.
+func identityAlterStmts(target string, c *schema.Column, lc *LiveColumn, unsafe bool) []string {
+    switch {
+    case c.Identity == "" && lc.Identity == "":
+        return nil
+    case c.Identity == "":
+        if unsafe && c.Generated == "" { return []string{target + " drop identity if exists;"} }
+        return nil
+    case lc.Identity == "":
+        if !unsafe || lc.Generated != "" || c.Generated != "" { return nil }
+        out := []string{}
+        if lc.Default != "" { out = append(out, target+" drop default;") }
+        return append(out, fmt.Sprintf("%s add generated %s as identity%s;", target, c.Identity, identityOptionsClause(c.IdentityOptions)))
+    }
+    sets := []string{}
+    if c.Identity != lc.Identity { sets = append(sets, "set generated "+c.Identity) }
+    if o, ls := c.IdentityOptions, lc.IdentitySequence; o != nil && ls != nil {
+        for _, f := range identityOptionFields(o) {
+            if f.want != "" && f.want != f.live(ls) { sets = append(sets, "set "+f.clause+" "+f.want) }
+        }
+        if o.Cycle != nil && *o.Cycle != ls.Cycle {
+            if *o.Cycle { sets = append(sets, "set cycle") } else { sets = append(sets, "set no cycle") }
+        }
+    }
+    if len(sets) == 0 { return nil }
+    return []string{target + " " + strings.Join(sets, " ") + ";"}
+}
+
+type identityOptionField struct {
+    clause, want string
+    live         func(*LiveSequence) string
+}
+
+func identityOptionFields(o *schema.Sequence) []identityOptionField {
+    return []identityOptionField{
+        {"increment by", strings.TrimSpace(o.Increment), func(l *LiveSequence) string { return l.Increment }},
+        {"minvalue", strings.TrimSpace(o.MinValue), func(l *LiveSequence) string { return l.MinValue }},
+        {"maxvalue", strings.TrimSpace(o.MaxValue), func(l *LiveSequence) string { return l.MaxValue }},
+        {"start with", strings.TrimSpace(o.Start), func(l *LiveSequence) string { return l.Start }},
+        {"cache", strings.TrimSpace(o.Cache), func(l *LiveSequence) string { return l.Cache }},
+    }
+}
+
+// identityOptionsClause renders " (start with 1000 ...)" for GENERATED ... AS
+// IDENTITY, or "" when no option is set.
+func identityOptionsClause(o *schema.Sequence) string {
+    if o == nil { return "" }
+    parts := []string{}
+    for _, f := range identityOptionFields(o) {
+        if f.want != "" { parts = append(parts, f.clause+" "+f.want) }
+    }
+    if o.Cycle != nil {
+        if *o.Cycle { parts = append(parts, "cycle") } else { parts = append(parts, "no cycle") }
+    }
+    if len(parts) == 0 { return "" }
+    return " (" + strings.Join(parts, " ") + ")"
 }
 
 // collationIdent quotes a COLLATE target ("C", app.ci), accepting parts the
@@ -4401,7 +4474,7 @@ func renderColumn(name string, c *schema.Column) string {
         parts = append(parts, "generated always as ("+c.Generated+") "+kind)
     } else if c.Identity != "" {
         // identity columns cannot also have a default expression
-        parts = append(parts, "generated "+c.Identity+" as identity")
+        parts = append(parts, "generated "+c.Identity+" as identity"+identityOptionsClause(c.IdentityOptions))
     } else if c.Default != "" {
         parts = append(parts, "default "+c.Default)
     }
