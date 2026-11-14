@@ -226,6 +226,20 @@ schema app:
 	}
 }
 
+func TestValidateOwnerGrants(t *testing.T) {
+	p := write(t, t.TempDir(), "o.yml", `
+schema app:
+  table t:
+    owner: app_owner
+    columns: {id: {type: int}}
+    grants: {app_owner: [select], reader: [select]}
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "grants to its owner app_owner are implicit and ignored") || strings.Contains(got, "reader") {
+		t.Errorf("unexpected findings:\n%s", got)
+	}
+}
+
 func TestValidateRenames(t *testing.T) {
 	p := write(t, t.TempDir(), "r.yml", `
 schema app:

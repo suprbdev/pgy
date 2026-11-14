@@ -1118,7 +1118,7 @@ schema app:
 
 Behavior:
 
-- A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched.
+- A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched: an owner holds every privilege implicitly, so grants to it in the YAML are ignored (`pgy validate` warns about them). The owner is the declared `owner`, else the live owner, else the role running the migration. Roles can also be `current_user`, `current_role` or `session_user`, and are compared as the connected role.
 - Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
 - An **empty privilege list** (`some_role: []`) is not the same as omitting the block. It means "this role holds nothing on this object" and revokes whatever the live database still grants. Use it to take a privilege away while keeping the object managed.
 - `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute.

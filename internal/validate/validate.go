@@ -129,6 +129,7 @@ func Database(d *schema.Database) []Issue {
 		add(Error, "", "%v", err)
 	}
 	checkRenames(d, add)
+	checkOwnerGrants(d, add)
 
 	for _, fq := range sortedKeys(d.Tables) {
 		t := d.Tables[fq]
@@ -827,4 +828,45 @@ func uniqueOn(t *schema.Table, cols []string) bool {
 		}
 	}
 	return false
+}
+
+// checkOwnerGrants warns about grants to an object's declared owner, which
+// holds every privilege implicitly; pgy ignores them.
+func checkOwnerGrants(d *schema.Database, add func(Severity, string, string, ...any)) {
+	check := func(obj, owner string, grants map[string][]string) {
+		if owner == "" {
+			return
+		}
+		if _, ok := grants[owner]; ok {
+			add(Warning, obj, "grants to its owner %s are implicit and ignored", owner)
+		}
+	}
+	for _, k := range sortedKeys(d.Tables) {
+		if t := d.Tables[k]; t != nil {
+			check("table "+k, t.Owner, t.Grants)
+		}
+	}
+	for _, k := range sortedKeys(d.Views) {
+		if v := d.Views[k]; v != nil {
+			check("view "+k, v.Owner, v.Grants)
+		}
+	}
+	for _, k := range sortedKeys(d.Sequences) {
+		if sq := d.Sequences[k]; sq != nil {
+			check("sequence "+k, sq.Owner, sq.Grants)
+		}
+	}
+	for _, k := range sortedKeys(d.Functions) {
+		if f := d.Functions[k]; f != nil {
+			check("function "+k, f.Owner, f.Grants)
+		}
+	}
+	for _, k := range sortedKeys(d.Procedures) {
+		if p := d.Procedures[k]; p != nil {
+			check("procedure "+k, p.Owner, p.Grants)
+		}
+	}
+	for _, s := range sortedKeys(d.SchemaGrants) {
+		check("schema "+s, d.SchemaOwners[s], d.SchemaGrants[s])
+	}
 }

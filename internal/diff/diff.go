@@ -3417,7 +3417,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
-        add(grantDiffStmts("schema "+pqIdent(s), resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser), live.SchemaGrants[s]))
+        add(ownedGrantDiff("schema "+pqIdent(s), resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser), live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s])))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -3427,7 +3427,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
         dt := desired.Tables[k]
         if dt == nil { continue }
         if dt.Grants != nil {
-            add(grantDiffStmts("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), live.TableGrants[k]))
+            add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, dt.Owner)))
         }
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -3441,17 +3441,17 @@ func planGrants(live *Live, desired *schema.Database) []string {
 
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
-            add(grantDiffStmts("sequence "+pqIdent(k), resolveGrantRoles(sq.Grants, live.CurrentUser), live.TableGrants[k]))
+            add(ownedGrantDiff("sequence "+pqIdent(k), resolveGrantRoles(sq.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, sq.Owner)))
         }
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil && td.Grants != nil {
-            add(grantDiffStmts("type "+pqIdent(k), resolveGrantRoles(td.Grants, live.CurrentUser), live.TypeGrants[k]))
+            add(ownedGrantDiff("type "+pqIdent(k), resolveGrantRoles(td.Grants, live.CurrentUser), live.TypeGrants[k], objectOwner(live, "type:"+k, td.Owner)))
         }
     }
     for _, k := range sortedKeys(desired.Domains) {
         if dm := desired.Domains[k]; dm != nil && dm.Grants != nil {
-            add(grantDiffStmts("domain "+pqIdent(k), resolveGrantRoles(dm.Grants, live.CurrentUser), live.TypeGrants[k]))
+            add(ownedGrantDiff("domain "+pqIdent(k), resolveGrantRoles(dm.Grants, live.CurrentUser), live.TypeGrants[k], objectOwner(live, "type:"+k, dm.Owner)))
         }
     }
 
@@ -3464,7 +3464,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range viewNames {
         vw := desired.Views[k]
         if vw == nil || vw.Grants == nil { continue }
-        add(grantDiffStmts("table "+pqIdent(k), resolveGrantRoles(vw.Grants, live.CurrentUser), live.TableGrants[k]))
+        add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(vw.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, vw.Owner)))
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -3483,7 +3483,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if f.Grants != nil {
-            add(grantDiffStmts(target, resolveGrantRoles(f.Grants, live.CurrentUser), live.FunctionGrants[norm]))
+            add(ownedGrantDiff(target, resolveGrantRoles(f.Grants, live.CurrentUser), live.FunctionGrants[norm], objectOwner(live, "proc:"+norm, f.Owner)))
         }
     }
 
@@ -3504,7 +3504,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if pr.Grants != nil {
-            add(grantDiffStmts(target, resolveGrantRoles(pr.Grants, live.CurrentUser), live.FunctionGrants[norm]))
+            add(ownedGrantDiff(target, resolveGrantRoles(pr.Grants, live.CurrentUser), live.FunctionGrants[norm], objectOwner(live, "proc:"+norm, pr.Owner)))
         }
     }
     return append(revokes, grants...)
@@ -3600,6 +3600,38 @@ func grantRole(role string) string {
     if strings.EqualFold(role, "public") { return "public" }
     if isRoleKeyword(role) { return strings.ToLower(strings.TrimSpace(role)) }
     return quoteIdent(role)
+}
+
+// objectOwner returns the role that owns (or will own) an object: the
+// declared owner, else the live owner, else the connecting role, which
+// creates new objects.
+func objectOwner(live *Live, key, declared string) string {
+    if declared != "" { return resolveRole(declared, live.CurrentUser) }
+    if o := live.Owners[key]; o != "" { return o }
+    return live.CurrentUser
+}
+
+// ownedGrantDiff is grantDiffStmts with the object owner left out on both
+// sides: an owner holds every privilege implicitly, and live ACLs never
+// list it, so a grant to the owner would be re-emitted on every diff.
+func ownedGrantDiff(target string, desired map[string][]string, liveG map[string]map[string]bool, owner string) (revokes, grants []string) {
+    if owner != "" {
+        if _, ok := desired[owner]; ok {
+            d := make(map[string][]string, len(desired))
+            for r, p := range desired {
+                if r != owner { d[r] = p }
+            }
+            desired = d
+        }
+        if _, ok := liveG[owner]; ok {
+            l := make(map[string]map[string]bool, len(liveG))
+            for r, p := range liveG {
+                if r != owner { l[r] = p }
+            }
+            liveG = l
+        }
+    }
+    return grantDiffStmts(target, desired, liveG)
 }
 
 // isRoleKeyword reports whether role is CURRENT_USER, CURRENT_ROLE or
