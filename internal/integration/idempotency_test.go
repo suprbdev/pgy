@@ -255,7 +255,7 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 				t.Fatal(err)
 			}
 			plan := diff.Plan(live, d, true)
-			for _, s := range append(append(plan.Creates, plan.Alters...), plan.Drops...) {
+			for _, s := range append(append(append(plan.Creates, plan.Alters...), plan.Drops...), plan.Concurrent...) {
 				if _, err := pool.Exec(ctx, s); err != nil {
 					t.Fatalf("apply %q: %v", s, err)
 				}

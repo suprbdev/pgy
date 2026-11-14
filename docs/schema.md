@@ -324,6 +324,7 @@ indexes:
       col1: gin_trgm_ops
     include: [col3]         # optional INCLUDE (non-key) columns for index-only scans
     nullsNotDistinct: true  # optional, unique indexes: NULLs compare equal (PostgreSQL 15+)
+    concurrently: true      # optional: on an existing table, build without blocking writes
     with:                   # optional storage parameters
       fillfactor: 70
     comment: "lookup by col1"   # optional COMMENT ON INDEX (diffed against live)
@@ -336,6 +337,8 @@ If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
 
 Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with` and operator classes. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
+
+`concurrently: true` makes an index added to (or, under `--unsafe`, rebuilt on) an existing table use `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`, which do not block writes but cannot run inside a transaction. `pgy diff` puts these statements in a separate `concurrent` buffer section that starts with `-- pgy:no-transaction`, and `pgy commit` writes it as its own migration after the main one. Indexes on tables created by the same plan are built normally.
 
 A `columns` entry may end in a sort order — `asc`, `desc`, `nulls first`, `nulls last`, or a combination such as `created_at desc nulls last`. The suffix is emitted after any operator class, and an `opclasses` key may name the column with or without it.
 

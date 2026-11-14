@@ -83,6 +83,7 @@ Exit codes:
                         SQL: string(b), Name: base, Checksum: sum,
                         LockTimeout: lockTimeout, StatementTimeout: statementTimeout,
                         RecordIn: schemaName + "." + tableName,
+                        NoTransaction: db.HasNoTransactionDirective(string(b)),
                     })
                     if err != nil { return fmt.Errorf("%s: %w", f, err) }
                     if !cfg.Quiet { fmt.Printf("applied %s\n", base) }

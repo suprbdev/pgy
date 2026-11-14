@@ -290,6 +290,7 @@ type Index struct {
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
+    Concurrently bool           // build on existing tables with CREATE INDEX CONCURRENTLY
     Comment   string            // empty means unmanaged
 }
 
@@ -1159,6 +1160,7 @@ func parseIndexes(v any) []*Index {
                 if cm, ok := dm["comment"].(string); ok { ix.Comment = cm }
                 if inc, ok := dm["include"]; ok { ix.Include = parseStringListFromNode(inc) }
                 if b, ok := dm["nullsNotDistinct"].(bool); ok { ix.NullsNotDistinct = b }
+                if b, ok := dm["concurrently"].(bool); ok { ix.Concurrently = b }
                 if w, ok := dm["with"].(map[string]any); ok {
                     ix.With = map[string]string{}
                     for k, v := range w { ix.With[k] = scalarToString(v) }

@@ -232,6 +232,10 @@ These are never dropped: objects in other schemas, extension members, partitions
 
 See `docs/feature_support.md` for the full capability matrix.
 
+### Migrations without a transaction
+
+Each migration normally runs in its own transaction. A migration whose leading comment lines include `-- pgy:no-transaction` runs statement by statement on one connection instead, as `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE` (used in the same migration), `VACUUM` or `REINDEX CONCURRENTLY` require. It is recorded only after every statement succeeds, but a failure leaves earlier statements applied, so prefer idempotent statements (`IF NOT EXISTS`) in such files. `pgy diff` generates these migrations itself for indexes declared with `concurrently: true`.
+
 ## Notes
 - Forward-only: no down/rollback.
 - Advisory locks during init/migrate.

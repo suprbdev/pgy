@@ -14,7 +14,7 @@ These are the foundational elements required for almost any relational database 
 - [x] **Columns** (Data types, nullability, defaults)
 - [x] **Primary Keys**
 - [x] **Foreign Keys** (`onDelete`/`onUpdate`, `match`, `deferrable`/`initiallyDeferred`, `notValid`)
-- [x] **Indexes** (Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, expression indexes, per-column sort order — `desc`, `nulls last` —, `include` covering columns, `nullsNotDistinct` and `with` storage parameters. Live definitions are compared in full; a changed index is dropped and recreated under `--unsafe`. Names over 63 bytes are truncated the way PostgreSQL stores them)
+- [x] **Indexes** (Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, expression indexes, per-column sort order — `desc`, `nulls last` —, `include` covering columns, `nullsNotDistinct`, `with` storage parameters and `concurrently` (built in a separate no-transaction migration). Live definitions are compared in full; a changed index is dropped and recreated under `--unsafe`. Names over 63 bytes are truncated the way PostgreSQL stores them)
 - [x] **UNIQUE Constraints** (Table-level and column-level; `nullsNotDistinct`, `deferrable`/`initiallyDeferred`)
 - [x] **CHECK Constraints** (`noInherit`, `notValid`)
 - [x] **NOT NULL Constraints** (Via column `nullable` property)

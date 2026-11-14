@@ -96,6 +96,9 @@ Exit codes:
             } else {
                 plan := diff.PlanWith(live, compiled, opts)
                 sql = diff.Render(plan)
+                if len(plan.Concurrent) > 0 {
+                    sql = group.Render([]group.Step{{Plan: plan}})
+                }
                 summary = plan.Summary()
             }
 

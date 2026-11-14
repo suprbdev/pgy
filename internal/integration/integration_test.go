@@ -61,7 +61,7 @@ func freshSchema(t *testing.T, pool *pgxpool.Pool) string {
 func applyPlan(t *testing.T, pool *pgxpool.Pool, p *diff.PlanDiff) {
 	t.Helper()
 	ctx := context.Background()
-	all := append(append(p.Creates, p.Alters...), p.Drops...)
+	all := append(append(append(p.Creates, p.Alters...), p.Drops...), p.Concurrent...)
 	for _, stmt := range all {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatalf("apply SQL %q: %v", stmt, err)
