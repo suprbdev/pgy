@@ -165,6 +165,7 @@ func RegisterCommands(ctx context.Context, root *cobra.Command) {
     root.AddCommand(cmdMigrate())
     root.AddCommand(cmdMarkApplied())
     root.AddCommand(cmdStatus())
+    root.AddCommand(cmdValidate())
     root.AddCommand(&cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) { fmt.Println(VersionString()) }})
 }
 

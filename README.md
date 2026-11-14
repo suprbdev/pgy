@@ -78,6 +78,13 @@ If `--schemas`/`PGY_SCHEMAS`/config are not set, pgy auto-discovers all `.yml`/`
 pgy init --dsn "$PG_DSN"            # creates --migrations-table (default pgy.migrations)
 ```
 
+- Check schema files offline (JSON Schema, missing columns, unresolvable `dependsOn`, cycles; no database needed). Exits 1 on errors, so it works as a pre-commit hook or CI step:
+
+```
+pgy validate --schema-root ./schemas
+pgy validate --json          # findings as JSON
+```
+
 - Generate diff from YAML to DB (writes SQL to buffer):
 
 ```

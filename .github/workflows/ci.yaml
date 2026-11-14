@@ -24,6 +24,8 @@ jobs:
           version: v2.15.0
       - name: Tests (race)
         run: go test -race ./...
+      - name: Validate examples
+        run: go run ./cmd/pgy validate --schema-root examples
 
   integration:
     runs-on: ubuntu-latest
