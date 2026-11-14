@@ -106,6 +106,7 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
         cur := merge(func(p string) bool { return included[p] })
         cur.Extensions = full.Extensions
         cur.Roles = full.Roles
+        cur.DefaultPrivileges = full.DefaultPrivileges
         cur.EventTriggers, cur.Publications = nil, nil
         if i == len(ordered)-1 { cur.EventTriggers, cur.Publications = full.EventTriggers, full.Publications }
         (&availability{ix: ix, cur: cur, live: live}).deferUnready()

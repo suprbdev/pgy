@@ -310,6 +310,11 @@ func Database(d *schema.Database) []Issue {
 			}
 		}
 	}
+	for i, dp := range d.DefaultPrivileges {
+		if dp != nil && len(dp.Schemas) > 0 && dp.Grants["schemas"] != nil {
+			add(Error, fmt.Sprintf("defaultPrivileges[%d]", i), "schemas defaults cannot be limited with in")
+		}
+	}
 	for _, name := range sortedKeys(d.Publications) {
 		p := d.Publications[name]
 		if p == nil {

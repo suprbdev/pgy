@@ -91,6 +91,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
     }
 
+    simulateOwnersAndDefaults(out, desired)
+
     for name, p := range desired.Publications {
         if p == nil { continue }
         lp := &LivePublication{AllTables: p.AllTables, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
@@ -455,6 +457,10 @@ func cloneLive(l *Live) *Live {
         Domains:            cloneSet(l.Domains),
         Roles:              cloneSet(l.Roles),
         RoleDefs:           cloneMap(l.RoleDefs, func(r *LiveRole) *LiveRole { c := *r; return &c }),
+        Owners:             cloneMap(l.Owners, nil),
+        DefaultACLs:        cloneGrantMap(l.DefaultACLs),
+        DefaultACLRows:     cloneSet(l.DefaultACLRows),
+        CurrentUser:        l.CurrentUser,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),
@@ -541,4 +547,44 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.Policies == nil { t.Policies = map[string]*LivePolicy{} }
     if t.IndexComments == nil { t.IndexComments = map[string]string{} }
     if t.ConstraintComments == nil { t.ConstraintComments = map[string]string{} }
+}
+
+// simulateOwnersAndDefaults records the owners and default privileges a plan
+// for desired leaves behind.
+func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
+    set := func(key, owner string) { if owner != "" { out.Owners[key] = owner } }
+    for s, o := range desired.SchemaOwners { set("schema:"+s, o) }
+    for k, td := range desired.Types { if td != nil { set("type:"+k, td.Owner) } }
+    for k, dm := range desired.Domains { if dm != nil { set("type:"+k, dm.Owner) } }
+    for k, sq := range desired.Sequences { if sq != nil { set("rel:"+k, sq.Owner) } }
+    for k, dt := range desired.Tables { if dt != nil { set("rel:"+k, dt.Owner) } }
+    for k, vw := range desired.Views { if vw != nil { set("rel:"+k, vw.Owner) } }
+    for k, f := range desired.Functions {
+        if f != nil { set("proc:"+normalizeFunctionSignature(schema.RoutineName(k)+f.ArgsSig), f.Owner) }
+    }
+    for k, p := range desired.Procedures {
+        if p != nil { set("proc:"+normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig), p.Owner) }
+    }
+    for _, dp := range desired.DefaultPrivileges {
+        if dp == nil { continue }
+        role := dp.ForRole
+        if role == "" { role = out.CurrentUser }
+        schemas := dp.Schemas
+        if len(schemas) == 0 { schemas = []string{""} }
+        for kind, grants := range dp.Grants {
+            for _, nsp := range schemas {
+                key := role + "|" + nsp + "|" + kind
+                if out.DefaultACLs[key] == nil { out.DefaultACLs[key] = map[string]map[string]bool{} }
+                if _, implicit := defaultACLImplicit[kind]; implicit && nsp == "" && !out.DefaultACLRows[key] {
+                    out.DefaultACLs[key]["public"] = map[string]bool{defaultACLImplicit[kind]: true}
+                }
+                out.DefaultACLRows[key] = true
+                for grantee, privs := range grants {
+                    set := map[string]bool{}
+                    for _, p := range privs { set[strings.ToLower(p)] = true }
+                    out.DefaultACLs[key][strings.ToLower(grantee)] = set
+                }
+            }
+        }
+    }
 }

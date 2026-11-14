@@ -35,6 +35,8 @@ type Database struct {
     Publications map[string]*Publication `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
+    SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
+    DefaultPrivileges []*DefaultPrivilege `yaml:"-"`
 }
 
 // Role is a cluster-level role (CREATE ROLE). Passwords are intentionally
@@ -66,6 +68,7 @@ type View struct {
     Comment      string
     Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
     Grants       map[string][]string // role -> privileges; nil means unmanaged
+    Owner        string // "" = unmanaged
     SecurityInvoker *bool  // views: security_invoker option (PostgreSQL 15+); nil = unmanaged
     SecurityBarrier *bool  // views: security_barrier option; nil = unmanaged
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
@@ -92,6 +95,17 @@ type PublicationTable struct {
     Table   string // schema-qualified
     Columns []string
     Where   string
+}
+
+// DefaultPrivilege is one ALTER DEFAULT PRIVILEGES scope: objects created
+// later by ForRole ("" = the connecting role), in Schemas (empty = in any
+// schema), get Grants: object kind (tables, sequences, functions, types,
+// schemas) -> role -> privileges. Roles not listed are unmanaged; an empty
+// list revokes everything from that role.
+type DefaultPrivilege struct {
+    ForRole string
+    Schemas []string
+    Grants  map[string]map[string][]string
 }
 
 // EventTrigger is a database-wide CREATE EVENT TRIGGER declaration.
@@ -158,6 +172,7 @@ type Sequence struct {
     Cache     string
     Cycle     *bool  // nil = unmanaged
     OwnedBy   string // table.column (or schema.table.column)
+    Owner     string // "" = unmanaged
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
 }
@@ -173,6 +188,7 @@ type Domain struct {
     NotNull        bool
     Check          string // CHECK expression (without surrounding parens)
     ConstraintName string // optional name for the CHECK constraint
+    Owner          string // "" = unmanaged
     DependsOn      []string `yaml:"dependsOn"`
     Comment        string
 }
@@ -189,6 +205,7 @@ type Table struct {
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
     Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
+    Owner  string              `yaml:"-"` // "" = unmanaged
     // RowLevelSecurity is tri-state: nil means unmanaged (RLS state is left
     // alone), true means ENABLE, false means DISABLE (gated behind --unsafe,
     // since disabling removes row filtering from every policy on the table).
@@ -339,6 +356,7 @@ type TypeDef struct {
     AttributeOrder []string      // composite: YAML declaration order (filled from node tree)
     DependsOn []string `yaml:"dependsOn"`
     Comment string
+    Owner   string // "" = unmanaged
 }
 
 // RangeDef holds a range type's CREATE TYPE ... AS RANGE options. Subtype is
@@ -368,6 +386,7 @@ type Function struct {
     Grants map[string][]string // role -> privileges; nil means unmanaged
     RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
     Comment string             // empty means unmanaged
+    Owner   string             // "" = unmanaged
 }
 
 // Procedure is a CREATE PROCEDURE declaration (PostgreSQL 11+). Unlike
@@ -385,6 +404,7 @@ type Procedure struct {
     Grants map[string][]string // role -> privileges; nil means unmanaged
     RevokePublic bool          // revoke default PUBLIC execute
     Comment string             // empty means unmanaged
+    Owner   string             // "" = unmanaged
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -439,6 +459,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.Comment != "" {
                     existing.Comment = t.Comment
+                }
+                if t.Owner != "" {
+                    existing.Owner = t.Owner
                 }
                 if t.PartitionBy != nil {
                     existing.PartitionBy = t.PartitionBy
@@ -539,6 +562,11 @@ func Merge(dbs []*Database) *Database {
             if merged.SchemaGrants == nil { merged.SchemaGrants = map[string]map[string][]string{} }
             for k, v := range d.SchemaGrants { merged.SchemaGrants[k] = v }
         }
+        if len(d.SchemaOwners) > 0 {
+            if merged.SchemaOwners == nil { merged.SchemaOwners = map[string]string{} }
+            for k, v := range d.SchemaOwners { merged.SchemaOwners[k] = v }
+        }
+        merged.DefaultPrivileges = append(merged.DefaultPrivileges, d.DefaultPrivileges...)
         // merge schema comments
         if len(d.SchemaComments) > 0 {
             if merged.SchemaComments == nil { merged.SchemaComments = map[string]string{} }
@@ -642,10 +670,20 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                         }
                         delete(inner, "comment")
                     }
+                    if o, ok := inner["owner"].(string); ok {
+                        if o = strings.TrimSpace(o); o != "" {
+                            if out.SchemaOwners == nil { out.SchemaOwners = map[string]string{} }
+                            out.SchemaOwners[schemaName] = o
+                        }
+                        delete(inner, "owner")
+                    }
                 }
                 mergeTablesInto(out, schemaName, v)
             }
         }
+    }
+    if dpRaw, ok := root["defaultPrivileges"]; ok {
+        out.DefaultPrivileges = parseDefaultPrivileges(dpRaw)
     }
     if pubRaw, ok := root["publications"]; ok {
         out.Publications = parsePublications(pubRaw)
@@ -756,6 +794,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Policies = parsePolicies(polRaw)
                 }
                 if cm, ok := m["comment"].(string); ok { t.Comment = cm }
+                if o, ok := m["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
                 parseTablePartitioning(t, defaultSchema, m)
                 parseTableStorage(t, m)
             }
@@ -804,6 +843,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 t.Policies = parsePolicies(polRaw)
             }
             if cm, ok := m["comment"].(string); ok { t.Comment = cm }
+            if o, ok := m["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
             parseTablePartitioning(t, schemaName, m)
             parseTableStorage(t, m)
             db.Tables[fq] = t
@@ -860,6 +900,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Policies = parsePolicies(polRaw)
                 }
                 if cm, ok := inner["comment"].(string); ok { t.Comment = cm }
+                if o, ok := inner["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
                 parseTablePartitioning(t, schemaName, inner)
                 parseTableStorage(t, inner)
             }
@@ -914,6 +955,11 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if g := parseGrants(body); g != nil {
                 if db.SchemaGrants == nil { db.SchemaGrants = map[string]map[string][]string{} }
                 db.SchemaGrants[schemaName] = g
+            }
+        } else if key == "owner" {
+            if o, ok := body.(string); ok && strings.TrimSpace(o) != "" {
+                if db.SchemaOwners == nil { db.SchemaOwners = map[string]string{} }
+                db.SchemaOwners[schemaName] = strings.TrimSpace(o)
             }
         } else if key == "comment" {
             if cm, ok := body.(string); ok && cm != "" {
@@ -1357,6 +1403,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     if gRaw, ok := m["grants"]; ok { fn.Grants = parseGrants(gRaw) }
     if rp, ok := m["revokePublic"].(bool); ok { fn.RevokePublic = rp }
     if cm, ok := m["comment"].(string); ok { fn.Comment = cm }
+    if o, ok := m["owner"].(string); ok { fn.Owner = strings.TrimSpace(o) }
     return fn
 }
 
@@ -1388,6 +1435,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
     if gRaw, ok := m["grants"]; ok { pr.Grants = parseGrants(gRaw) }
     if rp, ok := m["revokePublic"].(bool); ok { pr.RevokePublic = rp }
     if cm, ok := m["comment"].(string); ok { pr.Comment = cm }
+    if o, ok := m["owner"].(string); ok { pr.Owner = strings.TrimSpace(o) }
     return pr
 }
 
@@ -1419,6 +1467,7 @@ func parseType(schemaName, key string, body any) *TypeDef {
         td.DependsOn = parseStringListFromNode(dep)
     }
     if cm, ok := m["comment"].(string); ok { td.Comment = cm }
+    if o, ok := m["owner"].(string); ok { td.Owner = strings.TrimSpace(o) }
     return td
 }
 
@@ -1863,6 +1912,7 @@ func parseView(schemaName, key string, body any) *View {
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
     if gRaw, ok := m["grants"]; ok { vw.Grants = parseGrants(gRaw) }
+    if o, ok := m["owner"].(string); ok { vw.Owner = strings.TrimSpace(o) }
     if b, ok := m["securityInvoker"].(bool); ok { vw.SecurityInvoker = &b }
     if b, ok := m["securityBarrier"].(bool); ok { vw.SecurityBarrier = &b }
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
@@ -1890,7 +1940,35 @@ func parseSequence(schemaName, key string, body any) *Sequence {
         sq.DependsOn = parseStringListFromNode(dep)
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
+    if o, ok := m["owner"].(string); ok { sq.Owner = strings.TrimSpace(o) }
     return sq
+}
+
+// parseDefaultPrivileges parses a list of {for, in, tables, sequences,
+// functions, types, schemas} entries; each kind maps role -> privileges.
+func parseDefaultPrivileges(v any) []*DefaultPrivilege {
+    arr, ok := v.([]any)
+    if !ok { return nil }
+    out := []*DefaultPrivilege{}
+    for _, it := range arr {
+        m, ok := it.(map[string]any)
+        if !ok { continue }
+        dp := &DefaultPrivilege{Grants: map[string]map[string][]string{}}
+        if s, ok := m["for"].(string); ok { dp.ForRole = strings.TrimSpace(s) }
+        switch in := m["in"].(type) {
+        case string:
+            dp.Schemas = []string{strings.TrimSpace(in)}
+        case []any:
+            dp.Schemas = parseStringListFromNode(in)
+        }
+        for _, kind := range []string{"tables", "sequences", "functions", "types", "schemas"} {
+            if g, ok := m[kind]; ok {
+                if parsed := parseGrants(g); parsed != nil { dp.Grants[kind] = parsed }
+            }
+        }
+        out = append(out, dp)
+    }
+    return out
 }
 
 // parsePublications parses { name: {allTables, tables, schemas, publish,
@@ -2021,6 +2099,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
         dm.DependsOn = parseStringListFromNode(dep)
     }
     if cm, ok := m["comment"].(string); ok { dm.Comment = cm }
+    if o, ok := m["owner"].(string); ok { dm.Owner = strings.TrimSpace(o) }
     return dm
 }
 

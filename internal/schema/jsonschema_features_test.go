@@ -17,9 +17,16 @@ publications:
     viaPartitionRoot: true
     comment: cdc
   all: {allTables: true}
+defaultPrivileges:
+  - for: app_owner
+    in: [public]
+    tables: {app_read: [select]}
+    sequences: {app_rw: [usage]}
+  - functions: {public: []}
 eventTriggers:
   log_ddl: {event: ddl_command_end, tags: [CREATE TABLE], function: public.log_ddl(), enabled: always, comment: audit}
 schema public:
+  owner: app_owner
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
   text search dictionary nostop: {template: snowball, options: {language: english}}
@@ -29,6 +36,7 @@ schema public:
   type floatrange: {type: range, subtype: float8, subtypeDiff: float8mi, multirangeTypeName: floatmultirange}
   sequence order_no: {as: bigint, cycle: false, ownedBy: none}
   table orders:
+    owner: app_owner
     unlogged: false
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:
