@@ -174,6 +174,7 @@ type Sequence struct {
     Cycle     *bool  // nil = unmanaged
     OwnedBy   string // table.column (or schema.table.column)
     Owner     string // "" = unmanaged
+    Grants    map[string][]string // role -> privileges (usage, select, update); nil = unmanaged
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
 }
@@ -190,6 +191,7 @@ type Domain struct {
     Check          string // CHECK expression (without surrounding parens)
     ConstraintName string // optional name for the CHECK constraint
     Owner          string // "" = unmanaged
+    Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
     DependsOn      []string `yaml:"dependsOn"`
     Comment        string
 }
@@ -372,6 +374,7 @@ type TypeDef struct {
     DependsOn []string `yaml:"dependsOn"`
     Comment string
     Owner   string // "" = unmanaged
+    Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
 }
 
 // RangeDef holds a range type's CREATE TYPE ... AS RANGE options. Subtype is
@@ -1590,6 +1593,7 @@ func parseType(schemaName, key string, body any) *TypeDef {
     }
     if cm, ok := m["comment"].(string); ok { td.Comment = cm }
     if o, ok := m["owner"].(string); ok { td.Owner = strings.TrimSpace(o) }
+    if g, ok := m["grants"]; ok { td.Grants = parseGrants(g) }
     return td
 }
 
@@ -2076,6 +2080,7 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     if o, ok := m["owner"].(string); ok { sq.Owner = strings.TrimSpace(o) }
+    if g, ok := m["grants"]; ok { sq.Grants = parseGrants(g) }
     return sq
 }
 
@@ -2235,6 +2240,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
     }
     if cm, ok := m["comment"].(string); ok { dm.Comment = cm }
     if o, ok := m["owner"].(string); ok { dm.Owner = strings.TrimSpace(o) }
+    if g, ok := m["grants"]; ok { dm.Grants = parseGrants(g) }
     return dm
 }
 

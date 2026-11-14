@@ -721,6 +721,7 @@
       "description": "Body of a `type <name>:` declaration (enum, composite or range).",
       "type": "object",
       "properties": {
+        "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "enum": ["enum", "composite", "range"] },
         "subtype": { "type": "string", "description": "Range: element type, e.g. timestamptz." },
@@ -791,6 +792,7 @@
       "description": "Body of a `sequence <name>:` declaration.",
       "type": "object",
       "properties": {
+        "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "as": { "type": "string", "enum": ["smallint", "integer", "bigint"] },
         "increment": { "type": ["integer", "string"] },
@@ -873,6 +875,7 @@
       "description": "Body of a `domain <name>:` declaration.",
       "type": "object",
       "properties": {
+        "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "description": "Underlying base type." },
         "as": { "type": "string", "description": "Alias for type." },

@@ -89,6 +89,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             out.CompositeAttributes[k] = attrs
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
+        if td.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], td.Grants) }
     }
 
     simulateOwnersAndDefaults(out, desired)
@@ -157,6 +158,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             ld.Checks[truncateIdent(name)] = "CHECK (" + dm.Check + ")"
         }
         out.DomainDefs[k] = ld
+        if dm.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], dm.Grants) }
         if dm.Comment != "" { out.TypeComments[k] = dm.Comment }
     }
 
@@ -176,6 +178,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if sq.OwnedBy != "" { ls.Owner = qualifyOwnedBy(sq.OwnedBy) }
         out.SequenceDefs[k] = ls
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
+        if sq.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], sq.Grants) }
     }
 
     for k, f := range desired.Functions {
@@ -479,6 +482,7 @@ func cloneLive(l *Live) *Live {
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),
+        TypeGrants:         cloneGrantMap(l.TypeGrants),
         FunctionGrants:     cloneGrantMap(l.FunctionGrants),
         SchemaGrants:       cloneGrantMap(l.SchemaGrants),
         ColumnGrants:       cloneMap(l.ColumnGrants, cloneGrantMap),

@@ -62,7 +62,8 @@ type Live struct{
     RoleMembers map[string]map[string]bool
     RoleComments map[string]string // role name -> comment (pg_shdescription)
     // Grants: object key -> role -> privilege -> exists. Object owners excluded.
-    TableGrants    map[string]map[string]map[string]bool // key "schema.table"
+    TableGrants    map[string]map[string]map[string]bool // key "schema.table" (also views and sequences)
+    TypeGrants     map[string]map[string]map[string]bool // key "schema.type" (types and domains)
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
     SchemaGrants   map[string]map[string]map[string]bool // key schema name
     // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists (pg_attribute.attacl)
@@ -382,6 +383,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
+        TypeGrants: map[string]map[string]map[string]bool{},
         FunctionGrants: map[string]map[string]map[string]bool{},
         SchemaGrants: map[string]map[string]map[string]bool{},
         ColumnGrants: map[string]map[string]map[string]map[string]bool{},
@@ -683,6 +685,27 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             la := &LiveAggregate{}
             if err := aggRows.Scan(&schemaName, &name, &args, &la.SFunc, &la.SType, &la.FinalFunc, &la.InitCond, &la.CombineFunc, &la.Parallel); err != nil { return err }
             l.AggregateDefs[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, name, args))] = la
+        }
+        return nil
+    })
+
+    typeGrantQ := `
+        select n.nspname || '.' || t.typname,
+               case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
+               lower(a.privilege_type)
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        cross join lateral aclexplode(t.typacl) a
+        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+        and a.grantee <> t.typowner
+    `
+    batch.add(typeGrantQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var key, role, priv string
+            if err := rows.Scan(&key, &role, &priv); err != nil { return err }
+            addLiveGrant(l.TypeGrants, key, role, priv)
         }
         return nil
     })
@@ -1189,7 +1212,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         cross join lateral aclexplode(c.relacl) a
-        where c.relkind in ('r', 'p', 'v', 'm')
+        where c.relkind in ('r', 'p', 'v', 'm', 'S')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
@@ -3214,6 +3237,22 @@ func planGrants(live *Live, desired *schema.Database) []string {
             c := dt.Columns[cn]
             if c == nil || c.Grants == nil { continue }
             add(columnGrantDiffStmts(k, cn, c.Grants, live.ColumnGrants[k][cn]))
+        }
+    }
+
+    for _, k := range sortedKeys(desired.Sequences) {
+        if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
+            add(grantDiffStmts("sequence "+pqIdent(k), sq.Grants, live.TableGrants[k]))
+        }
+    }
+    for _, k := range sortedKeys(desired.Types) {
+        if td := desired.Types[k]; td != nil && td.Grants != nil {
+            add(grantDiffStmts("type "+pqIdent(k), td.Grants, live.TypeGrants[k]))
+        }
+    }
+    for _, k := range sortedKeys(desired.Domains) {
+        if dm := desired.Domains[k]; dm != nil && dm.Grants != nil {
+            add(grantDiffStmts("domain "+pqIdent(k), dm.Grants, live.TypeGrants[k]))
         }
     }
 
