@@ -1324,7 +1324,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 pkCols := map[string]bool{}
                 for _, pc := range dt.PrimaryKey { pkCols[pc] = true }
                 colNames := make([]string, 0, len(dt.Columns))
-                for cn := range dt.Columns { colNames = append(colNames, cn) }
+                if dt.PartitionOf == "" {
+                    for cn := range dt.Columns { colNames = append(colNames, cn) }
+                }
                 sort.Strings(colNames)
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
@@ -1345,11 +1347,14 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
-                if unsafe {
+                if unsafe && dt.PartitionOf == "" {
+                    dropCols := []string{}
                     for cn := range lt.Columns {
-                        if _, ok := dt.Columns[cn]; !ok {
-                            plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), pqIdent(cn)))
-                        }
+                        if _, ok := dt.Columns[cn]; !ok { dropCols = append(dropCols, cn) }
+                    }
+                    sort.Strings(dropCols)
+                    for _, cn := range dropCols {
+                        plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), pqIdent(cn)))
                     }
                 }
             }

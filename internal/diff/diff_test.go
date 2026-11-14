@@ -3900,6 +3900,44 @@ func TestPartitionSkippedIfExists(t *testing.T) {
 	}
 }
 
+func TestPartitionInheritedColumnsNotDroppedUnsafe(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.measurement_y2024": {
+			Name:        "measurement_y2024",
+			Columns:     map[string]*schema.Column{},
+			PartitionOf: "public.measurement",
+			Partition:   &schema.PartitionSpec{From: []string{"2024-01-01"}, To: []string{"2025-01-01"}, Modulus: -1, Remainder: -1},
+		},
+	}}
+	live := liveWithTable("public.measurement_y2024", map[string]*LiveColumn{
+		"id":      {Type: "integer"},
+		"created": {Type: "date"},
+	})
+	p := Plan(live, desired, true)
+	if sql := Render(p); sql != "" {
+		t.Errorf("partition child inherits its columns; expected no SQL under --unsafe, got:\n%s", sql)
+	}
+}
+
+func TestDropColumnUnsafeDeterministicOrder(t *testing.T) {
+	live := liveWithTable("public.users", map[string]*LiveColumn{
+		"id": {Type: "int"}, "c": {Type: "text"}, "a": {Type: "text"}, "b": {Type: "text"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.users": {Name: "users", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+	}}
+	for i := 0; i < 20; i++ {
+		p := Plan(live, desired, true)
+		got := strings.Join(p.Drops, "\n")
+		want := `alter table "public"."users" drop column "a";` + "\n" +
+			`alter table "public"."users" drop column "b";` + "\n" +
+			`alter table "public"."users" drop column "c";`
+		if got != want {
+			t.Fatalf("drops not sorted:\n%s", got)
+		}
+	}
+}
+
 func TestPartitionListCreate(t *testing.T) {
 	desired := &schema.Database{Tables: map[string]*schema.Table{
 		"public.events_eu": {
