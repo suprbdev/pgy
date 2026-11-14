@@ -17,7 +17,7 @@ pgy is a declarative, forward-only migration tool for PostgreSQL 15–18. You de
 Download the archive for your platform from the [latest release](https://github.com/suprbdev/pgy/releases/latest) (Linux and macOS on amd64 and arm64, Windows on amd64). Optionally verify it against `checksums.txt`, then put `pgy` on your `PATH`:
 
 ```sh
-VERSION=0.19.6   # see the latest release
+VERSION=0.19.7   # see the latest release
 curl -LO https://github.com/suprbdev/pgy/releases/download/v${VERSION}/pgy_${VERSION}_linux_amd64.tar.gz
 tar xzf pgy_${VERSION}_linux_amd64.tar.gz
 sudo install -m 0755 pgy /usr/local/bin/pgy
@@ -43,7 +43,7 @@ make install   # installs to $HOME/go/bin if present, else PREFIX/bin (/usr/loca
 **1. Describe the schema.** Create `schemas/app.yml`:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.19.6/schemas/pgy.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.19.7/schemas/pgy.schema.json
 schema app:
   table account:
     columns:
@@ -97,7 +97,7 @@ From then on, edit the YAML and repeat steps 3 and 4. In CI, `pgy diff` against 
 [`schemas/pgy.schema.json`](schemas/pgy.schema.json) is a JSON Schema for pgy's YAML. Editors that use [yaml-language-server](https://github.com/redhat-developer/yaml-language-server), such as VS Code with the Red Hat YAML extension or Neovim, use it to complete keys, validate values and show documentation on hover. Point the modeline at the schema of the pgy release you use, so the editor accepts exactly the keys that release understands:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.19.6/schemas/pgy.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.19.7/schemas/pgy.schema.json
 ```
 
 To skip the modeline, map files to the schema in VS Code's settings instead. See [Editor Support](docs/schema.md#editor-support) for that and for what the schema checks.
