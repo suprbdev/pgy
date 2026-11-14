@@ -29,3 +29,15 @@ func TestPolicyRoleKeywordsAndPublic(t *testing.T) {
 		t.Errorf("keywords must compare as the connected role, got:\n%s", sql)
 	}
 }
+
+func TestOwnerKeywordComparesAsConnectedRole(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {Name: "t", Owner: "current_user", Columns: map[string]*schema.Column{"id": {Type: "int"}}}}}
+	live := Simulate(&Live{CurrentUser: "deployer"}, d)
+	live.CurrentUser = "deployer"
+	if live.Owners["rel:app.t"] != "deployer" {
+		t.Fatalf("simulated owner = %q", live.Owners["rel:app.t"])
+	}
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("owner: current_user must match the connected role, got:\n%s", sql)
+	}
+}

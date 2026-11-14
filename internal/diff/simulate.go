@@ -617,7 +617,7 @@ func ensureLiveTableMaps(t *LiveTable) {
 // simulateOwnersAndDefaults records the owners and default privileges a plan
 // for desired leaves behind.
 func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
-    set := func(key, owner string) { if owner != "" { out.Owners[key] = owner } }
+    set := func(key, owner string) { if owner != "" { out.Owners[key] = resolveRole(owner, out.CurrentUser) } }
     for s, o := range desired.SchemaOwners { set("schema:"+s, o) }
     for k, td := range desired.Types { if td != nil { set("type:"+k, td.Owner) } }
     for k, dm := range desired.Domains { if dm != nil { set("type:"+k, dm.Owner) } }

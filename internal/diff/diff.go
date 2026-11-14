@@ -3298,7 +3298,7 @@ func constraintRecreated(lt *LiveTable, name, def string, unsafe bool) bool {
 func planOwners(live *Live, desired *schema.Database) []string {
     out := []string{}
     owner := func(kind, target, want, liveKey string) {
-        if want == "" || live.Owners[liveKey] == want { return }
+        if want == "" || live.Owners[liveKey] == resolveRole(want, live.CurrentUser) { return }
         out = append(out, fmt.Sprintf("alter %s %s owner to %s;", kind, target, grantRole(want)))
     }
     for _, s := range sortedKeys(desired.SchemaOwners) {
