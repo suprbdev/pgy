@@ -30,6 +30,7 @@ type Live struct{
     Domains    map[string]bool
     Collations map[string]bool
     CollationComments map[string]string
+    EventTriggers map[string]*LiveEventTrigger
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
@@ -68,6 +69,17 @@ type Live struct{
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
+}
+
+// LiveEventTrigger is an event trigger from pg_event_trigger. Function is
+// "schema.name"; Enabled is origin | disabled | replica | always.
+type LiveEventTrigger struct {
+    Event     string
+    Tags      []string
+    Function  string
+    Enabled   string
+    Comment   string
+    Extension bool // member of an extension
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -238,6 +250,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         SequenceDefs: map[string]*LiveSequence{},
         Collations: map[string]bool{},
         CollationComments: map[string]string{},
+        EventTriggers: map[string]*LiveEventTrigger{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
@@ -677,6 +690,29 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     enumRows.Close()
     
+    etQ := `
+        select e.evtname, e.evtevent, n.nspname || '.' || p.proname,
+               case e.evtenabled when 'D' then 'disabled' when 'R' then 'replica' when 'A' then 'always' else 'origin' end,
+               coalesce(e.evttags, '{}'), coalesce(d.description, ''),
+               exists (select 1 from pg_depend x where x.classid = 'pg_event_trigger'::regclass and x.objid = e.oid and x.deptype = 'e')
+        from pg_event_trigger e
+        join pg_proc p on p.oid = e.evtfoid
+        join pg_namespace n on n.oid = p.pronamespace
+        left join pg_description d on d.objoid = e.oid and d.classoid = 'pg_event_trigger'::regclass
+    `
+    etRows, err := pool.Query(ctx, etQ)
+    if err != nil { return nil, err }
+    for etRows.Next() {
+        var name string
+        et := &LiveEventTrigger{}
+        if err := etRows.Scan(&name, &et.Event, &et.Function, &et.Enabled, &et.Tags, &et.Comment, &et.Extension); err != nil {
+            etRows.Close()
+            return nil, err
+        }
+        l.EventTriggers[name] = et
+    }
+    etRows.Close()
+
     collQ := `
         select n.nspname, c.collname, coalesce(d.description, '')
         from pg_collation c
@@ -1710,6 +1746,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(plan.Creates, deferredTriggers...)
+    planEventTriggers(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
@@ -1975,6 +2012,66 @@ func isNumericLiteral(s string) bool {
         }
     }
     return s != "-" && s != "." && s != "-."
+}
+
+// planEventTriggers creates missing event triggers and drops and recreates
+// ones whose event, tags or function changed (metadata only, so not gated
+// behind --unsafe), after every function create. Enabled state and comments
+// are reconciled with ALTER / COMMENT. With a present eventTriggers block,
+// --unsafe --prune drops undeclared ones that no extension owns.
+func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
+    if desired.EventTriggers == nil { return }
+    for _, name := range sortedKeys(desired.EventTriggers) {
+        et := desired.EventTriggers[name]
+        if et == nil || et.Event == "" || et.Function == "" { continue }
+        ident := pqIdent(truncateIdent(name))
+        create := fmt.Sprintf("create event trigger %s on %s", ident, strings.ToLower(et.Event))
+        if len(et.Tags) > 0 {
+            tags := make([]string, len(et.Tags))
+            for i, t := range et.Tags { tags[i] = quoteString(strings.ToUpper(strings.TrimSpace(t))) }
+            create += " when tag in (" + strings.Join(tags, ", ") + ")"
+        }
+        fn := strings.TrimSuffix(strings.TrimSpace(et.Function), "()")
+        create += " execute function " + pqIdent(qualifyName(fn)) + "();"
+        le := live.EventTriggers[truncateIdent(name)]
+        switch {
+        case le == nil:
+            plan.Creates = append(plan.Creates, create)
+            le = &LiveEventTrigger{Enabled: "origin"}
+        case !eventTriggerMatches(et, le):
+            plan.Creates = append(plan.Creates, fmt.Sprintf("drop event trigger %s;", ident), create)
+            le = &LiveEventTrigger{Enabled: "origin"}
+        }
+        if et.Enabled != "" && et.Enabled != le.Enabled {
+            action := map[string]string{"origin": "enable", "disabled": "disable", "replica": "enable replica", "always": "enable always"}[et.Enabled]
+            if action != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("alter event trigger %s %s;", ident, action)) }
+        }
+        if et.Comment != "" && et.Comment != le.Comment {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("comment on event trigger %s is %s;", ident, quoteString(et.Comment)))
+        }
+    }
+    if !opts.Unsafe || !opts.Prune { return }
+    for _, name := range sortedKeys(live.EventTriggers) {
+        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil { continue }
+        plan.Drops = append(plan.Drops, fmt.Sprintf("drop event trigger %s;", pqIdent(name)))
+    }
+}
+
+func eventTriggerMatches(et *schema.EventTrigger, le *LiveEventTrigger) bool {
+    if strings.ToLower(et.Event) != le.Event { return false }
+    if qualifyName(strings.TrimSuffix(strings.TrimSpace(et.Function), "()")) != le.Function { return false }
+    want := make([]string, len(et.Tags))
+    for i, t := range et.Tags { want[i] = strings.ToUpper(strings.TrimSpace(t)) }
+    have := append([]string(nil), le.Tags...)
+    sort.Strings(want)
+    sort.Strings(have)
+    return strings.Join(want, ",") == strings.Join(have, ",")
+}
+
+// qualifyName qualifies an unqualified object name with public.
+func qualifyName(s string) string {
+    if strings.Contains(s, ".") { return s }
+    return "public." + s
 }
 
 // renderCollation emits CREATE COLLATION IF NOT EXISTS, copying From when

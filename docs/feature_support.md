@@ -59,7 +59,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 - [ ] **Full Text Search Configurations** (Custom dictionaries, parsers, templates)
 - [x] **Collations** (`collation <name>:` blocks → `CREATE COLLATION` with provider/locale/lcCollate/lcCtype/deterministic/rules or `from`; create-only, comments diffed, pruned with `--prune`)
 - [ ] **Rules** (`CREATE RULE` query rewrites)
-- [ ] **Event Triggers** (DDL triggers)
+- [x] **Event Triggers** (top-level `eventTriggers:` → `CREATE EVENT TRIGGER` with event/tags/function; changed definition drop+recreate, `enabled` → `ALTER EVENT TRIGGER ... ENABLE/DISABLE/ENABLE REPLICA/ALWAYS`, comments diffed; present block authoritative for `--prune`)
 - [ ] **Logical Replication** (Publications and Subscriptions)
 - [ ] **Tablespaces** (Physical storage mapping)
 

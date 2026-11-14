@@ -27,6 +27,25 @@
         ]
       }
     },
+    "eventTriggers": {
+      "description": "Database-wide event triggers (CREATE EVENT TRIGGER). When present, --unsafe --prune drops event triggers not listed (extension-owned ones are kept).",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "event": { "type": "string", "enum": ["ddl_command_start", "ddl_command_end", "sql_drop", "table_rewrite", "login"] },
+          "tags": { "$ref": "#/definitions/stringList", "description": "Command tags to fire on (WHEN TAG IN), e.g. CREATE TABLE." },
+          "function": { "type": "string", "minLength": 1, "description": "Function returning event_trigger, e.g. public.log_ddl()." },
+          "enabled": {
+            "description": "true/origin (default), false/disabled, replica or always.",
+            "oneOf": [ { "type": "boolean" }, { "type": "string", "enum": ["origin", "disabled", "replica", "always"] } ]
+          },
+          "comment": { "type": "string" }
+        },
+        "required": ["event", "function"],
+        "additionalProperties": false
+      }
+    },
     "roles": {
       "description": "Cluster-level roles (CREATE ROLE). Passwords are intentionally unsupported: secrets do not belong in schema YAML.",
       "type": "object",

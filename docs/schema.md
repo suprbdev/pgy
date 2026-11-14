@@ -984,6 +984,22 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ---
 
+## Event Triggers
+
+Database-wide event triggers are declared in a top-level `eventTriggers:` map (they are not schema-scoped). Creating them requires superuser.
+
+```yaml
+eventTriggers:
+  log_ddl:
+    event: ddl_command_end          # ddl_command_start | ddl_command_end | sql_drop | table_rewrite | login (PostgreSQL 17+)
+    tags: [CREATE TABLE, ALTER TABLE]   # optional WHEN TAG IN filter
+    function: audit.log_ddl()       # a function returning event_trigger
+    enabled: true                   # true/origin | false/disabled | replica | always
+    comment: DDL audit
+```
+
+Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension.
+
 ## Collation Definitions
 
 Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.

@@ -25,6 +25,9 @@ type Database struct {
     Domains map[string]*Domain `yaml:"-"`
     Roles map[string]*Role `yaml:"-"`
     Collations map[string]*Collation `yaml:"-"`
+    // EventTriggers is nil when the YAML has no eventTriggers block (event
+    // triggers unmanaged) and authoritative for pruning when present.
+    EventTriggers map[string]*EventTrigger `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
 }
@@ -59,6 +62,16 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     Indexes         []*Index // materialized views only
+}
+
+// EventTrigger is a database-wide CREATE EVENT TRIGGER declaration.
+type EventTrigger struct {
+    Name     string
+    Event    string   // ddl_command_start | ddl_command_end | sql_drop | table_rewrite | login
+    Tags     []string // WHEN TAG IN (...); empty = every command
+    Function string   // function returning event_trigger, e.g. public.log_ddl()
+    Enabled  string   // origin (default) | disabled | replica | always
+    Comment  string
 }
 
 // Collation is a CREATE COLLATION declaration, either from provider options
@@ -408,6 +421,10 @@ func Merge(dbs []*Database) *Database {
             if merged.Collations == nil { merged.Collations = map[string]*Collation{} }
             for k, v := range d.Collations { merged.Collations[k] = v }
         }
+        if d.EventTriggers != nil {
+            if merged.EventTriggers == nil { merged.EventTriggers = map[string]*EventTrigger{} }
+            for k, v := range d.EventTriggers { merged.EventTriggers[k] = v }
+        }
         // merge domains
         if len(d.Domains) > 0 {
             if merged.Domains == nil { merged.Domains = map[string]*Domain{} }
@@ -527,6 +544,9 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                 mergeTablesInto(out, schemaName, v)
             }
         }
+    }
+    if etRaw, ok := root["eventTriggers"]; ok {
+        out.EventTriggers = parseEventTriggers(etRaw)
     }
     // roles top-level (cluster-scoped, no schema qualification)
     if rolesRaw, ok := root["roles"]; ok {
@@ -1690,6 +1710,32 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     return sq
+}
+
+// parseEventTriggers parses { name: {event, tags, function, enabled, comment} }.
+// enabled accepts true/false or origin/disabled/replica/always.
+func parseEventTriggers(v any) map[string]*EventTrigger {
+    m, ok := v.(map[string]any)
+    if !ok { return map[string]*EventTrigger{} }
+    out := map[string]*EventTrigger{}
+    for name, def := range m {
+        et := &EventTrigger{Name: name}
+        if dm, ok := def.(map[string]any); ok {
+            if s, ok := dm["event"].(string); ok { et.Event = strings.ToLower(strings.TrimSpace(s)) }
+            if t, ok := dm["tags"]; ok { et.Tags = parseStringListFromNode(t) }
+            if s, ok := dm["function"].(string); ok { et.Function = strings.TrimSpace(s) }
+            switch e := dm["enabled"].(type) {
+            case bool:
+                et.Enabled = "origin"
+                if !e { et.Enabled = "disabled" }
+            case string:
+                et.Enabled = strings.ToLower(strings.TrimSpace(e))
+            }
+            if s, ok := dm["comment"].(string); ok { et.Comment = s }
+        }
+        out[name] = et
+    }
+    return out
 }
 
 func parseCollation(schemaName, key string, body any) *Collation {
