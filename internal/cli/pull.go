@@ -48,7 +48,7 @@ on stderr.`,
                 fq := t
                 if !strings.Contains(fq, ".") { fq = "public." + fq }
                 if live.Tables[fq] == nil { return fmt.Errorf("--data %s: no such table", t) }
-                rows, err := diff.TableRows(ctx, pool, fq)
+                rows, err := diff.TableRows(ctx, pool, fq, live.Tables[fq].Partitioned)
                 if err != nil { return err }
                 data[fq] = rows
             }

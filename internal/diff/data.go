@@ -74,6 +74,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         rows, err := dataRowsJSON(dt.Data.Rows)
         if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
         tbl := pqIdent(fq)
+        from := dataTarget(fq, lt.Partitioned || dt.PartitionBy != nil)
         join := make([]string, len(key))
         liveKey := make([]string, len(key))
         declKey := make([]string, len(key))
@@ -90,7 +91,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
                  r as (select d.i, d.j, jsonb_populate_record(null::` + tbl + `, d.j) as v from d)
             select r.i, t.` + pqIdent(key[0]) + ` is null,
                    coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(t) -> k is distinct from to_jsonb(r.v) -> k), '{}')
-            from r left join ` + tbl + ` t on ` + strings.Join(join, " and ") + `
+            from r left join ` + from + ` t on ` + strings.Join(join, " and ") + `
             where t.` + pqIdent(key[0]) + ` is null
                or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(t) -> k is distinct from to_jsonb(r.v) -> k)`
         ld := &LiveTableData{Changed: map[int][]string{}}
@@ -124,7 +125,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         }
         extraQ := `
             select jsonb_build_object(` + strings.Join(textKey, ", ") + `)
-            from ` + tbl + ` t
+            from ` + from + ` t
             where not exists (select 1 from jsonb_array_elements($1::jsonb) e(j)
                               where (` + strings.Join(liveKey, ", ") + `) = (` + strings.Join(declKey, ", ") + `))
             order by ` + strings.Join(liveKey, ", ")
@@ -144,6 +145,14 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         l.TableData[fq] = ld
     }
     return nil
+}
+
+// dataTarget names table fq for reading or changing its own rows: ONLY for
+// a regular table, so the rows of tables inheriting from it are left out;
+// a partitioned table as is, since its rows live in its partitions.
+func dataTarget(fq string, partitioned bool) string {
+    if partitioned { return pqIdent(fq) }
+    return "only " + pqIdent(fq)
 }
 
 func hasColumns(lt *LiveTable, cols []string) bool {
@@ -325,7 +334,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                     if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, cn, row[cn]))) }
                 }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", pqIdent(fq), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, k, row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, k, row[k]) })))
             }
         }
     }
@@ -336,17 +345,25 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             if ld == nil { continue }
             key := desired.Tables[fq].DataKey()
             for _, ex := range ld.Extra {
-                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", pqIdent(fq), dataKeyWhere(key, func(k string) string { return quoteString(ex[k]) })))
+                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, func(k string) string { return quoteString(ex[k]) })))
             }
         }
     }
     return writes, deletes
 }
 
-// TableRows returns every row of table fq as a column -> value map decoded
-// from JSON (numbers as json.Number), for pgy pull --data.
-func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string) ([]map[string]any, error) {
-    rows, err := pool.Query(ctx, "select to_jsonb(t)::text from "+pqIdent(fq)+" t")
+func partitioned(live *Live, dt *schema.Table, fq string) bool {
+    if dt != nil && dt.PartitionBy != nil { return true }
+    lt := live.Tables[fq]
+    return lt != nil && lt.Partitioned
+}
+
+// TableRows returns the rows of table fq (without those of tables that
+// inherit from it) as column -> value maps decoded from JSON (numbers as
+// json.Number), for pgy pull --data. partitioned reads through a
+// partitioned table into its partitions.
+func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned bool) ([]map[string]any, error) {
+    rows, err := pool.Query(ctx, "select to_jsonb(t)::text from "+dataTarget(fq, partitioned)+" t")
     if err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
     defer rows.Close()
     out := []map[string]any{}

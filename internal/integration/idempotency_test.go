@@ -280,7 +280,7 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	data := map[string][]map[string]any{}
 	for fq, dt := range desired.Tables {
 		if dt != nil && dt.Data != nil {
-			rows, err := diff.TableRows(ctx, pool, fq)
+			rows, err := diff.TableRows(ctx, pool, fq, live.Tables[fq] != nil && live.Tables[fq].Partitioned)
 			if err != nil {
 				t.Fatal(err)
 			}

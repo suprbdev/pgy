@@ -59,7 +59,7 @@ func TestDataFromSnapshot(t *testing.T) {
 	p := PlanWith(live, dataDB(), Options{Unsafe: true})
 	for _, want := range []string{
 		`insert into "app"."plan" ("code", "name") values ('pro', 'Pro');`,
-		`update "app"."plan" set "name" = 'Free' where "code" = 'free';`,
+		`update only "app"."plan" set "name" = 'Free' where "code" = 'free';`,
 	} {
 		if !findAlter(p, want) {
 			t.Errorf("missing %q in\n%s", want, Render(p))
@@ -68,7 +68,7 @@ func TestDataFromSnapshot(t *testing.T) {
 	if strings.Contains(Render(p), "delete") {
 		t.Error("rows are only deleted with --prune")
 	}
-	if p := PlanWith(live, dataDB(), Options{Unsafe: true, Prune: true}); len(p.Drops) == 0 || p.Drops[0] != `delete from "app"."plan" where "code" = 'old';` {
+	if p := PlanWith(live, dataDB(), Options{Unsafe: true, Prune: true}); len(p.Drops) == 0 || p.Drops[0] != `delete from only "app"."plan" where "code" = 'old';` {
 		t.Errorf("expected a delete, got %v", p.Drops)
 	}
 	delete(live.TableData, "app.plan")

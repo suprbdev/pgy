@@ -87,7 +87,7 @@ func TestIntegrationDataChanges(t *testing.T) {
 	sql := step(v2, false)
 	for _, want := range []string{
 		`insert into "` + sch + `"."plan" ("code", "name", "price") values ('team', 'Team', 25);`,
-		`update "` + sch + `"."feature" set "label" = 'more' where "id" = 2;`,
+		`update only "` + sch + `"."feature" set "label" = 'more' where "id" = 2;`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("missing %q in:\n%s", want, sql)
@@ -97,7 +97,7 @@ func TestIntegrationDataChanges(t *testing.T) {
 		t.Errorf("without --prune nothing is deleted and unchanged rows are left alone:\n%s", sql)
 	}
 	sql = step(v2, true)
-	if !strings.Contains(sql, `delete from "`+sch+`"."plan" where "code" = 'ent';`) || !strings.Contains(sql, `where "code" = 'legacy';`) {
+	if !strings.Contains(sql, `delete from only "`+sch+`"."plan" where "code" = 'ent';`) || !strings.Contains(sql, `where "code" = 'legacy';`) {
 		t.Errorf("--prune must delete undeclared rows:\n%s", sql)
 	}
 	var n int
@@ -154,4 +154,75 @@ schema SCH:
     data:
       rows: [{key: open, label: Opened}]
 `)
+}
+
+func TestIntegrationDataOnInheritanceParent(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	y := `
+schema SCH:
+  table event:
+    columns: {id: {type: int}, kind: {type: text}}
+    primaryKey: [id]
+    data:
+      rows: [{id: 1, kind: base}]
+  table login_event:
+    inherits: [SCH.event]
+    columns: {ip: {type: text, nullable: true}}
+`
+	convergeYAML(t, pool, sch, y)
+	if _, err := pool.Exec(ctx, `insert into "`+sch+`".login_event (id, kind) values (2, 'login')`); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "s.yml")
+	if err := os.WriteFile(p, []byte(strings.ReplaceAll(y, "SCH", sch)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := schema.LoadAndMerge([]string{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(diff.PlanWith(introspect(t, pool, d), d, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+		t.Errorf("rows of an inheriting table are not the parent's data:\n%s", sql)
+	}
+}
+
+func TestIntegrationDataOnPartitionedTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	base := `
+schema SCH:
+  table region:
+    columns: {code: {type: text}, zone: {type: text}, name: {type: text}}
+    primaryKey: [code, zone]
+    partitionBy: {type: list, columns: [zone]}
+    data:
+      rows: ROWS
+  table region_eu:
+    partitionOf: SCH.region
+    forValues: {in: [eu]}
+  table region_us:
+    partitionOf: SCH.region
+    forValues: {in: [us]}
+`
+	convergeYAML(t, pool, sch, strings.ReplaceAll(base, "ROWS", `[{code: de, zone: eu, name: Germany}, {code: ny, zone: us, name: NY}, {code: fr, zone: eu, name: France}]`))
+	d := strings.ReplaceAll(base, "ROWS", `[{code: de, zone: eu, name: Deutschland}, {code: ny, zone: us, name: NY}]`)
+	p := filepath.Join(t.TempDir(), "s.yml")
+	if err := os.WriteFile(p, []byte(strings.ReplaceAll(d, "SCH", sch)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := schema.LoadAndMerge([]string{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := diff.PlanWith(introspect(t, pool, db), db, diff.Options{Unsafe: true, Prune: true})
+	sql := diff.Render(plan)
+	if !strings.Contains(sql, `update "`+sch+`"."region" set "name" = 'Deutschland'`) || !strings.Contains(sql, `delete from "`+sch+`"."region" where "code" = 'fr' and "zone" = 'eu';`) {
+		t.Fatalf("expected an update and a delete through the partitioned parent:\n%s", sql)
+	}
+	applyPlan(t, pool, plan)
+	if again := diff.Render(diff.PlanWith(introspect(t, pool, db), db, diff.Options{Unsafe: true, Prune: true})); again != "" {
+		t.Errorf("not converged:\n%s", again)
+	}
 }
