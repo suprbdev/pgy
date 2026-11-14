@@ -34,6 +34,7 @@ are reported on stderr.`,
             ctx := cmd.Context()
             cfg := FromContext(ctx)
             if cfg.DSN == "" { return fmt.Errorf("--dsn or PGY_DSN is required") }
+            if cmd.Flags().Changed("schemas") { return fmt.Errorf("pull reads no schema files; use --schema to choose which database schemas to pull") }
             pool, err := db.Connect(ctx, cfg.DSN)
             if err != nil { return err }
             defer pool.Close()
