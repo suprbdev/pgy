@@ -2527,10 +2527,21 @@ func TestRenderEmpty(t *testing.T) {
 
 // --- pqIdent ---
 
+func TestGrantRoleEscapesQuotes(t *testing.T) {
+	if got := grantRole(`we"ird`); got != `"we""ird"` {
+		t.Errorf("got %s", got)
+	}
+	if got := grantRole("PUBLIC"); got != "public" {
+		t.Errorf("got %s", got)
+	}
+}
+
 func TestPqIdent(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"public.users", `"public"."users"`},
 		{"id", `"id"`},
+		{`odd"name`, `"odd""name"`},
+		{`app.my"table`, `"app"."my""table"`},
 	}
 	for _, c := range cases {
 		got := pqIdent(c.in)

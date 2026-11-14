@@ -308,3 +308,18 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		}
 	}
 }
+
+func TestIntegrationQuotedIdentifiersIdempotent(t *testing.T) {
+	assertYAMLIdempotent(t, map[string]string{
+		"quotes": `
+schema SCH:
+  'table odd"table':
+    columns:
+      'col"umn': {type: text, comment: it's quoted}
+      Mixed: {type: int}
+    indexes:
+      'odd"idx': {columns: [Mixed]}
+    comment: it's quoted
+`,
+	})
+}

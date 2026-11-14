@@ -3221,7 +3221,7 @@ func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liv
 // grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.
 func grantRole(role string) string {
     if strings.EqualFold(role, "public") { return "public" }
-    return `"` + role + `"`
+    return quoteIdent(role)
 }
 
 // grantFuncArgs strips default clauses from an args signature — GRANT/REVOKE
@@ -4016,13 +4016,17 @@ func renderColumn(name string, c *schema.Column) string {
     return strings.Join(parts, " ")
 }
 
+// pqIdent quotes a name, or a "schema.name" pair split at the first dot,
+// as SQL identifiers, doubling embedded double quotes.
 func pqIdent(fq string) string {
-    // support schema.table and simple name
-    if strings.Contains(fq, ".") {
-        parts := strings.SplitN(fq, ".", 2)
-        return `"` + parts[0] + `"."` + parts[1] + `"`
+    if schemaName, name, ok := strings.Cut(fq, "."); ok {
+        return quoteIdent(schemaName) + "." + quoteIdent(name)
     }
-    return `"` + fq + `"`
+    return quoteIdent(fq)
+}
+
+func quoteIdent(s string) string {
+    return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // renderIndexElems renders index column entries: plain identifiers are quoted,

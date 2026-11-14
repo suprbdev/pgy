@@ -4,6 +4,7 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "strings"
     "time"
 
     "github.com/spf13/cobra"
@@ -60,6 +61,6 @@ func cmdMarkApplied() *cobra.Command {
     return c
 }
 
-func dbIdent(id string) string { return `"` + id + `"` }
+func dbIdent(id string) string { return `"` + strings.ReplaceAll(id, `"`, `""`) + `"` }
 
 

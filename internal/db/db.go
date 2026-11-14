@@ -3,6 +3,7 @@ package db
 import (
     "context"
     "fmt"
+    "strings"
 
     "github.com/jackc/pgx/v5/pgxpool"
 )
@@ -55,8 +56,7 @@ func EnsureMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema, tabl
 }
 
 func pqIdent(id string) string {
-    // very basic quote identifier
-    return `"` + id + `"`
+    return `"` + strings.ReplaceAll(id, `"`, `""`) + `"`
 }
 
 
