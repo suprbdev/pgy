@@ -116,8 +116,29 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if vw == nil || vw.Query == "" { continue }
         if vw.Materialized {
             out.MatViews[k] = true
+            if len(vw.Indexes) > 0 {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                ensureLiveTableMaps(lt)
+                for _, ix := range vw.Indexes {
+                    if ix == nil || len(ix.Columns) == 0 { continue }
+                    name := indexName(k, ix)
+                    lt.Indexes[name] = true
+                    delete(lt.IndexOpclasses, name)
+                    delete(lt.IndexDefs, name)
+                    if ix.Comment != "" { lt.IndexComments[name] = ix.Comment }
+                }
+            }
         } else {
             out.Views[k] = true
+            if opts := viewOptions(vw); len(opts) > 0 {
+                vo := map[string]string{}
+                for name, v := range out.ViewOptions[k] { vo[name] = v }
+                for _, o := range opts {
+                    if o[1] == "" { delete(vo, o[0]) } else { vo[o[0]] = o[1] }
+                }
+                out.ViewOptions[k] = vo
+            }
         }
         if vw.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], vw.Grants) }
         if vw.Comment != "" { out.RelComments[k] = vw.Comment }
@@ -289,6 +310,8 @@ func cloneLive(l *Live) *Live {
         ExtensionDefs:      cloneMap(l.ExtensionDefs, func(e *LiveExtension) *LiveExtension { c := *e; return &c }),
         Views:              cloneSet(l.Views),
         MatViews:           cloneSet(l.MatViews),
+        ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
+        MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Domains:            cloneSet(l.Domains),
         Roles:              cloneSet(l.Roles),

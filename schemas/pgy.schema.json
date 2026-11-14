@@ -577,6 +577,15 @@
           "type": "boolean",
           "description": "Always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)."
         },
+        "securityInvoker": { "type": "boolean", "description": "Views: security_invoker option — check permissions as the querying user (PostgreSQL 15+)." },
+        "securityBarrier": { "type": "boolean", "description": "Views: security_barrier option." },
+        "checkOption": { "type": "string", "enum": ["local", "cascaded", "none"], "description": "Views: WITH CHECK OPTION level; none removes it." },
+        "withData": { "type": "boolean", "description": "Materialized views: false creates WITH NO DATA (populate later with REFRESH)." },
+        "indexes": {
+          "type": "object",
+          "description": "Materialized views: indexes, same format as table indexes (a unique index enables REFRESH ... CONCURRENTLY).",
+          "additionalProperties": { "$ref": "#/definitions/index" }
+        },
         "grants": { "$ref": "#/definitions/grants" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }

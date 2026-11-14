@@ -837,16 +837,25 @@ schema public:
       - table public.users
     grants:
       reporting: [select]
+    securityInvoker: true   # check table permissions as the querying user (PostgreSQL 15+)
+    checkOption: local      # local | cascaded | none
 ```
+
+`securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
 
 ### Materialized Views
 
-Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support).
+Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
 
 ```yaml
 schema public:
   materialized view user_stats:
     query: "select count(*) as total, status from users group by status"
+    withData: false
+    indexes:
+      user_stats_status:
+        columns: [status]
+        unique: true
     dependsOn:
       - table public.users
 ```
@@ -855,6 +864,11 @@ schema public:
 |----------|------|-------------|
 | `query` | string | The `SELECT` statement defining the view |
 | `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
+| `securityInvoker` | boolean | Plain views only. `security_invoker` option (PostgreSQL 15+). Omitted = unmanaged |
+| `securityBarrier` | boolean | Plain views only. `security_barrier` option. Omitted = unmanaged |
+| `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
+| `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
+| `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 

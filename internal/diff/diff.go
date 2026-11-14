@@ -22,6 +22,10 @@ type Live struct{
     ExtensionDefs map[string]*LiveExtension
     Views      map[string]bool
     MatViews   map[string]bool
+    // ViewOptions: "schema.view" -> reloptions (security_invoker, security_barrier, check_option)
+    ViewOptions map[string]map[string]string
+    // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
+    MatViewTables map[string]*LiveTable
     Sequences  map[string]bool
     Domains    map[string]bool
     Roles      map[string]bool
@@ -98,6 +102,13 @@ type LiveTable struct{
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
+// indexedRelation returns the live table or materialized view with the given
+// key, which is where index introspection rows are recorded.
+func (l *Live) indexedRelation(key string) *LiveTable {
+    if t := l.Tables[key]; t != nil { return t }
+    return l.MatViewTables[key]
+}
+
 func newLiveTable() *LiveTable {
     return &LiveTable{
         Columns:            map[string]*LiveColumn{},
@@ -169,6 +180,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         ExtensionDefs: map[string]*LiveExtension{},
         Views: map[string]bool{},
         MatViews: map[string]bool{},
+        ViewOptions: map[string]map[string]string{},
+        MatViewTables: map[string]*LiveTable{},
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
         Roles: map[string]bool{},
@@ -231,6 +244,27 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     tableRows.Close()
     
+    // Query existing materialized views
+    matViewQ := `
+        select schemaname, matviewname
+        from pg_matviews
+        where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and schemaname !~ '^pg_(toast_)?temp_'
+    `
+    matViewRows, err := pool.Query(ctx, matViewQ)
+    if err != nil { return nil, err }
+    for matViewRows.Next() {
+        var schemaName, viewName string
+        if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
+            matViewRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, viewName)
+        l.MatViews[key] = true
+        l.MatViewTables[key] = newLiveTable()
+    }
+    matViewRows.Close()
+
     // Query columns to enrich table info. Uses pg_catalog rather than
     // information_schema so format_type keeps type modifiers (varchar(255))
     // and resolves arrays/user types (information_schema reports those as
@@ -317,8 +351,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             idxRows.Close()
             return nil, err
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
+        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
             t.Indexes[idxName] = true
         }
     }
@@ -348,8 +381,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             opcRows.Close()
             return nil, err
         }
-        key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
+        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
             t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault})
         }
     }
@@ -383,7 +415,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             idefRows.Close()
             return nil, err
         }
-        t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
+        t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
         if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
         li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions)}
         for _, opt := range indoption[:nKey] {
@@ -616,7 +648,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query existing views
     viewQ := `
-        select n.nspname, c.relname
+        select n.nspname, c.relname, coalesce(c.reloptions, '{}'::text[])
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind = 'v'
@@ -627,32 +659,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for viewRows.Next() {
         var schemaName, viewName string
-        if err := viewRows.Scan(&schemaName, &viewName); err != nil {
+        var reloptions []string
+        if err := viewRows.Scan(&schemaName, &viewName, &reloptions); err != nil {
             viewRows.Close()
             return nil, err
         }
-        l.Views[fmt.Sprintf("%s.%s", schemaName, viewName)] = true
+        key := fmt.Sprintf("%s.%s", schemaName, viewName)
+        l.Views[key] = true
+        l.ViewOptions[key] = parseProconfig(reloptions)
     }
     viewRows.Close()
-
-    // Query existing materialized views
-    matViewQ := `
-        select schemaname, matviewname
-        from pg_matviews
-        where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and schemaname !~ '^pg_(toast_)?temp_'
-    `
-    matViewRows, err := pool.Query(ctx, matViewQ)
-    if err != nil { return nil, err }
-    for matViewRows.Next() {
-        var schemaName, viewName string
-        if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
-            matViewRows.Close()
-            return nil, err
-        }
-        l.MatViews[fmt.Sprintf("%s.%s", schemaName, viewName)] = true
-    }
-    matViewRows.Close()
 
     // Query existing sequences (includes serial/identity-owned sequences,
     // which is fine: presence only guards against duplicate CREATE SEQUENCE)
@@ -976,7 +992,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             icRows.Close()
             return nil, err
         }
-        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+        if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
             t.IndexComments[idxName] = comment
         }
     }
@@ -1402,13 +1418,23 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
             vw, ok := desired.Views[e.Key]
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
-                if live.MatViews[e.Key] { continue }
-                plan.Creates = append(plan.Creates, fmt.Sprintf("create materialized view if not exists %s as %s;", pqIdent(e.Key), vw.Query))
+                if !live.MatViews[e.Key] {
+                    stmt := fmt.Sprintf("create materialized view if not exists %s as %s", pqIdent(e.Key), vw.Query)
+                    if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
+                    plan.Creates = append(plan.Creates, stmt+";")
+                }
+                if len(vw.Indexes) > 0 {
+                    applyTableConstraints(plan, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
+                }
             } else {
+                opts := viewOptions(vw)
                 // live view definitions can't be reliably text-compared (pg_get_viewdef
                 // rewrites the query), so replacement is opt-in via `replace: true`
-                if live.Views[e.Key] && !vw.Replace { continue }
-                plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s as %s;", pqIdent(e.Key), vw.Query))
+                if live.Views[e.Key] && !vw.Replace {
+                    plan.Alters = append(plan.Alters, viewOptionStmts(e.Key, opts, live.ViewOptions[e.Key])...)
+                    continue
+                }
+                plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s%s as %s;", pqIdent(e.Key), renderViewWith(opts, live.ViewOptions[e.Key]), vw.Query))
             }
         case "table":
             // Handle tables in dependency order
@@ -1539,6 +1565,72 @@ func renderRole(r *schema.Role) string {
     // DO block instead.
     return fmt.Sprintf("do $$ begin if not exists (select from pg_catalog.pg_roles where rolname = %s) then %s; end if; end $$;",
         quoteString(r.Name), stmt)
+}
+
+// viewOptions returns the view reloptions the YAML manages, in a fixed
+// order, as name/value pairs. An empty value means the option should be
+// unset (false booleans, checkOption: none).
+func viewOptions(vw *schema.View) [][2]string {
+    out := [][2]string{}
+    for _, b := range []struct {
+        name string
+        val  *bool
+    }{{"check_option", nil}, {"security_barrier", vw.SecurityBarrier}, {"security_invoker", vw.SecurityInvoker}} {
+        if b.name == "check_option" {
+            switch vw.CheckOption {
+            case "":
+            case "none":
+                out = append(out, [2]string{b.name, ""})
+            default:
+                out = append(out, [2]string{b.name, vw.CheckOption})
+            }
+            continue
+        }
+        if b.val == nil { continue }
+        v := ""
+        if *b.val { v = "true" }
+        out = append(out, [2]string{b.name, v})
+    }
+    return out
+}
+
+// renderViewWith renders the WITH (...) clause of CREATE OR REPLACE VIEW, or
+// "" when no option is set. CREATE OR REPLACE replaces the view's options
+// with exactly this list, so live options the YAML does not manage are
+// carried over.
+func renderViewWith(opts [][2]string, live map[string]string) string {
+    merged := map[string]string{}
+    for k, v := range live { merged[k] = v }
+    for _, o := range opts {
+        if o[1] == "" { delete(merged, o[0]) } else { merged[o[0]] = o[1] }
+    }
+    keys := make([]string, 0, len(merged))
+    for k := range merged { keys = append(keys, k) }
+    sort.Strings(keys)
+    parts := make([]string, 0, len(keys))
+    for _, k := range keys { parts = append(parts, k+" = "+merged[k]) }
+    if len(parts) == 0 { return "" }
+    return " with (" + strings.Join(parts, ", ") + ")"
+}
+
+// viewOptionStmts emits ALTER VIEW ... SET / RESET for managed options that
+// differ from the live reloptions. A live "false" counts as unset.
+func viewOptionStmts(key string, opts [][2]string, live map[string]string) []string {
+    set, reset := []string{}, []string{}
+    for _, o := range opts {
+        have := strings.ToLower(live[o[0]])
+        if have == "false" { have = "" }
+        if have == o[1] { continue }
+        if o[1] == "" {
+            reset = append(reset, o[0])
+        } else {
+            set = append(set, o[0]+" = "+o[1])
+        }
+    }
+    out := []string{}
+    if len(set) > 0 { out = append(out, fmt.Sprintf("alter view %s set (%s);", pqIdent(key), strings.Join(set, ", "))) }
+    if len(reset) > 0 { out = append(out, fmt.Sprintf("alter view %s reset (%s);", pqIdent(key), strings.Join(reset, ", "))) }
+    return out
 }
 
 // renderSequence emits CREATE SEQUENCE IF NOT EXISTS with only the options
@@ -1738,6 +1830,18 @@ func planComments(live *Live, desired *schema.Database) []string {
         kind := "view "
         if vw.Materialized { kind = "materialized view " }
         comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
+        lt := live.MatViewTables[k]
+        schemaPrefix := ""
+        if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
+        for _, ix := range vw.Indexes {
+            if ix == nil || ix.Comment == "" || len(ix.Columns) == 0 { continue }
+            var liveIdx map[string]bool
+            if lt != nil { liveIdx = lt.Indexes }
+            name := LiveIndexName(k, ix, liveIdx)
+            have := ""
+            if lt != nil { have = lt.IndexComments[name] }
+            comment("index "+pqIdent(schemaPrefix+name), ix.Comment, have)
+        }
     }
 
     seqNames := make([]string, 0, len(desired.Sequences))
