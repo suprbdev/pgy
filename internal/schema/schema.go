@@ -189,8 +189,11 @@ type Trigger struct {
 }
 
 type Extension struct {
-    Name        string `yaml:"name"`
-    IfNotExists bool   `yaml:"ifNotExists"`
+    Name        string   `yaml:"name"`
+    IfNotExists bool     `yaml:"ifNotExists"`
+    Schema      string   `yaml:"schema"`  // WITH SCHEMA; empty = server default
+    Version     string   `yaml:"version"` // VERSION; empty = default version, never updated
+    Cascade     bool     `yaml:"cascade"`
     DependsOn   []string `yaml:"dependsOn"`
 }
 
@@ -433,6 +436,9 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                     if name == "" { continue }
                     ext := &Extension{Name: name}
                     if b, ok := v["ifNotExists"].(bool); ok { ext.IfNotExists = b }
+                    if sc, ok := v["schema"].(string); ok { ext.Schema = strings.TrimSpace(sc) }
+                    if ver, ok := v["version"]; ok { ext.Version = scalarToString(ver) }
+                    if b, ok := v["cascade"].(bool); ok { ext.Cascade = b }
                     if dep, ok := v["dependsOn"]; ok {
                         ext.DependsOn = parseStringListFromNode(dep)
                     }

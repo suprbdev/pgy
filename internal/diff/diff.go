@@ -18,6 +18,8 @@ type Live struct{
     Types      map[string]bool
     Functions  map[string]bool
     Extensions map[string]bool
+    // ExtensionDefs: extension name -> installed schema/version
+    ExtensionDefs map[string]*LiveExtension
     Views      map[string]bool
     MatViews   map[string]bool
     Sequences  map[string]bool
@@ -50,6 +52,14 @@ type Live struct{
     ProcedureDefs map[string]*LiveProcedure
     // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
     EnumLabels map[string][]string
+}
+
+// LiveExtension is an installed extension's schema, version and whether it
+// can be moved with ALTER EXTENSION ... SET SCHEMA.
+type LiveExtension struct {
+    Schema      string
+    Version     string
+    Relocatable bool
 }
 
 type LiveFunction struct{
@@ -120,6 +130,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Types: map[string]bool{},
         Functions: map[string]bool{},
         Extensions: map[string]bool{},
+        ExtensionDefs: map[string]*LiveExtension{},
         Views: map[string]bool{},
         MatViews: map[string]bool{},
         Sequences: map[string]bool{},
@@ -505,16 +516,22 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     domRows.Close()
 
     // Query existing extensions
-    extQ := `select extname from pg_extension`
+    extQ := `
+        select e.extname, n.nspname, e.extversion, e.extrelocatable
+        from pg_extension e
+        join pg_namespace n on n.oid = e.extnamespace
+    `
     extRows, err := pool.Query(ctx, extQ)
     if err != nil { return nil, err }
     for extRows.Next() {
-        var extName string
-        if err := extRows.Scan(&extName); err != nil {
+        var extName, extSchema, extVersion string
+        var relocatable bool
+        if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable); err != nil {
             extRows.Close()
             return nil, err
         }
         l.Extensions[extName] = true
+        l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable}
     }
     extRows.Close()
 
@@ -1081,7 +1098,9 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 
     // Collect all schemas needed from desired entities
     neededSchemas := map[string]bool{}
-    // Extensions don't require schemas, skip them
+    for _, ext := range desired.Extensions {
+        if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
+    }
     for k := range desired.Types {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
@@ -1149,20 +1168,17 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
     extNames := make([]string, 0, len(desired.Extensions))
     for _, ext := range desired.Extensions {
-        if ext != nil && ext.Name != "" {
-            if !live.Extensions[ext.Name] {
-                extNames = append(extNames, ext.Name)
-            }
-        }
+        if ext != nil && ext.Name != "" { extNames = append(extNames, ext.Name) }
     }
     sort.Strings(extNames)
     for _, extName := range extNames {
         ext := findExtension(desired, extName)
         if ext == nil { continue }
-        stmt := "create extension "
-        if ext.IfNotExists { stmt += "if not exists " }
-        stmt += pqIdent(ext.Name) + ";"
-        plan.Creates = append(plan.Creates, stmt)
+        if live.Extensions[ext.Name] {
+            plan.Alters = append(plan.Alters, extensionAlterStmts(ext, live.ExtensionDefs[ext.Name])...)
+            continue
+        }
+        plan.Creates = append(plan.Creates, renderExtension(ext))
     }
     
     // Topologically sort remaining entities (types, functions, tables) respecting dependsOn.
@@ -2521,6 +2537,32 @@ func joinIdentList(cols []string) string {
 func quoteString(s string) string {
     // naive single-quote escaping
     return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// renderExtension emits CREATE EXTENSION with the options set in YAML.
+func renderExtension(ext *schema.Extension) string {
+    stmt := "create extension "
+    if ext.IfNotExists { stmt += "if not exists " }
+    stmt += pqIdent(ext.Name)
+    if ext.Schema != "" { stmt += " schema " + pqIdent(ext.Schema) }
+    if ext.Version != "" { stmt += " version " + quoteString(ext.Version) }
+    if ext.Cascade { stmt += " cascade" }
+    return stmt + ";"
+}
+
+// extensionAlterStmts moves a live extension to its declared schema (when it
+// is relocatable; others cannot be moved and are left alone) and updates it
+// to its declared version. Unset schema/version are unmanaged.
+func extensionAlterStmts(ext *schema.Extension, le *LiveExtension) []string {
+    if le == nil { return nil }
+    out := []string{}
+    if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
+        out = append(out, fmt.Sprintf("alter extension %s set schema %s;", pqIdent(ext.Name), pqIdent(ext.Schema)))
+    }
+    if ext.Version != "" && ext.Version != le.Version {
+        out = append(out, fmt.Sprintf("alter extension %s update to %s;", pqIdent(ext.Name), quoteString(ext.Version)))
+    }
+    return out
 }
 
 func findExtension(db *schema.Database, name string) *schema.Extension {

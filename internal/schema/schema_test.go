@@ -1267,6 +1267,26 @@ extensions:
 	}
 }
 
+func TestExtensionOptionsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+extensions:
+  - name: pg_trgm
+    schema: extensions
+    version: 1.6
+    cascade: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Extensions) != 1 {
+		t.Fatalf("want 1 extension, got %d", len(db.Extensions))
+	}
+	e := db.Extensions[0]
+	if e.Schema != "extensions" || e.Version != "1.6" || !e.Cascade {
+		t.Errorf("unexpected extension options: %+v", e)
+	}
+}
+
 func TestExtensionsStringShorthand(t *testing.T) {
 	yaml := `
 extensions: [pg_trgm, pgcrypto]
