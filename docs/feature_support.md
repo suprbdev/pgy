@@ -57,7 +57,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 Advanced PostgreSQL-specific capabilities for niche use cases.
 
 - [ ] **Foreign Data Wrappers (FDW)** (Servers, user mappings, and foreign tables)
-- [ ] **Full Text Search Configurations** (Custom dictionaries, parsers, templates)
+- [x] **Full Text Search Configurations** (`text search configuration` (copy or parser + managed token mappings → `ADD/ALTER/DROP MAPPING`) and `text search dictionary` (template + options, create-only) blocks; comments diffed, prunable. Custom parsers and templates are out of scope: they need C functions)
 - [x] **Collations** (`collation <name>:` blocks → `CREATE COLLATION` with provider/locale/lcCollate/lcCtype/deterministic/rules or `from`; create-only, comments diffed, pruned with `--prune`)
 - [ ] **Rules** (`CREATE RULE` query rewrites)
 - [x] **Event Triggers** (top-level `eventTriggers:` → `CREATE EVENT TRIGGER` with event/tags/function; changed definition drop+recreate, `enabled` → `ALTER EVENT TRIGGER ... ENABLE/DISABLE/ENABLE REPLICA/ALWAYS`, comments diffed; present block authoritative for `--prune`)

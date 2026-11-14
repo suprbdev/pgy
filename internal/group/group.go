@@ -296,6 +296,16 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
     for _, co := range d.Collations {
         if co != nil { hard(ix.resolveDeps(co.DependsOn)) }
     }
+    for _, td := range d.TSDictionaries {
+        if td != nil { hard(ix.resolveDeps(td.DependsOn)) }
+    }
+    for _, tc := range d.TSConfigs {
+        if tc == nil { continue }
+        hard(ix.resolveDeps(tc.DependsOn))
+        for _, dicts := range tc.Mappings {
+            for _, dict := range dicts { hard(ix.mentions(dict, []string{kindTSDict})) }
+        }
+    }
     for _, vw := range d.Views {
         if vw == nil { continue }
         hard(ix.resolveDeps(vw.DependsOn))

@@ -91,6 +91,10 @@ func planPrune(live *Live, desired *schema.Database) (early, late []string) {
     late = append(late, dropList("sequence", undeclared(sequences, func(k string) bool { return desired.Sequences[k] != nil }, "rel"))...)
     late = append(late, dropList("domain", undeclared(live.Domains, func(k string) bool { return desired.Domains[k] != nil }, "type"))...)
     late = append(late, dropList("type", undeclared(live.Types, func(k string) bool { return desired.Types[k] != nil }, "type"))...)
+    tsConfigs := map[string]bool{}
+    for k := range live.TSConfigs { tsConfigs[k] = true }
+    early = append(early, dropList("text search configuration", undeclared(tsConfigs, func(k string) bool { return desired.TSConfigs[k] != nil }, "tscfg"))...)
+    late = append(late, dropList("text search dictionary", undeclared(live.TSDictionaries, func(k string) bool { return desired.TSDictionaries[k] != nil }, "tsdict"))...)
     late = append(late, dropList("collation", undeclared(live.Collations, func(k string) bool { return desired.Collations[k] != nil }, "coll"))...)
     return early, late
 }
@@ -111,6 +115,8 @@ func managedSchemas(d *schema.Database) map[string]bool {
     add(sortedKeys(d.Domains))
     add(sortedKeys(d.Sequences))
     add(sortedKeys(d.Collations))
+    add(sortedKeys(d.TSConfigs))
+    add(sortedKeys(d.TSDictionaries))
     return out
 }
 

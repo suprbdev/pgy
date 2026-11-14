@@ -32,6 +32,10 @@ type Live struct{
     Domains    map[string]bool
     Collations map[string]bool
     CollationComments map[string]string
+    // TSConfigs: "schema.config" -> token type alias -> dictionaries (unqualified, in order)
+    TSConfigs        map[string]map[string][]string
+    TSDictionaries   map[string]bool
+    TSComments       map[string]string // "config:schema.name" / "dict:schema.name" -> comment
     EventTriggers map[string]*LiveEventTrigger
     Publications  map[string]*LivePublication
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
@@ -285,6 +289,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         SequenceDefs: map[string]*LiveSequence{},
         Collations: map[string]bool{},
         CollationComments: map[string]string{},
+        TSConfigs: map[string]map[string][]string{},
+        TSDictionaries: map[string]bool{},
+        TSComments: map[string]string{},
         EventTriggers: map[string]*LiveEventTrigger{},
         Publications: map[string]*LivePublication{},
         DomainDefs: map[string]*LiveDomain{},
@@ -819,6 +826,56 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     etRows.Close()
 
+    tsQ := `
+        select 'config', n.nspname || '.' || c.cfgname, coalesce(d.description, '')
+        from pg_ts_config c
+        join pg_namespace n on n.oid = c.cfgnamespace
+        left join pg_description d on d.objoid = c.oid and d.classoid = 'pg_ts_config'::regclass
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        union all
+        select 'dict', n.nspname || '.' || t.dictname, coalesce(d.description, '')
+        from pg_ts_dict t
+        join pg_namespace n on n.oid = t.dictnamespace
+        left join pg_description d on d.objoid = t.oid and d.classoid = 'pg_ts_dict'::regclass
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    tsRows, err := pool.Query(ctx, tsQ)
+    if err != nil { return nil, err }
+    for tsRows.Next() {
+        var kind, key, comment string
+        if err := tsRows.Scan(&kind, &key, &comment); err != nil {
+            tsRows.Close()
+            return nil, err
+        }
+        if kind == "config" { l.TSConfigs[key] = map[string][]string{} } else { l.TSDictionaries[key] = true }
+        if comment != "" { l.TSComments[kind+":"+key] = comment }
+    }
+    tsRows.Close()
+
+    tsMapQ := `
+        select n.nspname || '.' || c.cfgname, t.alias, array_agg(dd.dictname::text order by m.mapseqno)
+        from pg_ts_config_map m
+        join pg_ts_config c on c.oid = m.mapcfg
+        join pg_namespace n on n.oid = c.cfgnamespace
+        cross join lateral ts_token_type(c.cfgparser) t
+        join pg_ts_dict dd on dd.oid = m.mapdict
+        where t.tokid = m.maptokentype
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        group by 1, 2
+    `
+    tsMapRows, err := pool.Query(ctx, tsMapQ)
+    if err != nil { return nil, err }
+    for tsMapRows.Next() {
+        var cfg, alias string
+        var dicts []string
+        if err := tsMapRows.Scan(&cfg, &alias, &dicts); err != nil {
+            tsMapRows.Close()
+            return nil, err
+        }
+        if l.TSConfigs[cfg] != nil { l.TSConfigs[cfg][alias] = dicts }
+    }
+    tsMapRows.Close()
+
     collQ := `
         select n.nspname, c.collname, coalesce(d.description, '')
         from pg_collation c
@@ -1352,6 +1409,14 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_depend d join pg_type t on t.oid = d.objid join pg_namespace n on n.oid = t.typnamespace
         where d.deptype = 'e' and d.classid = 'pg_type'::regclass
         union all
+        select 'tscfg:' || n.nspname || '.' || c.cfgname
+        from pg_depend d join pg_ts_config c on c.oid = d.objid join pg_namespace n on n.oid = c.cfgnamespace
+        where d.deptype = 'e' and d.classid = 'pg_ts_config'::regclass
+        union all
+        select 'tsdict:' || n.nspname || '.' || c.dictname
+        from pg_depend d join pg_ts_dict c on c.oid = d.objid join pg_namespace n on n.oid = c.dictnamespace
+        where d.deptype = 'e' and d.classid = 'pg_ts_dict'::regclass
+        union all
         select 'coll:' || n.nspname || '.' || c.collname
         from pg_depend d join pg_collation c on c.oid = d.objid join pg_namespace n on n.oid = c.collnamespace
         where d.deptype = 'e' and d.classid = 'pg_collation'::regclass
@@ -1665,8 +1730,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Collations {
-        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
+    for _, keys := range [][]string{sortedKeys(desired.Collations), sortedKeys(desired.TSConfigs), sortedKeys(desired.TSDictionaries)} {
+        for _, k := range keys {
+            if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
+        }
     }
 
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
@@ -1823,6 +1890,16 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace procedure" }
             stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
             plan.Creates = append(plan.Creates, stmt)
+        case "tsdictionary":
+            td := desired.TSDictionaries[e.Key]
+            if td == nil || td.Template == "" || live.TSDictionaries[e.Key] { continue }
+            opts := []string{"template = " + td.Template}
+            for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+            plan.Creates = append(plan.Creates, fmt.Sprintf("create text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
+        case "tsconfig":
+            tc := desired.TSConfigs[e.Key]
+            if tc == nil { continue }
+            plan.Creates = append(plan.Creates, tsConfigStmts(e.Key, tc, live.TSConfigs[e.Key])...)
         case "collation":
             co := desired.Collations[e.Key]
             if co == nil || live.Collations[e.Key] { continue }
@@ -2420,6 +2497,59 @@ func qualifyName(s string) string {
     return "public." + s
 }
 
+// tsConfigStmts creates a missing text search configuration (as a copy or
+// from a parser) and reconciles the token type mappings the YAML manages.
+// For a new configuration the copied mappings are unknown, so each managed
+// mapping is dropped (if present) and added.
+func tsConfigStmts(fq string, tc *schema.TSConfig, live map[string][]string) []string {
+    out := []string{}
+    target := "alter text search configuration " + pqIdent(fq)
+    if live == nil {
+        switch {
+        case tc.Copy != "":
+            out = append(out, fmt.Sprintf("create text search configuration %s (copy = %s);", pqIdent(fq), pqIdent(tc.Copy)))
+        case tc.Parser != "":
+            out = append(out, fmt.Sprintf("create text search configuration %s (parser = %s);", pqIdent(fq), pqIdent(tc.Parser)))
+        default:
+            return nil
+        }
+        for _, tok := range sortedKeys(tc.Mappings) {
+            out = append(out, fmt.Sprintf("%s drop mapping if exists for %s;", target, tok))
+            if dicts := tc.Mappings[tok]; len(dicts) > 0 {
+                out = append(out, fmt.Sprintf("%s add mapping for %s with %s;", target, tok, joinTSDicts(dicts)))
+            }
+        }
+        return out
+    }
+    for _, tok := range sortedKeys(tc.Mappings) {
+        want, have := tc.Mappings[tok], live[tok]
+        switch {
+        case len(want) == 0 && len(have) > 0:
+            out = append(out, fmt.Sprintf("%s drop mapping for %s;", target, tok))
+        case len(want) > 0 && len(have) == 0:
+            out = append(out, fmt.Sprintf("%s add mapping for %s with %s;", target, tok, joinTSDicts(want)))
+        case len(want) > 0 && !sameTSDicts(want, have):
+            out = append(out, fmt.Sprintf("%s alter mapping for %s with %s;", target, tok, joinTSDicts(want)))
+        }
+    }
+    return out
+}
+
+func joinTSDicts(dicts []string) string {
+    parts := make([]string, len(dicts))
+    for i, d := range dicts { parts[i] = pqIdent(strings.TrimSpace(d)) }
+    return strings.Join(parts, ", ")
+}
+
+// sameTSDicts compares dictionary lists by unqualified name, in order.
+func sameTSDicts(want, have []string) bool {
+    if len(want) != len(have) { return false }
+    for i := range want {
+        if collationName(want[i]) != collationName(have[i]) { return false }
+    }
+    return true
+}
+
 // renderCollation emits CREATE COLLATION IF NOT EXISTS, copying From when
 // set, else with the provider options set in YAML.
 func renderCollation(fq string, co *schema.Collation) string {
@@ -2494,6 +2624,16 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     for _, k := range sortedKeys(desired.Collations) {
         if co := desired.Collations[k]; co != nil {
             comment("collation "+pqIdent(k), co.Comment, live.CollationComments[k])
+        }
+    }
+    for _, k := range sortedKeys(desired.TSDictionaries) {
+        if td := desired.TSDictionaries[k]; td != nil {
+            comment("text search dictionary "+pqIdent(k), td.Comment, live.TSComments["dict:"+k])
+        }
+    }
+    for _, k := range sortedKeys(desired.TSConfigs) {
+        if tc := desired.TSConfigs[k]; tc != nil {
+            comment("text search configuration "+pqIdent(k), tc.Comment, live.TSComments["config:"+k])
         }
     }
 
