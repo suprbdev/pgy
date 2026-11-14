@@ -250,6 +250,16 @@
           "description": "Rewrite rules (CREATE RULE).",
           "additionalProperties": { "$ref": "#/definitions/rule" }
         },
+        "statistics": {
+          "type": "object",
+          "description": "Extended statistics (CREATE STATISTICS).",
+          "additionalProperties": { "$ref": "#/definitions/statistic" }
+        },
+        "replicaIdentity": {
+          "type": "string",
+          "description": "REPLICA IDENTITY: default, full, nothing or index <name>.",
+          "pattern": "^(default|full|nothing|(using )?index .+)$"
+        },
         "constraints": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/constraint" }
@@ -323,6 +333,16 @@
           "type": "object",
           "description": "Rewrite rules (CREATE RULE).",
           "additionalProperties": { "$ref": "#/definitions/rule" }
+        },
+        "statistics": {
+          "type": "object",
+          "description": "Extended statistics (CREATE STATISTICS).",
+          "additionalProperties": { "$ref": "#/definitions/statistic" }
+        },
+        "replicaIdentity": {
+          "type": "string",
+          "description": "REPLICA IDENTITY: default, full, nothing or index <name>.",
+          "pattern": "^(default|full|nothing|(using )?index .+)$"
         },
         "constraints": {
           "type": "object",
@@ -500,6 +520,17 @@
         }
       },
       "required": ["columns", "references"],
+      "additionalProperties": false
+    },
+    "statistic": {
+      "description": "CREATE STATISTICS on columns and/or expressions of the table.",
+      "type": "object",
+      "properties": {
+        "kinds": { "type": "array", "items": { "type": "string", "enum": ["ndistinct", "dependencies", "mcv"] }, "description": "Default: all kinds." },
+        "columns": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "required": ["columns"],
       "additionalProperties": false
     },
     "rule": {

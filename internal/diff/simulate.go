@@ -362,6 +362,11 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lt.Triggers[truncateIdent(tr.Name)] = ""
         if tr.Comment != "" { lt.TriggerComments[truncateIdent(tr.Name)] = tr.Comment }
     }
+    for _, st := range dt.Statistics {
+        if st == nil || len(st.Columns) == 0 { continue }
+        lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment}
+    }
+    if dt.ReplicaIdentity != "" { lt.ReplicaIdentity = dt.ReplicaIdentity }
     for _, r := range dt.Rules {
         if r == nil || r.Event == "" || r.Do == "" { continue }
         lt.Rules[truncateIdent(r.Name)] = &LiveRule{Event: strings.ToLower(r.Event), Instead: r.Instead, Where: r.Where}
@@ -527,6 +532,7 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     c.ConstraintComments = cloneMap(t.ConstraintComments, nil)
     c.TriggerComments = cloneMap(t.TriggerComments, nil)
     c.Rules = cloneMap(t.Rules, func(r *LiveRule) *LiveRule { cp := *r; return &cp })
+    c.Statistics = cloneMap(t.Statistics, func(s *LiveStatistic) *LiveStatistic { cp := *s; return &cp })
     c.RuleComments = cloneMap(t.RuleComments, nil)
     c.PolicyComments = cloneMap(t.PolicyComments, nil)
     return &c
@@ -541,6 +547,7 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.ConstraintInherited == nil { t.ConstraintInherited = map[string]bool{} }
     if t.TriggerComments == nil { t.TriggerComments = map[string]string{} }
     if t.Rules == nil { t.Rules = map[string]*LiveRule{} }
+    if t.Statistics == nil { t.Statistics = map[string]*LiveStatistic{} }
     if t.RuleComments == nil { t.RuleComments = map[string]string{} }
     if t.PolicyComments == nil { t.PolicyComments = map[string]string{} }
     if t.TriggerInherited == nil { t.TriggerInherited = map[string]bool{} }

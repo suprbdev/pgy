@@ -279,6 +279,21 @@ schema public:
 
 `unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone.
 
+#### Replica identity and extended statistics
+
+```yaml
+schema app:
+  table events:
+    replicaIdentity: full       # default | full | nothing | index <unique index name>
+    statistics:
+      events_tenant_kind:
+        kinds: [ndistinct, dependencies]   # ndistinct | dependencies | mcv; omit for all
+        columns: [tenant_id, kind]         # columns and/or expressions such as lower(name)
+        comment: correlated columns
+```
+
+`replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects in the table's schema. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
+
 #### Column alterations
 
 For columns that already exist in the live database, `pgy diff` reconciles their attributes:
