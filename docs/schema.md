@@ -330,9 +330,16 @@ foreignKeys:
     references:
       table: <schema.table>
       columns: [col1]
-    onDelete: cascade   # cascade | restrict | set null | set default
+    onDelete: cascade   # cascade | restrict | set null | set default | no action
+    onUpdate: cascade   # optional, same actions as onDelete
+    match: full         # optional: full | simple (default) | partial
+    deferrable: true    # optional DEFERRABLE
+    initiallyDeferred: true   # optional DEFERRABLE INITIALLY DEFERRED (implies deferrable)
+    notValid: true      # optional: add NOT VALID, existing rows are not checked
     comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
+
+`no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. `notValid` only affects how the constraint is added: once it is validated (`ALTER TABLE ... VALIDATE CONSTRAINT`), the live definition no longer says `NOT VALID`, which is not treated as a change.
 
 ### Triggers
 
@@ -402,13 +409,18 @@ constraints:
     expression: "col > 0"       # for check or exclude
     def: "col > 0"              # alias for expression
     columns: [col1, col2]       # for unique
+    nullsNotDistinct: true      # unique: NULLS NOT DISTINCT (PostgreSQL 15+)
+    deferrable: true            # unique/exclude: DEFERRABLE
+    initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
+    noInherit: true             # check: NO INHERIT
+    notValid: true              # check: add NOT VALID, existing rows are not checked
 ```
 
 #### Constraint alterations
 
 Constraints (including foreign keys) are matched against the live database by name, and their definitions are compared via `pg_get_constraintdef()`. A constraint whose definition changed is dropped and re-added — since the re-add revalidates existing rows (and can fail on them), this requires `--unsafe`. Without `--unsafe`, a redefined constraint emits no SQL.
 
-Definition comparison is normalized: casts (`''::text`), parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so a live `CHECK ((email <> ''::text))` matches a YAML `expression: "email <> ''"` without churn. FK clauses not modeled in YAML (`ON UPDATE`, `MATCH`, `DEFERRABLE`) make a live constraint compare unequal, and the re-added constraint will not include them. Primary keys are matched by existence only and never dropped.
+Definition comparison is normalized: casts (`''::text`), parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so a live `CHECK ((email <> ''::text))` matches a YAML `expression: "email <> ''"` without churn. The rewrites PostgreSQL applies when storing an expression are also understood: `x in ('a', 'b')` matches `x = ANY (ARRAY['a', 'b'])`, `between` matches its `>=`/`<=` form, `like`/`ilike` match `~~`/`~~*`, `!=` matches `<>`, and `-1` matches `'-1'::integer`. A trailing `NOT VALID` is ignored on both sides. Primary keys are matched by existence only and never dropped.
 
 ### Partitioning
 

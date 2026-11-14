@@ -1287,6 +1287,55 @@ extensions:
 	}
 }
 
+func TestFKAndConstraintOptionsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table c:
+    columns:
+      pid: {type: int}
+      a: {type: int}
+    foreignKeys:
+      c_pid_fkey:
+        columns: [pid]
+        references: {table: app.p, columns: [id]}
+        onUpdate: cascade
+        match: FULL
+        deferrable: true
+        initiallyDeferred: true
+        notValid: true
+    constraints:
+      c_a_check:
+        type: check
+        expression: a > 0
+        noInherit: true
+        notValid: true
+      c_a_key:
+        type: unique
+        columns: [a]
+        nullsNotDistinct: true
+        deferrable: true
+        initiallyDeferred: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := db.Tables["app.c"]
+	fk := tbl.ForeignKeys[0]
+	if fk.OnUpdate != "cascade" || fk.Match != "full" || !fk.Deferrable || !fk.InitiallyDeferred || !fk.NotValid {
+		t.Errorf("unexpected FK options: %+v", fk)
+	}
+	byName := map[string]*Constraint{}
+	for _, c := range tbl.Constraints {
+		byName[c.Name] = c
+	}
+	if c := byName["c_a_check"]; !c.NoInherit || !c.NotValid {
+		t.Errorf("unexpected check options: %+v", c)
+	}
+	if c := byName["c_a_key"]; !c.NullsNotDistinct || !c.Deferrable || !c.InitiallyDeferred {
+		t.Errorf("unexpected unique options: %+v", c)
+	}
+}
+
 func TestExtensionsStringShorthand(t *testing.T) {
 	yaml := `
 extensions: [pg_trgm, pgcrypto]

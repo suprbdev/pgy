@@ -11,14 +11,14 @@ These are the foundational elements required for almost any relational database 
 - [x] **Tables** (Base tables)
 - [x] **Columns** (Data types, nullability, defaults)
 - [x] **Primary Keys**
-- [x] **Foreign Keys**
+- [x] **Foreign Keys** (`onDelete`/`onUpdate`, `match`, `deferrable`/`initiallyDeferred`, `notValid`)
 - [x] **Indexes** (Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, expression indexes, and per-column sort order — `desc`, `nulls last`. Names over 63 bytes are truncated the way PostgreSQL stores them)
-- [x] **UNIQUE Constraints** (Table-level and column-level)
-- [x] **CHECK Constraints**
+- [x] **UNIQUE Constraints** (Table-level and column-level; `nullsNotDistinct`, `deferrable`/`initiallyDeferred`)
+- [x] **CHECK Constraints** (`noInherit`, `notValid`)
 - [x] **NOT NULL Constraints** (Via column `nullable` property)
 - [x] **EXCLUDE Constraints**
 - [x] **Column Alterations** (`ALTER COLUMN ... TYPE / SET DEFAULT / DROP DEFAULT / SET NOT NULL / DROP NOT NULL` for existing columns. Types compared normalized — `varchar(255)` matches live `character varying(255)`, `serial` matches its live `integer` + `nextval` form; defaults compared with live casts stripped (`'x'::text` matches `'x'`). Type changes are gated behind `--unsafe` and support a column-level `using:` expression. Guard rails: identity columns are never altered, `nextval` defaults are never dropped, primary-key columns never emit `DROP NOT NULL`)
-- [x] **Constraint Alterations** (Changed definitions of existing FK/check/unique/exclude constraints emit `DROP CONSTRAINT` + `ADD CONSTRAINT`, gated behind `--unsafe`. Live definitions introspected via `pg_get_constraintdef()`; comparison is normalized — casts, parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so `CHECK ((email <> ''::text))` matches `email <> ''`. Limitations: clauses not modeled in YAML (`ON UPDATE`, `MATCH`, `DEFERRABLE`) make a live FK compare unequal and re-add without them; primary keys are not compared)
+- [x] **Constraint Alterations** (Changed definitions of existing FK/check/unique/exclude constraints emit `DROP CONSTRAINT` + `ADD CONSTRAINT`, gated behind `--unsafe`. Live definitions introspected via `pg_get_constraintdef()`; comparison is normalized — casts, parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so `CHECK ((email <> ''::text))` matches `email <> ''`. FK `onUpdate`/`match`/`deferrable`/`initiallyDeferred`/`notValid`, unique `nullsNotDistinct`/deferrable, check `noInherit`/`notValid` are modeled and compared; `IN`/`BETWEEN`/`LIKE` rewrites are understood. Limitation: primary keys are not compared)
 - [x] **Comments** (`COMMENT ON` schemas, tables, columns, indexes, foreign keys, types, functions, views; diffed against live, PostGraphile smart tags safe)
 
 ## Level 2: Advanced Types & Logic

@@ -350,6 +350,14 @@
           "type": "string",
           "description": "ON DELETE action, e.g. cascade, restrict, set null, set default, no action."
         },
+        "onUpdate": {
+          "type": "string",
+          "description": "ON UPDATE action, e.g. cascade, restrict, set null, set default, no action."
+        },
+        "match": { "type": "string", "enum": ["full", "simple", "partial"], "description": "MATCH type (default simple)." },
+        "deferrable": { "type": "boolean" },
+        "initiallyDeferred": { "type": "boolean", "description": "Implies deferrable." },
+        "notValid": { "type": "boolean", "description": "Add the constraint NOT VALID: existing rows are not checked." },
         "comment": {
           "type": "string",
           "description": "COMMENT ON CONSTRAINT text (diffed against live)."
@@ -400,7 +408,12 @@
         "columns": {
           "$ref": "#/definitions/columnRefs",
           "description": "Columns for a unique constraint."
-        }
+        },
+        "nullsNotDistinct": { "type": "boolean", "description": "Unique only: NULLS NOT DISTINCT (PostgreSQL 15+)." },
+        "deferrable": { "type": "boolean", "description": "Unique/exclude only." },
+        "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
+        "noInherit": { "type": "boolean", "description": "Check only: NO INHERIT." },
+        "notValid": { "type": "boolean", "description": "Check only: add NOT VALID (existing rows are not checked)." }
       },
       "required": ["type"],
       "additionalProperties": false

@@ -64,6 +64,46 @@ schema SCH:
     dependsOn: [function SCH.area]
     query: select SCH.area(1) as c, SCH.area(2, 3) as r
 `,
+		"fk_constraint_options": `
+schema SCH:
+  table p:
+    columns:
+      id: {type: int, primaryKey: true}
+  table c:
+    columns:
+      id: {type: int}
+      pid: {type: int, nullable: true}
+      a: {type: int, nullable: true}
+      b: {type: int, nullable: true}
+    foreignKeys:
+      c_pid_fkey:
+        columns: [pid]
+        references: {table: SCH.p, columns: [id]}
+        match: full
+        onUpdate: cascade
+        onDelete: set null
+        initiallyDeferred: true
+        notValid: true
+      c_pid_fkey2:
+        columns: [pid]
+        references: {table: SCH.p, columns: [id]}
+        onDelete: no action
+        deferrable: true
+    constraints:
+      c_a_check:
+        type: check
+        expression: a > 0
+        noInherit: true
+        notValid: true
+      c_ab_key:
+        type: unique
+        columns: [a, b]
+        initiallyDeferred: true
+      c_b_key:
+        type: unique
+        columns: [b]
+        nullsNotDistinct: true
+`,
 		"defaults": `
 schema SCH:
   table t:
