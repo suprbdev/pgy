@@ -325,6 +325,19 @@
           "description": "Per-column operator class overrides; keys match entries in columns.",
           "additionalProperties": { "type": "string" }
         },
+        "include": {
+          "$ref": "#/definitions/columnRefs",
+          "description": "Non-key columns stored in the index (INCLUDE), for index-only scans."
+        },
+        "nullsNotDistinct": {
+          "type": "boolean",
+          "description": "Unique indexes: treat NULLs as equal (NULLS NOT DISTINCT, PostgreSQL 15+)."
+        },
+        "with": {
+          "type": "object",
+          "description": "Index storage parameters, e.g. {fillfactor: 70} or {fastupdate: false}.",
+          "additionalProperties": { "$ref": "#/definitions/scalar" }
+        },
         "comment": {
           "type": "string",
           "description": "COMMENT ON INDEX text (diffed against live)."

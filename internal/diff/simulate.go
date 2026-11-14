@@ -207,6 +207,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         name := indexName(fq, ix)
         lt.Indexes[name] = true
         delete(lt.IndexOpclasses, name)
+        delete(lt.IndexDefs, name)
         if ix.Comment != "" { lt.IndexComments[name] = ix.Comment }
     }
     for _, ct := range dt.Constraints {
@@ -330,6 +331,13 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     if t.IndexOpclasses != nil {
         c.IndexOpclasses = cloneMap(t.IndexOpclasses, func(v []LiveIndexOpclass) []LiveIndexOpclass {
             return append([]LiveIndexOpclass(nil), v...)
+        })
+    }
+    if t.IndexDefs != nil {
+        c.IndexDefs = cloneMap(t.IndexDefs, func(li *LiveIndex) *LiveIndex {
+            if li == nil { return nil }
+            cp := *li
+            return &cp
         })
     }
     c.Triggers = cloneMap(t.Triggers, nil)

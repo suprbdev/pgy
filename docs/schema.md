@@ -289,6 +289,10 @@ indexes:
     opclass: gin_trgm_ops   # optional operator class applied to every column
     opclasses:              # optional per-column operator classes (override opclass)
       col1: gin_trgm_ops
+    include: [col3]         # optional INCLUDE (non-key) columns for index-only scans
+    nullsNotDistinct: true  # optional, unique indexes: NULLs compare equal (PostgreSQL 15+)
+    with:                   # optional storage parameters
+      fillfactor: 70
     comment: "lookup by col1"   # optional COMMENT ON INDEX (diffed against live)
 ```
 
@@ -297,6 +301,8 @@ If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from
 `using: btree` is the PostgreSQL default and is omitted from the generated SQL. The `where` expression is emitted verbatim (wrapped in parentheses), so any valid predicate works.
 
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
+
+Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with` and operator classes. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
 
 A `columns` entry may end in a sort order — `asc`, `desc`, `nulls first`, `nulls last`, or a combination such as `created_at desc nulls last`. The suffix is emitted after any operator class, and an `opclasses` key may name the column with or without it.
 
@@ -319,7 +325,6 @@ indexes:
     where: deleted_at is null
 ```
 
-Note: for an index that already exists live, only operator-class changes are detected: with `--unsafe`, a changed `opclass`/`opclasses` drops and recreates the index (a rebuild — potentially slow, and queries lose the index briefly); without `--unsafe`, nothing is emitted. Changing `columns`, `using`, `unique`, or `where` on an existing index is not detected — the live index is adopted by name as-is.
 
 ### Foreign Keys
 

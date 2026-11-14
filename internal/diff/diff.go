@@ -87,6 +87,10 @@ type LiveTable struct{
     // --unsafe). Nil / missing entry means unknown: the index is adopted
     // by name and opclass changes are not detected.
     IndexOpclasses map[string][]LiveIndexOpclass
+    // IndexDefs: index name -> structured definition, for detecting changed
+    // indexes (drop+recreate, gated behind --unsafe). Missing entry means
+    // unknown: only the opclass check applies.
+    IndexDefs map[string]*LiveIndex
     Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
     Policies    map[string]*LivePolicy // policy name -> live definition
     IndexComments      map[string]string // index name -> comment (absent key = no comment)
@@ -94,6 +98,21 @@ type LiveTable struct{
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
+// LiveIndex is an index definition as introspected from pg_index. Keys holds
+// each key column's name or expression (pg_get_indexdef per column, without
+// opclass or ordering); Descending/NullsFirst decode indoption per key column.
+type LiveIndex struct {
+    Unique           bool
+    Method           string
+    Keys             []string
+    Descending       []bool
+    NullsFirst       []bool
+    Include          []string
+    Predicate        string
+    NullsNotDistinct bool
+    Options          map[string]string // reloptions: lower-cased name -> value
+}
+
 // LiveIndexOpclass is the operator class of one index key column. Default is
 // true when the column uses the access method's default opclass for its type,
 // so a desired index with no explicit opclass matches regardless of the
@@ -191,7 +210,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}
+        l.Tables[key] = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, IndexDefs: map[string]*LiveIndex{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}
     }
     tableRows.Close()
     
@@ -224,7 +243,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
-        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}; l.Tables[key] = t }
+        if t == nil { t = &LiveTable{Columns: map[string]*LiveColumn{}, Constraints: map[string]bool{}, ConstraintDefs: map[string]string{}, Indexes: map[string]bool{}, IndexOpclasses: map[string][]LiveIndexOpclass{}, IndexDefs: map[string]*LiveIndex{}, Triggers: map[string]string{}, Policies: map[string]*LivePolicy{}, IndexComments: map[string]string{}, ConstraintComments: map[string]string{}}; l.Tables[key] = t }
         t.Columns[colName] = &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
     }
     if err := rows.Err(); err != nil { return nil, err }
@@ -314,6 +333,45 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
     }
     opcRows.Close()
+
+    // Query structured index definitions so changed indexes can be detected.
+    idefQ := `
+        select n.nspname, t.relname, i.relname, x.indisunique, am.amname, x.indnkeyatts,
+               array(select pg_get_indexdef(x.indexrelid, k, true) from generate_series(1, x.indnatts) k order by k),
+               x.indoption::int2[],
+               coalesce(pg_get_expr(x.indpred, x.indrelid, true), ''),
+               x.indnullsnotdistinct,
+               coalesce(i.reloptions, '{}'::text[])
+        from pg_index x
+        join pg_class i on i.oid = x.indexrelid
+        join pg_class t on t.oid = x.indrelid
+        join pg_am am on am.oid = i.relam
+        join pg_namespace n on n.oid = t.relnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    idefRows, err := pool.Query(ctx, idefQ)
+    if err != nil { return nil, err }
+    for idefRows.Next() {
+        var schemaName, tableName, idxName, method, predicate string
+        var unique, nullsNotDistinct bool
+        var nKey int16
+        var cols, reloptions []string
+        var indoption []int16
+        if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions); err != nil {
+            idefRows.Close()
+            return nil, err
+        }
+        t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
+        if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
+        li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions)}
+        for _, opt := range indoption[:nKey] {
+            li.Descending = append(li.Descending, opt&1 != 0)
+            li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
+        }
+        t.IndexDefs[idxName] = li
+    }
+    idefRows.Close()
 
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
@@ -1978,14 +2036,15 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ix.Unique { uniq = " unique" }
         using := ""
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
-        where := ""
-        if ix.Where != "" { where = fmt.Sprintf(" where (%s)", ix.Where) }
-        stmt := fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), where)
+        stmt := fmt.Sprintf("create%s index if not exists %s on %s%s(%s)%s;", uniq, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix), renderIndexTail(ix))
         if liveIndexes[name] {
-            // Opclass change → drop + recreate. Rebuilding an index can be
+            // Changed definition → drop + recreate. Rebuilding an index can be
             // expensive and briefly leaves queries without it, so gate behind
-            // --unsafe. Without live opclass data the index is adopted by name.
-            if liveOCs, ok := liveIndexOpclasses(lt)[name]; unsafe && ok && indexOpclassesDiffer(ix, liveOCs) {
+            // --unsafe. Without live definition data the index is adopted by name.
+            changed := false
+            if lt != nil && lt.IndexDefs[name] != nil { changed = indexDefinitionDiffers(ix, lt.IndexDefs[name]) }
+            if liveOCs, ok := liveIndexOpclasses(lt)[name]; ok && indexOpclassesDiffer(ix, liveOCs) { changed = true }
+            if unsafe && changed {
                 idxFq := name
                 if i := strings.IndexByte(fq, '.'); i >= 0 { idxFq = fq[:i] + "." + name }
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt)
@@ -2509,6 +2568,55 @@ func renderIndexElems(ix *schema.Index) string {
         parts = append(parts, elem)
     }
     return strings.Join(parts, ", ")
+}
+
+// renderIndexTail renders the clauses after an index's column list: INCLUDE,
+// NULLS NOT DISTINCT, WITH (storage parameters, sorted) and WHERE.
+func renderIndexTail(ix *schema.Index) string {
+    out := ""
+    if len(ix.Include) > 0 { out += " include (" + joinIdentList(ix.Include) + ")" }
+    if ix.NullsNotDistinct { out += " nulls not distinct" }
+    if len(ix.With) > 0 {
+        keys := make([]string, 0, len(ix.With))
+        for k := range ix.With { keys = append(keys, k) }
+        sort.Strings(keys)
+        parts := make([]string, 0, len(keys))
+        for _, k := range keys { parts = append(parts, k+" = "+ix.With[k]) }
+        out += " with (" + strings.Join(parts, ", ") + ")"
+    }
+    if ix.Where != "" { out += fmt.Sprintf(" where (%s)", ix.Where) }
+    return out
+}
+
+// indexDefinitionDiffers reports whether a desired index no longer matches
+// its live definition: uniqueness, access method, key columns/expressions and
+// their ordering, INCLUDE columns, predicate, NULLS NOT DISTINCT or storage
+// parameters. Operator classes are compared separately by
+// indexOpclassesDiffer, since live default opclasses are not spelled out.
+func indexDefinitionDiffers(ix *schema.Index, li *LiveIndex) bool {
+    method := strings.ToLower(strings.TrimSpace(ix.Using))
+    if method == "" { method = "btree" }
+    if ix.Unique != li.Unique || method != li.Method || ix.NullsNotDistinct != li.NullsNotDistinct { return true }
+    if len(ix.Columns) != len(li.Keys) || len(li.Descending) != len(li.Keys) || len(ix.Include) != len(li.Include) { return true }
+    for i, c := range ix.Columns {
+        base, ordering := splitIndexOrdering(c)
+        if !constraintDefsEqual(base, li.Keys[i]) { return true }
+        desc := strings.HasPrefix(ordering, "desc")
+        nullsFirst := desc
+        if strings.HasSuffix(ordering, "nulls first") { nullsFirst = true }
+        if strings.HasSuffix(ordering, "nulls last") { nullsFirst = false }
+        if desc != li.Descending[i] || nullsFirst != li.NullsFirst[i] { return true }
+    }
+    for i, c := range ix.Include {
+        if !constraintDefsEqual(c, li.Include[i]) { return true }
+    }
+    if !constraintDefsEqual(ix.Where, li.Predicate) { return true }
+    if len(ix.With) != len(li.Options) { return true }
+    for k, v := range ix.With {
+        lv, ok := li.Options[strings.ToLower(k)]
+        if !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(lv)) { return true }
+    }
+    return false
 }
 
 func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
