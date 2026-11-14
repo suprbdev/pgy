@@ -316,7 +316,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lc.Default = c.Default
         if c.Identity != "" { lc.Identity = c.Identity }
         if c.Generated != "" { lc.Generated, lc.Default, lc.Virtual = c.Generated, "", c.Virtual }
-        if c.Collate != "" { lc.Collation = c.Collate }
+        if c.Collate != "" { lc.Collation = collationName(c.Collate) }
         if c.Compression == "default" {
             lc.Compression = ""
         } else if c.Compression != "" {
@@ -567,6 +567,7 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
     }
     for _, dp := range desired.DefaultPrivileges {
         if dp == nil { continue }
+        for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }
         role := dp.ForRole
         if role == "" { role = out.CurrentUser }
         schemas := dp.Schemas

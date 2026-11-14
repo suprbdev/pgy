@@ -76,6 +76,12 @@ schema app:
     partitionOf: app.users
   type mood:
     type: enum
+  table g:
+    columns:
+      a: {type: int}
+      b: {type: int, generated: a * 2}
+    triggers:
+      g_touch: {timing: before, events: [update], level: row, when: "old.* is distinct from new.*", procedure: app.touch()}
 `)
 	issues := Files([]string{p})
 	if !HasErrors(issues) {
@@ -91,6 +97,7 @@ schema app:
 		"trigger t calls app.touch, which no schema file declares",
 		"partition needs forValues or default: true",
 		"enum has no labels",
+		"a BEFORE trigger's WHEN cannot reference new.* on a table with generated columns",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)

@@ -196,9 +196,19 @@ func Database(d *schema.Database) []Issue {
 				}
 			}
 		}
+		hasGenerated := false
+		for _, c := range t.Columns {
+			if c != nil && c.Generated != "" {
+				hasGenerated = true
+			}
+		}
 		for _, tr := range t.Triggers {
-			if tr != nil {
-				checkTrigger(d, obj, tr, add)
+			if tr == nil {
+				continue
+			}
+			checkTrigger(d, obj, tr, add)
+			if hasGenerated && strings.EqualFold(tr.Timing, "before") && strings.Contains(strings.ToLower(strings.ReplaceAll(tr.When, " ", "")), "new.*") {
+				add(Error, obj, "trigger %s: a BEFORE trigger's WHEN cannot reference new.* on a table with generated columns", tr.Name)
 			}
 		}
 		for cn, c := range t.Columns {

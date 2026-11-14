@@ -1851,6 +1851,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
+    for _, dp := range desired.DefaultPrivileges {
+        if dp == nil { continue }
+        for _, nsp := range dp.Schemas { neededSchemas[nsp] = true }
+    }
     for _, keys := range [][]string{sortedKeys(desired.Collations), sortedKeys(desired.TSConfigs), sortedKeys(desired.TSDictionaries)} {
         for _, k := range keys {
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }

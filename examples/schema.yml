@@ -48,6 +48,15 @@ roles:
     inRoles: [app_base]
 
 # ---------------------------------------------------------------------------
+# Default privileges: grants applied automatically to objects created later
+# (here: by the role running the migrations, inside schema app)
+# ---------------------------------------------------------------------------
+defaultPrivileges:
+  - in: [app]
+    tables: {app_user: [select]}
+    sequences: {app_user: [usage]}
+
+# ---------------------------------------------------------------------------
 # Main application schema
 # ---------------------------------------------------------------------------
 schema app:
@@ -55,6 +64,11 @@ schema app:
   grants:                      # schema-level privileges per role
     app_user: [usage]
     app_admin: [usage, create]
+
+  collation case_insensitive:  # ICU collation; equality ignores case
+    provider: icu
+    locale: und-u-ks-level2
+    deterministic: false
 
   # --- Types -----------------------------------------------------------------
 
@@ -113,6 +127,10 @@ schema app:
         comment: Login identifier.   # would add a unique constraint — the
       display_name:                  # unique index below covers it instead
         type: text
+      handle:
+        type: text
+        nullable: true
+        collate: app.case_insensitive   # "Ana" and "ana" are the same handle
       country:
         type: app.country_code
       settings:
@@ -150,6 +168,12 @@ schema app:
       customer_active_idx:
         columns: [created_at]
         where: is_active       # partial index predicate
+      customer_handle_idx:
+        columns: [handle]
+        unique: true           # case-insensitive thanks to the collation
+      customer_recent_idx:
+        columns: [created_at desc]   # sort order: asc | desc, nulls first | last
+        include: [display_name]      # covering index (INCLUDE)
     constraints:
       customer_points_check:
         type: check
@@ -170,6 +194,9 @@ schema app:
         for: select            # select | insert | update | delete | all
         to: [app_user]         # role list (string also accepted)
         using: "id = current_setting('app.customer_id')::uuid"
+      customer_active_only:
+        as: restrictive        # must pass in addition to the permissive ones
+        using: is_active
       customer_self_update:
         for: update
         to: [app_user]
@@ -208,6 +235,10 @@ schema app:
         type: timestamptz
         notNull: true
         default: now()
+      placed_on:
+        type: date
+        nullable: true
+        generated: "(placed_at at time zone 'UTC')::date"   # GENERATED ALWAYS AS (...) STORED
     primaryKey:                # named block form; a plain list also works:
       order_pkey:              #   primaryKey: [id]
         columns: [id]
@@ -223,6 +254,7 @@ schema app:
           table: app.customer
           columns: [id]
         onDelete: restrict     # cascade | restrict | set null | set default | no action
+        onUpdate: cascade      # also: match, deferrable, initiallyDeferred, notValid
         comment: "@fieldName customer"   # COMMENT ON CONSTRAINT, diffed against live
     triggers:
       order_audit:
@@ -326,6 +358,7 @@ schema app:
       FROM app.customer c
       WHERE c.is_active
     replace: true              # always emit CREATE OR REPLACE
+    securityInvoker: true      # check table permissions as the querying user
     grants:
       app_user: [select]
     comment: Customers that can currently log in.
@@ -339,6 +372,10 @@ schema app:
              count(DISTINCT customer_id) AS customers
       FROM app."order"
       GROUP BY 1
+    indexes:
+      daily_order_stats_day_idx:
+        columns: [day]
+        unique: true           # enables REFRESH MATERIALIZED VIEW CONCURRENTLY
     grants:
       app_user: [select]
     comment: Refreshed out-of-band; pgy only manages the definition.
