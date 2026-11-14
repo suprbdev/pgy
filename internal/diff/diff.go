@@ -2872,7 +2872,13 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
             }
             stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
         } else {
-            stmt = fmt.Sprintf("create trigger %s %s %s on %s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), strings.ToLower(tr.Level), when, tr.Procedure)
+            level := strings.ToLower(strings.TrimSpace(tr.Level))
+            if level == "" { level = "statement" }
+            referencing := ""
+            if tr.OldTable != "" { referencing += " old table as " + pqIdent(tr.OldTable) }
+            if tr.NewTable != "" { referencing += " new table as " + pqIdent(tr.NewTable) }
+            if referencing != "" { referencing = " referencing" + referencing }
+            stmt = fmt.Sprintf("create trigger %s %s %s on %s%s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), referencing, level, when, tr.Procedure)
         }
         if liveDef, ok := liveTriggers[trName]; ok {
             // "" means the live definition is unknown — fall back to
