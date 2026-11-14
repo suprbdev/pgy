@@ -1813,6 +1813,61 @@ func TestExtensionSkippedIfExists(t *testing.T) {
 	}
 }
 
+func TestExtensionSchemaVersionCascadeCreate(t *testing.T) {
+	desired := &schema.Database{
+		Tables:     map[string]*schema.Table{},
+		Extensions: []*schema.Extension{{Name: "pg_trgm", IfNotExists: true, Schema: "extensions", Version: "1.6", Cascade: true}},
+	}
+	p := Plan(emptyLive(), desired, false)
+	want := []string{
+		`create schema if not exists "extensions";`,
+		`create extension if not exists "pg_trgm" schema "extensions" version '1.6' cascade;`,
+	}
+	if len(p.Creates) != 2 || p.Creates[0] != want[0] || p.Creates[1] != want[1] {
+		t.Errorf("want %v, got %v", want, p.Creates)
+	}
+}
+
+func TestExtensionSchemaVersionAltered(t *testing.T) {
+	l := emptyLive()
+	l.Schemas["extensions"] = true
+	l.Extensions["pg_trgm"] = true
+	l.ExtensionDefs = map[string]*LiveExtension{"pg_trgm": {Schema: "public", Version: "1.5", Relocatable: true}}
+	desired := &schema.Database{
+		Tables:     map[string]*schema.Table{},
+		Extensions: []*schema.Extension{{Name: "pg_trgm", Schema: "extensions", Version: "1.6"}},
+	}
+	p := Plan(l, desired, false)
+	want := []string{
+		`alter extension "pg_trgm" set schema "extensions";`,
+		`alter extension "pg_trgm" update to '1.6';`,
+	}
+	if len(p.Creates) != 0 || len(p.Alters) != 2 || p.Alters[0] != want[0] || p.Alters[1] != want[1] {
+		t.Errorf("want alters %v, got creates=%v alters=%v", want, p.Creates, p.Alters)
+	}
+}
+
+func TestExtensionNonRelocatableNotMovedAndUnsetUnmanaged(t *testing.T) {
+	l := emptyLive()
+	l.Schemas["extensions"] = true
+	l.Extensions["postgis"] = true
+	l.Extensions["pgcrypto"] = true
+	l.ExtensionDefs = map[string]*LiveExtension{
+		"postgis":  {Schema: "public", Version: "3.4.0", Relocatable: false},
+		"pgcrypto": {Schema: "public", Version: "1.3", Relocatable: true},
+	}
+	desired := &schema.Database{
+		Tables: map[string]*schema.Table{},
+		Extensions: []*schema.Extension{
+			{Name: "postgis", Schema: "extensions", Version: "3.4.0"},
+			{Name: "pgcrypto"},
+		},
+	}
+	if sql := Render(Plan(l, desired, false)); sql != "" {
+		t.Errorf("non-relocatable extensions cannot move and unset options are unmanaged, got:\n%s", sql)
+	}
+}
+
 // --- enum types ---
 
 func TestEnumTypeCreate(t *testing.T) {

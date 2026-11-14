@@ -30,7 +30,17 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for _, ext := range desired.Extensions {
-        if ext != nil && ext.Name != "" { out.Extensions[ext.Name] = true }
+        if ext == nil || ext.Name == "" { continue }
+        out.Extensions[ext.Name] = true
+        le := &LiveExtension{Relocatable: true}
+        prev := out.ExtensionDefs[ext.Name]
+        if prev != nil { *le = *prev }
+        if ext.Schema != "" {
+            out.Schemas[ext.Schema] = true
+            if prev == nil || prev.Relocatable { le.Schema = ext.Schema }
+        }
+        if ext.Version != "" { le.Version = ext.Version }
+        out.ExtensionDefs[ext.Name] = le
     }
 
     for name, r := range desired.Roles {
@@ -273,6 +283,7 @@ func cloneLive(l *Live) *Live {
         Types:              cloneSet(l.Types),
         Functions:          cloneSet(l.Functions),
         Extensions:         cloneSet(l.Extensions),
+        ExtensionDefs:      cloneMap(l.ExtensionDefs, func(e *LiveExtension) *LiveExtension { c := *e; return &c }),
         Views:              cloneSet(l.Views),
         MatViews:           cloneSet(l.MatViews),
         Sequences:          cloneSet(l.Sequences),

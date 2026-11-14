@@ -205,7 +205,18 @@ extensions: [pg_trgm, pgcrypto]
 |----------|------|-------------|
 | `name` | string | Extension name |
 | `ifNotExists` | boolean | Adds `IF NOT EXISTS` to the SQL statement |
+| `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing. A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged |
+| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged |
+| `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
+
+```yaml
+extensions:
+  - name: pg_trgm
+    ifNotExists: true
+    schema: extensions
+    version: "1.6"
+```
 
 ---
 
