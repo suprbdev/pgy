@@ -124,6 +124,7 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
         stepOpts := opts
         stepOpts.Prune = opts.Prune && last
         p := diff.PlanWith(diff.Simulate(live, prev), cur, stepOpts)
+        p.Warnings = diff.KeepExisting(p.Warnings, live, full)
         if !last { p.Drops = nil }
         if len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0 {
             steps = append(steps, Step{Name: g.Name, Plan: p})

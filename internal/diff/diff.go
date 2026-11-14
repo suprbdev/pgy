@@ -1923,6 +1923,8 @@ type PlanDiff struct{
     // (CREATE / DROP INDEX CONCURRENTLY). They belong in a separate
     // no-transaction migration that runs after the rest of the plan.
     Concurrent []string
+    // Warnings flags statements that lock or rewrite existing tables.
+    Warnings []Warning
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -2357,6 +2359,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
     }
+    plan.Warnings = lockWarnings(live, plan)
     return plan
 }
 

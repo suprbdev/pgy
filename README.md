@@ -100,6 +100,8 @@ pgy diff --dsn "$PG_DSN" --schema-root ./schemas --schemas "base.yml,ext.yml"
 # exit code 2 when changes are detected
 ```
 
+  `pgy diff` warns on stderr about statements that lock or rewrite a table that already exists. They are listed in [Lock warnings](#lock-warnings) below.
+
 - Inspect or clear buffer:
 
 ```
@@ -245,6 +247,21 @@ See `docs/feature_support.md` for the full capability matrix.
 ### Migrations without a transaction
 
 Each migration normally runs in its own transaction. A migration whose leading comment lines include `-- pgy:no-transaction` runs statement by statement on one connection instead, as `CREATE INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE` (used in the same migration), `VACUUM` or `REINDEX CONCURRENTLY` require. It is recorded only after every statement succeeds, but a failure leaves earlier statements applied, so prefer idempotent statements (`IF NOT EXISTS`) in such files. `pgy diff` generates these migrations itself for indexes declared with `concurrently: true`.
+
+### Lock warnings
+
+`pgy diff` reports statements that would block traffic on a live database. Warnings go to stderr, and to the `warnings` field with `--json`. They never change the plan or the exit code. `--no-warnings` silences them. Only tables that exist before the migration count, so creating a new table and indexing it never warns.
+
+| Statement | Why | Instead |
+|-----------|-----|---------|
+| `CREATE INDEX` | blocks writes while the index builds | `concurrently: true` |
+| `ADD FOREIGN KEY` | checks every row while blocking writes on both tables | `notValid: true`, then validate later |
+| `ADD CHECK` | scans the table under `ACCESS EXCLUSIVE` | `notValid: true`, then validate later |
+| `ADD PRIMARY KEY` / `UNIQUE` / `EXCLUDE` | builds an index under `ACCESS EXCLUSIVE` | schedule a maintenance window |
+| `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE` (skipped if a validated `CHECK (col IS NOT NULL)` exists) | add that check first |
+| `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
+| `SET LOGGED` / `SET UNLOGGED` | rewrites the table | — |
+| `ADD COLUMN` with a volatile default, a stored generated expression, identity or serial | writes every row | add the column bare, then backfill |
 
 ## Notes
 - Forward-only: no down/rollback.

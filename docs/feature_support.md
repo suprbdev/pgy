@@ -57,6 +57,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 
 ## Removing objects
 
+- [x] **Lock warnings** (`pgy diff` reports statements that lock or rewrite existing tables on stderr and in `--json`: non-concurrent index builds, foreign keys and checks added without `NOT VALID`, primary key/unique/exclude constraints, `SET NOT NULL` without a validated `IS NOT NULL` check, rewriting type changes, `SET LOGGED/UNLOGGED`, and added columns with volatile defaults, stored generated expressions, identity or serial; `--no-warnings` to silence)
 - [x] **Renames** (`renamedFrom` on tables, columns, views, materialized views, sequences, types, domains, indexes, constraints, foreign keys, functions and procedures → `ALTER ... RENAME` / `SET SCHEMA`; enum `renamedLabels` → `RENAME VALUE`; applied only when the old name exists and the new one does not, emitted first so the rest of the plan and `--prune` see the renamed object)
 - [x] **Pruning** (`diff --unsafe --prune` drops undeclared tables, views, materialized views, functions, procedures, sequences, domains and types in schemas the YAML uses, plus undeclared triggers, constraints and indexes on declared tables. Aggregates are pruned like functions. Extension members, partitions, primary keys, constraint-backed or inherited indexes/constraints/triggers, column-owned sequences, window functions and `pgy.migrations` are never dropped. One `DROP` per object kind, so dependencies within a kind need no ordering)
 
