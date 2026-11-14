@@ -411,6 +411,35 @@ tables:
 	}
 }
 
+func TestPolicyAsParse(t *testing.T) {
+	yaml := `
+schema public:
+  table orders:
+    columns:
+      id: {type: bigint}
+    policies:
+      tenant_guard:
+        as: RESTRICTIVE
+        using: "true"
+      open:
+        as: permissive
+        using: "true"
+      plain:
+        using: "true"
+`
+	db, err := parseFlexibleDatabase([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range db.Tables["public.orders"].Policies {
+		got[p.Name] = p.As
+	}
+	if got["tenant_guard"] != "restrictive" || got["open"] != "permissive" || got["plain"] != "" {
+		t.Errorf("unexpected policy as values: %v", got)
+	}
+}
+
 // rowLevelSecurity is tri-state: absent (nil/unmanaged), true, false.
 func TestRLSTriStateParse(t *testing.T) {
 	yaml := `

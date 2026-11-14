@@ -410,6 +410,11 @@
           "enum": ["select", "insert", "update", "delete", "all"],
           "description": "Command the policy applies to (default all)."
         },
+        "as": {
+          "type": "string",
+          "enum": ["permissive", "restrictive"],
+          "description": "PERMISSIVE (default) policies are OR-ed together; RESTRICTIVE policies must all pass in addition."
+        },
         "to": {
           "description": "Role name or list of role names (default: all roles).",
           "oneOf": [
