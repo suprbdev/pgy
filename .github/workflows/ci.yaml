@@ -18,5 +18,39 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Vet
         run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
       - name: Tests (race)
         run: go test -race ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["15", "16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env:
+          POSTGRES_USER: pgy
+          POSTGRES_PASSWORD: pgy
+          POSTGRES_DB: pgytest
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U pgy -d pgytest"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Integration tests (PostgreSQL ${{ matrix.postgres }})
+        env:
+          PGY_TEST_DSN: postgres://pgy:pgy@localhost:5433/pgytest
+        run: go test -count=1 ./internal/integration/...
