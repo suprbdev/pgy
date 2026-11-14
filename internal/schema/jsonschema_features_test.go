@@ -63,6 +63,8 @@ schema public:
       tenant: {as: restrictive, using: "true", comment: tenant isolation}
   view active_orders:
     query: select 1
+    triggers:
+      active_orders_ins: {timing: instead of, events: [insert], procedure: public.ins(), comment: writable}
     securityInvoker: true
     securityBarrier: false
     checkOption: cascaded

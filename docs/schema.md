@@ -912,6 +912,7 @@ schema public:
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
+| `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 

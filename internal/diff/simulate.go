@@ -209,6 +209,16 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         } else {
             out.Views[k] = true
+            if len(vw.Triggers) > 0 {
+                vt := out.ViewTables[k]
+                if vt == nil { vt = &LiveTable{}; out.ViewTables[k] = vt }
+                ensureLiveTableMaps(vt)
+                for _, tr := range vw.Triggers {
+                    if tr == nil || tr.Procedure == "" { continue }
+                    vt.Triggers[truncateIdent(tr.Name)] = ""
+                    if tr.Comment != "" { vt.TriggerComments[truncateIdent(tr.Name)] = tr.Comment }
+                }
+            }
             if opts := viewOptions(vw); len(opts) > 0 {
                 vo := map[string]string{}
                 for name, v := range out.ViewOptions[k] { vo[name] = v }
@@ -405,6 +415,7 @@ func cloneLive(l *Live) *Live {
         MatViews:           cloneSet(l.MatViews),
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
+        ViewTables:         cloneMap(l.ViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),
         Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),

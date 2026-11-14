@@ -69,6 +69,7 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     Indexes         []*Index // materialized views only
+    Triggers        []*Trigger // plain views: INSTEAD OF triggers
 }
 
 // Publication is a logical replication CREATE PUBLICATION declaration.
@@ -1756,6 +1757,7 @@ func parseView(schemaName, key string, body any) *View {
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
     if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
+    if trRaw, ok := m["triggers"]; ok { vw.Triggers = parseTriggers(trRaw) }
     return vw
 }
 
