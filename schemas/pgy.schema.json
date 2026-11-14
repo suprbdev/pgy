@@ -27,6 +27,43 @@
         ]
       }
     },
+    "publications": {
+      "description": "Logical replication publications (CREATE PUBLICATION). When present, --unsafe --prune drops publications not listed.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication to or from it requires --unsafe (drop + create)." },
+          "tables": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "properties": {
+                    "table": { "type": "string", "minLength": 1 },
+                    "columns": { "$ref": "#/definitions/stringList", "description": "Column list (PostgreSQL 15+)." },
+                    "where": { "type": "string", "description": "Row filter (PostgreSQL 15+)." }
+                  },
+                  "required": ["table"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "schemas": { "$ref": "#/definitions/stringList", "description": "FOR TABLES IN SCHEMA (cannot be combined with column lists)." },
+          "publish": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["insert", "update", "delete", "truncate"] },
+            "description": "Published actions (default all)."
+          },
+          "viaPartitionRoot": { "type": "boolean", "description": "publish_via_partition_root." },
+          "comment": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "eventTriggers": {
       "description": "Database-wide event triggers (CREATE EVENT TRIGGER). When present, --unsafe --prune drops event triggers not listed (extension-owned ones are kept).",
       "type": "object",

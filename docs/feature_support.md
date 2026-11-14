@@ -60,7 +60,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 - [x] **Collations** (`collation <name>:` blocks → `CREATE COLLATION` with provider/locale/lcCollate/lcCtype/deterministic/rules or `from`; create-only, comments diffed, pruned with `--prune`)
 - [ ] **Rules** (`CREATE RULE` query rewrites)
 - [x] **Event Triggers** (top-level `eventTriggers:` → `CREATE EVENT TRIGGER` with event/tags/function; changed definition drop+recreate, `enabled` → `ALTER EVENT TRIGGER ... ENABLE/DISABLE/ENABLE REPLICA/ALWAYS`, comments diffed; present block authoritative for `--prune`)
-- [ ] **Logical Replication** (Publications and Subscriptions)
+- [x] **Logical Replication — Publications** (top-level `publications:` with tables (column lists, row filters), schemas, `allTables`, `publish`, `viaPartitionRoot`; membership → `ALTER PUBLICATION ... SET`, options → `SET (...)`, comments diffed; switching `allTables` and `--prune` drops need `--unsafe`. Subscriptions are out of scope: they carry connection strings with credentials)
 - [ ] **Tablespaces** (Physical storage mapping)
 
 ---

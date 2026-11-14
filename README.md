@@ -215,7 +215,7 @@ Diff behavior highlights:
 
 - tables, views, materialized views, functions, procedures, sequences, domains, enum/composite types and collations
 - triggers, foreign keys, check/unique/exclude constraints and indexes on tables (and indexes on materialized views) that are declared
-- event triggers, when the YAML has an `eventTriggers:` block
+- event triggers and publications, when the YAML has an `eventTriggers:` / `publications:` block
 
 These are never dropped: objects in other schemas, extension members, partitions (dropping the partitioned parent drops them), primary keys, indexes that back a constraint, constraints/triggers/indexes a partition inherits from its parent, sequences owned by a column, aggregates and window functions, roles, schemas, extensions, and pgy's own `pgy.migrations` table.
 

@@ -984,6 +984,28 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ---
 
+## Publications
+
+Logical replication publications are declared in a top-level `publications:` map.
+
+```yaml
+publications:
+  app_cdc:
+    tables:
+      - public.users
+      - table: public.orders
+        columns: [id, status, total]      # column list
+        where: "status <> 'draft'"        # row filter
+    schemas: [billing]                    # FOR TABLES IN SCHEMA
+    publish: [insert, update, delete]     # default: all actions
+    viaPartitionRoot: true
+    comment: change data capture
+  everything:
+    allTables: true
+```
+
+Publications are created after every table, so their tables and columns exist. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`/`viaPartitionRoot` emit `ALTER PUBLICATION ... SET (...)`, and comments are diffed. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list. PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
+
 ## Event Triggers
 
 Database-wide event triggers are declared in a top-level `eventTriggers:` map (they are not schema-scoped). Creating them requires superuser.
