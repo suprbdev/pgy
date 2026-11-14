@@ -136,7 +136,7 @@ func TestPruneEarlyDropsPrecedeColumnDrops(t *testing.T) {
 		return -1
 	}
 	view, col, table := idx(`drop view`), idx(`drop column "legacy"`), idx(`drop table`)
-	if view < 0 || col < 0 || table < 0 || !(view < col && col < table) {
+	if view < 0 || col < 0 || table < 0 || view > col || col > table {
 		t.Errorf("want view drop < column drop < table drop, got %d %d %d: %v", view, col, table, p.Drops)
 	}
 }
