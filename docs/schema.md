@@ -984,6 +984,41 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ---
 
+## Collation Definitions
+
+Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.
+
+```yaml
+schema app:
+  collation case_insensitive:
+    provider: icu              # icu | libc | builtin (PostgreSQL 17+)
+    locale: und-u-ks-level2
+    deterministic: false       # equality ignores case
+    comment: case-insensitive text
+  collation c_copy:
+    from: pg_catalog.C         # copy an existing collation instead
+  table users:
+    columns:
+      email:
+        type: text
+        collate: app.case_insensitive
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `provider` | string | `icu`, `libc` or `builtin` |
+| `locale` | string | Locale for the provider |
+| `lcCollate` / `lcCtype` | string | libc `LC_COLLATE` / `LC_CTYPE` |
+| `deterministic` | boolean | `false` makes equal-under-collation strings compare equal (ICU only) |
+| `rules` | string | ICU tailoring rules (PostgreSQL 16+) |
+| `from` | string | Copy an existing collation (`CREATE COLLATION ... FROM`); other options are ignored |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+| `comment` | string | `COMMENT ON COLLATION`, diffed against live |
+
+Column and domain `collate` values may name these collations schema-qualified; quotes around names are optional.
+
+---
+
 ## Dependencies
 
 All object types support `dependsOn` to control creation order. The topological sort resolves these before generating SQL.
@@ -999,6 +1034,7 @@ All object types support `dependsOn` to control creation order. The topological 
 | `materialized view <schema.view>` | `materialized view public.user_stats` |
 | `sequence <schema.seq>` | `sequence public.order_number_seq` |
 | `domain <schema.domain>` | `domain public.email` |
+| `collation <schema.collation>` | `collation app.case_insensitive` |
 | `schema <name>` | `schema private` (informational only, not resolved) |
 
 The sort is **deterministic**: entities with no ordering constraint between them are emitted by kind (types → domains → sequences → functions → procedures → tables → views), then by name, so identical YAML always produces an identical buffer.

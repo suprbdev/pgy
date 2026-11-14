@@ -24,6 +24,7 @@ type Database struct {
     Sequences map[string]*Sequence `yaml:"-"`
     Domains map[string]*Domain `yaml:"-"`
     Roles map[string]*Role `yaml:"-"`
+    Collations map[string]*Collation `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
 }
@@ -58,6 +59,23 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     Indexes         []*Index // materialized views only
+}
+
+// Collation is a CREATE COLLATION declaration, either from provider options
+// or copied from an existing collation (From). PostgreSQL cannot alter a
+// collation's definition, so collations are create-only.
+type Collation struct {
+    Schema        string
+    Name          string
+    Provider      string // icu | libc | builtin
+    Locale        string
+    LcCollate     string
+    LcCtype       string
+    Deterministic *bool
+    Rules         string // ICU tailoring rules (PostgreSQL 16+)
+    From          string // existing collation to copy
+    DependsOn     []string `yaml:"dependsOn"`
+    Comment       string
 }
 
 // Sequence is an explicit CREATE SEQUENCE declaration. Numeric options are
@@ -386,6 +404,10 @@ func Merge(dbs []*Database) *Database {
             if merged.Sequences == nil { merged.Sequences = map[string]*Sequence{} }
             for k, v := range d.Sequences { merged.Sequences[k] = v }
         }
+        if len(d.Collations) > 0 {
+            if merged.Collations == nil { merged.Collations = map[string]*Collation{} }
+            for k, v := range d.Collations { merged.Collations[k] = v }
+        }
         // merge domains
         if len(d.Domains) > 0 {
             if merged.Domains == nil { merged.Domains = map[string]*Domain{} }
@@ -453,6 +475,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.Views = map[string]*View{}
     out.Sequences = map[string]*Sequence{}
     out.Domains = map[string]*Domain{}
+    out.Collations = map[string]*Collation{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
         if arr, ok := extsRaw.([]any); ok {
@@ -734,6 +757,10 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             if sq != nil {
                 full := qualify(schemaName, sq.Name)
                 db.Sequences[full] = sq
+            }
+        } else if strings.HasPrefix(key, "collation ") {
+            if co := parseCollation(schemaName, key, body); co != nil {
+                db.Collations[qualify(schemaName, co.Name)] = co
             }
         } else if strings.HasPrefix(key, "domain ") {
             dm := parseDomain(schemaName, key, body)
@@ -1307,6 +1334,12 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, co := range d.Collations {
+        if co == nil { continue }
+        e := Entity{Key: k, Kind: "collation", DependsOn: co.DependsOn}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, dm := range d.Domains {
         if dm == nil { continue }
         e := Entity{Key: k, Kind: "domain", DependsOn: dm.DependsOn}
@@ -1374,7 +1407,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     // natural create order), then name. Without this, Kahn's queue would
     // follow Go's randomized map iteration and the buffer would differ
     // between runs on identical input.
-    kindRank := map[string]int{"extension": 0, "type": 1, "domain": 2, "sequence": 3, "function": 4, "procedure": 5, "table": 6, "view": 7}
+    kindRank := map[string]int{"extension": 0, "collation": 1, "type": 2, "domain": 3, "sequence": 4, "function": 5, "procedure": 6, "table": 7, "view": 8}
     entityLess := func(a, b string) bool {
         ra, rb := kindRank[entityMap[a].Kind], kindRank[entityMap[b].Kind]
         if ra != rb { return ra < rb }
@@ -1536,6 +1569,7 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
         {"table ", func(k string) bool { return d.Tables[k] != nil }},
         {"type ", func(k string) bool { return d.Types[k] != nil }},
         {"domain ", func(k string) bool { return d.Domains[k] != nil }},
+        {"collation ", func(k string) bool { return d.Collations[k] != nil }},
         {"sequence ", func(k string) bool { return d.Sequences[k] != nil }},
         {"materialized view ", func(k string) bool { return d.Views[k] != nil }},
         {"view ", func(k string) bool { return d.Views[k] != nil }},
@@ -1549,7 +1583,7 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
 
     for _, key := range []string{raw, qualify("", raw)} {
         if d.Tables[key] != nil || d.Types[key] != nil || d.Views[key] != nil ||
-            d.Sequences[key] != nil || d.Domains[key] != nil {
+            d.Sequences[key] != nil || d.Domains[key] != nil || d.Collations[key] != nil {
             return []string{key}
         }
     }
@@ -1656,6 +1690,23 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     }
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     return sq
+}
+
+func parseCollation(schemaName, key string, body any) *Collation {
+    co := &Collation{Schema: schemaName, Name: strings.TrimSpace(strings.TrimPrefix(key, "collation "))}
+    m, ok := body.(map[string]any)
+    if !ok { return co }
+    str := func(k string) string { s, _ := m[k].(string); return strings.TrimSpace(s) }
+    co.Provider = strings.ToLower(str("provider"))
+    co.Locale = str("locale")
+    co.LcCollate = str("lcCollate")
+    co.LcCtype = str("lcCtype")
+    co.Rules = str("rules")
+    co.From = str("from")
+    co.Comment, _ = m["comment"].(string)
+    if b, ok := m["deterministic"].(bool); ok { co.Deterministic = &b }
+    if dep, ok := m["dependsOn"]; ok { co.DependsOn = parseStringListFromNode(dep) }
+    return co
 }
 
 func parseDomain(schemaName, key string, body any) *Domain {

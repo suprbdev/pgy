@@ -16,10 +16,12 @@ const (
     kindSequence  = "sequence"
     kindFunction  = "function"
     kindProcedure = "procedure"
+    kindCollation = "collation"
 )
 
 var (
-    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure}
+    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure, kindCollation}
+    collationKinds = []string{kindCollation}
     typeKinds   = []string{kindType, kindDomain}
     callKinds    = []string{kindFunction}
     exprKinds    = []string{kindFunction, kindType, kindDomain}
@@ -53,6 +55,7 @@ func declared(d *schema.Database) []ref {
     add(kindSequence, nonNilKeys(d.Sequences))
     add(kindFunction, nonNilKeys(d.Functions))
     add(kindProcedure, nonNilKeys(d.Procedures))
+    add(kindCollation, nonNilKeys(d.Collations))
     return out
 }
 
@@ -82,6 +85,8 @@ func isDeclared(d *schema.Database, r ref) bool {
         return d.Functions[r.key] != nil
     case kindProcedure:
         return d.Procedures[r.key] != nil
+    case kindCollation:
+        return d.Collations[r.key] != nil
     }
     return false
 }
@@ -103,6 +108,8 @@ func existsLive(l *diff.Live, r ref) bool {
         return hasSignaturePrefix(l.Functions, schema.RoutineName(r.key))
     case kindProcedure:
         return hasSignaturePrefix(l.Procedures, schema.RoutineName(r.key))
+    case kindCollation:
+        return l.Collations[r.key]
     }
     return false
 }

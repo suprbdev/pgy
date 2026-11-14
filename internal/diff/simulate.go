@@ -12,7 +12,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 
     for _, keys := range [][]string{
         mapKeys(desired.Types), mapKeys(desired.Functions), mapKeys(desired.Procedures),
-        mapKeys(desired.Tables), mapKeys(desired.Views), mapKeys(desired.Sequences), mapKeys(desired.Domains),
+        mapKeys(desired.Tables), mapKeys(desired.Views), mapKeys(desired.Sequences), mapKeys(desired.Domains), mapKeys(desired.Collations),
     } {
         for _, k := range keys {
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
@@ -68,6 +68,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
+    }
+
+    for k, co := range desired.Collations {
+        if co == nil { continue }
+        out.Collations[k] = true
+        if co.Comment != "" { out.CollationComments[k] = co.Comment }
     }
 
     for k, dm := range desired.Domains {
@@ -344,6 +350,8 @@ func cloneLive(l *Live) *Live {
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
+        Collations:         cloneSet(l.Collations),
+        CollationComments:  cloneMap(l.CollationComments, nil),
         SequenceDefs:       cloneMap(l.SequenceDefs, func(s *LiveSequence) *LiveSequence { c := *s; return &c }),
         DomainDefs:         cloneMap(l.DomainDefs, func(d *LiveDomain) *LiveDomain { c := *d; c.Checks = cloneMap(d.Checks, nil); return &c }),
         Domains:            cloneSet(l.Domains),
