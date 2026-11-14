@@ -1407,6 +1407,21 @@ func TestPolicyRoleOrderAndCaseIgnored(t *testing.T) {
 	}
 }
 
+func TestPolicyToPublicMatchesLiveEmptyRoles(t *testing.T) {
+	live := livePolicyTable("p", &LivePolicy{Cmd: "insert", Roles: []string{}, WithCheck: "(a > 0)"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "p", For: "insert", To: []string{"PUBLIC"}, WithCheck: "a > 0"},
+	})}}
+	p := Plan(live, desired, false)
+	if findAlter(p, "policy") {
+		t.Errorf("to: public is how live reports no TO clause; alters: %v", p.Alters)
+	}
+	live = livePolicyTable("p", &LivePolicy{Cmd: "insert", Roles: []string{"app"}, WithCheck: "(a > 0)"})
+	if p := Plan(live, desired, false); !findAlter(p, "create policy") {
+		t.Errorf("narrowing from a role to public must replace; alters: %v", p.Alters)
+	}
+}
+
 func TestPolicyNoDropWithoutPoliciesBlock(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "bigint"}})
 	live.Tables["public.t"].Policies = map[string]*LivePolicy{"some_policy": {Cmd: "all"}}
@@ -2708,6 +2723,91 @@ func TestNormalizeConstraintDef(t *testing.T) {
 	}
 	if normalizeConstraintDef("CHECK (s <> 'A')") == normalizeConstraintDef("check (s <> 'a')") {
 		t.Errorf("string literal case must be preserved")
+	}
+}
+
+func TestNormalizeConstraintDefDeparsedForms(t *testing.T) {
+	cases := [][2]string{
+		{"CHECK ((s = ANY (ARRAY['a'::text, 'b'::text])))", "check (s in ('a', 'b'))"},
+		{"CHECK ((s1 = 'a'::text))", "check (s1 in ('a'))"},
+		{"CHECK ((s <> ALL (ARRAY['x'::text, 'y'::text])))", "check (s not in ('x','y'))"},
+		{"CHECK (((v)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])))", "check (v in ('a', 'b'))"},
+		{"CHECK (((v1)::text = 'a'::text))", "check (v1 IN ('a'))"},
+		{"CHECK ((st = ANY (ARRAY['a'::fx.st, 'b'::fx.st])))", "check (st in ('a','b'))"},
+		{"CHECK (((n >= (0)::numeric) AND (n <= (100)::numeric)))", "check (n between 0 and 100)"},
+		{"CHECK (((length(ln) >= 1) AND (length(ln) <= 5)))", "check (length(ln) BETWEEN 1 AND 5)"},
+		{"CHECK (((nb < 1) OR (nb > 5)))", "check (nb not between 1 and 5)"},
+		{"CHECK ((neg > '-1'::integer))", "check (neg > -1)"},
+		{"CHECK ((e ~~ '%@%'::text))", "check (e like '%@%')"},
+		{"CHECK ((e !~~* '%x%'::text))", "check (e not ilike '%x%')"},
+		{"CHECK ((ne <> 3))", "check (ne != 3)"},
+		{"CHECK ((id IN ( SELECT 1)))", "check (id in (select 1))"},
+	}
+	for _, c := range cases {
+		if normalizeConstraintDef(c[0]) != normalizeConstraintDef(c[1]) {
+			t.Errorf("expected %q == %q after normalization (%q vs %q)", c[0], c[1], normalizeConstraintDef(c[0]), normalizeConstraintDef(c[1]))
+		}
+	}
+	different := [][2]string{
+		{"CHECK ((s = ANY (ARRAY['a'::text, 'b'::text])))", "check (s in ('a', 'c'))"},
+		{"CHECK ((s <> ALL (ARRAY['a'::text, 'b'::text])))", "check (s in ('a', 'b'))"},
+		{"CHECK ((e ~~ 'in (x)'::text))", "check (e like 'in (y)')"},
+		{"CHECK ((e ~~ '%@%'::text))", "check (e ilike '%@%')"},
+	}
+	for _, c := range different {
+		if normalizeConstraintDef(c[0]) == normalizeConstraintDef(c[1]) {
+			t.Errorf("expected %q != %q after normalization", c[0], c[1])
+		}
+	}
+}
+
+func TestCanonicalizeExprKeepsStringLiterals(t *testing.T) {
+	in := `note = 'it''s in (a, b) like x::text' and k != 1`
+	want := `note = 'it''s in (a, b) like x::text' and k <> 1`
+	if got := canonicalizeExpr(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestAlterColumnDefaultDeparsedFormsSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"d1":  {Type: "integer", Default: "'-1'::integer"},
+		"d2":  {Type: "numeric", Default: "'-1.5'::numeric"},
+		"d3":  {Type: "timestamp with time zone", Default: "(now() + '1 day'::interval)"},
+		"d4":  {Type: "date", Default: "CURRENT_DATE"},
+		"d5":  {Type: "text[]", Default: "'{}'::text[]"},
+		"d6":  {Type: "character varying(5)", Default: "'x'::character varying"},
+		"d8":  {Type: "integer", Default: "(1 + 2)"},
+		"d11": {Type: "timestamp without time zone", Default: "(now() AT TIME ZONE 'utc'::text)"},
+		"d13": {Type: "bigint", Default: "'-9223372036854775807'::bigint"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"d1":  {Type: "int", Default: "-1"},
+			"d2":  {Type: "numeric", Default: "-1.5"},
+			"d3":  {Type: "timestamptz", Default: "now() + interval '1 day'"},
+			"d4":  {Type: "date", Default: "current_date"},
+			"d5":  {Type: "text[]", Default: "'{}'"},
+			"d6":  {Type: "varchar(5)", Default: "'x'"},
+			"d8":  {Type: "int", Default: "1+2"},
+			"d11": {Type: "timestamp", Default: "now() at time zone 'utc'"},
+			"d13": {Type: "bigint", Default: "-9223372036854775807"},
+		}},
+	}}
+	p := Plan(live, desired, false)
+	if len(p.Alters) != 0 {
+		t.Errorf("deparsed defaults must not diff, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnDefaultNegativeChangeDetected(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"n": {Type: "integer", Default: "'-1'::integer"}})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{"n": {Type: "int", Default: "-2"}}},
+	}}
+	p := Plan(live, desired, false)
+	if !findAlter(p, `set default -2;`) {
+		t.Errorf("changed negative default must diff, got %+v", p.Alters)
 	}
 }
 

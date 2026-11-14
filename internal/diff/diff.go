@@ -2188,18 +2188,22 @@ func isSerialType(t string) bool {
     return false
 }
 
+// defaultsEqual compares a YAML default with its live pg_get_expr form. The
+// parenthesis-insensitive constraint normalization is the fallback, since
+// PostgreSQL wraps compound defaults in parentheses ((now() + '1 day')).
 func defaultsEqual(desired, live string) bool {
-    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live)
+    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) ||
+        normalizeConstraintDef(desired) == normalizeConstraintDef(live)
 }
 
 // normalizeDefaultExpr canonicalizes a default expression for comparison:
-// strips ::type casts outside quoted literals (live defaults come back as
-// 'x'::text or nextval('s'::regclass)), lowercases everything outside
-// single-quoted strings, and collapses whitespace.
+// runs canonicalizeExpr (live defaults come back as 'x'::text, '-1'::integer
+// or nextval('s'::regclass)), lowercases everything outside single-quoted
+// strings, and collapses whitespace.
 func normalizeDefaultExpr(s string) string {
     var b strings.Builder
     inQ := false
-    rs := []rune(strings.TrimSpace(s))
+    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
@@ -2270,14 +2274,17 @@ func expandPolicyCmd(c string) string {
 // (current_setting('app.member_id'))::bigint`) do not count as a change.
 //
 // An empty desired For means ALL; an empty desired To means PUBLIC, which is
-// how the live side reports a policy with no TO clause.
+// how the live side reports a policy with no TO clause. An explicit public
+// entry in To is ignored for the same reason (polroles' 0 entry is dropped).
 func policyMatchesLive(pol *schema.Policy, live *LivePolicy) bool {
     wantCmd := strings.ToLower(pol.For)
     if wantCmd == "" { wantCmd = "all" }
     if wantCmd != live.Cmd { return false }
 
-    wantRoles := append([]string{}, pol.To...)
-    for i, r := range wantRoles { wantRoles[i] = strings.ToLower(r) }
+    wantRoles := []string{}
+    for _, r := range pol.To {
+        if !strings.EqualFold(r, "public") { wantRoles = append(wantRoles, strings.ToLower(r)) }
+    }
     liveRoles := append([]string{}, live.Roles...)
     for i, r := range liveRoles { liveRoles[i] = strings.ToLower(r) }
     sort.Strings(wantRoles)
@@ -2335,15 +2342,16 @@ func canonicalTriggerEvents(events []string) []string {
 }
 
 // normalizeConstraintDef canonicalizes a constraint definition for comparison
-// against pg_get_constraintdef() output: outside single-quoted strings it
-// strips ::type casts, double quotes, parentheses, whitespace, and "public."
-// qualifiers, and lowercases. Stripping parentheses and whitespace can make
+// against pg_get_constraintdef() output: after canonicalizeExpr (IN/BETWEEN/
+// LIKE rewrites, cast removal), outside single-quoted strings it strips
+// double quotes, parentheses, whitespace, and "public." qualifiers, and
+// lowercases. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
 func normalizeConstraintDef(s string) string {
     var b strings.Builder
     inQ := false
-    rs := []rune(strings.TrimSpace(s))
+    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
