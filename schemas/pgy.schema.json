@@ -468,7 +468,7 @@
     "trigger": {
       "type": "object",
       "properties": {
-        "timing": { "type": "string", "enum": ["before", "after"] },
+        "timing": { "type": "string", "enum": ["before", "after", "instead of"], "description": "instead of: views only (always FOR EACH ROW)." },
         "events": {
           "type": "array",
           "items": {
@@ -682,6 +682,11 @@
           "type": "object",
           "description": "Materialized views: indexes, same format as table indexes (a unique index enables REFRESH ... CONCURRENTLY).",
           "additionalProperties": { "$ref": "#/definitions/index" }
+        },
+        "triggers": {
+          "type": "object",
+          "description": "Plain views: triggers, typically timing: instead of, to make the view writable.",
+          "additionalProperties": { "$ref": "#/definitions/trigger" }
         },
         "grants": { "$ref": "#/definitions/grants" },
         "dependsOn": { "$ref": "#/definitions/stringList" },

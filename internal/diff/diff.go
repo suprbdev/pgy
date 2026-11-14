@@ -26,6 +26,8 @@ type Live struct{
     ViewOptions map[string]map[string]string
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
+    // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)
+    ViewTables map[string]*LiveTable
     Sequences  map[string]bool
     Domains    map[string]bool
     Collations map[string]bool
@@ -277,6 +279,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         MatViews: map[string]bool{},
         ViewOptions: map[string]map[string]string{},
         MatViewTables: map[string]*LiveTable{},
+        ViewTables: map[string]*LiveTable{},
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
         SequenceDefs: map[string]*LiveSequence{},
@@ -546,7 +549,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query existing triggers with their full definitions so redefined
     // triggers can be detected (skip internal triggers, e.g. FK enforcement)
     trgQ := `
-        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgparentid <> 0
+        select n.nspname, c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgparentid <> 0, c.relkind = 'v'
         from pg_trigger t
         join pg_class c on c.oid = t.tgrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -558,13 +561,17 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for trgRows.Next() {
         var schemaName, tableName, trgName, trgDef string
-        var inherited bool
-        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited); err != nil {
+        var inherited, onView bool
+        if err := trgRows.Scan(&schemaName, &tableName, &trgName, &trgDef, &inherited, &onView); err != nil {
             trgRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        if t := l.Tables[key]; t != nil {
+        t := l.Tables[key]
+        if onView {
+            if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
+        }
+        if t != nil {
             t.Triggers[trgName] = trgDef
             if inherited { t.TriggerInherited[trgName] = true }
         }
@@ -1303,7 +1310,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             tpcRows.Close()
             return nil, err
         }
-        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+        key := fmt.Sprintf("%s.%s", schemaName, tableName)
+        t := l.Tables[key]
+        if t == nil && kind == "trigger" { t = l.ViewTables[key] }
+        if t != nil {
             if kind == "trigger" { t.TriggerComments[name] = comment } else { t.PolicyComments[name] = comment }
         }
     }
@@ -1857,9 +1867,12 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 // rewrites the query), so replacement is opt-in via `replace: true`
                 if live.Views[e.Key] && !vw.Replace {
                     plan.Alters = append(plan.Alters, viewOptionStmts(e.Key, opts, live.ViewOptions[e.Key])...)
-                    continue
+                } else {
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s%s as %s;", pqIdent(e.Key), renderViewWith(opts, live.ViewOptions[e.Key]), vw.Query))
                 }
-                plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s%s as %s;", pqIdent(e.Key), renderViewWith(opts, live.ViewOptions[e.Key]), vw.Query))
+                if len(vw.Triggers) > 0 {
+                    applyTableConstraints(plan, e.Key, &schema.Table{Triggers: vw.Triggers}, live.ViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
+                }
             }
         case "table":
             // Handle tables in dependency order
@@ -2569,6 +2582,17 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         kind := "view "
         if vw.Materialized { kind = "materialized view " }
         comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
+        if vt := live.ViewTables[k]; !vw.Materialized {
+            for _, tr := range vw.Triggers {
+                if tr == nil || tr.Comment == "" || tr.Procedure == "" { continue }
+                name := truncateIdent(tr.Name)
+                have := ""
+                if vt != nil {
+                    if def, ok := vt.Triggers[name]; ok && (def == "" || triggerDefsEqual(renderTrigger(k, tr), def)) { have = vt.TriggerComments[name] }
+                }
+                comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
+            }
+        }
         lt := live.MatViewTables[k]
         schemaPrefix := ""
         if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
@@ -2992,6 +3016,7 @@ func renderTrigger(fq string, tr *schema.Trigger) string {
     }
     level := strings.ToLower(strings.TrimSpace(tr.Level))
     if level == "" { level = "statement" }
+    if strings.EqualFold(strings.Join(strings.Fields(tr.Timing), " "), "instead of") { level = "row" }
     referencing := ""
     if tr.OldTable != "" { referencing += " old table as " + pqIdent(tr.OldTable) }
     if tr.NewTable != "" { referencing += " new table as " + pqIdent(tr.NewTable) }

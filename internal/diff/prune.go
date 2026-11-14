@@ -47,9 +47,14 @@ func planPrune(live *Live, desired *schema.Database) (early, late []string) {
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {
-        vw, lt := desired.Views[fq], live.MatViewTables[fq]
-        if vw == nil || !vw.Materialized || lt == nil { continue }
-        early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
+        vw := desired.Views[fq]
+        if vw == nil { continue }
+        if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
+            early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
+        }
+        if vt := live.ViewTables[fq]; !vw.Materialized && vt != nil {
+            early = append(early, pruneTableObjects(fq, &schema.Table{Triggers: vw.Triggers}, vt)...)
+        }
     }
 
     undeclared := func(liveSet map[string]bool, declared func(string) bool, extKind string) []string {
