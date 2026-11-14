@@ -70,6 +70,14 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
     }
 
+    for name, et := range desired.EventTriggers {
+        if et == nil || et.Event == "" || et.Function == "" { continue }
+        le := &LiveEventTrigger{Event: strings.ToLower(et.Event), Function: qualifyName(strings.TrimSuffix(strings.TrimSpace(et.Function), "()")), Enabled: "origin", Comment: et.Comment}
+        for _, t := range et.Tags { le.Tags = append(le.Tags, strings.ToUpper(strings.TrimSpace(t))) }
+        if et.Enabled != "" { le.Enabled = et.Enabled }
+        out.EventTriggers[truncateIdent(name)] = le
+    }
+
     for k, co := range desired.Collations {
         if co == nil { continue }
         out.Collations[k] = true
@@ -351,6 +359,7 @@ func cloneLive(l *Live) *Live {
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),
+        EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),
         SequenceDefs:       cloneMap(l.SequenceDefs, func(s *LiveSequence) *LiveSequence { c := *s; return &c }),
         DomainDefs:         cloneMap(l.DomainDefs, func(d *LiveDomain) *LiveDomain { c := *d; c.Checks = cloneMap(d.Checks, nil); return &c }),
