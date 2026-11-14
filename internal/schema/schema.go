@@ -53,6 +53,11 @@ type View struct {
     Comment      string
     Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
     Grants       map[string][]string // role -> privileges; nil means unmanaged
+    SecurityInvoker *bool  // views: security_invoker option (PostgreSQL 15+); nil = unmanaged
+    SecurityBarrier *bool  // views: security_barrier option; nil = unmanaged
+    CheckOption     string // views: local | cascaded | none; "" = unmanaged
+    WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
+    Indexes         []*Index // materialized views only
 }
 
 // Sequence is an explicit CREATE SEQUENCE declaration. Numeric options are
@@ -1598,6 +1603,11 @@ func parseView(schemaName, key string, body any) *View {
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
     if gRaw, ok := m["grants"]; ok { vw.Grants = parseGrants(gRaw) }
+    if b, ok := m["securityInvoker"].(bool); ok { vw.SecurityInvoker = &b }
+    if b, ok := m["securityBarrier"].(bool); ok { vw.SecurityBarrier = &b }
+    if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
+    if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
+    if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
     return vw
 }
 
