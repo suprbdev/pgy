@@ -114,6 +114,8 @@ type LiveTable struct{
     ConstraintInherited map[string]bool
     TriggerInherited    map[string]bool
     IsPartition bool            // relispartition: a partition of a partitioned table
+    Unlogged    bool            // relpersistence = 'u'
+    Options     map[string]string // reloptions: lower-cased name -> value
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
@@ -187,6 +189,9 @@ type LiveColumn struct{
     Identity  string // "" (none), "always", or "by default"
     Generated string // generation expression of a generated column ("" = not generated)
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
+    Collation   string // explicit collation differing from the type's default ("" = default)
+    Compression string // pglz | lz4 | "" (default)
+    Storage     string // plain | external | extended | main
 }
 
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
@@ -245,7 +250,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname, c.relispartition
+        select n.nspname, c.relname, c.relispartition, c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[])
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind in ('r', 'p')
@@ -256,14 +261,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for tableRows.Next() {
         var schemaName, tableName string
-        var isPartition bool
-        if err := tableRows.Scan(&schemaName, &tableName, &isPartition); err != nil {
+        var isPartition, unlogged bool
+        var reloptions []string
+        if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions); err != nil {
             tableRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
-        l.Tables[key] = newLiveTable()
-        l.Tables[key].IsPartition = isPartition
+        lt := newLiveTable()
+        lt.IsPartition, lt.Unlogged, lt.Options = isPartition, unlogged, parseProconfig(reloptions)
+        l.Tables[key] = lt
     }
     tableRows.Close()
     
@@ -298,7 +305,11 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                not a.attnotnull,
                coalesce(pg_get_expr(ad.adbin, ad.adrelid), ''),
                case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end,
-               a.attgenerated::text
+               a.attgenerated::text,
+               coalesce((select co.collname from pg_collation co join pg_type ty on ty.oid = a.atttypid
+                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
+               case a.attcompression when 'p' then 'pglz' when 'l' then 'lz4' else '' end,
+               case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -315,12 +326,12 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     for rows.Next() {
         var schemaName, tableName, colName, dataType, def, identity string
         var nullable bool
-        var generated string
-        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated); err != nil { return nil, err }
+        var generated, collation, compression, storage string
+        if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage); err != nil { return nil, err }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         t := l.Tables[key]
         if t == nil { t = newLiveTable(); l.Tables[key] = t }
-        lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity}
+        lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage}
         if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
         t.Columns[colName] = lc
     }
@@ -1555,11 +1566,14 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                     sort.Strings(cols)
                 }
-                create := fmt.Sprintf("create table if not exists %s (%s)", pqIdent(fq), strings.Join(cols, ", "))
+                unlogged := ""
+                if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
+                create := fmt.Sprintf("create %stable if not exists %s (%s)", unlogged, pqIdent(fq), strings.Join(cols, ", "))
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
-                plan.Creates = append(plan.Creates, create+";")
+                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+";")
+                plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
@@ -1583,10 +1597,12 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         // otherwise run before the column exists and force a
                         // two-migration split.
                         plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
+                        if c.Storage != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage)) }
                         continue
                     }
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
                 }
+                if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
@@ -2416,10 +2432,23 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
 
-    if unsafe && c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type) {
+    typeChanged := c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type)
+    collateChanged := c.Collate != "" && !strings.EqualFold(c.Collate, lc.Collation)
+    if unsafe && c.Type != "" && (typeChanged || collateChanged) {
         stmt := fmt.Sprintf("%s type %s", target, c.Type)
+        if c.Collate != "" { stmt += " collate " + pqIdent(c.Collate) }
         if c.Using != "" { stmt += " using " + c.Using }
         out = append(out, stmt+";")
+    }
+    if c.Compression != "" {
+        want := c.Compression
+        if want == "default" { want = "" }
+        if want != lc.Compression {
+            out = append(out, fmt.Sprintf("%s set compression %s;", target, c.Compression))
+        }
+    }
+    if c.Storage != "" && c.Storage != lc.Storage {
+        out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
     }
 
     if c.Generated != "" || lc.Generated != "" {
@@ -2446,6 +2475,59 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     } else if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && lc.Identity == "" {
         out = append(out, target+" drop not null;")
     }
+    return out
+}
+
+// renderStorageParams renders a table's WITH (...) storage parameters, sorted,
+// or "" when there are none.
+func renderStorageParams(with map[string]string) string {
+    if len(with) == 0 { return "" }
+    keys := make([]string, 0, len(with))
+    for k := range with { keys = append(keys, k) }
+    sort.Strings(keys)
+    parts := make([]string, len(keys))
+    for i, k := range keys { parts[i] = k + " = " + with[k] }
+    return " with (" + strings.Join(parts, ", ") + ")"
+}
+
+// columnStorageStmts emits SET STORAGE for the columns of a newly created
+// table that declare one (CREATE TABLE only accepts STORAGE from PostgreSQL 16).
+func columnStorageStmts(fq string, dt *schema.Table) []string {
+    out := []string{}
+    for _, cn := range sortedKeys(dt.Columns) {
+        if c := dt.Columns[cn]; c != nil && c.Storage != "" {
+            out = append(out, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage))
+        }
+    }
+    return out
+}
+
+// tableStorageStmts reconciles an existing table's persistence and storage
+// parameters. SET LOGGED / UNLOGGED rewrites the table, so it is gated
+// behind --unsafe. A present `with` block is authoritative: live parameters
+// it does not list are reset.
+func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) []string {
+    out := []string{}
+    if dt.Unlogged != nil && *dt.Unlogged != lt.Unlogged && unsafe {
+        mode := "logged"
+        if *dt.Unlogged { mode = "unlogged" }
+        out = append(out, fmt.Sprintf("alter table %s set %s;", pqIdent(fq), mode))
+    }
+    if dt.With == nil { return out }
+    set, reset := []string{}, []string{}
+    want := map[string]bool{}
+    for _, k := range sortedKeys(dt.With) {
+        want[strings.ToLower(k)] = true
+        lv, ok := lt.Options[strings.ToLower(k)]
+        if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(dt.With[k])) {
+            set = append(set, k+" = "+dt.With[k])
+        }
+    }
+    for _, k := range sortedKeys(lt.Options) {
+        if !want[k] { reset = append(reset, k) }
+    }
+    if len(set) > 0 { out = append(out, fmt.Sprintf("alter table %s set (%s);", pqIdent(fq), strings.Join(set, ", "))) }
+    if len(reset) > 0 { out = append(out, fmt.Sprintf("alter table %s reset (%s);", pqIdent(fq), strings.Join(reset, ", "))) }
     return out
 }
 
@@ -2796,6 +2878,8 @@ func isCastTypeChar(r rune) bool {
 
 func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
+    if c.Compression != "" && c.Compression != "default" { parts = append(parts, "compression "+c.Compression) }
+    if c.Collate != "" { parts = append(parts, "collate "+pqIdent(c.Collate)) }
     if !c.Nullable { parts = append(parts, "not null") }
     if c.Generated != "" {
         kind := "stored"

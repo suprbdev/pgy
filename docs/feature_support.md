@@ -44,6 +44,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Grants & Privileges** (`GRANT` / `REVOKE` on tables, views, materialized views, functions, schemas, and columns — column-level via `grants:` under a column; `revokePublic` for functions; an empty list (`role: []`) revokes everything for that role while keeping the object managed; all revokes ordered before all grants so narrowing a table grant to column grants is safe)
 - [x] **Roles & Users** (Top-level `roles:` block → `CREATE ROLE` with login/superuser/createdb/createrole/replication/bypassRLS/noinherit/connection limit; `inRoles` memberships via `GRANT role TO role`; create-only, no passwords)
 - [x] **Sequences** (`sequence <name>:` blocks → `CREATE SEQUENCE IF NOT EXISTS` with as/increment/minValue/maxValue/start/cache/cycle/ownedBy; create-only, comments diffed)
+- [x] **Table & Column Storage** (`unlogged` → `SET LOGGED/UNLOGGED` under `--unsafe`; `with` storage parameters → `SET/RESET (...)`; column `collate` (changes under `--unsafe`), `compression` and `storage` diffed against live)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
 - [x] **Identity Columns** (Column `identity: always | byDefault` → `GENERATED ... AS IDENTITY`; create-only, existing columns never altered; overrides `default`)
 
