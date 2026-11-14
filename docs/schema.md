@@ -652,11 +652,15 @@ schema app:
         for: insert
         to: kickly_member
         withCheck: "member_id = current_setting('app.member_id')::bigint"
+      not_archived:
+        as: restrictive
+        using: "archived_at is null"
 ```
 
 | Property | Type | Description |
 |----------|------|-------------|
 | `rowLevelSecurity` | boolean | `true` emits `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` when not already enabled. `false` emits `... DISABLE ROW LEVEL SECURITY` when currently enabled, and only under `--unsafe`. Omit the key to leave the live setting alone |
+| `policies.<name>.as` | string | `permissive` (default) or `restrictive`. Permissive policies are OR-ed together; every restrictive policy must also pass |
 | `policies.<name>.for` | string | `select` \| `insert` \| `update` \| `delete` \| `all`. Omit for `ALL` |
 | `policies.<name>.to` | string or list | Role(s). Omit for all roles |
 | `policies.<name>.using` | string | `USING` expression |
@@ -664,7 +668,7 @@ schema app:
 
 Behavior:
 
-- Policies are matched by name, and their definitions are diffed. A live policy whose `for`, `to`, `using` or `withCheck` no longer matches is dropped and recreated in the same migration transaction. This is not gated behind `--unsafe`: `DROP POLICY` is metadata-only and has no dependents.
+- Policies are matched by name, and their definitions are diffed. A live policy whose `as`, `for`, `to`, `using` or `withCheck` no longer matches is dropped and recreated in the same migration transaction. This is not gated behind `--unsafe`: `DROP POLICY` is metadata-only and has no dependents.
 - Expression comparison is normalized, so the casts, parentheses and quoting PostgreSQL adds when echoing an expression back (`member_id = (current_setting('app.member_id'::text))::bigint`) do not count as a change. Role lists are compared order- and case-insensitively.
 - A present `policies:` block is authoritative: live policies not listed are dropped. Tables without a `policies:` block are unmanaged.
 - `ENABLE ROW LEVEL SECURITY` and `CREATE POLICY` are emitted after all object creates/alters, so policy expressions may freely reference functions created in the same plan.

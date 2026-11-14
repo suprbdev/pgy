@@ -130,6 +130,7 @@ type PartitionSpec struct {
 
 type Policy struct {
     Name      string
+    As        string   // permissive|restrictive (empty = permissive)
     For       string   // select|insert|update|delete|all (empty = all)
     To        []string // roles (empty = all roles)
     Using     string
@@ -777,7 +778,7 @@ func defaultToString(v any) string {
     return ""
 }
 
-// parsePolicies parses { name: {for, to, using, withCheck}, ... } sorted by name.
+// parsePolicies parses { name: {as, for, to, using, withCheck}, ... } sorted by name.
 func parsePolicies(v any) []*Policy {
     m, ok := v.(map[string]any)
     if !ok { return nil }
@@ -786,6 +787,7 @@ func parsePolicies(v any) []*Policy {
         p := &Policy{Name: name}
         if dm, ok := def.(map[string]any); ok {
             if f, ok := dm["for"].(string); ok { p.For = strings.ToLower(f) }
+            if as, ok := dm["as"].(string); ok { p.As = strings.ToLower(strings.TrimSpace(as)) }
             if to, ok := dm["to"].(string); ok {
                 p.To = []string{to}
             } else if to, ok := dm["to"]; ok {

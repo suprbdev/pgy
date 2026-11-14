@@ -165,6 +165,9 @@ schema SCH:
         for: insert
         to: public
         withCheck: "a > 0"
+      p4:
+        as: restrictive
+        using: "id <> 0"
 `,
 	}
 	pool := connect(t)

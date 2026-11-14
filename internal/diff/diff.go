@@ -98,10 +98,11 @@ type LiveIndexOpclass struct {
 // detected and replaced. Roles is nil/empty when the policy applies to PUBLIC
 // (i.e. no explicit TO clause).
 type LivePolicy struct {
-    Cmd       string // select|insert|update|delete|all
-    Roles     []string
-    Using     string
-    WithCheck string
+    Restrictive bool   // AS RESTRICTIVE (false = PERMISSIVE)
+    Cmd         string // select|insert|update|delete|all
+    Roles       []string
+    Using       string
+    WithCheck   string
 }
 
 type LiveColumn struct{
@@ -358,7 +359,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // redefined policy can be detected. polroles is '{0}' for PUBLIC (no TO
     // clause), which maps to an empty role list.
     polQ := `
-        select n.nspname, c.relname, pol.polname, pol.polcmd::text,
+        select n.nspname, c.relname, pol.polname, pol.polcmd::text, not pol.polpermissive,
                coalesce(
                    (select array_agg(r.rolname order by r.rolname)
                     from pg_roles r where r.oid = any(pol.polroles)),
@@ -378,17 +379,19 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         var schemaName, tableName, polName, polCmd string
         var roles []string
         var using, withCheck string
-        if err := polRows.Scan(&schemaName, &tableName, &polName, &polCmd, &roles, &using, &withCheck); err != nil {
+        var restrictive bool
+        if err := polRows.Scan(&schemaName, &tableName, &polName, &polCmd, &restrictive, &roles, &using, &withCheck); err != nil {
             polRows.Close()
             return nil, err
         }
         key := fmt.Sprintf("%s.%s", schemaName, tableName)
         if t := l.Tables[key]; t != nil {
             t.Policies[polName] = &LivePolicy{
-                Cmd:       expandPolicyCmd(polCmd),
-                Roles:     roles,
-                Using:     using,
-                WithCheck: withCheck,
+                Restrictive: restrictive,
+                Cmd:         expandPolicyCmd(polCmd),
+                Roles:       roles,
+                Using:       using,
+                WithCheck:   withCheck,
             }
         }
     }
@@ -2083,6 +2086,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(polName), pqIdent(fq)))
             }
             stmt := fmt.Sprintf("create policy %s on %s", pqIdent(polName), pqIdent(fq))
+            if pol.As == "restrictive" { stmt += " as restrictive" }
             if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
             if len(pol.To) > 0 {
                 roles := make([]string, 0, len(pol.To))
@@ -2312,10 +2316,12 @@ func expandPolicyCmd(c string) string {
 // and quoting PostgreSQL adds when echoing an expression back (`member_id =
 // (current_setting('app.member_id'))::bigint`) do not count as a change.
 //
-// An empty desired For means ALL; an empty desired To means PUBLIC, which is
-// how the live side reports a policy with no TO clause. An explicit public
-// entry in To is ignored for the same reason (polroles' 0 entry is dropped).
+// An empty desired As means PERMISSIVE and an empty desired For means ALL; an
+// empty desired To means PUBLIC, which is how the live side reports a policy
+// with no TO clause. An explicit public entry in To is ignored for the same
+// reason (polroles' 0 entry is dropped).
 func policyMatchesLive(pol *schema.Policy, live *LivePolicy) bool {
+    if (pol.As == "restrictive") != live.Restrictive { return false }
     wantCmd := strings.ToLower(pol.For)
     if wantCmd == "" { wantCmd = "all" }
     if wantCmd != live.Cmd { return false }

@@ -1407,6 +1407,41 @@ func TestPolicyRoleOrderAndCaseIgnored(t *testing.T) {
 	}
 }
 
+func TestPolicyRestrictiveCreate(t *testing.T) {
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "guard", As: "restrictive", For: "select", To: []string{"app"}, Using: "tenant_id = 1"},
+	})}}
+	p := Plan(emptyLive(), desired, false)
+	want := `create policy "guard" on "public"."t" as restrictive for select to "app" using (tenant_id = 1);`
+	if !findAlter(p, want) {
+		t.Errorf("want %q, got %v", want, p.Alters)
+	}
+}
+
+func TestPolicyRestrictiveSkippedIfSame(t *testing.T) {
+	live := livePolicyTable("guard", &LivePolicy{Restrictive: true, Cmd: "all", Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "guard", As: "restrictive", Using: "true"},
+	})}}
+	if p := Plan(live, desired, false); findAlter(p, "policy") {
+		t.Errorf("same restrictive policy should emit nothing; alters: %v", p.Alters)
+	}
+}
+
+func TestPolicyPermissiveToRestrictiveReplaced(t *testing.T) {
+	live := livePolicyTable("guard", &LivePolicy{Cmd: "all", Using: "true"})
+	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "guard", As: "restrictive", Using: "true"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "guard")
+
+	live = livePolicyTable("guard", &LivePolicy{Restrictive: true, Cmd: "all", Using: "true"})
+	desired = &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{
+		{Name: "guard", Using: "true"},
+	})}}
+	assertPolicyReplaced(t, Plan(live, desired, false), "guard")
+}
+
 func TestPolicyToPublicMatchesLiveEmptyRoles(t *testing.T) {
 	live := livePolicyTable("p", &LivePolicy{Cmd: "insert", Roles: []string{}, WithCheck: "(a > 0)"})
 	desired := &schema.Database{Tables: map[string]*schema.Table{"public.t": rlsTable([]*schema.Policy{

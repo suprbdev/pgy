@@ -218,10 +218,11 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             if !strings.EqualFold(r, "public") { roles = append(roles, r) }
         }
         lt.Policies[truncateIdent(pol.Name)] = &LivePolicy{
-            Cmd:       cmd,
-            Roles:     roles,
-            Using:     pol.Using,
-            WithCheck: pol.WithCheck,
+            Restrictive: pol.As == "restrictive",
+            Cmd:         cmd,
+            Roles:       roles,
+            Using:       pol.Using,
+            WithCheck:   pol.WithCheck,
         }
     }
     if dt.RowLevelSecurity != nil { lt.RLSEnabled = *dt.RowLevelSecurity }
