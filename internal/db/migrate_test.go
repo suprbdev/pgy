@@ -103,3 +103,15 @@ func TestSplitEmptyAndWhitespace(t *testing.T) {
 		t.Fatalf("want no statements, got %v", got)
 	}
 }
+
+func TestSplitSemicolonInsideParentheses(t *testing.T) {
+	sql := `create rule r as on insert to t do also (insert into log values (new.id); notify t_changed);
+select ')' as paren; select 1;`
+	got := SplitSQLStatements(sql)
+	if len(got) != 3 {
+		t.Fatalf("want 3 statements, got %d: %v", len(got), got)
+	}
+	if !strings.HasSuffix(got[0], "notify t_changed)") {
+		t.Errorf("multi-action rule split mid-statement: %q", got[0])
+	}
+}

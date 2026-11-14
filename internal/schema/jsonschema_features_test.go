@@ -65,6 +65,8 @@ schema public:
         comment: audit trail
     policies:
       tenant: {as: restrictive, using: "true", comment: tenant isolation}
+    rules:
+      orders_no_delete: {event: delete, instead: true, where: old.id > 0, do: nothing, comment: keep rows}
   view active_orders:
     query: select 1
     triggers:

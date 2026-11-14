@@ -225,6 +225,11 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/trigger" }
         },
+        "rules": {
+          "type": "object",
+          "description": "Rewrite rules (CREATE RULE).",
+          "additionalProperties": { "$ref": "#/definitions/rule" }
+        },
         "constraints": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/constraint" }
@@ -292,6 +297,11 @@
         "triggers": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/trigger" }
+        },
+        "rules": {
+          "type": "object",
+          "description": "Rewrite rules (CREATE RULE).",
+          "additionalProperties": { "$ref": "#/definitions/rule" }
         },
         "constraints": {
           "type": "object",
@@ -465,6 +475,20 @@
         }
       },
       "required": ["columns", "references"],
+      "additionalProperties": false
+    },
+    "rule": {
+      "description": "A rewrite rule: CREATE RULE name AS ON event TO table [WHERE cond] DO [INSTEAD] action.",
+      "type": "object",
+      "properties": {
+        "event": { "type": "string", "enum": ["select", "insert", "update", "delete"] },
+        "instead": { "type": "boolean" },
+        "where": { "type": "string" },
+        "do": { "type": "string", "description": "nothing, one statement, or (stmt; stmt)." },
+        "replace": { "type": "boolean", "description": "Re-emit CREATE OR REPLACE RULE on every diff (actions are not compared)." },
+        "comment": { "type": "string" }
+      },
+      "required": ["event", "do"],
       "additionalProperties": false
     },
     "trigger": {
@@ -689,6 +713,11 @@
           "type": "object",
           "description": "Plain views: triggers, typically timing: instead of, to make the view writable.",
           "additionalProperties": { "$ref": "#/definitions/trigger" }
+        },
+        "rules": {
+          "type": "object",
+          "description": "Plain views: rewrite rules.",
+          "additionalProperties": { "$ref": "#/definitions/rule" }
         },
         "grants": { "$ref": "#/definitions/grants" },
         "dependsOn": { "$ref": "#/definitions/stringList" },

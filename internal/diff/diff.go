@@ -182,6 +182,8 @@ type LiveTable struct{
     Policies    map[string]*LivePolicy // policy name -> live definition
     IndexComments      map[string]string // index name -> comment (absent key = no comment)
     TriggerComments    map[string]string // trigger name -> comment
+    Rules              map[string]*LiveRule // rule name -> definition (excluding views' _RETURN)
+    RuleComments       map[string]string
     PolicyComments     map[string]string // policy name -> comment
     ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
     // ConstraintInherited / TriggerInherited: names cloned from a partitioned
@@ -214,11 +216,23 @@ func newLiveTable() *LiveTable {
         IndexComments:      map[string]string{},
         ConstraintComments: map[string]string{},
         TriggerComments:    map[string]string{},
+        Rules:              map[string]*LiveRule{},
+        RuleComments:       map[string]string{},
         PolicyComments:     map[string]string{},
         ConstraintInherited: map[string]bool{},
         TriggerInherited:    map[string]bool{},
     }
 }
+
+// LiveRule is a rewrite rule's event, INSTEAD flag and WHERE condition
+// (as pg_get_ruledef prints it, parentheses included).
+type LiveRule struct {
+    Event   string
+    Instead bool
+    Where   string
+}
+
+var ruleWhereRe = regexp.MustCompile(`(?s)\bON\s+\w+\s+TO\s+\S+\s+WHERE\s+(.*?)\s+DO\s`)
 
 // LiveIndex is an index definition as introspected from pg_index. Keys holds
 // each key column's name or expression (pg_get_indexdef per column, without
@@ -584,6 +598,40 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
     }
     trgRows.Close()
+
+    ruleQ := `
+        select n.nspname, c.relname, r.rulename, c.relkind = 'v',
+               case r.ev_type when '1' then 'select' when '2' then 'update' when '3' then 'insert' else 'delete' end,
+               r.is_instead, pg_get_ruledef(r.oid), coalesce(d.description, '')
+        from pg_rewrite r
+        join pg_class c on c.oid = r.ev_class
+        join pg_namespace n on n.oid = c.relnamespace
+        left join pg_description d on d.objoid = r.oid and d.classoid = 'pg_rewrite'::regclass
+        where r.rulename <> '_RETURN' and c.relkind in ('r', 'p', 'v')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    ruleRows, err := pool.Query(ctx, ruleQ)
+    if err != nil { return nil, err }
+    for ruleRows.Next() {
+        var schemaName, relName, ruleName, def, comment string
+        var onView bool
+        lr := &LiveRule{}
+        if err := ruleRows.Scan(&schemaName, &relName, &ruleName, &onView, &lr.Event, &lr.Instead, &def, &comment); err != nil {
+            ruleRows.Close()
+            return nil, err
+        }
+        if m := ruleWhereRe.FindStringSubmatch(def); m != nil { lr.Where = m[1] }
+        key := fmt.Sprintf("%s.%s", schemaName, relName)
+        t := l.Tables[key]
+        if onView {
+            if t = l.ViewTables[key]; t == nil { t = newLiveTable(); l.ViewTables[key] = t }
+        }
+        if t == nil { continue }
+        t.Rules[ruleName] = lr
+        if comment != "" { t.RuleComments[ruleName] = comment }
+    }
+    ruleRows.Close()
 
     // Query row level security state
     rlsQ := `
@@ -1947,8 +1995,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 } else {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s%s as %s;", pqIdent(e.Key), renderViewWith(opts, live.ViewOptions[e.Key]), vw.Query))
                 }
-                if len(vw.Triggers) > 0 {
-                    applyTableConstraints(plan, e.Key, &schema.Table{Triggers: vw.Triggers}, live.ViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
+                if len(vw.Triggers)+len(vw.Rules) > 0 {
+                    applyTableConstraints(plan, e.Key, &schema.Table{Triggers: vw.Triggers, Rules: vw.Rules}, live.ViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
                 }
             }
         case "table":
@@ -2702,6 +2750,15 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             }
             comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
         }
+        for _, r := range dt.Rules {
+            if r == nil || r.Comment == "" || r.Do == "" { continue }
+            name := truncateIdent(r.Name)
+            have := ""
+            if lt != nil {
+                if lr := lt.Rules[name]; lr != nil && !r.Replace && ruleMatchesLive(r, lr) { have = lt.RuleComments[name] }
+            }
+            comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
+        }
         for _, pol := range dt.Policies {
             if pol == nil || pol.Comment == "" || pol.Name == "" { continue }
             name := truncateIdent(pol.Name)
@@ -2731,6 +2788,17 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
                     if def, ok := vt.Triggers[name]; ok && (def == "" || triggerDefsEqual(renderTrigger(k, tr), def)) { have = vt.TriggerComments[name] }
                 }
                 comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
+            }
+        }
+        if vt := live.ViewTables[k]; !vw.Materialized {
+            for _, r := range vw.Rules {
+                if r == nil || r.Comment == "" || r.Do == "" { continue }
+                name := truncateIdent(r.Name)
+                have := ""
+                if vt != nil {
+                    if lr := vt.Rules[name]; lr != nil && !r.Replace && ruleMatchesLive(r, lr) { have = vt.RuleComments[name] }
+                }
+                comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
             }
         }
         lt := live.MatViewTables[k]
@@ -3136,6 +3204,29 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         *deferredTriggers = append(*deferredTriggers, stmt)
     }
 
+    for _, r := range dt.Rules {
+        if r == nil || r.Event == "" || r.Do == "" { continue }
+        name := truncateIdent(r.Name)
+        if lt != nil {
+            if lr := lt.Rules[name]; lr != nil && !r.Replace && ruleMatchesLive(r, lr) { continue }
+        }
+        *deferredTriggers = append(*deferredTriggers, renderRule(fq, r))
+    }
+}
+
+// renderRule renders CREATE OR REPLACE RULE for a table or view rule.
+func renderRule(fq string, r *schema.Rule) string {
+    stmt := fmt.Sprintf("create or replace rule %s as on %s to %s", pqIdent(truncateIdent(r.Name)), strings.ToLower(r.Event), pqIdent(fq))
+    if r.Where != "" { stmt += " where " + r.Where }
+    stmt += " do "
+    if r.Instead { stmt += "instead " }
+    return stmt + strings.TrimSuffix(strings.TrimSpace(r.Do), ";") + ";"
+}
+
+// ruleMatchesLive compares a rule's event, INSTEAD flag and WHERE condition;
+// the action is not compared because PostgreSQL rewrites it when storing.
+func ruleMatchesLive(r *schema.Rule, lr *LiveRule) bool {
+    return strings.ToLower(r.Event) == lr.Event && r.Instead == lr.Instead && constraintDefsEqual(r.Where, lr.Where)
 }
 
 // renderTrigger renders a table trigger's CREATE [CONSTRAINT] TRIGGER statement.

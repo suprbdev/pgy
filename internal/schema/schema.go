@@ -72,6 +72,7 @@ type View struct {
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
+    Rules           []*Rule    // plain views
 }
 
 // Publication is a logical replication CREATE PUBLICATION declaration.
@@ -183,6 +184,7 @@ type Table struct {
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
     Triggers   []*Trigger      `yaml:"-"`
+    Rules      []*Rule         `yaml:"-"`
     Constraints []*Constraint  `yaml:"-"`
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
@@ -302,6 +304,20 @@ type Trigger struct {
     OldTable string        // REFERENCING OLD TABLE AS (AFTER triggers)
     NewTable string        // REFERENCING NEW TABLE AS (AFTER triggers)
     Comment  string        // empty means unmanaged
+}
+
+// Rule is a CREATE RULE on a table or view. PostgreSQL rewrites the action
+// when storing it, so only the event, INSTEAD flag and WHERE condition are
+// compared against live; Replace re-emits CREATE OR REPLACE RULE on every
+// diff for action changes.
+type Rule struct {
+    Name    string
+    Event   string // select | insert | update | delete
+    Instead bool
+    Where   string
+    Do      string // action: nothing, a statement, or (stmt; stmt)
+    Replace bool
+    Comment string
 }
 
 type Extension struct {
@@ -446,6 +462,7 @@ func Merge(dbs []*Database) *Database {
                 existing.ForeignKeys = mergeNamed(existing.ForeignKeys, t.ForeignKeys, func(x *ForeignKey) string { return x.Name })
                 existing.Constraints = mergeNamed(existing.Constraints, t.Constraints, func(x *Constraint) string { return x.Name })
                 existing.Triggers = mergeNamed(existing.Triggers, t.Triggers, func(x *Trigger) string { return x.Name })
+                existing.Rules = mergeNamed(existing.Rules, t.Rules, func(x *Rule) string { return x.Name })
                 existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
                 merged.Tables[name] = cloneTable(t)
@@ -541,6 +558,7 @@ func cloneTable(t *Table) *Table {
     c.ForeignKeys = append([]*ForeignKey(nil), t.ForeignKeys...)
     c.Constraints = append([]*Constraint(nil), t.Constraints...)
     c.Triggers = append([]*Trigger(nil), t.Triggers...)
+    c.Rules = append([]*Rule(nil), t.Rules...)
     c.DependsOn = append([]string(nil), t.DependsOn...)
     c.ColumnOrder = append([]string(nil), t.ColumnOrder...)
     return &c
@@ -719,6 +737,9 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if trgRaw, ok := m["triggers"]; ok {
                     t.Triggers = parseTriggers(trgRaw)
                 }
+                if rRaw, ok := m["rules"]; ok {
+                    t.Rules = parseRules(rRaw)
+                }
                 if conRaw, ok := m["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -763,6 +784,9 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             if trgRaw, ok := m["triggers"]; ok {
                 t.Triggers = parseTriggers(trgRaw)
+            }
+            if rRaw, ok := m["rules"]; ok {
+                t.Rules = parseRules(rRaw)
             }
             if conRaw, ok := m["constraints"]; ok {
                 t.Constraints = parseConstraints(conRaw)
@@ -816,6 +840,9 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if trgRaw, ok := inner["triggers"]; ok {
                     t.Triggers = parseTriggers(trgRaw)
+                }
+                if rRaw, ok := inner["rules"]; ok {
+                    t.Rules = parseRules(rRaw)
                 }
                 if conRaw, ok := inner["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
@@ -1153,6 +1180,26 @@ func parseTriggers(v any) []*Trigger {
             }
             out = append(out, tr)
         }
+    }
+    sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+    return out
+}
+
+func parseRules(v any) []*Rule {
+    out := []*Rule{}
+    m, ok := v.(map[string]any)
+    if !ok { return out }
+    for name, def := range m {
+        r := &Rule{Name: name}
+        if dm, ok := def.(map[string]any); ok {
+            if s, ok := dm["event"].(string); ok { r.Event = strings.ToLower(strings.TrimSpace(s)) }
+            if b, ok := dm["instead"].(bool); ok { r.Instead = b }
+            if s, ok := dm["where"].(string); ok { r.Where = strings.TrimSpace(s) }
+            if s, ok := dm["do"].(string); ok { r.Do = strings.TrimSpace(s) }
+            if b, ok := dm["replace"].(bool); ok { r.Replace = b }
+            if s, ok := dm["comment"].(string); ok { r.Comment = s }
+        }
+        out = append(out, r)
     }
     sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
     return out
@@ -1822,6 +1869,7 @@ func parseView(schemaName, key string, body any) *View {
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
     if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
     if trRaw, ok := m["triggers"]; ok { vw.Triggers = parseTriggers(trRaw) }
+    if rRaw, ok := m["rules"]; ok { vw.Rules = parseRules(rRaw) }
     return vw
 }
 
