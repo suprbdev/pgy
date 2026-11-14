@@ -213,7 +213,7 @@ Diff behavior highlights:
 
 `pgy diff --unsafe --prune` also drops what the YAML no longer declares, in every schema the YAML declares at least one object in:
 
-- tables, views, materialized views, functions, procedures, sequences, domains and enum/composite types
+- tables, views, materialized views, functions, procedures, sequences, domains, enum/composite types and collations
 - triggers, foreign keys, check/unique/exclude constraints and indexes on tables (and indexes on materialized views) that are declared
 
 These are never dropped: objects in other schemas, extension members, partitions (dropping the partitioned parent drops them), primary keys, indexes that back a constraint, constraints/triggers/indexes a partition inherits from its parent, sequences owned by a column, aggregates and window functions, roles, schemas, extensions, and pgy's own `pgy.migrations` table.

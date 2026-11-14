@@ -133,7 +133,8 @@
         "^view [^\\s].*$": { "$ref": "#/definitions/view" },
         "^materialized view [^\\s].*$": { "$ref": "#/definitions/view" },
         "^sequence [^\\s].*$": { "$ref": "#/definitions/sequence" },
-        "^domain [^\\s].*$": { "$ref": "#/definitions/domain" }
+        "^domain [^\\s].*$": { "$ref": "#/definitions/domain" },
+        "^collation [^\\s].*$": { "$ref": "#/definitions/collation" }
       },
       "additionalProperties": false
     },
@@ -625,6 +626,22 @@
           "type": "string",
           "description": "table.column (or schema.table.column) owning the sequence."
         },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "collation": {
+      "description": "Body of a `collation <name>:` declaration (CREATE COLLATION). Create-only.",
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string", "enum": ["icu", "libc", "builtin"] },
+        "locale": { "type": "string", "description": "Locale, e.g. und-u-ks-level2 (ICU) or en_US.utf8 (libc)." },
+        "lcCollate": { "type": "string" },
+        "lcCtype": { "type": "string" },
+        "deterministic": { "type": "boolean", "description": "false allows case/accent-insensitive comparisons (ICU)." },
+        "rules": { "type": "string", "description": "ICU tailoring rules (PostgreSQL 16+)." },
+        "from": { "type": "string", "description": "Copy an existing collation instead (CREATE COLLATION ... FROM)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },

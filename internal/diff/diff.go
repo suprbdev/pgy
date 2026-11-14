@@ -28,6 +28,8 @@ type Live struct{
     MatViewTables map[string]*LiveTable
     Sequences  map[string]bool
     Domains    map[string]bool
+    Collations map[string]bool
+    CollationComments map[string]string
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
@@ -234,6 +236,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
         SequenceDefs: map[string]*LiveSequence{},
+        Collations: map[string]bool{},
+        CollationComments: map[string]string{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
@@ -673,6 +677,28 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     enumRows.Close()
     
+    collQ := `
+        select n.nspname, c.collname, coalesce(d.description, '')
+        from pg_collation c
+        join pg_namespace n on n.oid = c.collnamespace
+        left join pg_description d on d.objoid = c.oid and d.classoid = 'pg_collation'::regclass
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    collRows, err := pool.Query(ctx, collQ)
+    if err != nil { return nil, err }
+    for collRows.Next() {
+        var schemaName, collName, comment string
+        if err := collRows.Scan(&schemaName, &collName, &comment); err != nil {
+            collRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, collName)
+        l.Collations[key] = true
+        if comment != "" { l.CollationComments[key] = comment }
+    }
+    collRows.Close()
+
     // Query existing domains
     domQ := `
         select n.nspname, t.typname,
@@ -1123,6 +1149,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_depend d join pg_type t on t.oid = d.objid join pg_namespace n on n.oid = t.typnamespace
         where d.deptype = 'e' and d.classid = 'pg_type'::regclass
         union all
+        select 'coll:' || n.nspname || '.' || c.collname
+        from pg_depend d join pg_collation c on c.oid = d.objid join pg_namespace n on n.oid = c.collnamespace
+        where d.deptype = 'e' and d.classid = 'pg_collation'::regclass
+        union all
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
         from pg_depend d join pg_proc p on p.oid = d.objid join pg_namespace n on n.oid = p.pronamespace
         where d.deptype = 'e' and d.classid = 'pg_proc'::regclass
@@ -1391,6 +1421,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
+    for k := range desired.Collations {
+        if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
+    }
 
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
@@ -1540,6 +1573,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace procedure" }
             stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
             plan.Creates = append(plan.Creates, stmt)
+        case "collation":
+            co := desired.Collations[e.Key]
+            if co == nil || live.Collations[e.Key] { continue }
+            plan.Creates = append(plan.Creates, renderCollation(e.Key, co))
         case "domain":
             dm, ok := desired.Domains[e.Key]
             if !ok || dm == nil || dm.Type == "" { continue }
@@ -1940,11 +1977,25 @@ func isNumericLiteral(s string) bool {
     return s != "-" && s != "." && s != "-."
 }
 
+// renderCollation emits CREATE COLLATION IF NOT EXISTS, copying From when
+// set, else with the provider options set in YAML.
+func renderCollation(fq string, co *schema.Collation) string {
+    if co.From != "" { return fmt.Sprintf("create collation if not exists %s from %s;", pqIdent(fq), pqIdent(co.From)) }
+    opts := []string{}
+    for _, o := range [][2]string{{"provider", co.Provider}, {"locale", co.Locale}, {"lc_collate", co.LcCollate}, {"lc_ctype", co.LcCtype}, {"rules", co.Rules}} {
+        if o[1] == "" { continue }
+        if o[0] == "provider" { opts = append(opts, "provider = "+o[1]); continue }
+        opts = append(opts, o[0]+" = "+quoteString(o[1]))
+    }
+    if co.Deterministic != nil { opts = append(opts, fmt.Sprintf("deterministic = %t", *co.Deterministic)) }
+    return fmt.Sprintf("create collation if not exists %s (%s);", pqIdent(fq), strings.Join(opts, ", "))
+}
+
 // renderDomain emits CREATE DOMAIN with only the options set in YAML.
 // CREATE DOMAIN has no IF NOT EXISTS; existence is guarded by live.Domains.
 func renderDomain(fq string, dm *schema.Domain) string {
     parts := []string{"create domain", pqIdent(fq), "as", dm.Type}
-    if dm.Collate != "" { parts = append(parts, "collate "+pqIdent(dm.Collate)) }
+    if dm.Collate != "" { parts = append(parts, "collate "+collationIdent(dm.Collate)) }
     if dm.Default != "" { parts = append(parts, "default "+dm.Default) }
     if dm.NotNull { parts = append(parts, "not null") }
     if dm.Check != "" {
@@ -1995,6 +2046,12 @@ func planComments(live *Live, desired *schema.Database) []string {
         td := desired.Types[k]
         if td == nil { continue }
         comment("type "+pqIdent(k), td.Comment, live.TypeComments[k])
+    }
+
+    for _, k := range sortedKeys(desired.Collations) {
+        if co := desired.Collations[k]; co != nil {
+            comment("collation "+pqIdent(k), co.Comment, live.CollationComments[k])
+        }
     }
 
     domainNames := make([]string, 0, len(desired.Domains))
@@ -2556,10 +2613,10 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
 
     typeChanged := c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type)
-    collateChanged := c.Collate != "" && !strings.EqualFold(c.Collate, lc.Collation)
+    collateChanged := c.Collate != "" && collationName(c.Collate) != lc.Collation
     if unsafe && c.Type != "" && (typeChanged || collateChanged) {
         stmt := fmt.Sprintf("%s type %s", target, c.Type)
-        if c.Collate != "" { stmt += " collate " + pqIdent(c.Collate) }
+        if c.Collate != "" { stmt += " collate " + collationIdent(c.Collate) }
         if c.Using != "" { stmt += " using " + c.Using }
         out = append(out, stmt+";")
     }
@@ -2599,6 +2656,22 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
         out = append(out, target+" drop not null;")
     }
     return out
+}
+
+// collationIdent quotes a COLLATE target ("C", app.ci), accepting parts the
+// YAML already double-quoted.
+func collationIdent(s string) string {
+    parts := strings.Split(strings.TrimSpace(s), ".")
+    for i, p := range parts { parts[i] = `"` + strings.Trim(strings.TrimSpace(p), `"`) + `"` }
+    return strings.Join(parts, ".")
+}
+
+// collationName returns a COLLATE target's unqualified, unquoted name, as
+// pg_collation.collname reports it.
+func collationName(s string) string {
+    s = strings.ReplaceAll(strings.TrimSpace(s), `"`, "")
+    if i := strings.LastIndexByte(s, '.'); i >= 0 { s = s[i+1:] }
+    return s
 }
 
 // renderStorageParams renders a table's WITH (...) storage parameters, sorted,
@@ -3002,7 +3075,7 @@ func isCastTypeChar(r rune) bool {
 func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
     if c.Compression != "" && c.Compression != "default" { parts = append(parts, "compression "+c.Compression) }
-    if c.Collate != "" { parts = append(parts, "collate "+pqIdent(c.Collate)) }
+    if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
     if !c.Nullable { parts = append(parts, "not null") }
     if c.Generated != "" {
         kind := "stored"

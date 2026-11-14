@@ -57,7 +57,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 
 - [ ] **Foreign Data Wrappers (FDW)** (Servers, user mappings, and foreign tables)
 - [ ] **Full Text Search Configurations** (Custom dictionaries, parsers, templates)
-- [ ] **Collations** (Custom string sorting rules)
+- [x] **Collations** (`collation <name>:` blocks → `CREATE COLLATION` with provider/locale/lcCollate/lcCtype/deterministic/rules or `from`; create-only, comments diffed, pruned with `--prune`)
 - [ ] **Rules** (`CREATE RULE` query rewrites)
 - [ ] **Event Triggers** (DDL triggers)
 - [ ] **Logical Replication** (Publications and Subscriptions)

@@ -241,6 +241,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
             if c == nil { continue }
             hard(ix.mentions(c.Type, typeKinds))
             hard(ix.mentions(c.Generated, exprKinds))
+            hard(ix.mentions(c.Collate, collationKinds))
             soft(ix.mentions(c.Default, defaultKinds))
         }
         for _, fk := range t.ForeignKeys {
@@ -281,12 +282,16 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         if dm == nil { continue }
         hard(ix.resolveDeps(dm.DependsOn))
         hard(ix.mentions(dm.Type, typeKinds))
+        hard(ix.mentions(dm.Collate, collationKinds))
         hard(ix.mentions(dm.Check+" "+dm.Default, exprKinds))
     }
     for _, sq := range d.Sequences {
         if sq == nil { continue }
         hard(ix.resolveDeps(sq.DependsOn))
         if t := ownedByTable(sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
+    }
+    for _, co := range d.Collations {
+        if co != nil { hard(ix.resolveDeps(co.DependsOn)) }
     }
     for _, vw := range d.Views {
         if vw == nil { continue }
