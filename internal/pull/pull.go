@@ -178,7 +178,7 @@ func (b *builder) schemas() {
 		b.blocks[s] = blk
 		b.declaredSchema[s] = s != "public"
 		b.owner(blk, "schema:"+s)
-		if c := b.live.SchemaComments[s]; c != "" && !(s == "public" && c == "standard public schema") {
+		if c := b.live.SchemaComments[s]; c != "" && (s != "public" || c != "standard public schema") {
 			add(blk, "comment", str(c))
 		}
 		if g := grantsNode(b.live.SchemaGrants[s]); g != nil {
