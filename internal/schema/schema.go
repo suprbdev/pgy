@@ -226,6 +226,7 @@ type Table struct {
     Comment string             `yaml:"-"` // empty means unmanaged
     PartitionBy *PartitionBy   `yaml:"-"` // declarative partitioning key (parent tables)
     PartitionOf string         `yaml:"-"` // fully qualified parent table (partition children)
+    Inherits    []string       `yaml:"-"` // fully qualified parent tables (INHERITS); nil = unmanaged
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
@@ -524,6 +525,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.PartitionOf != "" {
                     existing.PartitionOf = t.PartitionOf
+                }
+                if t.Inherits != nil {
+                    existing.Inherits = t.Inherits
                 }
                 if t.Partition != nil {
                     existing.Partition = t.Partition
@@ -1455,6 +1459,10 @@ func parseTableStorage(t *Table, m map[string]any) {
 }
 
 func parseTablePartitioning(t *Table, schemaName string, m map[string]any) {
+    if inh, ok := m["inherits"]; ok {
+        t.Inherits = []string{}
+        for _, p := range parseStringListFromNode(inh) { t.Inherits = append(t.Inherits, qualify(schemaName, p)) }
+    }
     if pbRaw, ok := m["partitionBy"]; ok {
         t.PartitionBy = parsePartitionBy(pbRaw)
     }
@@ -1844,6 +1852,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
             // partition children must be created after their parent
             deps = append(append([]string{}, deps...), "table "+t.PartitionOf)
         }
+        for _, p := range t.Inherits { deps = append(append([]string{}, deps...), "table "+p) }
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e

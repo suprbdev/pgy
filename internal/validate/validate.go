@@ -138,7 +138,7 @@ func Database(d *schema.Database) []Issue {
 		obj := "table " + fq
 		checkDeps(d, obj, t.DependsOn, add)
 		hasCols := t.PartitionOf == "" && len(t.Columns) > 0
-		colExists := func(c string) bool { _, ok := t.Columns[c]; return ok }
+		colExists := func(c string) bool { return tableHasColumn(d, fq, c, 0) }
 		need := func(what string, cols []string) {
 			if !hasCols {
 				return
@@ -191,7 +191,7 @@ func Database(d *schema.Database) []Issue {
 			}
 			if ref.PartitionOf == "" && len(ref.Columns) > 0 {
 				for _, c := range fk.RefColumns {
-					if base := columnName(c); base != "" && ref.Columns[base] == nil {
+					if base := columnName(c); base != "" && !tableHasColumn(d, qualifyPublic(fk.RefTable), base, 0) {
 						add(Error, obj, "foreign key %s references unknown column %s.%s", fk.Name, fk.RefTable, base)
 					}
 				}
@@ -258,6 +258,14 @@ func Database(d *schema.Database) []Issue {
 			} else if !found {
 				add(Warning, obj, "clusterOn index %s is not declared on this table", idx)
 			}
+		}
+		for _, p := range t.Inherits {
+			if d.Tables[p] == nil {
+				add(Warning, obj, "inherits %s, which no schema file declares", p)
+			}
+		}
+		if len(t.Inherits) > 0 && (t.PartitionOf != "" || t.PartitionBy != nil) {
+			add(Error, obj, "inherits cannot be combined with partitionOf or partitionBy")
 		}
 		if t.PartitionOf != "" && d.Tables[t.PartitionOf] == nil {
 			add(Warning, obj, "partition of %s, which no schema file declares", t.PartitionOf)
@@ -709,4 +717,22 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 			routines.check("procedure "+k, qualifiedSource(k, p.RenamedFrom)+p.ArgsSig, add)
 		}
 	}
+}
+
+// tableHasColumn reports whether table fq declares column c, directly or
+// through a declared INHERITS parent.
+func tableHasColumn(d *schema.Database, fq, c string, depth int) bool {
+	t := d.Tables[fq]
+	if t == nil || depth > 16 {
+		return false
+	}
+	if _, ok := t.Columns[c]; ok {
+		return true
+	}
+	for _, p := range t.Inherits {
+		if d.Tables[p] == nil || tableHasColumn(d, p, c, depth+1) {
+			return true
+		}
+	}
+	return false
 }

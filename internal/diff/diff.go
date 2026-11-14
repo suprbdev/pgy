@@ -224,6 +224,7 @@ type LiveTable struct{
     ConstraintInherited map[string]bool
     TriggerInherited    map[string]bool
     IsPartition bool            // relispartition: a partition of a partitioned table
+    Inherits    []string        // INHERITS parents (not partitioning), in inhseqno order
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
     Options     map[string]string // reloptions: lower-cased name -> value
@@ -342,6 +343,7 @@ type LiveColumn struct{
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
     Collation   string // explicit collation differing from the type's default ("" = default)
     StatisticsTarget *int // attstattarget; nil = default
+    Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
     Compression string // pglz | lz4 | "" (default)
@@ -516,7 +518,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce((select cn.nspname from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation and cn.nspname <> 'pg_catalog'), ''),
                (select case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
-                from pg_type ty where ty.oid = a.atttypid)
+                from pg_type ty where ty.oid = a.atttypid),
+               a.attinhcount > 0
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -534,11 +537,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var generated, collation, compression, storage string
             var statTarget *int
             var collSchema, typeStorage string
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage); err != nil { return err }
+            var inherited bool
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited}
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             t.Columns[colName] = lc
         }
@@ -701,6 +705,26 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 t.TriggerEnabled[trgName] = enabled
                 if inherited { t.TriggerInherited[trgName] = true }
             }
+        }
+        return nil
+    })
+
+    inhQ := `
+        select cn.nspname || '.' || c.relname, pn.nspname || '.' || p.relname
+        from pg_inherits i
+        join pg_class c on c.oid = i.inhrelid
+        join pg_namespace cn on cn.oid = c.relnamespace
+        join pg_class p on p.oid = i.inhparent
+        join pg_namespace pn on pn.oid = p.relnamespace
+        where not c.relispartition and c.relkind in ('r', 'p') and p.relkind in ('r', 'p')
+        and cn.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        order by 1, i.inhseqno
+    `
+    batch.add(inhQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var child, parent string
+            if err := rows.Scan(&child, &parent); err != nil { return err }
+            if t := l.Tables[child]; t != nil { t.Inherits = append(t.Inherits, parent) }
         }
         return nil
     })
@@ -2325,6 +2349,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 unlogged := ""
                 if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                 create := fmt.Sprintf("create %stable if not exists %s (%s)", unlogged, pqIdent(fq), strings.Join(cols, ", "))
+                if len(dt.Inherits) > 0 {
+                    parents := make([]string, len(dt.Inherits))
+                    for i, p := range dt.Inherits { parents[i] = pqIdent(p) }
+                    create += " inherits (" + strings.Join(parents, ", ") + ")"
+                }
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
@@ -2346,6 +2375,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
+                    if ok && lc.Inherited { continue }
                     if !ok {
                         // ADD COLUMN is emitted into Creates at the table's
                         // topological position, not Alters: Render puts all
@@ -2365,13 +2395,14 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
+                plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, live, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
                 // drops
                 if unsafe && dt.PartitionOf == "" {
                     dropCols := []string{}
-                    for cn := range lt.Columns {
-                        if _, ok := dt.Columns[cn]; !ok { dropCols = append(dropCols, cn) }
+                    for cn, lc := range lt.Columns {
+                        if _, ok := dt.Columns[cn]; !ok && !lc.Inherited && !parentDeclaresColumn(desired, dt, cn, 0) { dropCols = append(dropCols, cn) }
                     }
                     sort.Strings(dropCols)
                     for _, cn := range dropCols {
@@ -3821,6 +3852,35 @@ func replicaIdentityStmt(fq string, dt *schema.Table, lt *LiveTable) string {
 func statisticsTargetOf(lc *LiveColumn) int {
     if lc.StatisticsTarget == nil { return -1 }
     return *lc.StatisticsTarget
+}
+
+// parentDeclaresColumn reports whether one of dt's INHERITS parents
+// declares column cn, directly or through its own parents.
+func parentDeclaresColumn(d *schema.Database, dt *schema.Table, cn string, depth int) bool {
+    if dt == nil || depth > 16 { return false }
+    for _, p := range dt.Inherits {
+        pt := d.Tables[p]
+        if pt == nil { continue }
+        if _, ok := pt.Columns[cn]; ok || parentDeclaresColumn(d, pt, cn, depth+1) { return true }
+    }
+    return false
+}
+
+// inheritStmts reconciles a table's INHERITS parents when the YAML declares
+// them: missing parents are added with INHERIT, and under --unsafe parents
+// the YAML no longer lists are removed with NO INHERIT.
+func inheritStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) []string {
+    if dt.Inherits == nil || lt == nil { return nil }
+    out := []string{}
+    for _, p := range dt.Inherits {
+        if indexOf(lt.Inherits, p) < 0 { out = append(out, fmt.Sprintf("alter table %s inherit %s;", pqIdent(fq), pqIdent(p))) }
+    }
+    if unsafe {
+        for _, p := range lt.Inherits {
+            if indexOf(dt.Inherits, p) < 0 { out = append(out, fmt.Sprintf("alter table %s no inherit %s;", pqIdent(fq), pqIdent(p))) }
+        }
+    }
+    return out
 }
 
 // clusterOnStmt emits ALTER TABLE ... CLUSTER ON / SET WITHOUT CLUSTER when

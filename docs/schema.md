@@ -576,6 +576,27 @@ Notes:
 - Indexes, foreign keys, constraints, and triggers declared on a partition child apply to that child as usual.
 - PostgreSQL requires a partitioned table's primary key to include the partition key columns.
 
+### Inheritance
+
+Classic table inheritance (`INHERITS`) is declared with `inherits:`, a list of parent tables. A child declares only its own columns. It gets the parents' columns from PostgreSQL.
+
+```yaml
+schema app:
+  table event:
+    columns:
+      id: {type: bigint}
+      at: {type: timestamptz}
+  table login_event:
+    inherits: [app.event]           # CREATE TABLE ... INHERITS (app.event)
+    columns:
+      ip: {type: inet}
+```
+
+- The child is created after its parents.
+- On an existing table, a parent missing from the live table is added with `ALTER TABLE ... INHERIT`. With `--unsafe`, a live parent the list no longer names is removed with `NO INHERIT`, and its columns stay on the child. `inherits: []` removes every parent. Without the key, parents are unmanaged.
+- Columns a table gets from a parent are never altered or dropped on the child. That includes columns the child also declares itself. Change them on the parent.
+- `pgy pull` emits `inherits` and leaves inherited columns out of the child. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
+
 ---
 
 ## Type Definitions

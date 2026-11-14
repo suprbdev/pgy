@@ -241,6 +241,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         if t == nil { continue }
         hard(ix.resolveDeps(t.DependsOn))
         if t.PartitionOf != "" { hard([]ref{{kindTable, t.PartitionOf}}) }
+        for _, p := range t.Inherits { hard([]ref{{kindTable, p}}) }
         for _, c := range t.Columns {
             if c == nil { continue }
             hard(ix.mentions(c.Type, typeKinds))

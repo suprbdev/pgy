@@ -263,3 +263,29 @@ schema app:
 		}
 	}
 }
+
+func TestValidateInherits(t *testing.T) {
+	p := write(t, t.TempDir(), "i.yml", `
+schema app:
+  table base:
+    columns: {id: {type: int}}
+  table child:
+    inherits: [app.base, app.missing]
+    columns: {extra: {type: int}}
+    indexes:
+      child_id_idx: {columns: [id]}
+  table bad:
+    inherits: [app.base]
+    partitionBy: {type: range, columns: [id]}
+    columns: {x: {type: int}}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{"inherits app.missing, which no schema file declares", "inherits cannot be combined with partitionOf or partitionBy"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `unknown column "id"`) {
+		t.Errorf("a column inherited from a parent is known:\n%s", got)
+	}
+}
