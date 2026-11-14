@@ -280,12 +280,24 @@ type Extension struct {
 type TypeDef struct {
     Name   string
     Schema string
-    Kind   string   // enum|composite
+    Kind   string   // enum|composite|range
     Labels []string // enum
+    Range  *RangeDef // range
     Attributes map[string]string // composite: name->type
     AttributeOrder []string      // composite: YAML declaration order (filled from node tree)
     DependsOn []string `yaml:"dependsOn"`
     Comment string
+}
+
+// RangeDef holds a range type's CREATE TYPE ... AS RANGE options. Subtype is
+// required; the rest are optional.
+type RangeDef struct {
+    Subtype            string
+    SubtypeOpclass     string
+    Collation          string
+    Canonical          string
+    SubtypeDiff        string
+    MultirangeTypeName string
 }
 
 type Function struct {
@@ -1283,6 +1295,13 @@ func parseType(schemaName, key string, body any) *TypeDef {
             if mm, ok := v.(map[string]any); ok {
                 if t, ok := mm["type"].(string); ok { td.Attributes[k] = t }
             }
+        }
+    }
+    if td.Kind == "range" {
+        str := func(k string) string { s, _ := m[k].(string); return strings.TrimSpace(s) }
+        td.Range = &RangeDef{
+            Subtype: str("subtype"), SubtypeOpclass: str("subtypeOpclass"), Collation: str("collation"),
+            Canonical: str("canonical"), SubtypeDiff: str("subtypeDiff"), MultirangeTypeName: str("multirangeTypeName"),
         }
     }
     if dep, ok := m["dependsOn"]; ok {
