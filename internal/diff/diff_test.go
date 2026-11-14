@@ -2887,7 +2887,7 @@ func TestConstraintOptionsEquivalentToLiveSkipped(t *testing.T) {
 		"x1": "EXCLUDE USING gist (id WITH =) DEFERRABLE",
 	})
 	desired := constraintAlterDesired([]*schema.Constraint{
-		{Name: "c1", Type: "check", Expression: "id > 0", NoInherit: true},
+		{Name: "c1", Type: "check", Expression: "id > 0", NoInherit: true, NotValid: true},
 		{Name: "c2", Type: "check", Expression: "id > 0", NotValid: true},
 		{Name: "u1", Type: "unique", Columns: []string{"id", "email"}, InitiallyDeferred: true},
 		{Name: "u2", Type: "unique", Columns: []string{"email"}, NullsNotDistinct: true},

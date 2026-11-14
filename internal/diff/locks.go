@@ -80,11 +80,11 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
             switch m[3] {
             case "foreign key":
                 if !notValid {
-                    warn(fq, stmt, "adding foreign key %s checks every row of %s while blocking writes to it and to the referenced table; add it with notValid: true and validate it in a later migration", name, fq)
+                    warn(fq, stmt, "adding foreign key %s checks every row of %s while blocking writes to it and to the referenced table; add it with notValid: true and remove notValid in a later migration, which validates it without blocking writes", name, fq)
                 }
             case "check":
                 if !notValid {
-                    warn(fq, stmt, "adding check %s scans all of %s under an ACCESS EXCLUSIVE lock; add it with notValid: true and validate it in a later migration", name, fq)
+                    warn(fq, stmt, "adding check %s scans all of %s under an ACCESS EXCLUSIVE lock; add it with notValid: true and remove notValid in a later migration, which validates it without blocking writes", name, fq)
                 }
             default:
                 warn(fq, stmt, "adding %s %s builds its index under an ACCESS EXCLUSIVE lock, blocking reads and writes on %s", m[3], name, fq)

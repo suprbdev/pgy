@@ -3610,8 +3610,12 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         fkName := truncateIdent(fk.Name)
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), def)
         if liveConstraints[fkName] {
-            if liveDef, ok := liveConstraintDefs[fkName]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+            liveDef, ok := liveConstraintDefs[fkName]
+            switch {
+            case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fkName)), stmt)
+            case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(fkName)))
             }
             continue
         }
@@ -3684,8 +3688,12 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         ctName := truncateIdent(ct.Name)
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), def)
         if liveConstraints[ctName] {
-            if liveDef, ok := liveConstraintDefs[ctName]; unsafe && ok && !constraintDefsEqual(def, liveDef) {
+            liveDef, ok := liveConstraintDefs[ctName]
+            switch {
+            case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ctName)), stmt)
+            case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(ctName)))
             }
             continue
         }
@@ -4315,6 +4323,12 @@ func renderFKDef(fk *schema.ForeignKey) string {
     if a := fkAction(fk.OnDelete); a != "" { def += " on delete " + a }
     def += deferralClause(fk.Deferrable, fk.InitiallyDeferred)
     return def + validityClause(fk.NotValid, fk.NotEnforced)
+}
+
+// liveNotValid reports whether a pg_get_constraintdef() output marks the
+// constraint NOT VALID.
+func liveNotValid(def string) bool {
+    return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT VALID")
 }
 
 // validityClause renders NOT VALID / NOT ENFORCED. A constraint that is not

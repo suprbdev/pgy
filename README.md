@@ -255,8 +255,8 @@ Each migration normally runs in its own transaction. A migration whose leading c
 | Statement | Why | Instead |
 |-----------|-----|---------|
 | `CREATE INDEX` | blocks writes while the index builds | `concurrently: true` |
-| `ADD FOREIGN KEY` | checks every row while blocking writes on both tables | `notValid: true`, then validate later |
-| `ADD CHECK` | scans the table under `ACCESS EXCLUSIVE` | `notValid: true`, then validate later |
+| `ADD FOREIGN KEY` | checks every row while blocking writes on both tables | `notValid: true`, then drop it in a later migration (pgy emits `VALIDATE CONSTRAINT`, which doesn't block writes) |
+| `ADD CHECK` | scans the table under `ACCESS EXCLUSIVE` | the same two steps |
 | `ADD PRIMARY KEY` / `UNIQUE` / `EXCLUDE` | builds an index under `ACCESS EXCLUSIVE` | schedule a maintenance window |
 | `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE` (skipped if a validated `CHECK (col IS NOT NULL)` exists) | add that check first |
 | `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
