@@ -4108,6 +4108,56 @@ func TestAlterColumnTypeEquivalentSkipped(t *testing.T) {
 	}
 }
 
+func TestAlterColumnTypeAliasesEquivalentSkipped(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"enum":   {Type: "status"},
+		"enumq":  {Type: `"Status"[]`},
+		"fl":     {Type: "double precision"},
+		"fl53":   {Type: "double precision"},
+		"fl24":   {Type: "real"},
+		"ch":     {Type: "character(1)"},
+		"bits":   {Type: "bit varying(8)"},
+		"arr":    {Type: "integer[]"},
+		"chvary": {Type: "character varying(10)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"enum":   {Type: "public.status"},
+			"enumq":  {Type: `"public"."Status"[]`},
+			"fl":     {Type: "float"},
+			"fl53":   {Type: "float(53)"},
+			"fl24":   {Type: "float(24)"},
+			"ch":     {Type: "char"},
+			"bits":   {Type: "varbit(8)"},
+			"arr":    {Type: "int[3]"},
+			"chvary": {Type: "char varying(10)"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 0 {
+		t.Errorf("equivalent types must not diff, got %+v", p.Alters)
+	}
+}
+
+func TestAlterColumnTypeQualifierAndPrecisionChangesDetected(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{
+		"s":  {Type: "status"},
+		"fl": {Type: "double precision"},
+		"c":  {Type: "character(1)"},
+	})
+	desired := &schema.Database{Tables: map[string]*schema.Table{
+		"public.t": {Name: "t", Columns: map[string]*schema.Column{
+			"s":  {Type: "app.status"},
+			"fl": {Type: "float(10)"},
+			"c":  {Type: "char(2)"},
+		}},
+	}}
+	p := Plan(live, desired, true)
+	if len(p.Alters) != 3 {
+		t.Errorf("non-public schema, lower float precision and char length are real changes, got %+v", p.Alters)
+	}
+}
+
 func TestAlterColumnSerialNotDiffedAgainstInteger(t *testing.T) {
 	live := liveWithTablePK("public.t", map[string]*LiveColumn{
 		"id": {Type: "integer", Default: "nextval('t_id_seq'::regclass)"},

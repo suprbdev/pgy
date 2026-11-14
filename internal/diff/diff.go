@@ -5,6 +5,7 @@ import (
     "fmt"
     "regexp"
     "sort"
+    "strconv"
     "strings"
 
     "github.com/jackc/pgx/v5/pgxpool"
@@ -2112,6 +2113,8 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 // Ordered: longer spellings must be rewritten before their substrings.
 var columnTypeAliases = [][2]string{
     {"character varying", "varchar"},
+    {"char varying", "varchar"},
+    {"bit varying", "varbit"},
     {"double precision", "float8"},
     {"timestamp with time zone", "timestamptz"},
     {"timestamp without time zone", "timestamp"},
@@ -2136,7 +2139,9 @@ var columnTypeAliases = [][2]string{
 // never diffs against its live `integer` + nextval default form.
 func normalizeColumnType(t string) string {
     s := strings.ToLower(strings.TrimSpace(t))
+    s = strings.ReplaceAll(s, `"`, "")
     s = strings.Join(strings.Fields(s), " ")
+    s = publicQualifierRe.ReplaceAllString(s, "$1")
     // move an inline modifier past a with/without suffix so
     // "timestamp(6) with time zone" aliases like "timestamptz(6)"
     if i := strings.Index(s, "("); i >= 0 {
@@ -2152,9 +2157,28 @@ func normalizeColumnType(t string) string {
     }
     s = strings.ReplaceAll(s, " (", "(")
     s = strings.ReplaceAll(s, ", ", ",")
-    s = strings.ReplaceAll(s, `"`, "")
+    s = floatTypeRe.ReplaceAllStringFunc(s, func(m string) string {
+        sm := floatTypeRe.FindStringSubmatch(m)
+        if sm[2] != "" {
+            if n, err := strconv.Atoi(sm[2]); err == nil && n <= 24 { return "real" + sm[3] }
+        }
+        return "float8" + sm[3]
+    })
+    s = bareCharTypeRe.ReplaceAllStringFunc(s, func(m string) string {
+        if strings.HasSuffix(m, "(") { return m }
+        return m + "(1)"
+    })
+    s = arrayBoundsRe.ReplaceAllString(s, "[]")
     return s
 }
+
+var (
+    publicQualifierRe = regexp.MustCompile(`(^|[^a-z0-9_$.])public\.`)
+    // PostgreSQL maps float(1..24) to real and bare float / float(25..53) to double precision.
+    floatTypeRe    = regexp.MustCompile(`\bfloat(\((\d+)\))?($|[^a-z0-9_(])`)
+    bareCharTypeRe = regexp.MustCompile(`\b(char|bit)\b\(?`)
+    arrayBoundsRe  = regexp.MustCompile(`(\[\d*\])+`)
+)
 
 func isSerialType(t string) bool {
     switch strings.ToLower(strings.TrimSpace(t)) {
