@@ -308,10 +308,12 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         name := truncateIdent(ct.Name)
         lt.Constraints[name] = true
         delete(lt.ConstraintDefs, name)
+        if ct.Comment != "" { lt.ConstraintComments[name] = ct.Comment }
     }
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
         lt.Triggers[truncateIdent(tr.Name)] = ""
+        if tr.Comment != "" { lt.TriggerComments[truncateIdent(tr.Name)] = tr.Comment }
     }
     for _, pol := range dt.Policies {
         if pol == nil || pol.Name == "" { continue }
@@ -321,6 +323,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         for _, r := range pol.To {
             if !strings.EqualFold(r, "public") { roles = append(roles, r) }
         }
+        if pol.Comment != "" { lt.PolicyComments[truncateIdent(pol.Name)] = pol.Comment }
         lt.Policies[truncateIdent(pol.Name)] = &LivePolicy{
             Restrictive: pol.As == "restrictive",
             Cmd:         cmd,
@@ -461,6 +464,8 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     })
     c.IndexComments = cloneMap(t.IndexComments, nil)
     c.ConstraintComments = cloneMap(t.ConstraintComments, nil)
+    c.TriggerComments = cloneMap(t.TriggerComments, nil)
+    c.PolicyComments = cloneMap(t.PolicyComments, nil)
     return &c
 }
 
@@ -471,6 +476,8 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.Indexes == nil { t.Indexes = map[string]bool{} }
     if t.Triggers == nil { t.Triggers = map[string]string{} }
     if t.ConstraintInherited == nil { t.ConstraintInherited = map[string]bool{} }
+    if t.TriggerComments == nil { t.TriggerComments = map[string]string{} }
+    if t.PolicyComments == nil { t.PolicyComments = map[string]string{} }
     if t.TriggerInherited == nil { t.TriggerInherited = map[string]bool{} }
     if t.Policies == nil { t.Policies = map[string]*LivePolicy{} }
     if t.IndexComments == nil { t.IndexComments = map[string]string{} }

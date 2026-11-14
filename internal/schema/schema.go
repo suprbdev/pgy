@@ -195,6 +195,7 @@ type Policy struct {
     To        []string // roles (empty = all roles)
     Using     string
     WithCheck string
+    Comment   string // empty means unmanaged
 }
 
 type Constraint struct {
@@ -208,6 +209,7 @@ type Constraint struct {
     NoInherit         bool     // check: NO INHERIT
     NotValid          bool     // check: added NOT VALID (existing rows not checked)
     NotEnforced       bool     // check: NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
+    Comment           string   // empty means unmanaged
 }
 
 type Column struct {
@@ -268,6 +270,7 @@ type Trigger struct {
     InitiallyDeferred bool // implies deferrable
     OldTable string        // REFERENCING OLD TABLE AS (AFTER triggers)
     NewTable string        // REFERENCING NEW TABLE AS (AFTER triggers)
+    Comment  string        // empty means unmanaged
 }
 
 type Extension struct {
@@ -932,6 +935,7 @@ func parsePolicies(v any) []*Policy {
             }
             if u, ok := dm["using"].(string); ok { p.Using = u }
             if wc, ok := dm["withCheck"].(string); ok { p.WithCheck = wc }
+            if cm, ok := dm["comment"].(string); ok { p.Comment = cm }
         }
         out = append(out, p)
     }
@@ -1089,6 +1093,7 @@ func parseTriggers(v any) []*Trigger {
                 if c, ok := dm["constraint"].(bool); ok { tr.Constraint = c }
                 if d, ok := dm["deferrable"].(bool); ok { tr.Deferrable = d }
                 if id, ok := dm["initiallyDeferred"].(bool); ok { tr.InitiallyDeferred = id }
+                if cm, ok := dm["comment"].(string); ok { tr.Comment = cm }
                 if ref, ok := dm["referencing"].(map[string]any); ok {
                     if s, ok := ref["old"].(string); ok { tr.OldTable = strings.TrimSpace(s) }
                     if s, ok := ref["new"].(string); ok { tr.NewTable = strings.TrimSpace(s) }
@@ -1117,6 +1122,7 @@ func parseConstraints(v any) []*Constraint {
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
                 if b, ok := dm["notValid"].(bool); ok { c.NotValid = b }
                 if b, ok := dm["enforced"].(bool); ok { c.NotEnforced = !b }
+                if cm, ok := dm["comment"].(string); ok { c.Comment = cm }
             }
             out = append(out, c)
         }

@@ -488,6 +488,7 @@
           },
           "additionalProperties": false
         },
+        "comment": { "type": "string", "description": "COMMENT ON TRIGGER text (diffed against live)." },
         "procedure": {
           "type": "string",
           "description": "Trigger function to execute, e.g. public.set_updated_at()."
@@ -527,7 +528,8 @@
         "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
         "noInherit": { "type": "boolean", "description": "Check only: NO INHERIT." },
         "notValid": { "type": "boolean", "description": "Check only: add NOT VALID (existing rows are not checked)." },
-        "enforced": { "type": "boolean", "description": "Check only: false emits NOT ENFORCED (PostgreSQL 18+). Default true." }
+        "enforced": { "type": "boolean", "description": "Check only: false emits NOT ENFORCED (PostgreSQL 18+). Default true." },
+        "comment": { "type": "string", "description": "COMMENT ON CONSTRAINT text (diffed against live)." }
       },
       "required": ["type"],
       "additionalProperties": false
@@ -553,7 +555,8 @@
           ]
         },
         "using": { "type": "string", "description": "USING expression." },
-        "withCheck": { "type": "string", "description": "WITH CHECK expression." }
+        "withCheck": { "type": "string", "description": "WITH CHECK expression." },
+        "comment": { "type": "string", "description": "COMMENT ON POLICY text (diffed against live)." }
       },
       "additionalProperties": false
     },

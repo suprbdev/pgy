@@ -50,7 +50,7 @@ schema public:
         notValid: true
         enforced: false
     constraints:
-      orders_qty_check: {type: check, expression: qty > 0, noInherit: true, notValid: true, enforced: false}
+      orders_qty_check: {type: check, expression: qty > 0, noInherit: true, notValid: true, enforced: false, comment: "@name qty"}
       orders_code_key: {type: unique, columns: [code], nullsNotDistinct: true, deferrable: true, initiallyDeferred: true}
     triggers:
       orders_audit:
@@ -58,8 +58,9 @@ schema public:
         events: [insert, "update of price, qty"]
         referencing: {old: old_rows, new: new_rows}
         procedure: public.audit()
+        comment: audit trail
     policies:
-      tenant: {as: restrictive, using: "true"}
+      tenant: {as: restrictive, using: "true", comment: tenant isolation}
   view active_orders:
     query: select 1
     securityInvoker: true

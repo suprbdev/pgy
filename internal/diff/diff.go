@@ -168,6 +168,8 @@ type LiveTable struct{
     Triggers    map[string]string // trigger name -> pg_get_triggerdef() output ("" if unknown)
     Policies    map[string]*LivePolicy // policy name -> live definition
     IndexComments      map[string]string // index name -> comment (absent key = no comment)
+    TriggerComments    map[string]string // trigger name -> comment
+    PolicyComments     map[string]string // policy name -> comment
     ConstraintComments map[string]string // constraint name -> comment (absent key = no comment)
     // ConstraintInherited / TriggerInherited: names cloned from a partitioned
     // parent or inherited from a parent table; never pruned on their own
@@ -198,6 +200,8 @@ func newLiveTable() *LiveTable {
         Policies:           map[string]*LivePolicy{},
         IndexComments:      map[string]string{},
         ConstraintComments: map[string]string{},
+        TriggerComments:    map[string]string{},
+        PolicyComments:     map[string]string{},
         ConstraintInherited: map[string]bool{},
         TriggerInherited:    map[string]bool{},
     }
@@ -1262,6 +1266,36 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     icRows.Close()
 
+    // Query trigger and policy comments
+    tpcQ := `
+        select 'trigger', n.nspname, c.relname, t.tgname, d.description
+        from pg_description d
+        join pg_trigger t on t.oid = d.objoid and d.classoid = 'pg_trigger'::regclass
+        join pg_class c on c.oid = t.tgrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        union all
+        select 'policy', n.nspname, c.relname, p.polname, d.description
+        from pg_description d
+        join pg_policy p on p.oid = d.objoid and d.classoid = 'pg_policy'::regclass
+        join pg_class c on c.oid = p.polrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    tpcRows, err := pool.Query(ctx, tpcQ)
+    if err != nil { return nil, err }
+    for tpcRows.Next() {
+        var kind, schemaName, tableName, name, comment string
+        if err := tpcRows.Scan(&kind, &schemaName, &tableName, &name, &comment); err != nil {
+            tpcRows.Close()
+            return nil, err
+        }
+        if t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]; t != nil {
+            if kind == "trigger" { t.TriggerComments[name] = comment } else { t.PolicyComments[name] = comment }
+        }
+    }
+    tpcRows.Close()
+
     // Query constraint comments (pg_description keyed by pg_constraint oid)
     cncQ := `
         select n.nspname, c.relname, con.conname, d.description
@@ -1908,7 +1942,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     planPolicies(plan, live, desired, unsafe)
     planPublications(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
-    plan.Alters = append(plan.Alters, planComments(live, desired)...)
+    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired)
         plan.Drops = append(append(early, plan.Drops...), late...)
@@ -2374,7 +2408,7 @@ func ownedByIdent(s string) string {
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared).
-func planComments(live *Live, desired *schema.Database) []string {
+func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
         if want != "" && want != have {
@@ -2459,8 +2493,33 @@ func planComments(live *Live, desired *schema.Database) []string {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
             have := ""
-            if lt != nil { have = lt.ConstraintComments[fkName] }
+            if lt != nil && !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe) { have = lt.ConstraintComments[fkName] }
             comment(fmt.Sprintf("constraint %s on %s", pqIdent(fkName), pqIdent(k)), fk.Comment, have)
+        }
+        for _, ct := range dt.Constraints {
+            if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
+            name := truncateIdent(ct.Name)
+            have := ""
+            if lt != nil && !constraintRecreated(lt, name, renderConstraintDef(ct), unsafe) { have = lt.ConstraintComments[name] }
+            comment(fmt.Sprintf("constraint %s on %s", pqIdent(name), pqIdent(k)), ct.Comment, have)
+        }
+        for _, tr := range dt.Triggers {
+            if tr == nil || tr.Comment == "" || tr.Procedure == "" { continue }
+            name := truncateIdent(tr.Name)
+            have := ""
+            if lt != nil {
+                if def, ok := lt.Triggers[name]; ok && (def == "" || triggerDefsEqual(renderTrigger(k, tr), def)) { have = lt.TriggerComments[name] }
+            }
+            comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
+        }
+        for _, pol := range dt.Policies {
+            if pol == nil || pol.Comment == "" || pol.Name == "" { continue }
+            name := truncateIdent(pol.Name)
+            have := ""
+            if lt != nil {
+                if lp := lt.Policies[name]; lp != nil && policyMatchesLive(pol, lp) { have = lt.PolicyComments[name] }
+            }
+            comment(fmt.Sprintf("policy %s on %s", pqIdent(name), pqIdent(k)), pol.Comment, have)
         }
     }
 
@@ -2519,6 +2578,14 @@ func planComments(live *Live, desired *schema.Database) []string {
         comment("procedure "+pqIdent(name)+grantFuncArgs(pr.ArgsSig), pr.Comment, live.FunctionComments[norm])
     }
     return stmts
+}
+
+// constraintRecreated reports whether applyTableConstraints drops and
+// re-adds a live constraint (losing its comment) because its definition
+// changed.
+func constraintRecreated(lt *LiveTable, name, def string, unsafe bool) bool {
+    liveDef, ok := lt.ConstraintDefs[name]
+    return unsafe && ok && lt.Constraints[name] && !constraintDefsEqual(def, liveDef)
 }
 
 // planGrants reconciles desired grants against live ACLs for schemas, tables,
@@ -2858,28 +2925,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
     for _, tr := range dt.Triggers {
         if tr == nil || tr.Procedure == "" { continue }
         trName := truncateIdent(tr.Name)
-        events := strings.ToUpper(strings.Join(canonicalTriggerEvents(tr.Events), " or "))
-        when := ""
-        if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
-        var stmt string
-        if tr.Constraint {
-            // constraint triggers are always AFTER ... FOR EACH ROW
-            deferral := ""
-            if tr.InitiallyDeferred {
-                deferral = " deferrable initially deferred"
-            } else if tr.Deferrable {
-                deferral = " deferrable"
-            }
-            stmt = fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
-        } else {
-            level := strings.ToLower(strings.TrimSpace(tr.Level))
-            if level == "" { level = "statement" }
-            referencing := ""
-            if tr.OldTable != "" { referencing += " old table as " + pqIdent(tr.OldTable) }
-            if tr.NewTable != "" { referencing += " new table as " + pqIdent(tr.NewTable) }
-            if referencing != "" { referencing = " referencing" + referencing }
-            stmt = fmt.Sprintf("create trigger %s %s %s on %s%s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), referencing, level, when, tr.Procedure)
-        }
+        stmt := renderTrigger(fq, tr)
         if liveDef, ok := liveTriggers[trName]; ok {
             // "" means the live definition is unknown — fall back to
             // name-only matching and skip rather than churn.
@@ -2889,6 +2935,31 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         *deferredTriggers = append(*deferredTriggers, stmt)
     }
 
+}
+
+// renderTrigger renders a table trigger's CREATE [CONSTRAINT] TRIGGER statement.
+func renderTrigger(fq string, tr *schema.Trigger) string {
+    trName := truncateIdent(tr.Name)
+    events := strings.ToUpper(strings.Join(canonicalTriggerEvents(tr.Events), " or "))
+    when := ""
+    if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
+    if tr.Constraint {
+        // constraint triggers are always AFTER ... FOR EACH ROW
+        deferral := ""
+        if tr.InitiallyDeferred {
+            deferral = " deferrable initially deferred"
+        } else if tr.Deferrable {
+            deferral = " deferrable"
+        }
+        return fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
+    }
+    level := strings.ToLower(strings.TrimSpace(tr.Level))
+    if level == "" { level = "statement" }
+    referencing := ""
+    if tr.OldTable != "" { referencing += " old table as " + pqIdent(tr.OldTable) }
+    if tr.NewTable != "" { referencing += " new table as " + pqIdent(tr.NewTable) }
+    if referencing != "" { referencing = " referencing" + referencing }
+    return fmt.Sprintf("create trigger %s %s %s on %s%s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), referencing, level, when, tr.Procedure)
 }
 
 // planPolicies emits ENABLE/DISABLE ROW LEVEL SECURITY and policy create/drop
