@@ -42,6 +42,7 @@ func TestDefaultPrivileges(t *testing.T) {
 		{ForRole: "app_owner", Grants: map[string]map[string][]string{"functions": {"public": {}}}},
 	}}
 	live := emptyLive()
+	live.Schemas["app"] = true
 	live.DefaultACLs = map[string]map[string]map[string]bool{"app_owner|app|tables": {"app_read": {"select": true, "delete": true}}}
 	live.DefaultACLRows = map[string]bool{"app_owner|app|tables": true}
 	p := Plan(live, d, false)
@@ -67,5 +68,15 @@ func TestDefaultPrivileges(t *testing.T) {
 	live.DefaultACLRows = map[string]bool{"app_owner|app|tables": true, "app_owner|app|sequences": true, "app_owner||functions": true}
 	if sql := Render(Plan(live, d, false)); sql != "" {
 		t.Errorf("matching default privileges must not diff, got:\n%s", sql)
+	}
+}
+
+func TestDefaultPrivilegesCreateTheirSchemaFirst(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{}, DefaultPrivileges: []*schema.DefaultPrivilege{
+		{Schemas: []string{"app"}, Grants: map[string]map[string][]string{"tables": {"reader": {"select"}}}},
+	}}
+	p := Plan(emptyLive(), d, false)
+	if len(p.Creates) < 2 || p.Creates[0] != `create schema if not exists "app";` {
+		t.Errorf("the schema must be created before its default privileges, got %v", p.Creates)
 	}
 }
