@@ -23,24 +23,21 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
     return pool, nil
 }
 
-// WithAdvisoryLock acquires a session-level advisory lock for the duration of fn.
-// Returns true if the lock was acquired.
-func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, fn func(context.Context) error) (bool, error) {
-    // single lock key for tool, could be customized later
-    const key int64 = 0x707979 // "pyy" arbitrary
-    var acquired bool
-    err := pool.AcquireFunc(ctx, func(conn *pgxpool.Conn) error {
-        if err := conn.Conn().QueryRow(ctx, "select pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {
-            return err
+// AdvisoryLockKey is the session-level advisory lock pgy holds while it
+// initializes or migrates a database.
+const AdvisoryLockKey int64 = 0x707979
+
+// WithAdvisoryLock runs fn while holding AdvisoryLockKey on a dedicated pool
+// connection, waiting for any other pgy process holding it (cancel ctx to
+// stop waiting). fn may use other pool connections.
+func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, fn func(context.Context) error) error {
+    return pool.AcquireFunc(ctx, func(conn *pgxpool.Conn) error {
+        if _, err := conn.Exec(ctx, "select pg_advisory_lock($1)", AdvisoryLockKey); err != nil {
+            return fmt.Errorf("acquire migration lock: %w", err)
         }
-        if !acquired {
-            // run without lock but indicate false
-            return fn(ctx)
-        }
-        defer func() { _, _ = conn.Conn().Exec(ctx, "select pg_advisory_unlock($1)", key) }()
+        defer func() { _, _ = conn.Exec(context.WithoutCancel(ctx), "select pg_advisory_unlock($1)", AdvisoryLockKey) }()
         return fn(ctx)
     })
-    return acquired, err
 }
 
 func EnsureMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema, table string) error {

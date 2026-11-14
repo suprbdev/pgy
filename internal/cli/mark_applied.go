@@ -4,8 +4,6 @@ import (
     "fmt"
     "os"
     "path/filepath"
-    "strconv"
-    "strings"
     "time"
 
     "github.com/spf13/cobra"
@@ -33,18 +31,12 @@ func cmdMarkApplied() *cobra.Command {
             files, err := readMigrationFiles(cfg.MigrationsDir)
             if err != nil { return err }
             if len(files) == 0 { return fmt.Errorf("no migrations found in %s", cfg.MigrationsDir) }
-            // normalize target to prefix (e.g. 0003 or 0003_name)
-            base := strings.TrimSuffix(filepath.Base(target), ".sql")
-            until := base
-            sel := filterUntil(files, until)
-            if len(sel) == 0 { return fmt.Errorf("target not found: %s", target) }
-            // clear future rows and insert up to until
+            sel, err := filterUntil(files, target)
+            if err != nil { return err }
             schemaName := "pgy"
             tableName := "migrations"
             if err := db.EnsureMigrationsTable(ctx, pool, schemaName, tableName); err != nil { return err }
-            // delete all rows greater than until version
-            untilVersion, err := strconv.Atoi(base)
-            if err != nil { return fmt.Errorf("invalid migration version %q: %w", base, err) }
+            untilVersion := db.MigrationVersion(filepath.Base(sel[len(sel)-1]))
             _, err = pool.Exec(ctx, fmt.Sprintf("delete from %s.%s where version > $1", dbIdent(schemaName), dbIdent(tableName)), untilVersion)
             if err != nil { return err }
             // insert missing rows up to until

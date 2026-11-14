@@ -86,7 +86,7 @@ func nextMigrationNumber(dir string) (int, error) {
         return 0, err
     }
     nums := []int{}
-    re := regexp.MustCompile(`^(\d{4})`)
+    re := regexp.MustCompile(`^(\d+)`)
     for _, e := range entries {
         if e.IsDir() { continue }
         m := re.FindStringSubmatch(e.Name())

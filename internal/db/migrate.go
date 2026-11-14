@@ -27,16 +27,57 @@ func LoadApplied(ctx context.Context, pool *PoolShim, schema, table string) (map
 }
 
 func ApplyInTx(ctx context.Context, pool *PoolShim, sql string) error {
+    return ApplyMigration(ctx, pool, Migration{SQL: sql})
+}
+
+// Migration is one migration file to apply with ApplyMigration.
+type Migration struct {
+    SQL              string
+    Name             string // file name; recorded when RecordIn is set
+    Checksum         string
+    LockTimeout      string // transaction-local lock_timeout, e.g. "5s"; empty = server default
+    StatementTimeout string // transaction-local statement_timeout; empty = server default
+    RecordIn         string // "schema.table" migrations table to record the migration in; empty = not recorded
+}
+
+// ApplyMigration runs m.SQL statement by statement in a single transaction.
+// Timeouts are set transaction-locally before the first statement, and when
+// RecordIn is set the migration is recorded in the same transaction, so it
+// can never be applied without being recorded (or vice versa). Recording
+// fails if the version parsed from Name is already taken.
+func ApplyMigration(ctx context.Context, pool *PoolShim, m Migration) error {
     tx, err := pool.Begin(ctx)
     if err != nil { return err }
     defer func() { _ = tx.Rollback(ctx) }()
-    
-    statements := SplitSQLStatements(sql)
-    for _, stmt := range statements {
+
+    for _, setting := range [][2]string{{"lock_timeout", m.LockTimeout}, {"statement_timeout", m.StatementTimeout}} {
+        if setting[1] == "" { continue }
+        if _, err := tx.Exec(ctx, "select set_config($1, $2, true)", setting[0], setting[1]); err != nil {
+            return fmt.Errorf("set %s: %w", setting[0], err)
+        }
+    }
+    for _, stmt := range SplitSQLStatements(m.SQL) {
         if strings.TrimSpace(stmt) == "" { continue }
         if _, err := tx.Exec(ctx, stmt); err != nil { return err }
     }
+    if m.RecordIn != "" {
+        schema, table, _ := strings.Cut(m.RecordIn, ".")
+        q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1, $2, $3, now())", pqIdent(schema), pqIdent(table))
+        if _, err := tx.Exec(ctx, q, MigrationVersion(m.Name), m.Name, m.Checksum); err != nil {
+            return fmt.Errorf("record %s: %w", m.Name, err)
+        }
+    }
     return tx.Commit(ctx)
+}
+
+// MigrationVersion returns the number a migration file name starts with
+// ("0003_users.sql" -> 3), or 0 when it has none.
+func MigrationVersion(name string) int {
+    n := 0
+    for i := 0; i < len(name) && isDigit(name[i]); i++ {
+        n = n*10 + int(name[i]-'0')
+    }
+    return n
 }
 
 // SplitSQLStatements splits SQL on semicolons while respecting single-quoted
@@ -147,11 +188,8 @@ func isDollarTagChar(c byte) bool {
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func RecordApplied(ctx context.Context, pool *PoolShim, schema, table, name, checksum string, appliedAt time.Time) error {
-    // version is parsed from filename prefix
-    var version int
-    if _, err := fmt.Sscanf(name, "%d", &version); err != nil { version = 0 }
     q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1,$2,$3,$4) on conflict (version) do nothing", pqIdent(schema), pqIdent(table))
-    _, err := pool.Exec(ctx, q, version, name, checksum, appliedAt)
+    _, err := pool.Exec(ctx, q, MigrationVersion(name), name, checksum, appliedAt)
     return err
 }
 

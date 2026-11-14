@@ -38,7 +38,7 @@ Exit codes:
             }
             var conn interface{ Close() }
             var live *diff.Live
-            if cfg.DSN == "" {
+            if fromEmpty || cfg.DSN == "" {
                 if !fromEmpty {
                     return fmt.Errorf("--dsn or PGY_DSN is required (or use --from-empty)")
                 }
@@ -100,6 +100,9 @@ Exit codes:
             }
 
             if len(sql) == 0 {
+                if err := os.Remove(cfg.BufferPath); err != nil && !os.IsNotExist(err) {
+                    return err
+                }
                 if !cfg.Quiet {
                     fmt.Println("no changes detected")
                 }

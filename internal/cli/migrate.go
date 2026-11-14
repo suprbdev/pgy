@@ -10,7 +10,6 @@ import (
     "path/filepath"
     "sort"
     "strings"
-    "time"
 
     "github.com/spf13/cobra"
 
@@ -46,57 +45,65 @@ Exit codes:
 
             files, err := readMigrationFiles(cfg.MigrationsDir)
             if err != nil { return err }
-            if until != "" { files = filterUntil(files, until) }
-            if limit > 0 && len(files) > limit { files = files[:limit] }
-
-            applied, err := loadApplied(ctx, pool, schemaName, tableName)
-            if err != nil { return err }
-
-            toApply := make([]string, 0)
-            for _, f := range files {
-                base := filepath.Base(f)
-                if _, ok := applied[base]; !ok {
-                    toApply = append(toApply, f)
+            if until != "" {
+                if files, err = filterUntil(files, until); err != nil { return err }
+            }
+            pending := func() ([]string, error) {
+                applied, err := db.LoadApplied(ctx, pool, schemaName, tableName)
+                if err != nil { return nil, err }
+                out := []string{}
+                for _, f := range files {
+                    if _, ok := applied[filepath.Base(f)]; !ok { out = append(out, f) }
                 }
+                if limit > 0 && len(out) > limit { out = out[:limit] }
+                return out, nil
             }
 
             if dryRun {
+                toApply, err := pending()
+                if err != nil { return err }
                 for _, f := range toApply { fmt.Println(f) }
                 if len(toApply) == 0 && !cfg.Quiet { fmt.Println("no pending migrations") }
                 if len(toApply) > 0 { return &exitCodeError{code: 2} }
                 return nil
             }
 
-            _, err = db.WithAdvisoryLock(ctx, pool, func(ctx context.Context) error {
-                if lockTimeout != "" { _, _ = pool.Exec(ctx, "set lock_timeout = "+lockTimeout) }
-                if statementTimeout != "" { _, _ = pool.Exec(ctx, "set statement_timeout = "+statementTimeout) }
+            return db.WithAdvisoryLock(ctx, pool, func(ctx context.Context) error {
+                toApply, err := pending()
+                if err != nil { return err }
+                if len(toApply) == 0 && !cfg.Quiet { fmt.Println("no pending migrations") }
                 for _, f := range toApply {
                     b, err := os.ReadFile(f)
                     if err != nil { return err }
                     sum := checksumBody(b)
-                    // verify checksum header if present
                     if hx := parseChecksumHeader(string(b)); hx != "" && hx != sum {
                         return fmt.Errorf("checksum mismatch for %s", f)
                     }
-                    if err := applyOne(ctx, pool, string(b)); err != nil { return fmt.Errorf("%s: %w", f, err) }
                     base := filepath.Base(f)
-                    if err := recordApplied(ctx, pool, schemaName, tableName, base, sum); err != nil { return err }
+                    err = db.ApplyMigration(ctx, pool, db.Migration{
+                        SQL: string(b), Name: base, Checksum: sum,
+                        LockTimeout: lockTimeout, StatementTimeout: statementTimeout,
+                        RecordIn: schemaName + "." + tableName,
+                    })
+                    if err != nil { return fmt.Errorf("%s: %w", f, err) }
                     if !cfg.Quiet { fmt.Printf("applied %s\n", base) }
                 }
                 return nil
             })
-            if err != nil { return err }
-            return nil
         },
     }
     c.Flags().StringVar(&until, "until", "", "Apply up to a specific migration (prefix ok)")
-    c.Flags().IntVar(&limit, "limit", 0, "Apply only N pending migrations")
+    c.Flags().IntVar(&limit, "limit", 0, "Apply at most N pending migrations")
     c.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be applied")
     c.Flags().StringVar(&lockTimeout, "lock-timeout", "", "SET lock_timeout (e.g. 5s)")
     c.Flags().StringVar(&statementTimeout, "statement-timeout", "", "SET statement_timeout (e.g. 30s)")
     return c
 }
 
+// readMigrationFiles returns the .sql files in dir in name order. Two files
+// sharing a version number (e.g. 0005_a.sql and 0005_b.sql from parallel
+// branches) are an error: the migrations table is keyed by version, so only
+// one of them could ever be recorded.
 func readMigrationFiles(dir string) ([]string, error) {
     entries, err := os.ReadDir(dir)
     if err != nil {
@@ -109,24 +116,28 @@ func readMigrationFiles(dir string) ([]string, error) {
         if strings.HasSuffix(e.Name(), ".sql") { names = append(names, filepath.Join(dir, e.Name())) }
     }
     sort.Strings(names)
+    seen := map[int]string{}
+    for _, n := range names {
+        base := filepath.Base(n)
+        v := db.MigrationVersion(base)
+        if prev, ok := seen[v]; ok {
+            return nil, fmt.Errorf("migrations %s and %s share version %d; renumber one of them", prev, base, v)
+        }
+        seen[v] = base
+    }
     return names, nil
 }
 
-func filterUntil(files []string, until string) []string {
-    out := []string{}
-    for _, f := range files {
-        base := filepath.Base(f)
-        out = append(out, f)
-        if strings.HasPrefix(base, until) { break }
+// filterUntil returns files up to and including the first one whose name
+// starts with until (a version such as 0003, or a full name with or without
+// .sql). It is an error if no file matches.
+func filterUntil(files []string, until string) ([]string, error) {
+    until = strings.TrimSuffix(filepath.Base(until), ".sql")
+    for i, f := range files {
+        if strings.HasPrefix(filepath.Base(f), until) { return files[:i+1], nil }
     }
-    return out
+    return nil, fmt.Errorf("no migration matches %q", until)
 }
-
-func loadApplied(ctx context.Context, pool *db.PoolShim, schema, table string) (map[string]string, error) { return db.LoadApplied(ctx, pool, schema, table) }
-
-func applyOne(ctx context.Context, pool *db.PoolShim, sql string) error { return db.ApplyInTx(ctx, pool, sql) }
-
-func recordApplied(ctx context.Context, pool *db.PoolShim, schema, table, name, checksum string) error { return db.RecordApplied(ctx, pool, schema, table, name, checksum, time.Now().UTC()) }
 
 func checksumBody(b []byte) string {
     // ignore header comment lines starting with -- up to first blank line

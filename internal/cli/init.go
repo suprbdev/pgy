@@ -34,18 +34,14 @@ func cmdInit() *cobra.Command {
             }
             defer conn.Close()
 
-            unlocked, err := db.WithAdvisoryLock(ctx, conn, func(ctx context.Context) error {
+            err = db.WithAdvisoryLock(ctx, conn, func(ctx context.Context) error {
                 return db.EnsureMigrationsTable(ctx, conn, schema, table)
             })
             if err != nil {
                 return err
             }
             if !cfg.Quiet {
-                if unlocked {
-                    fmt.Printf("initialized %s.%s\n", schema, table)
-                } else {
-                    fmt.Printf("initialized %s.%s (lock bypassed)\n", schema, table)
-                }
+                fmt.Printf("initialized %s.%s\n", schema, table)
             }
             return nil
         },
