@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:${PG_VERSION:-16}-alpine
     environment:
       POSTGRES_USER: pgy
       POSTGRES_PASSWORD: pgy

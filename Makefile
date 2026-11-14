@@ -27,7 +27,7 @@ test-integration-up:
 test-integration-down:
 	docker compose down -v
 
-test-integration: test-integration-up
+test-integration: test-integration-up ## Run integration tests against Docker PostgreSQL (PG_VERSION=15|16|17, default 16)
 	PGY_TEST_DSN=postgres://pgy:pgy@localhost:5433/pgytest go test ./internal/integration/... -v -count=1
 	$(MAKE) test-integration-down
 
