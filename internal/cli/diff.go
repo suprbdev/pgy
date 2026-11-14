@@ -20,10 +20,16 @@ func cmdDiff() *cobra.Command {
     var jsonOut bool
     var fromEmpty bool
     var split string
+    var noWarnings bool
     c := &cobra.Command{
         Use:   "diff",
         Short: "Generate SQL diff between YAML schema and live DB",
         Long: `Generate SQL diff between YAML schema and live DB.
+
+Statements that lock or rewrite an existing table (an index built without
+concurrently, a foreign key or check added without notValid, SET NOT NULL, a
+rewriting type change, SET LOGGED/UNLOGGED, an added column whose value is
+computed per row) are reported on stderr. Use --no-warnings to silence them.
 
 Exit codes:
   0  No changes detected (schema matches live DB)
@@ -93,13 +99,24 @@ Exit codes:
                 sql = group.Render(steps)
                 groups = len(steps)
                 summary = splitSummary(steps)
+                if !noWarnings {
+                    for _, s := range steps {
+                        for _, w := range s.Plan.Warnings { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
+                    }
+                }
             } else {
                 plan := diff.PlanWith(live, compiled, opts)
                 sql = diff.Render(plan)
                 if len(plan.Concurrent) > 0 {
                     sql = group.Render([]group.Step{{Plan: plan}})
                 }
-                summary = plan.Summary()
+                s := map[string]any{}
+                for k, v := range plan.Summary() { s[k] = v }
+                if len(plan.Warnings) > 0 { s["warnings"] = plan.Warnings }
+                summary = s
+                if !noWarnings {
+                    for _, w := range plan.Warnings { fmt.Fprintln(os.Stderr, "warning:", w.Message) }
+                }
             }
 
             if jsonOut || cfg.JSON {
@@ -134,6 +151,7 @@ Exit codes:
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
     c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in. Run it with ALL schema files: objects declared only in files left out are dropped")
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
+    c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report statements that lock or rewrite existing tables")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
     c.Flags().Lookup("split").NoOptDefVal = group.ModeFile
@@ -167,6 +185,7 @@ func splitSummary(steps []group.Step) map[string]any {
             g[k] = v
             total[k] += v
         }
+        if len(s.Plan.Warnings) > 0 { g["warnings"] = s.Plan.Warnings }
         groups = append(groups, g)
     }
     out := map[string]any{"groups": groups}

@@ -660,3 +660,14 @@ schema public:
         t.Fatalf("expected a single rename and no recreate:\n%s", all)
     }
 }
+
+func TestPlanSplitWarnsOnlyForExistingTables(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": "schema public:\n  table a:\n    columns:\n      id: {type: int, primaryKey: true}\n",
+        "b.yml": "schema public:\n  table b:\n    columns:\n      id: {type: int, primaryKey: true}\n      a_id: {type: int}\n    foreignKeys:\n      b_a_fkey: {columns: [a_id], references: {table: public.a, columns: [id]}}\n",
+    })
+    steps := planFiles(t, nil, p("a.yml", "b.yml"), ModeFile, false)
+    for _, s := range steps {
+        if len(s.Plan.Warnings) > 0 { t.Errorf("tables created by this plan must not warn: %+v", s.Plan.Warnings) }
+    }
+}
