@@ -66,7 +66,7 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
         if m := lockIndexRe.FindStringSubmatch(stmt); m != nil {
             if fq := unquoteFQ(m[3]); exists(fq) {
                 if lt := live.Tables[fq]; lt != nil && lt.Partitioned {
-                    warn(fq, stmt, "CREATE INDEX %s blocks writes to every partition of %s while it builds; PostgreSQL cannot build it concurrently on a partitioned table, so build it on each partition concurrently and attach those indexes, or run it in a maintenance window", unquoteFQ(m[2]), fq)
+                    warn(fq, stmt, "CREATE INDEX %s blocks writes to every partition of %s while it builds; set concurrently: true to build it on each partition concurrently and attach the partition indexes", unquoteFQ(m[2]), fq)
                 } else {
                     warn(fq, stmt, "CREATE INDEX %s blocks writes to %s while it builds; set concurrently: true to build it without blocking", unquoteFQ(m[2]), fq)
                 }

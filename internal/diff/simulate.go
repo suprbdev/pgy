@@ -538,6 +538,7 @@ func cloneLive(l *Live) *Live {
         CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),
+        Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),
     }
 }
 

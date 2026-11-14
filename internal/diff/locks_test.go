@@ -120,20 +120,62 @@ func TestLockWarningsSkipNotNullWithCheck(t *testing.T) {
 func TestConcurrentIndexOnPartitionedTable(t *testing.T) {
 	live := emptyLive()
 	live.Schemas["app"] = true
-	lt := newLiveTable()
-	lt.Partitioned = true
-	lt.Columns["id"] = &LiveColumn{Type: "integer"}
-	live.Tables["app.p"] = lt
+	for _, k := range []string{"app.p", "app.p_eu", "app.p_eu_2024", "app.p_us"} {
+		lt := newLiveTable()
+		lt.Columns["id"] = &LiveColumn{Type: "integer"}
+		live.Tables[k] = lt
+	}
+	live.Tables["app.p"].Partitioned, live.Tables["app.p_eu"].Partitioned = true, true
+	live.Partitions = map[string][]string{"app.p": {"app.p_eu", "app.p_us"}, "app.p_eu": {"app.p_eu_2024"}}
 	d := &schema.Database{Tables: map[string]*schema.Table{"app.p": {
-		Name: "p", PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"id"}},
+		Name: "p", PartitionBy: &schema.PartitionBy{Type: "list", Columns: []string{"id"}},
 		Columns: map[string]*schema.Column{"id": {Type: "int"}},
 		Indexes: []*schema.Index{{Name: "p_id_idx", Columns: []string{"id"}, Concurrently: true}},
 	}}}
 	p := Plan(live, d, false)
-	if len(p.Concurrent) != 0 || !findCreate(p, `create index if not exists "p_id_idx" on "app"."p"("id");`) {
-		t.Errorf("a partitioned table's index must be built in the transaction:\n%s", Render(p))
+	want := []string{
+		`create index if not exists "p_id_idx" on only "app"."p"("id");`,
+		`create index if not exists "p_eu_p_id_idx" on only "app"."p_eu"("id");`,
+		`create index concurrently if not exists "p_eu_2024_p_eu_p_id_idx" on "app"."p_eu_2024"("id");`,
+		`alter index "app"."p_eu_p_id_idx" attach partition "app"."p_eu_2024_p_eu_p_id_idx";`,
+		`alter index "app"."p_id_idx" attach partition "app"."p_eu_p_id_idx";`,
+		`create index concurrently if not exists "p_us_p_id_idx" on "app"."p_us"("id");`,
+		`alter index "app"."p_id_idx" attach partition "app"."p_us_p_id_idx";`,
 	}
-	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "cannot build it concurrently on a partitioned table") {
+	if strings.Join(p.Concurrent, "\n") != strings.Join(want, "\n") || len(p.Creates) != 0 || len(p.Warnings) != 0 {
+		t.Errorf("unexpected plan:\n%s\nwarnings: %+v", Render(p)+strings.Join(p.Concurrent, "\n"), p.Warnings)
+	}
+	live.Tables["app.p"].Indexes["p_id_idx"] = true
+	live.Tables["app.p"].IndexDefs = map[string]*LiveIndex{"p_id_idx": {Method: "btree", Keys: []string{"id"}, Descending: []bool{false}, NullsFirst: []bool{false}, Invalid: true}}
+	if p := Plan(live, d, false); strings.Join(p.Concurrent, "\n") != strings.Join(want, "\n") {
+		t.Errorf("an invalid partitioned index must be completed again:\n%s", strings.Join(p.Concurrent, "\n"))
+	}
+	live.Tables["app.p"].IndexDefs["p_id_idx"].Invalid = false
+	if p := Plan(live, d, false); len(p.Concurrent) != 0 {
+		t.Errorf("a valid index needs nothing:\n%s", strings.Join(p.Concurrent, "\n"))
+	}
+	d.Tables["app.p"].Indexes[0].Concurrently = false
+	live.Tables["app.p"].Indexes = map[string]bool{}
+	p = Plan(live, d, false)
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "set concurrently: true to build it on each partition") {
 		t.Errorf("unexpected warnings: %+v", p.Warnings)
+	}
+}
+
+func TestInvalidConcurrentIndexRebuilt(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["app"] = true
+	lt := newLiveTable()
+	lt.Columns["id"] = &LiveColumn{Type: "integer"}
+	lt.Indexes["t_id_idx"] = true
+	lt.IndexDefs = map[string]*LiveIndex{"t_id_idx": {Method: "btree", Keys: []string{"id"}, Descending: []bool{false}, NullsFirst: []bool{false}, Invalid: true}}
+	live.Tables["app.t"] = lt
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {
+		Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}},
+		Indexes: []*schema.Index{{Name: "t_id_idx", Columns: []string{"id"}, Concurrently: true}},
+	}}}
+	want := `drop index concurrently if exists "app"."t_id_idx";` + "\n" + `create index concurrently if not exists "t_id_idx" on "app"."t"("id");`
+	if got := strings.Join(Plan(live, d, false).Concurrent, "\n"); got != want {
+		t.Errorf("an index left invalid by an interrupted build must be rebuilt, got:\n%s", got)
 	}
 }
