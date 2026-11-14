@@ -61,3 +61,30 @@ schema app:
 		t.Errorf("columnComments = %v", d.Views["app.v"].ColumnComments)
 	}
 }
+
+func TestFunctionParallelCostRowsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  function f():
+    returns: setof int
+    language: sql
+    parallel: SAFE
+    cost: 5
+    rows: 2.5
+    body: select 1
+  function g():
+    returns: int
+    language: sql
+    body: select 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := d.Functions["app.f()"]
+	if f.Parallel != "safe" || f.Cost == nil || *f.Cost != 5 || f.Rows == nil || *f.Rows != 2.5 {
+		t.Errorf("unexpected function attributes: %q %v %v", f.Parallel, f.Cost, f.Rows)
+	}
+	if g := d.Functions["app.g()"]; g.Parallel != "" || g.Cost != nil || g.Rows != nil {
+		t.Errorf("unset attributes must stay unmanaged: %+v", g)
+	}
+}

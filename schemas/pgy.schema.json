@@ -688,6 +688,9 @@
         "immutable": { "type": "boolean", "description": "Marks the function IMMUTABLE." },
         "strict": { "type": "boolean", "description": "STRICT (returns null on null input). Omit to leave unmanaged." },
         "leakproof": { "type": "boolean", "description": "LEAKPROOF. Omit to leave unmanaged." },
+        "parallel": { "type": "string", "enum": ["safe", "restricted", "unsafe"], "description": "PARALLEL safety. Omit to leave unmanaged." },
+        "cost": { "type": "number", "exclusiveMinimum": 0, "description": "COST in cpu_operator_cost units. Omit to leave unmanaged." },
+        "rows": { "type": "number", "exclusiveMinimum": 0, "description": "ROWS estimate (set-returning functions only). Omit to leave unmanaged." },
         "set": {
           "type": "object",
           "description": "SET parameter = value clauses, e.g. search_path: public.",

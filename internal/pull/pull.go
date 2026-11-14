@@ -483,6 +483,15 @@ func (b *builder) routines() {
 			if lf.Leakproof {
 				add(m, "leakproof", boolean(true))
 			}
+			if lf.Parallel != "" && lf.Parallel != "unsafe" {
+				add(m, "parallel", str(lf.Parallel))
+			}
+			if lf.Cost != 0 && lf.Cost != 100 {
+				add(m, "cost", floatNum(lf.Cost))
+			}
+			if lf.Rows != 0 && lf.Rows != 1000 {
+				add(m, "rows", floatNum(lf.Rows))
+			}
 			addSet(m, lf.Config)
 			add(m, "body", literal(lf.Body))
 		}
