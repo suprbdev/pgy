@@ -43,6 +43,15 @@ type Live struct{
     DomainDefs   map[string]*LiveDomain
     Roles      map[string]bool
     RoleDefs   map[string]*LiveRole
+    // Owners: "rel:schema.name" (tables, views, sequences), "type:schema.name"
+    // (types, domains), "schema:name", "proc:<normalized signature>" -> role
+    Owners     map[string]string
+    // DefaultACLs: "role|schema|kind" (schema "" = global, kind tables |
+    // sequences | functions | types | schemas) -> grantee -> privilege set,
+    // owner entries excluded. DefaultACLRows marks keys with a pg_default_acl row.
+    DefaultACLs    map[string]map[string]map[string]bool
+    DefaultACLRows map[string]bool
+    CurrentUser    string
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
     RoleComments map[string]string // role name -> comment (pg_shdescription)
@@ -311,6 +320,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleDefs: map[string]*LiveRole{},
+        Owners: map[string]string{},
+        DefaultACLs: map[string]map[string]map[string]bool{},
+        DefaultACLRows: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
@@ -1448,6 +1460,65 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     cncRows.Close()
 
+    ownerQ := `
+        select 'rel:' || n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner)
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind in ('r', 'p', 'v', 'm', 'S')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'type:' || n.nspname || '.' || t.typname, pg_get_userbyid(t.typowner)
+        from pg_type t join pg_namespace n on n.oid = t.typnamespace
+        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'schema:' || n.nspname, pg_get_userbyid(n.nspowner)
+        from pg_namespace n
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    ownerRows, err := pool.Query(ctx, ownerQ)
+    if err != nil { return nil, err }
+    for ownerRows.Next() {
+        var key, owner string
+        if err := ownerRows.Scan(&key, &owner); err != nil {
+            ownerRows.Close()
+            return nil, err
+        }
+        if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+        l.Owners[key] = owner
+    }
+    ownerRows.Close()
+
+    dAclQ := `
+        select pg_get_userbyid(d.defaclrole), coalesce(n.nspname, ''),
+               case d.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions'
+                    when 'T' then 'types' when 'n' then 'schemas' else d.defaclobjtype::text end,
+               coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
+               coalesce(lower(a.privilege_type), ''), coalesce(a.grantee = d.defaclrole, false)
+        from pg_default_acl d
+        left join pg_namespace n on n.oid = d.defaclnamespace
+        left join lateral aclexplode(d.defaclacl) a on true
+    `
+    dAclRows, err := pool.Query(ctx, dAclQ)
+    if err != nil { return nil, err }
+    for dAclRows.Next() {
+        var role, nsp, kind, grantee, priv string
+        var isOwner bool
+        if err := dAclRows.Scan(&role, &nsp, &kind, &grantee, &priv, &isOwner); err != nil {
+            dAclRows.Close()
+            return nil, err
+        }
+        key := role + "|" + nsp + "|" + kind
+        l.DefaultACLRows[key] = true
+        if grantee == "" || isOwner { continue }
+        addLiveGrant(l.DefaultACLs, key, grantee, priv)
+    }
+    dAclRows.Close()
+    if err := pool.QueryRow(ctx, "select current_user").Scan(&l.CurrentUser); err != nil { return nil, err }
+
     extMemQ := `
         select 'rel:' || n.nspname || '.' || c.relname
         from pg_depend d join pg_class c on c.oid = d.objid join pg_namespace n on n.oid = c.relnamespace
@@ -1798,6 +1869,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     
+    plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
+
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
     extNames := make([]string, 0, len(desired.Extensions))
     for _, ext := range desired.Extensions {
@@ -2092,6 +2165,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
     planPublications(plan, live, desired, opts)
+    plan.Alters = append(plan.Alters, planOwners(live, desired)...)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
     if opts.Unsafe && opts.Prune {
@@ -2855,6 +2929,103 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
 func constraintRecreated(lt *LiveTable, name, def string, unsafe bool) bool {
     liveDef, ok := lt.ConstraintDefs[name]
     return unsafe && ok && lt.Constraints[name] && !constraintDefsEqual(def, liveDef)
+}
+
+// planOwners emits ALTER ... OWNER TO for objects whose YAML owner differs
+// from the live owner (or that this plan creates). It runs before grants,
+// since a new owner changes who holds the implicit owner privileges.
+func planOwners(live *Live, desired *schema.Database) []string {
+    out := []string{}
+    owner := func(kind, target, want, liveKey string) {
+        if want == "" || live.Owners[liveKey] == want { return }
+        out = append(out, fmt.Sprintf("alter %s %s owner to %s;", kind, target, grantRole(want)))
+    }
+    for _, s := range sortedKeys(desired.SchemaOwners) {
+        owner("schema", pqIdent(s), desired.SchemaOwners[s], "schema:"+s)
+    }
+    for _, k := range sortedKeys(desired.Types) {
+        if td := desired.Types[k]; td != nil { owner("type", pqIdent(k), td.Owner, "type:"+k) }
+    }
+    for _, k := range sortedKeys(desired.Domains) {
+        if dm := desired.Domains[k]; dm != nil { owner("domain", pqIdent(k), dm.Owner, "type:"+k) }
+    }
+    for _, k := range sortedKeys(desired.Sequences) {
+        if sq := desired.Sequences[k]; sq != nil { owner("sequence", pqIdent(k), sq.Owner, "rel:"+k) }
+    }
+    for _, k := range sortedKeys(desired.Tables) {
+        if dt := desired.Tables[k]; dt != nil { owner("table", pqIdent(k), dt.Owner, "rel:"+k) }
+    }
+    for _, k := range sortedKeys(desired.Views) {
+        if vw := desired.Views[k]; vw != nil {
+            kind := "view"
+            if vw.Materialized { kind = "materialized view" }
+            owner(kind, pqIdent(k), vw.Owner, "rel:"+k)
+        }
+    }
+    for _, k := range sortedKeys(desired.Functions) {
+        if f := desired.Functions[k]; f != nil {
+            name := schema.RoutineName(k)
+            owner("function", pqIdent(name)+grantFuncArgs(f.ArgsSig), f.Owner, "proc:"+normalizeFunctionSignature(name+f.ArgsSig))
+        }
+    }
+    for _, k := range sortedKeys(desired.Procedures) {
+        if p := desired.Procedures[k]; p != nil {
+            name := schema.RoutineName(k)
+            owner("procedure", pqIdent(name)+grantFuncArgs(p.ArgsSig), p.Owner, "proc:"+normalizeFunctionSignature(name+p.ArgsSig))
+        }
+    }
+    return out
+}
+
+// defaultACLImplicit is what a role's objects of each kind grant PUBLIC when
+// no global pg_default_acl row overrides it.
+var defaultACLImplicit = map[string]string{"functions": "execute", "types": "usage"}
+
+// planDefaultPrivileges reconciles ALTER DEFAULT PRIVILEGES for the roles
+// each defaultPrivileges entry lists; unlisted grantees are unmanaged. It is
+// emitted right after schemas are created so objects this plan creates
+// already receive the defaults.
+func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
+    revokes, grants := []string{}, []string{}
+    for _, dp := range desired.DefaultPrivileges {
+        if dp == nil { continue }
+        role := dp.ForRole
+        if role == "" { role = live.CurrentUser }
+        schemas := dp.Schemas
+        if len(schemas) == 0 { schemas = []string{""} }
+        for _, kind := range sortedKeys(dp.Grants) {
+            for _, nsp := range schemas {
+                key := role + "|" + nsp + "|" + kind
+                liveG := map[string]map[string]bool{}
+                for r, privs := range live.DefaultACLs[key] { liveG[r] = privs }
+                if priv, ok := defaultACLImplicit[kind]; ok && nsp == "" && !live.DefaultACLRows[key] {
+                    liveG["public"] = map[string]bool{priv: true}
+                }
+                prefix := "alter default privileges"
+                if dp.ForRole != "" { prefix += " for role " + grantRole(dp.ForRole) }
+                if nsp != "" { prefix += " in schema " + pqIdent(nsp) }
+                for _, grantee := range sortedKeys(dp.Grants[kind]) {
+                    want := map[string]bool{}
+                    for _, p := range dp.Grants[kind][grantee] { want[strings.ToLower(p)] = true }
+                    have := liveG[strings.ToLower(grantee)]
+                    missing, extra := []string{}, []string{}
+                    for _, p := range sortedKeys(want) {
+                        if !have[p] { missing = append(missing, p) }
+                    }
+                    for _, p := range sortedKeys(have) {
+                        if !want[p] { extra = append(extra, p) }
+                    }
+                    if len(extra) > 0 {
+                        revokes = append(revokes, fmt.Sprintf("%s revoke %s on %s from %s;", prefix, strings.Join(extra, ", "), kind, grantRole(grantee)))
+                    }
+                    if len(missing) > 0 {
+                        grants = append(grants, fmt.Sprintf("%s grant %s on %s to %s;", prefix, strings.Join(missing, ", "), kind, grantRole(grantee)))
+                    }
+                }
+            }
+        }
+    }
+    return append(revokes, grants...)
 }
 
 // planGrants reconciles desired grants against live ACLs for schemas, tables,

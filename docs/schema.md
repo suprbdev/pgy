@@ -846,6 +846,35 @@ Behavior:
 - Grant/revoke statements are emitted after all object creation and FK alters.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
+### Ownership
+
+Schemas (in the `schema <name>:` block or `schemas:` map entry), tables, views, materialized views, sequences, functions, procedures, types and domains accept `owner: <role>`. A differing live owner emits `ALTER ... OWNER TO`, before any grants. Omitted = unmanaged.
+
+```yaml
+schema app:
+  owner: app_owner
+  table orders:
+    owner: app_owner
+    columns:
+      id: {type: bigint}
+```
+
+### Default Privileges
+
+A top-level `defaultPrivileges:` list manages `ALTER DEFAULT PRIVILEGES`, the privileges objects receive automatically when they are created later.
+
+```yaml
+defaultPrivileges:
+  - for: app_owner            # role creating the objects (default: the connecting role)
+    in: [app]                 # schemas (omit for all schemas)
+    tables: {app_read: [select], app_rw: [select, insert, update, delete]}
+    sequences: {app_rw: [usage]}
+  - for: app_owner
+    functions: {public: []}   # stop granting EXECUTE to PUBLIC by default
+```
+
+Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them.
+
 ### Column-Level Grants
 
 A column can carry its own `grants:` block. It emits PostgreSQL column-privilege syntax and is reconciled against the live column ACLs (`pg_attribute.attacl`) with the same authoritative semantics as object-level grants:

@@ -27,6 +27,23 @@
         ]
       }
     },
+    "defaultPrivileges": {
+      "description": "ALTER DEFAULT PRIVILEGES: privileges granted automatically on objects created later. Grantees not listed are unmanaged; [] revokes everything from a grantee.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "for": { "type": "string", "description": "Role whose future objects are affected (default: the connecting role)." },
+          "in": { "description": "Schema(s); omit for all schemas.", "oneOf": [ { "type": "string" }, { "$ref": "#/definitions/stringList" } ] },
+          "tables": { "$ref": "#/definitions/grants" },
+          "sequences": { "$ref": "#/definitions/grants" },
+          "functions": { "$ref": "#/definitions/grants" },
+          "types": { "$ref": "#/definitions/grants" },
+          "schemas": { "$ref": "#/definitions/grants" }
+        },
+        "additionalProperties": false
+      }
+    },
     "publications": {
       "description": "Logical replication publications (CREATE PUBLICATION). When present, --unsafe --prune drops publications not listed.",
       "type": "object",
@@ -166,9 +183,10 @@
       "additionalProperties": false
     },
     "schemasEntry": {
-      "description": "A schema under the `schemas:` map: optional grants/comment plus tables keyed by plain table name.",
+      "description": "A schema under the `schemas:` map: optional grants/comment/owner plus tables keyed by plain table name.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER SCHEMA ... OWNER TO), diffed against live." },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
       },
@@ -178,6 +196,7 @@
       "description": "A `schema <name>:` block containing table/function/procedure/type/view/sequence/domain declarations.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
       },
@@ -199,6 +218,7 @@
     "table": {
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "columns": {
           "description": "Columns as a map of name to spec, or a list of specs with explicit `name`.",
           "oneOf": [
@@ -271,6 +291,7 @@
       "description": "Table entry in the `tables:` list format.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "name": { "type": "string", "minLength": 1 },
         "schema": { "type": "string" },
         "columns": {
@@ -614,6 +635,7 @@
       "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "returns": { "type": "string", "description": "Return type, e.g. trigger, jsonb, setof record." },
         "language": { "type": "string", "description": "e.g. sql, plpgsql." },
         "security": { "type": "string", "enum": ["definer", "invoker"] },
@@ -643,6 +665,7 @@
       "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "language": { "type": "string" },
         "security": { "type": "string", "enum": ["definer", "invoker"] },
         "set": {
@@ -662,6 +685,7 @@
       "description": "Body of a `type <name>:` declaration (enum, composite or range).",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "enum": ["enum", "composite", "range"] },
         "subtype": { "type": "string", "description": "Range: element type, e.g. timestamptz." },
         "subtypeOpclass": { "type": "string", "description": "Range: btree operator class for the subtype." },
@@ -695,6 +719,7 @@
       "description": "Body of a `view <name>:` or `materialized view <name>:` declaration.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "query": { "type": "string", "description": "The SELECT statement defining the view." },
         "replace": {
           "type": "boolean",
@@ -730,6 +755,7 @@
       "description": "Body of a `sequence <name>:` declaration.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "as": { "type": "string", "enum": ["smallint", "integer", "bigint"] },
         "increment": { "type": ["integer", "string"] },
         "minValue": { "type": ["integer", "string"] },
@@ -794,6 +820,7 @@
       "description": "Body of a `domain <name>:` declaration.",
       "type": "object",
       "properties": {
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "description": "Underlying base type." },
         "as": { "type": "string", "description": "Alias for type." },
         "collate": { "type": "string" },
