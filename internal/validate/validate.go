@@ -379,11 +379,15 @@ func columnName(entry string) string {
 		base = strings.TrimSpace(base[len("period "):])
 	}
 	for _, r := range base {
-		if !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+		if !isIdentRune(r) {
 			return ""
 		}
 	}
 	return base
+}
+
+func isIdentRune(r rune) bool {
+	return r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
 }
 
 // singleOwnerObjects returns the objects that a later file replaces
