@@ -151,3 +151,14 @@ func TestPruneKeepsConfiguredMigrationsTable(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneKeepsInternalRoutines(t *testing.T) {
+	live := pruneLive()
+	live.FunctionDefs[normalizeFunctionSignature("app.myrange(double precision, double precision)")] = &LiveFunction{Kind: "f", Internal: true, Signature: "app.myrange(double precision, double precision)"}
+	p := PlanWith(live, pruneDesired(), Options{Unsafe: true, Prune: true})
+	for _, d := range p.Drops {
+		if strings.Contains(d, "myrange") {
+			t.Errorf("a range type's constructor must not be pruned: %s", d)
+		}
+	}
+}

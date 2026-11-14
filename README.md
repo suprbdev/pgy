@@ -78,6 +78,14 @@ If `--schemas`/`PGY_SCHEMAS`/config are not set, pgy auto-discovers all `.yml`/`
 pgy init --dsn "$PG_DSN"            # creates --migrations-table (default pgy.migrations)
 ```
 
+- Adopt an existing database: generate YAML from it (one file per schema plus `database.yml`). The output diffs clean against the database it came from. Objects pgy cannot express, such as functions written in C, are listed on stderr:
+
+```
+pgy pull --dsn "$PG_DSN" --out ./schemas                 # all schemas
+pgy pull --dsn "$PG_DSN" --schema app --schema billing   # print selected schemas to stdout
+pgy pull --dsn "$PG_DSN" --out ./schemas --owners --roles --force
+```
+
 - Check schema files offline (JSON Schema, missing columns, unresolvable `dependsOn`, cycles; no database needed). Exits 1 on errors, so it works as a pre-commit hook or CI step:
 
 ```
