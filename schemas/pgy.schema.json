@@ -261,6 +261,7 @@
           "description": "REPLICA IDENTITY: default, full, nothing or index <name>.",
           "pattern": "^(default|full|nothing|(using )?index .+)$"
         },
+        "clusterOn": { "type": "string", "description": "Index to mark for CLUSTER (ALTER TABLE ... CLUSTER ON); none removes the mark." },
         "constraints": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/constraint" }
@@ -345,6 +346,7 @@
           "description": "REPLICA IDENTITY: default, full, nothing or index <name>.",
           "pattern": "^(default|full|nothing|(using )?index .+)$"
         },
+        "clusterOn": { "type": "string", "description": "Index to mark for CLUSTER (ALTER TABLE ... CLUSTER ON); none removes the mark." },
         "constraints": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/constraint" }
@@ -398,6 +400,7 @@
         "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the column, e.g. C or und-x-icu. Changing it on a live column requires --unsafe." },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"], "description": "TOAST compression method (applies to newly written values)." },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"], "description": "Column storage mode (SET STORAGE)." },
+        "statisticsTarget": { "type": "integer", "minimum": -1, "description": "Per-column statistics target (SET STATISTICS); -1 restores the default." },
         "virtual": {
           "type": "boolean",
           "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
@@ -434,6 +437,7 @@
         "collate": { "type": "string", "minLength": 1 },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"] },
+        "statisticsTarget": { "type": "integer", "minimum": -1 },
         "using": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
@@ -572,6 +576,10 @@
           "additionalProperties": false
         },
         "comment": { "type": "string", "description": "COMMENT ON TRIGGER text (diffed against live)." },
+        "enabled": {
+          "description": "Trigger state: true/origin (default), false/disabled, replica or always.",
+          "oneOf": [ { "type": "boolean" }, { "type": "string", "enum": ["origin", "disabled", "replica", "always"] } ]
+        },
         "procedure": {
           "type": "string",
           "description": "Trigger function to execute, e.g. public.set_updated_at()."
@@ -775,6 +783,11 @@
           "type": "object",
           "description": "Plain views: triggers, typically timing: instead of, to make the view writable.",
           "additionalProperties": { "$ref": "#/definitions/trigger" }
+        },
+        "columnComments": {
+          "type": "object",
+          "description": "Views: COMMENT ON COLUMN per view column.",
+          "additionalProperties": { "type": "string" }
         },
         "rules": {
           "type": "object",

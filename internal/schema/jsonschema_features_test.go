@@ -39,6 +39,7 @@ schema public:
   table orders:
     owner: app_owner
     replicaIdentity: index orders_cover
+    clusterOn: orders_cover
     statistics:
       orders_qty_price: {kinds: [dependencies], columns: [qty, price], comment: correlated}
     unlogged: false
@@ -46,7 +47,7 @@ schema public:
     columns:
       id: {type: int}
       price: {type: numeric}
-      qty: {type: int}
+      qty: {type: int, statisticsTarget: 1000}
       total: {type: numeric, generated: price * qty}
       doubled: {type: int, generated: qty * 2, virtual: true}
       code: {type: text, collate: C, compression: lz4, storage: external}
@@ -75,6 +76,8 @@ schema public:
         referencing: {old: old_rows, new: new_rows}
         procedure: public.audit()
         comment: audit trail
+        enabled: replica
+      orders_off: {timing: before, events: [insert], level: row, procedure: public.audit(), enabled: false}
     policies:
       tenant: {as: restrictive, using: "true", comment: tenant isolation}
     rules:
@@ -86,6 +89,7 @@ schema public:
     securityInvoker: true
     securityBarrier: false
     checkOption: cascaded
+    columnComments: {"?column?": the constant}
   materialized view order_stats:
     query: select 1 as id
     withData: false

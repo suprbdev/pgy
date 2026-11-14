@@ -237,6 +237,7 @@ extensions:
 | `collate` | string | `COLLATE` for the column (e.g. `C`, `und-x-icu`). Changing it on a live column emits `ALTER COLUMN ... TYPE ... COLLATE` and requires `--unsafe`. Omitted = type default |
 | `compression` | string | `pglz`, `lz4` or `default`: TOAST compression method. Diffed against live → `ALTER COLUMN ... SET COMPRESSION` (affects newly written values only). Omitted = unmanaged |
 | `storage` | string | `plain`, `external`, `extended` or `main` → `ALTER COLUMN ... SET STORAGE`, diffed against live. Omitted = unmanaged |
+| `statisticsTarget` | integer | Per-column planner statistics target → `ALTER COLUMN ... SET STATISTICS <n>` (0 disables collection, -1 restores the default), diffed against live. Omitted = unmanaged |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
@@ -291,6 +292,16 @@ schema app:
         columns: [tenant_id, kind]         # columns and/or expressions such as lower(name)
         comment: correlated columns
 ```
+
+#### Clustering
+
+```yaml
+schema app:
+  table events:
+    clusterOn: events_created_idx   # or none to remove the mark
+```
+
+`clusterOn` marks the index a bare `CLUSTER` uses (`ALTER TABLE ... CLUSTER ON`, or `SET WITHOUT CLUSTER` for `none`), diffed against live. pgy only sets the mark; run `CLUSTER` yourself, since it rewrites the table under an exclusive lock. Partitioned tables can't be marked (mark each partition), and `pgy validate` rejects partial indexes.
 
 `replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects in the table's schema. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
 
@@ -410,7 +421,10 @@ triggers:
     referencing:       # optional transition tables (AFTER triggers)
       old: old_rows
       new: new_rows
+    enabled: true      # optional: true/origin | false/disabled | replica | always
 ```
+
+`enabled` manages the trigger's firing state (`ALTER TABLE ... ENABLE / DISABLE [REPLICA | ALWAYS] TRIGGER`), diffed against live. `replica` fires only when `session_replication_role = replica` (logical replication apply), `always` fires in both modes. Omitted = unmanaged.
 
 Events may name columns, `"update of status, total"` (quote it in a YAML flow list, since the comma would otherwise split it). `referencing` emits `REFERENCING OLD TABLE AS ... NEW TABLE AS ...`, which statement-level `AFTER` triggers use to see every affected row at once.
 
@@ -995,6 +1009,7 @@ schema public:
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
+| `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 

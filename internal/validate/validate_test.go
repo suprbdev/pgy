@@ -151,3 +151,41 @@ schema app:
 		t.Errorf("identical duplicate declarations must not warn:\n%s", got)
 	}
 }
+
+func TestValidateClusterOn(t *testing.T) {
+	p := write(t, t.TempDir(), "c.yml", `
+schema app:
+  table a:
+    clusterOn: a_part
+    columns: {x: {type: int}}
+    indexes:
+      a_part: {columns: [x], where: x > 0}
+  table b:
+    clusterOn: b_missing
+    columns: {x: {type: int}}
+  table p:
+    clusterOn: p_x
+    columns: {x: {type: int}}
+    indexes:
+      p_x: {columns: [x]}
+    partitionBy: {type: range, columns: [x]}
+  table ok:
+    clusterOn: ok_x
+    columns: {x: {type: int}}
+    indexes:
+      ok_x: {columns: [x]}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"clusterOn index a_part is partial",
+		"clusterOn index b_missing is not declared on this table",
+		"clusterOn is not supported on partitioned tables",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "ok_x") {
+		t.Errorf("valid clusterOn flagged:\n%s", got)
+	}
+}

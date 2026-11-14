@@ -242,6 +242,22 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, obj, "replica identity index %s is not declared on this table", idx)
 			}
 		}
+		if idx := t.ClusterOn; idx != "" && !strings.EqualFold(idx, "none") {
+			found := false
+			for _, ix := range t.Indexes {
+				if ix != nil && ix.Name == idx {
+					found = true
+					if ix.Where != "" {
+						add(Error, obj, "clusterOn index %s is partial; PostgreSQL cannot cluster on it", idx)
+					}
+				}
+			}
+			if t.PartitionBy != nil {
+				add(Error, obj, "clusterOn is not supported on partitioned tables (cluster each partition instead)")
+			} else if !found {
+				add(Warning, obj, "clusterOn index %s is not declared on this table", idx)
+			}
+		}
 		if t.PartitionOf != "" && d.Tables[t.PartitionOf] == nil {
 			add(Warning, obj, "partition of %s, which no schema file declares", t.PartitionOf)
 		}
