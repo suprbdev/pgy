@@ -471,9 +471,23 @@
         "timing": { "type": "string", "enum": ["before", "after"] },
         "events": {
           "type": "array",
-          "items": { "type": "string", "enum": ["insert", "update", "delete", "truncate"] }
+          "items": {
+            "anyOf": [
+              { "type": "string", "enum": ["insert", "update", "delete", "truncate"] },
+              { "type": "string", "pattern": "^[Uu][Pp][Dd][Aa][Tt][Ee] [Oo][Ff] .+$", "description": "UPDATE OF col1, col2" }
+            ]
+          }
         },
-        "level": { "type": "string", "enum": ["row", "statement"] },
+        "level": { "type": "string", "enum": ["row", "statement"], "description": "Default statement, as in PostgreSQL." },
+        "referencing": {
+          "type": "object",
+          "description": "Transition tables for AFTER triggers: REFERENCING OLD TABLE AS <old> NEW TABLE AS <new>.",
+          "properties": {
+            "old": { "type": "string", "minLength": 1 },
+            "new": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
         "procedure": {
           "type": "string",
           "description": "Trigger function to execute, e.g. public.set_updated_at()."

@@ -201,6 +201,11 @@ schema SCH:
         events: [truncate]
         level: statement
         procedure: SCH.touch()
+      t_audit:
+        timing: after
+        events: [update]
+        referencing: {old: old_rows, new: new_rows}
+        procedure: SCH.touch()
     rowLevelSecurity: true
     policies:
       p1:

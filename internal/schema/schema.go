@@ -266,6 +266,8 @@ type Trigger struct {
     Constraint bool        // CREATE CONSTRAINT TRIGGER (must be AFTER ... FOR EACH ROW)
     Deferrable bool
     InitiallyDeferred bool // implies deferrable
+    OldTable string        // REFERENCING OLD TABLE AS (AFTER triggers)
+    NewTable string        // REFERENCING NEW TABLE AS (AFTER triggers)
 }
 
 type Extension struct {
@@ -1087,6 +1089,10 @@ func parseTriggers(v any) []*Trigger {
                 if c, ok := dm["constraint"].(bool); ok { tr.Constraint = c }
                 if d, ok := dm["deferrable"].(bool); ok { tr.Deferrable = d }
                 if id, ok := dm["initiallyDeferred"].(bool); ok { tr.InitiallyDeferred = id }
+                if ref, ok := dm["referencing"].(map[string]any); ok {
+                    if s, ok := ref["old"].(string); ok { tr.OldTable = strings.TrimSpace(s) }
+                    if s, ok := ref["new"].(string); ok { tr.NewTable = strings.TrimSpace(s) }
+                }
             }
             out = append(out, tr)
         }

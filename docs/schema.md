@@ -386,10 +386,15 @@ triggers:
   <trigger_name>:
     timing: before     # before | after
     events: [insert, update, delete]
-    level: row         # row | statement
+    level: row         # row | statement (default statement, as in PostgreSQL)
     procedure: public.set_updated_at()
     when: old.updated_at is distinct from new.updated_at   # optional WHEN (condition) guard
+    referencing:       # optional transition tables (AFTER triggers)
+      old: old_rows
+      new: new_rows
 ```
+
+Events may name columns, `"update of status, total"` (quote it in a YAML flow list, since the comma would otherwise split it). `referencing` emits `REFERENCING OLD TABLE AS ... NEW TABLE AS ...`, which statement-level `AFTER` triggers use to see every affected row at once.
 
 Triggers are compared against the live database by **definition**, not just name: if a live trigger's `pg_get_triggerdef()` no longer matches the desired trigger (timing, events, level, `when:` guard, procedure, deferrability), it is dropped and recreated in the same migration. The comparison normalizes cosmetic differences (case, quoting, parentheses, type casts, `public.` qualifiers, event order, `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE`), so an unchanged trigger emits no SQL.
 
