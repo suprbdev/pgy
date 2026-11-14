@@ -70,3 +70,31 @@ func TestBuildTable(t *testing.T) {
 		t.Errorf("a serial column's sequence must not be pulled separately:\n%s", got)
 	}
 }
+
+func TestBuildQuotedTriggers(t *testing.T) {
+	lt := &diff.LiveTable{
+		Columns: map[string]*diff.LiveColumn{"a": {Type: "integer"}},
+		Triggers: map[string]string{
+			"Upd Trg": `CREATE TRIGGER "Upd Trg" BEFORE UPDATE OF a ON app."Order Items" FOR EACH ROW WHEN ((old.a IS DISTINCT FROM new.a)) EXECUTE FUNCTION app.touch()`,
+			"Ref Trg": `CREATE TRIGGER "Ref Trg" AFTER UPDATE ON app."Order Items" REFERENCING OLD TABLE AS "Old Rows" NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION app.touch()`,
+		},
+	}
+	live := &diff.Live{
+		Schemas: map[string]bool{"app": true},
+		Tables:  map[string]*diff.LiveTable{"app.Order Items": lt},
+		Details: &diff.LiveDetails{},
+	}
+	res, err := Build(live, Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) > 0 {
+		t.Fatalf("quoted triggers must parse, got warnings: %v", res.Warnings)
+	}
+	got := string(res.Files[0].Content)
+	for _, want := range []string{"Upd Trg:", "when: (old.a IS DISTINCT FROM new.a)", "referencing: {old: Old Rows, new: new_rows}"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

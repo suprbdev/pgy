@@ -884,7 +884,22 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 	}
 }
 
-var triggerRe = regexp.MustCompile(`(?s)^CREATE (CONSTRAINT )?TRIGGER (\S+) (BEFORE|AFTER|INSTEAD OF) (.+?) ON (\S+)(.*?) FOR EACH (ROW|STATEMENT)(?: WHEN \((.*)\))? EXECUTE (?:FUNCTION|PROCEDURE) (.+)$`)
+const identPart = `(?:"(?:[^"]|"")*"|[^\s".]+)`
+
+var (
+	triggerRe = regexp.MustCompile(`(?s)^CREATE (CONSTRAINT )?TRIGGER (` + identPart + `) (BEFORE|AFTER|INSTEAD OF) (.+?) ON ((?:` + identPart + `\.)*` + identPart + `)(.*?) FOR EACH (ROW|STATEMENT)(?: WHEN \((.*)\))? EXECUTE (?:FUNCTION|PROCEDURE) (.+)$`)
+	oldTableRe = regexp.MustCompile(`OLD TABLE AS (` + identPart + `)`)
+	newTableRe = regexp.MustCompile(`NEW TABLE AS (` + identPart + `)`)
+)
+
+// unquoteIdent removes the double quotes PostgreSQL puts around an
+// identifier, undoubling embedded quotes.
+func unquoteIdent(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	}
+	return s
+}
 
 func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 	trs := newMap()
@@ -914,13 +929,13 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 		add(tr, "events", list(events))
 		add(tr, "level", str(strings.ToLower(m[7])))
 		middle := m[6]
-		if mm := regexp.MustCompile(`OLD TABLE AS (\S+)`).FindStringSubmatch(middle); mm != nil || strings.Contains(middle, "NEW TABLE AS") {
+		if mm := oldTableRe.FindStringSubmatch(middle); mm != nil || strings.Contains(middle, "NEW TABLE AS") {
 			ref := flowMap()
 			if mm != nil {
-				add(ref, "old", str(mm[1]))
+				add(ref, "old", str(unquoteIdent(mm[1])))
 			}
-			if nn := regexp.MustCompile(`NEW TABLE AS (\S+)`).FindStringSubmatch(middle); nn != nil {
-				add(ref, "new", str(nn[1]))
+			if nn := newTableRe.FindStringSubmatch(middle); nn != nil {
+				add(ref, "new", str(unquoteIdent(nn[1])))
 			}
 			add(tr, "referencing", ref)
 		}

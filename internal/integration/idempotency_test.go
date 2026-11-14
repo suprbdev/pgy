@@ -321,5 +321,18 @@ schema SCH:
       'odd"idx': {columns: [Mixed]}
     comment: it's quoted
 `,
+		"triggers": `
+schema SCH:
+  function touch():
+    returns: trigger
+    language: plpgsql
+    body: begin return null; end
+  table Order Items:
+    columns:
+      Weird Col: {type: int}
+    triggers:
+      Upd Trg: {timing: before, events: [update of "Weird Col"], level: row, when: "old.\"Weird Col\" is distinct from new.\"Weird Col\"", procedure: SCH.touch()}
+      Ref Trg: {timing: after, events: [update], referencing: {old: Old Rows, new: new_rows}, procedure: SCH.touch()}
+`,
 	})
 }

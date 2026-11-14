@@ -3814,7 +3814,7 @@ func triggerEnableStmt(fq, name, want, have string) string {
 // renderTrigger renders a table trigger's CREATE [CONSTRAINT] TRIGGER statement.
 func renderTrigger(fq string, tr *schema.Trigger) string {
     trName := truncateIdent(tr.Name)
-    events := strings.ToUpper(strings.Join(canonicalTriggerEvents(tr.Events), " or "))
+    events := renderTriggerEvents(canonicalTriggerEvents(tr.Events))
     when := ""
     if tr.When != "" { when = fmt.Sprintf(" when (%s)", tr.When) }
     if tr.Constraint {
@@ -4392,6 +4392,32 @@ func triggerDefsEqual(desired, live string) bool {
         return strings.ReplaceAll(s, "executefunction", "executeprocedure")
     }
     return n(desired) == n(live)
+}
+
+var simpleIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
+
+// renderTriggerEvents joins trigger events with OR, upper-casing the event
+// keywords only. UPDATE OF column names keep their spelling: quoted names
+// pass through, bare names that need quoting are quoted, and simple bare
+// names are left for PostgreSQL to fold.
+func renderTriggerEvents(events []string) string {
+    out := make([]string, 0, len(events))
+    for _, e := range events {
+        e = strings.TrimSpace(e)
+        lower := strings.ToLower(e)
+        if !strings.HasPrefix(lower, "update of ") {
+            out = append(out, strings.ToUpper(e))
+            continue
+        }
+        cols := []string{}
+        for _, c := range splitTopLevel(e[len("update of "):]) {
+            c = strings.TrimSpace(c)
+            if !strings.HasPrefix(c, `"`) && !simpleIdentRe.MatchString(c) { c = pqIdent(c) }
+            cols = append(cols, c)
+        }
+        out = append(out, "UPDATE OF "+strings.Join(cols, ", "))
+    }
+    return strings.Join(out, " OR ")
 }
 
 // canonicalTriggerEvents orders trigger events the way pg_get_triggerdef()
