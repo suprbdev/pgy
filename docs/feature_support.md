@@ -57,6 +57,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 
 ## Removing objects
 
+- [x] **Renames** (`renamedFrom` on tables, columns, views, materialized views, sequences, types, domains, indexes, constraints, foreign keys, functions and procedures → `ALTER ... RENAME` / `SET SCHEMA`; enum `renamedLabels` → `RENAME VALUE`; applied only when the old name exists and the new one does not, emitted first so the rest of the plan and `--prune` see the renamed object)
 - [x] **Pruning** (`diff --unsafe --prune` drops undeclared tables, views, materialized views, functions, procedures, sequences, domains and types in schemas the YAML uses, plus undeclared triggers, constraints and indexes on declared tables. Aggregates are pruned like functions. Extension members, partitions, primary keys, constraint-backed or inherited indexes/constraints/triggers, column-owned sequences, window functions and `pgy.migrations` are never dropped. One `DROP` per object kind, so dependencies within a kind need no ordering)
 
 ## Level 4: Specialized Configurations

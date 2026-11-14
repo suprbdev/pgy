@@ -1215,6 +1215,44 @@ Column and domain `collate` values may name these collations schema-qualified; q
 
 ---
 
+## Renames
+
+Without a hint, a renamed object looks like a new object plus an undeclared old one: pgy creates the new one, and `--unsafe --prune` would drop the old one along with its data. Declare the previous name with `renamedFrom` and pgy emits `ALTER ... RENAME` instead:
+
+```yaml
+schema app:
+  table products:
+    renamedFrom: items             # ALTER TABLE app.items RENAME TO products
+    columns:
+      quantity: {type: int, renamedFrom: qty}
+    indexes:
+      products_quantity_idx: {columns: [quantity], renamedFrom: items_qty_idx}
+    constraints:
+      products_quantity_check: {type: check, expression: quantity >= 0, renamedFrom: items_qty_check}
+  table archive:
+    renamedFrom: legacy.archive    # a qualified name moves it: SET SCHEMA, then RENAME
+    columns:
+      id: {type: int}
+  type feeling:
+    renamedFrom: mood
+    type: enum
+    labels: [ok, so_so]
+    renamedLabels: {so_so: meh}    # ALTER TYPE ... RENAME VALUE 'meh' TO 'so_so'
+  function double_it(x int):
+    renamedFrom: twice             # same arguments, new name
+    returns: int
+    language: sql
+    body: select x * 2
+```
+
+`renamedFrom` is accepted on tables, columns, views, materialized views, sequences, types, domains, indexes, constraints, foreign keys, functions and procedures. A bare name is looked up in the object's own schema; a qualified one may name another schema. Enum labels are renamed with `renamedLabels` (new label → old label).
+
+- A rename happens only when the old name exists in the database and the new name does not. Once it has been applied the key is a no-op, so it can stay in the YAML until every environment has migrated.
+- Renames are emitted right after schema creation, before anything else in the migration. The rest of the diff, including `--prune`, then treats the object as already existing under its new name. References PostgreSQL updates on its own (foreign keys, triggers, indexes and constraints naming a renamed column, columns of a renamed type) don't cause any churn.
+- Anything else about the object is diffed as usual. Change a column's type and its name in the same edit, and the plan renames the column, then alters its type.
+- A domain's or table's existing constraints keep their names when the object is renamed. Rename them too, with `renamedFrom` on the constraint, if you want them to follow.
+- `pgy validate` rejects a `renamedFrom` naming an object the YAML still declares, two objects renamed from the same name, and `renamedLabels` that don't match the enum's labels.
+
 ## Dependencies
 
 All object types support `dependsOn` to control creation order. The topological sort resolves these before generating SQL.

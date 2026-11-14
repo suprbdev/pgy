@@ -225,3 +225,41 @@ schema app:
 		t.Errorf("missing duplicate check error in:\n%s", got)
 	}
 }
+
+func TestValidateRenames(t *testing.T) {
+	p := write(t, t.TempDir(), "r.yml", `
+schema app:
+  table a:
+    renamedFrom: b
+    columns:
+      x: {type: int, renamedFrom: y}
+      y: {type: int}
+      z: {type: int, renamedFrom: w}
+      v: {type: int, renamedFrom: w}
+  table b:
+    columns: {id: {type: int}}
+  table c:
+    renamedFrom: old
+    columns: {id: {type: int}}
+  view d:
+    renamedFrom: old
+    query: select 1
+  type mood:
+    type: enum
+    labels: [ok, so_so]
+    renamedLabels: {so_so: ok, gone: meh}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"table app.a: renamedFrom app.b names an object the YAML also declares",
+		"table app.a column x: renamedFrom y names an object the YAML also declares",
+		"renamedFrom w is also claimed by table app.a column",
+		"renamedFrom app.old is also claimed by table app.c",
+		"renamedLabels names gone, which is not one of its labels",
+		"renamedLabels source ok is still one of its labels",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

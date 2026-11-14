@@ -129,3 +129,52 @@ schema app:
 		t.Errorf("scalar identity has no options: %+v", b)
 	}
 }
+
+func TestRenamedFromParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  type feeling:
+    renamedFrom: mood
+    type: enum
+    labels: [ok, so_so]
+    renamedLabels: {so_so: meh}
+  domain sku: {renamedFrom: code, type: text}
+  sequence ticker: {renamedFrom: counter}
+  function stamp():
+    renamedFrom: touch
+    returns: trigger
+    language: plpgsql
+    body: begin return new; end
+  procedure p():
+    renamedFrom: q
+    language: sql
+    body: select 1
+  table products:
+    renamedFrom: items
+    columns:
+      quantity: {type: int, renamedFrom: qty}
+    indexes:
+      products_q: {columns: [quantity], renamedFrom: items_q}
+    constraints:
+      products_c: {type: check, expression: quantity > 0, renamedFrom: items_c}
+    foreignKeys:
+      products_f: {columns: [quantity], references: {table: app.x, columns: [id]}, renamedFrom: items_f}
+  view v2: {query: select 1, renamedFrom: v1}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := d.Tables["app.products"]
+	got := []string{
+		d.Types["app.feeling"].RenamedFrom, d.Types["app.feeling"].RenamedLabels["so_so"], d.Domains["app.sku"].RenamedFrom,
+		d.Sequences["app.ticker"].RenamedFrom, d.Functions["app.stamp()"].RenamedFrom, d.Procedures["app.p()"].RenamedFrom,
+		tb.RenamedFrom, tb.Columns["quantity"].RenamedFrom, tb.Indexes[0].RenamedFrom, tb.Constraints[0].RenamedFrom,
+		tb.ForeignKeys[0].RenamedFrom, d.Views["app.v2"].RenamedFrom,
+	}
+	want := []string{"mood", "meh", "code", "counter", "touch", "q", "items", "qty", "items_q", "items_c", "items_f", "v1"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("field %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

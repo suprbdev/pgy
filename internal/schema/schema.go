@@ -78,6 +78,7 @@ type View struct {
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 // Publication is a logical replication CREATE PUBLICATION declaration.
@@ -178,6 +179,7 @@ type Sequence struct {
     Grants    map[string][]string // role -> privileges (usage, select, update); nil = unmanaged
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 // Domain is a CREATE DOMAIN declaration: a named base type with optional
@@ -196,6 +198,7 @@ type Domain struct {
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
     DependsOn      []string `yaml:"dependsOn"`
     Comment        string
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 type Table struct {
@@ -226,6 +229,7 @@ type Table struct {
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 // PartitionBy declares a table's partitioning strategy (PARTITION BY).
@@ -269,6 +273,7 @@ type Constraint struct {
     NotValid          bool     // check: added NOT VALID (existing rows not checked)
     NotEnforced       bool     // check: NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string   // empty means unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 type Column struct {
@@ -288,6 +293,7 @@ type Column struct {
     StatisticsTarget *int `yaml:"statisticsTarget"` // SET STATISTICS; -1 = default; nil = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 type Index struct {
@@ -303,6 +309,7 @@ type Index struct {
     With      map[string]string // storage parameters, WITH (name = value)
     Concurrently bool           // build on existing tables with CREATE INDEX CONCURRENTLY
     Comment   string            // empty means unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 type ForeignKey struct {
@@ -318,6 +325,7 @@ type ForeignKey struct {
     NotValid          bool   // added NOT VALID (existing rows not checked)
     NotEnforced       bool   // NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string // empty means unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 type Trigger struct {
@@ -381,6 +389,8 @@ type TypeDef struct {
     Comment string
     Owner   string // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+    RenamedLabels map[string]string `yaml:"-"` // enum label -> previous label (ALTER TYPE ... RENAME VALUE)
 }
 
 // RangeDef holds a range type's CREATE TYPE ... AS RANGE options. Subtype is
@@ -414,6 +424,7 @@ type Function struct {
     RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 // Aggregate is a CREATE AGGREGATE declaration. SFunc and SType are
@@ -449,6 +460,7 @@ type Procedure struct {
     RevokePublic bool          // revoke default PUBLIC execute
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
+    RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -536,6 +548,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.ClusterOn != "" {
                     existing.ClusterOn = t.ClusterOn
+                }
+                if t.RenamedFrom != "" {
+                    existing.RenamedFrom = t.RenamedFrom
                 }
                 existing.DependsOn = appendUnique(existing.DependsOn, t.DependsOn)
             } else {
@@ -842,6 +857,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.ReplicaIdentity = parseReplicaIdentity(ri)
                 }
                 if co, ok := m["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
+                if v, ok := m["renamedFrom"].(string); ok { t.RenamedFrom = strings.TrimSpace(v) }
                 if conRaw, ok := m["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -898,6 +914,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 t.ReplicaIdentity = parseReplicaIdentity(ri)
             }
             if co, ok := m["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
+            if v, ok := m["renamedFrom"].(string); ok { t.RenamedFrom = strings.TrimSpace(v) }
             if conRaw, ok := m["constraints"]; ok {
                 t.Constraints = parseConstraints(conRaw)
             }
@@ -962,6 +979,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.ReplicaIdentity = parseReplicaIdentity(ri)
                 }
                 if co, ok := inner["clusterOn"].(string); ok { t.ClusterOn = strings.TrimSpace(co) }
+                if v, ok := inner["renamedFrom"].(string); ok { t.RenamedFrom = strings.TrimSpace(v) }
                 if conRaw, ok := inner["constraints"]; ok {
                     t.Constraints = parseConstraints(conRaw)
                 }
@@ -1074,6 +1092,7 @@ func parseColumnSpec(spec any) *Column {
     c := &Column{}
     if m, ok := spec.(map[string]any); ok {
         if t, ok := m["type"].(string); ok { c.Type = t }
+        if v, ok := m["renamedFrom"].(string); ok { c.RenamedFrom = strings.TrimSpace(v) }
         if n, ok := m["nullable"].(bool); ok { c.Nullable = n }
         if nn, ok := m["notNull"].(bool); ok { c.Nullable = !nn }
         if d, ok := m["default"]; ok { c.Default = defaultToString(d) }
@@ -1252,6 +1271,7 @@ func parseIndexes(v any) []*Index {
             ix := &Index{Name: name}
             if dm, ok := def.(map[string]any); ok {
                 ix.Columns = parseStringListFromNode(dm["columns"])
+                if v, ok := dm["renamedFrom"].(string); ok { ix.RenamedFrom = strings.TrimSpace(v) }
                 if u, ok := dm["unique"].(bool); ok { ix.Unique = u }
                 if m, ok := dm["using"].(string); ok { ix.Using = m }
                 if w, ok := dm["where"].(string); ok { ix.Where = w }
@@ -1285,6 +1305,7 @@ func parseForeignKeys(v any) []*ForeignKey {
             fk := &ForeignKey{Name: name}
             if dm, ok := def.(map[string]any); ok {
                 fk.Columns = parseStringListFromNode(dm["columns"])
+                if v, ok := dm["renamedFrom"].(string); ok { fk.RenamedFrom = strings.TrimSpace(v) }
                 if ref, ok := dm["references"].(map[string]any); ok {
                     if t, ok := ref["table"].(string); ok { fk.RefTable = t }
                     fk.RefColumns = parseStringListFromNode(ref["columns"])
@@ -1402,6 +1423,7 @@ func parseConstraints(v any) []*Constraint {
             c := &Constraint{Name: name}
             if dm, ok := def.(map[string]any); ok {
                 if t, ok := dm["type"].(string); ok { c.Type = t }
+                if v, ok := dm["renamedFrom"].(string); ok { c.RenamedFrom = strings.TrimSpace(v) }
                 if e, ok := dm["expression"].(string); ok { c.Expression = e }
                 if e, ok := dm["def"].(string); ok { c.Expression = e } // alias
                 if cols, ok := dm["columns"]; ok { c.Columns = parseStringListFromNode(cols) }
@@ -1539,6 +1561,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     }
     m, ok := body.(map[string]any)
     if !ok { return fn }
+    if v, ok := m["renamedFrom"].(string); ok { fn.RenamedFrom = strings.TrimSpace(v) }
     if r, ok := m["returns"].(string); ok { fn.Returns = r }
     if l, ok := m["language"].(string); ok { fn.Language = l }
     if s, ok := m["security"].(string); ok { fn.Security = s }
@@ -1601,6 +1624,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
     }
     m, ok := body.(map[string]any)
     if !ok { return pr }
+    if v, ok := m["renamedFrom"].(string); ok { pr.RenamedFrom = strings.TrimSpace(v) }
     if l, ok := m["language"].(string); ok { pr.Language = l }
     if s, ok := m["security"].(string); ok { pr.Security = s }
     if set, ok := m["set"].(map[string]any); ok {
@@ -1626,6 +1650,13 @@ func parseType(schemaName, key string, body any) *TypeDef {
     m, ok := body.(map[string]any)
     if !ok { return td }
     if kind, ok := m["type"].(string); ok { td.Kind = kind }
+    if v, ok := m["renamedFrom"].(string); ok { td.RenamedFrom = strings.TrimSpace(v) }
+    if rl, ok := m["renamedLabels"].(map[string]any); ok {
+        td.RenamedLabels = map[string]string{}
+        for label, old := range rl {
+            if o, ok := old.(string); ok { td.RenamedLabels[label] = o }
+        }
+    }
     if labels, ok := m["labels"].([]any); ok {
         for _, it := range labels { if s, ok := it.(string); ok { td.Labels = append(td.Labels, s) } }
     }
@@ -2101,6 +2132,7 @@ func parseView(schemaName, key string, body any) *View {
     m, ok := body.(map[string]any)
     if !ok { return vw }
     if q, ok := m["query"].(string); ok { vw.Query = q }
+    if v, ok := m["renamedFrom"].(string); ok { vw.RenamedFrom = strings.TrimSpace(v) }
     if dep, ok := m["dependsOn"]; ok {
         vw.DependsOn = parseStringListFromNode(dep)
     }
@@ -2130,6 +2162,7 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     m, ok := body.(map[string]any)
     if !ok { return sq }
     if a, ok := m["as"].(string); ok { sq.As = a }
+    if v, ok := m["renamedFrom"].(string); ok { sq.RenamedFrom = strings.TrimSpace(v) }
     if v, ok := m["increment"]; ok { sq.Increment = defaultToString(v) }
     if v, ok := m["minValue"]; ok { sq.MinValue = defaultToString(v) }
     if v, ok := m["maxValue"]; ok { sq.MaxValue = defaultToString(v) }
@@ -2291,6 +2324,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if !ok { return dm }
     if t, ok := m["type"].(string); ok { dm.Type = t }
     if t, ok := m["as"].(string); ok && t != "" { dm.Type = t } // alias
+    if v, ok := m["renamedFrom"].(string); ok { dm.RenamedFrom = strings.TrimSpace(v) }
     if c, ok := m["collate"].(string); ok { dm.Collate = c }
     if v, ok := m["default"]; ok { dm.Default = defaultToString(v) }
     if b, ok := m["notNull"].(bool); ok { dm.NotNull = b }
