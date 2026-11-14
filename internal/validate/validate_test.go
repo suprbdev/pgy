@@ -263,3 +263,17 @@ schema app:
 		}
 	}
 }
+
+func TestValidateConcurrentIndexOnPartitionedTable(t *testing.T) {
+	p := write(t, t.TempDir(), "p.yml", `
+schema app:
+  table p:
+    columns: {id: {type: int}}
+    partitionBy: {type: range, columns: [id]}
+    indexes:
+      p_id_idx: {columns: [id], concurrently: true}
+`)
+	if got := messages(Files([]string{p})); !strings.Contains(got, "index p_id_idx: PostgreSQL cannot build indexes concurrently on a partitioned table") {
+		t.Errorf("missing warning in:\n%s", got)
+	}
+}

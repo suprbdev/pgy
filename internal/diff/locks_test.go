@@ -116,3 +116,24 @@ func TestLockWarningsSkipNotNullWithCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestConcurrentIndexOnPartitionedTable(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["app"] = true
+	lt := newLiveTable()
+	lt.Partitioned = true
+	lt.Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.p"] = lt
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.p": {
+		Name: "p", PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"id"}},
+		Columns: map[string]*schema.Column{"id": {Type: "int"}},
+		Indexes: []*schema.Index{{Name: "p_id_idx", Columns: []string{"id"}, Concurrently: true}},
+	}}}
+	p := Plan(live, d, false)
+	if len(p.Concurrent) != 0 || !findCreate(p, `create index if not exists "p_id_idx" on "app"."p"("id");`) {
+		t.Errorf("a partitioned table's index must be built in the transaction:\n%s", Render(p))
+	}
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "cannot build it concurrently on a partitioned table") {
+		t.Errorf("unexpected warnings: %+v", p.Warnings)
+	}
+}

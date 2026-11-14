@@ -220,6 +220,7 @@ type LiveTable struct{
     ConstraintInherited map[string]bool
     TriggerInherited    map[string]bool
     IsPartition bool            // relispartition: a partition of a partitioned table
+    Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
     Options     map[string]string // reloptions: lower-cased name -> value
     HasPK       bool            // whether a primary key constraint exists
@@ -442,7 +443,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname, c.relispartition, c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[]),
+        select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[]),
                case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
                     when 'i' then 'index ' || coalesce((select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
                                                         where x.indrelid = c.oid and x.indisreplident), '')
@@ -456,15 +457,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(tableQ, func(tableRows pgx.Rows) error {
         for tableRows.Next() {
             var schemaName, tableName string
-            var isPartition, unlogged bool
+            var isPartition, partitioned, unlogged bool
             var reloptions []string
             var replident string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &unlogged, &reloptions, &replident); err != nil {
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &reloptions, &replident); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             lt := newLiveTable()
-            lt.IsPartition, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, unlogged, parseProconfig(reloptions), replident
+            lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident
             l.Tables[key] = lt
         }
         return nil
@@ -3600,7 +3601,7 @@ func applyTableConstraints(plan *PlanDiff, fq string, dt *schema.Table, lt *Live
         if ix.Unique { uniq = " unique" }
         using := ""
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
-        concurrent := ix.Concurrently && lt != nil
+        concurrent := ix.Concurrently && lt != nil && dt.PartitionBy == nil
         how := " index"
         if concurrent { how = " index concurrently" }
         stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, pqIdent(name), pqIdent(fq), using, renderIndexElems(ix, dt.Columns), renderIndexTail(ix))

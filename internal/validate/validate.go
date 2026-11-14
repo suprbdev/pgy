@@ -243,6 +243,13 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, obj, "replica identity index %s is not declared on this table", idx)
 			}
 		}
+		if t.PartitionBy != nil {
+			for _, ix := range t.Indexes {
+				if ix != nil && ix.Concurrently {
+					add(Warning, obj, "index %s: PostgreSQL cannot build indexes concurrently on a partitioned table, so pgy builds it normally", ix.Name)
+				}
+			}
+		}
 		if idx := t.ClusterOn; idx != "" && !strings.EqualFold(idx, "none") {
 			found := false
 			for _, ix := range t.Indexes {
