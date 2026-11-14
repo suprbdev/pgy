@@ -85,3 +85,15 @@ func TestDataSQLRoutesMapsThroughPopulateRecord(t *testing.T) {
 		t.Errorf("scalars stay literals, got %s", got)
 	}
 }
+
+func TestDollarTag(t *testing.T) {
+	for body, want := range map[string]string{
+		"select 1":                        "$$",
+		"execute $$x$$":                   "$body$",
+		"execute $$x$$ and $body$y$body$": "$body1$",
+	} {
+		if got := dollarTag(body); got != want {
+			t.Errorf("dollarTag(%q) = %s, want %s", body, got, want)
+		}
+	}
+}

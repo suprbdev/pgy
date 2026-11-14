@@ -2219,7 +2219,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             body := f.Body
             verb := "create function"
             if found { verb = "create or replace function" }
-            stmt := fmt.Sprintf("%s %s%s returns %s language %s%s as $$\n%s\n$$;", verb, pqIdent(fname)+f.ArgsSig, "", f.Returns, f.Language, attrsStr+setClauses, body)
+            stmt := fmt.Sprintf("%s %s returns %s language %s%s as %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, dollarQuote(body))
             plan.Creates = append(plan.Creates, stmt)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
@@ -2245,7 +2245,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
-            stmt := fmt.Sprintf("%s %s language %s%s as $$\n%s\n$$;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, pr.Body)
+            stmt := fmt.Sprintf("%s %s language %s%s as %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, dollarQuote(pr.Body))
             plan.Creates = append(plan.Creates, stmt)
         case "aggregate":
             ag := desired.Aggregates[e.Key]
@@ -2494,8 +2494,7 @@ func renderRole(r *schema.Role) string {
     // is fresh (e.g. diff --from-empty bootstraps against an empty Live
     // snapshot). Postgres has no CREATE ROLE IF NOT EXISTS, so guard with a
     // DO block instead.
-    return fmt.Sprintf("do $$ begin if not exists (select from pg_catalog.pg_roles where rolname = %s) then %s; end if; end $$;",
-        quoteString(r.Name), stmt)
+    return "do " + dollarQuoteInline(fmt.Sprintf("begin if not exists (select from pg_catalog.pg_roles where rolname = %s) then %s; end if; end", quoteString(r.Name), stmt)) + ";"
 }
 
 // viewOptions returns the view reloptions the YAML manages, in a fixed
@@ -2899,6 +2898,29 @@ func eventTriggerMatches(et *schema.EventTrigger, le *LiveEventTrigger) bool {
     sort.Strings(want)
     sort.Strings(have)
     return strings.Join(want, ",") == strings.Join(have, ",")
+}
+
+// dollarTag returns a dollar-quote delimiter that does not occur in body:
+// $$, else $body$, $body1$, ...
+func dollarTag(body string) string {
+    if !strings.Contains(body, "$$") { return "$$" }
+    for i := 0; ; i++ {
+        tag := "$body$"
+        if i > 0 { tag = fmt.Sprintf("$body%d$", i) }
+        if !strings.Contains(body, tag) { return tag }
+    }
+}
+
+// dollarQuote quotes a routine body on lines of its own.
+func dollarQuote(body string) string {
+    tag := dollarTag(body)
+    return tag + "\n" + body + "\n" + tag
+}
+
+// dollarQuoteInline quotes body on one line.
+func dollarQuoteInline(body string) string {
+    tag := dollarTag(body)
+    return tag + " " + body + " " + tag
 }
 
 // qualifyName qualifies an unqualified object name with public.
