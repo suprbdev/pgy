@@ -47,6 +47,10 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
 - [x] **Identity Columns** (Column `identity: always | byDefault` → `GENERATED ... AS IDENTITY`; create-only, existing columns never altered; overrides `default`)
 
+## Removing objects
+
+- [x] **Pruning** (`diff --unsafe --prune` drops undeclared tables, views, materialized views, functions, procedures, sequences, domains and types in schemas the YAML uses, plus undeclared triggers, constraints and indexes on declared tables. Extension members, partitions, primary keys, constraint-backed or inherited indexes/constraints/triggers, column-owned sequences, aggregates and `pgy.migrations` are never dropped. One `DROP` per object kind, so dependencies within a kind need no ordering)
+
 ## Level 4: Specialized Configurations
 Advanced PostgreSQL-specific capabilities for niche use cases.
 

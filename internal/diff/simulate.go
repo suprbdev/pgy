@@ -79,6 +79,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     for k, sq := range desired.Sequences {
         if sq == nil { continue }
         out.Sequences[k] = true
+        if sq.OwnedBy != "" && !strings.EqualFold(strings.TrimSpace(sq.OwnedBy), "none") { out.OwnedSequences[k] = true }
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
     }
 
@@ -91,7 +92,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if pr == nil { continue }
         norm := normalizeFunctionSignature(schema.RoutineName(k) + pr.ArgsSig)
         existed := out.Procedures[norm]
-        lp := &LiveProcedure{Security: "invoker"}
+        lp := &LiveProcedure{Signature: schema.RoutineName(k) + pr.ArgsSig, Security: "invoker"}
         prev := out.ProcedureDefs[norm]
         if prev != nil { lp.Security = prev.Security }
         if prev == nil || procedureChanged(pr, prev) {
@@ -157,7 +158,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     prev := out.FunctionDefs[norm]
     hasBody := strings.TrimSpace(f.Body) != ""
     if prev != nil || hasBody {
-        lf := &LiveFunction{Volatility: "volatile", Security: "invoker"}
+        lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker"}
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body))
         if prev != nil && !replaced { *lf = *prev }
         if hasBody { lf.Body = f.Body }
@@ -338,6 +339,8 @@ func cloneLive(l *Live) *Live {
             return &c
         }),
         EnumLabels: cloneMap(l.EnumLabels, func(v []string) []string { return append([]string(nil), v...) }),
+        ExtensionMembers:   cloneSet(l.ExtensionMembers),
+        OwnedSequences:     cloneSet(l.OwnedSequences),
     }
 }
 
@@ -365,6 +368,8 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
         })
     }
     c.Triggers = cloneMap(t.Triggers, nil)
+    c.ConstraintInherited = cloneSet(t.ConstraintInherited)
+    c.TriggerInherited = cloneSet(t.TriggerInherited)
     c.Policies = cloneMap(t.Policies, func(p *LivePolicy) *LivePolicy {
         if p == nil { return nil }
         cp := *p
@@ -382,6 +387,8 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.ConstraintDefs == nil { t.ConstraintDefs = map[string]string{} }
     if t.Indexes == nil { t.Indexes = map[string]bool{} }
     if t.Triggers == nil { t.Triggers = map[string]string{} }
+    if t.ConstraintInherited == nil { t.ConstraintInherited = map[string]bool{} }
+    if t.TriggerInherited == nil { t.TriggerInherited = map[string]bool{} }
     if t.Policies == nil { t.Policies = map[string]*LivePolicy{} }
     if t.IndexComments == nil { t.IndexComments = map[string]string{} }
     if t.ConstraintComments == nil { t.ConstraintComments = map[string]string{} }

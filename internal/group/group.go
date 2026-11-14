@@ -79,7 +79,7 @@ func dirName(dir string) string {
     return "schema"
 }
 
-func Plan(live *diff.Live, paths []string, groups []Group, unsafe bool) ([]Step, error) {
+func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([]Step, error) {
     files := map[string]*schema.Database{}
     for _, p := range paths {
         if _, ok := files[p]; ok { continue }
@@ -117,8 +117,11 @@ func Plan(live *diff.Live, paths []string, groups []Group, unsafe bool) ([]Step,
             }
         }
 
-        p := diff.Plan(diff.Simulate(live, prev), cur, unsafe)
-        if i < len(ordered)-1 { p.Drops = nil }
+        last := i == len(ordered)-1
+        stepOpts := opts
+        stepOpts.Prune = opts.Prune && last
+        p := diff.PlanWith(diff.Simulate(live, prev), cur, stepOpts)
+        if !last { p.Drops = nil }
         if len(p.Creates)+len(p.Alters)+len(p.Drops) > 0 {
             steps = append(steps, Step{Name: g.Name, Plan: p})
         }
