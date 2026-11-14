@@ -5,6 +5,7 @@ import (
     "fmt"
     "strings"
 
+    "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/suprbdev/pgy/internal/schema"
 )
@@ -194,19 +195,17 @@ func IntrospectDetails(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
                 return nil
             }},
     }
+    batch := &queryBatch{}
     for _, q := range queries {
-        rows, err := pool.Query(ctx, q.sql)
-        if err != nil { return err }
-        for rows.Next() {
-            if err := q.scan(rows.Scan); err != nil {
-                rows.Close()
-                return err
+        scan := q.scan
+        batch.add(q.sql, func(rows pgx.Rows) error {
+            for rows.Next() {
+                if err := scan(rows.Scan); err != nil { return err }
             }
-        }
-        rows.Close()
-        if err := rows.Err(); err != nil { return err }
+            return nil
+        })
     }
-    return nil
+    return batch.run(ctx, pool)
 }
 
 // parseDictOptions splits pg_ts_dict.dictinitoption ("language = 'english',
@@ -226,4 +225,34 @@ func parseDictOptions(s string) map[string]string {
         out[strings.TrimSpace(k)] = v
     }
     return out
+}
+
+// queryBatch collects introspection queries and their row handlers so they
+// can be sent to the server in one pipelined round trip.
+type queryBatch struct {
+    sqls     []string
+    handlers []func(pgx.Rows) error
+}
+
+func (b *queryBatch) add(sql string, handle func(pgx.Rows) error) {
+    b.sqls = append(b.sqls, sql)
+    b.handlers = append(b.handlers, handle)
+}
+
+// run sends every query in one batch and feeds each result to its handler
+// in the order the queries were added.
+func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
+    batch := &pgx.Batch{}
+    for _, q := range b.sqls { batch.Queue(q) }
+    br := pool.SendBatch(ctx, batch)
+    defer func() { _ = br.Close() }()
+    for i, handle := range b.handlers {
+        rows, err := br.Query()
+        if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }
+        err = handle(rows)
+        rows.Close()
+        if err == nil { err = rows.Err() }
+        if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }
+    }
+    return br.Close()
 }
