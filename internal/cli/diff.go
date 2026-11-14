@@ -6,6 +6,7 @@ import (
     "os"
     "path/filepath"
 
+    "github.com/jackc/pgx/v5/pgxpool"
     "github.com/spf13/cobra"
 
     "github.com/suprbdev/pgy/internal/db"
@@ -58,6 +59,7 @@ Exit codes:
                 return err
             }
             var conn interface{ Close() }
+            var pool *pgxpool.Pool
             var live *diff.Live
             if fromEmpty || cfg.DSN == "" {
                 if !fromEmpty {
@@ -71,10 +73,11 @@ Exit codes:
                     Extensions: map[string]bool{},
                 }
             } else {
-                pool, err2 := db.Connect(ctx, cfg.DSN)
+                p, err2 := db.Connect(ctx, cfg.DSN)
                 if err2 != nil {
                     return err2
                 }
+                pool = p
                 conn = pool
                 defer conn.Close()
                 live, err = diff.Introspect(ctx, pool)
@@ -97,6 +100,11 @@ Exit codes:
             // not be dependency-correct
             if _, err := schema.TopologicalSort(compiled); err != nil {
                 return err
+            }
+            if pool != nil {
+                if err := diff.IntrospectData(ctx, pool, live, compiled); err != nil {
+                    return err
+                }
             }
             var sql string
             var summary any

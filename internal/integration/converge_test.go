@@ -16,7 +16,6 @@ import (
 // fails unless a second plan is empty, and returns the applied SQL.
 func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 	t.Helper()
-	ctx := context.Background()
 	p := filepath.Join(t.TempDir(), "s.yml")
 	if err := os.WriteFile(p, []byte(strings.ReplaceAll(y, "SCH", sch)), 0o644); err != nil {
 		t.Fatal(err)
@@ -25,15 +24,9 @@ func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	live, err := diff.Introspect(ctx, pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := diff.Plan(live, d, true)
+	plan := diff.Plan(introspect(t, pool, d), d, true)
 	applyPlan(t, pool, plan)
-	if live, err = diff.Introspect(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	live := introspect(t, pool, d)
 	if again := diff.Render(diff.Plan(live, d, true)); again != "" {
 		t.Fatalf("plan did not converge:\n%s", again)
 	}
@@ -41,3 +34,17 @@ func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// introspect reads the live schema and compares the data rows d declares.
+func introspect(t *testing.T, pool *pgxpool.Pool, d *schema.Database) *diff.Live {
+	t.Helper()
+	ctx := context.Background()
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := diff.IntrospectData(ctx, pool, live, d); err != nil {
+		t.Fatal(err)
+	}
+	return live
+}

@@ -234,3 +234,35 @@ schema app:
 		t.Errorf("child sorted before its parent: %v", sorted)
 	}
 }
+
+func TestTableDataParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table plan:
+    columns:
+      code: {type: text, primaryKey: true}
+      seats: {type: int}
+    data:
+      rows:
+        - {code: free, seats: 1}
+        - {code: pro, seats: 10}
+  table status:
+    columns: {id: {type: int}, label: {type: text}}
+    data:
+      key: [label]
+      rows: [{label: open}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := d.Tables["app.plan"]
+	if plan.Data == nil || len(plan.Data.Rows) != 2 || plan.Data.Rows[1]["seats"] != 10 {
+		t.Fatalf("unexpected data: %+v", plan.Data)
+	}
+	if k := plan.DataKey(); len(k) != 1 || k[0] != "code" {
+		t.Errorf("column-level primary key must be the default data key, got %v", k)
+	}
+	if k := d.Tables["app.status"].DataKey(); len(k) != 1 || k[0] != "label" {
+		t.Errorf("explicit key ignored: %v", k)
+	}
+}

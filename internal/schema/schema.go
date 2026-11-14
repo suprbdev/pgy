@@ -162,6 +162,50 @@ type Collation struct {
     Comment       string
 }
 
+// TableData declares a table's managed rows (data:). Key names the columns
+// that identify a row; when empty, the table's primary key is used. Each row
+// maps column names to YAML values (string, int, float64, bool, nil, []any or
+// map[string]any).
+type TableData struct {
+    Key  []string
+    Rows []map[string]any
+}
+
+// DataKey returns the columns identifying t's data rows: Data.Key, or the
+// primary key (table-level, else column-level in column order).
+func (t *Table) DataKey() []string {
+    if t.Data != nil && len(t.Data.Key) > 0 { return t.Data.Key }
+    if len(t.PrimaryKey) > 0 {
+        out := make([]string, len(t.PrimaryKey))
+        for i, c := range t.PrimaryKey { out[i] = strings.Fields(c)[0] }
+        return out
+    }
+    out := []string{}
+    names := append([]string(nil), t.ColumnOrder...)
+    if len(names) == 0 {
+        for cn := range t.Columns { names = append(names, cn) }
+        sort.Strings(names)
+    }
+    for _, cn := range names {
+        if c := t.Columns[cn]; c != nil && c.PrimaryKey { out = append(out, cn) }
+    }
+    return out
+}
+
+// parseTableData parses a table's data: block, or returns nil.
+func parseTableData(v any) *TableData {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    td := &TableData{Rows: []map[string]any{}}
+    if k, ok := m["key"]; ok { td.Key = parseStringListFromNode(k) }
+    if rows, ok := m["rows"].([]any); ok {
+        for _, r := range rows {
+            if rm, ok := r.(map[string]any); ok { td.Rows = append(td.Rows, rm) }
+        }
+    }
+    return td
+}
+
 // Sequence is an explicit CREATE SEQUENCE declaration. Numeric options are
 // stored as strings so zero/negative values are distinguishable from unset.
 type Sequence struct {
@@ -227,6 +271,7 @@ type Table struct {
     PartitionBy *PartitionBy   `yaml:"-"` // declarative partitioning key (parent tables)
     PartitionOf string         `yaml:"-"` // fully qualified parent table (partition children)
     Inherits    []string       `yaml:"-"` // fully qualified parent tables (INHERITS); nil = unmanaged
+    Data        *TableData     `yaml:"-"` // managed rows; nil = unmanaged
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
@@ -528,6 +573,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.Inherits != nil {
                     existing.Inherits = t.Inherits
+                }
+                if t.Data != nil {
+                    existing.Data = t.Data
                 }
                 if t.Partition != nil {
                     existing.Partition = t.Partition
@@ -880,6 +928,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if cm, ok := m["comment"].(string); ok { t.Comment = cm }
                 if o, ok := m["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
                 parseTablePartitioning(t, defaultSchema, m)
+                t.Data = parseTableData(m["data"])
                 parseTableStorage(t, m)
             }
             db.Tables[fq] = t
@@ -937,6 +986,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             if cm, ok := m["comment"].(string); ok { t.Comment = cm }
             if o, ok := m["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
             parseTablePartitioning(t, schemaName, m)
+            t.Data = parseTableData(m["data"])
             parseTableStorage(t, m)
             db.Tables[fq] = t
         }
@@ -1002,6 +1052,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if cm, ok := inner["comment"].(string); ok { t.Comment = cm }
                 if o, ok := inner["owner"].(string); ok { t.Owner = strings.TrimSpace(o) }
                 parseTablePartitioning(t, schemaName, inner)
+                t.Data = parseTableData(inner["data"])
                 parseTableStorage(t, inner)
             }
             db.Tables[fq] = t

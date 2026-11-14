@@ -105,6 +105,9 @@ type Live struct{
     OwnedSequences map[string]bool
     // Partitions: "schema.parent" -> its direct partitions, sorted
     Partitions map[string][]string
+    // TableData: "schema.table" -> comparison of its declared data rows
+    // with the live rows; filled by IntrospectData
+    TableData map[string]*LiveTableData
 }
 
 // LivePublication is a publication from pg_publication and its table and
@@ -2414,12 +2417,15 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
+    dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
+    plan.Alters = append(plan.Alters, dataWrites...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
     planPublications(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)

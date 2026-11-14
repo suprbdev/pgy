@@ -219,6 +219,16 @@
     "table": {
       "type": "object",
       "properties": {
+        "data": {
+          "type": "object",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "properties": {
+            "key": { "$ref": "#/definitions/stringList" },
+            "rows": { "type": "array", "items": { "type": "object" } }
+          },
+          "required": ["rows"],
+          "additionalProperties": false
+        },
         "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
@@ -305,6 +315,16 @@
       "description": "Table entry in the `tables:` list format.",
       "type": "object",
       "properties": {
+        "data": {
+          "type": "object",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "properties": {
+            "key": { "$ref": "#/definitions/stringList" },
+            "rows": { "type": "array", "items": { "type": "object" } }
+          },
+          "required": ["rows"],
+          "additionalProperties": false
+        },
         "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },

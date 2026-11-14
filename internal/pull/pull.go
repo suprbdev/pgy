@@ -4,6 +4,7 @@
 package pull
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -24,6 +25,9 @@ type Options struct {
 	Owners bool
 	// Roles emits the cluster's non-system roles.
 	Roles bool
+	// Data holds rows (from diff.TableRows) to emit as data: blocks, keyed
+	// by "schema.table".
+	Data map[string][]map[string]any
 	// Single puts everything in one document (schema.yml) instead of a file
 	// per schema plus database.yml.
 	Single bool
@@ -635,6 +639,7 @@ func (b *builder) tables() {
 			}
 			add(t, "with", w)
 		}
+		b.data(t, fq, lt)
 		b.indexes(t, fq, lt)
 		b.constraints(t, fq, lt)
 		b.triggers(t, fq, lt)
@@ -966,6 +971,93 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 	if len(trs.Content) > 0 {
 		add(t, "triggers", trs)
 	}
+}
+
+// data emits the rows requested with Options.Data as a data: block, keyed
+// by the primary key and sorted by it. Generated columns are left out.
+func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
+	rows, ok := b.opts.Data[fq]
+	if !ok {
+		return
+	}
+	key := pkColumns(lt)
+	if len(key) == 0 {
+		b.warn("table %s: data needs a primary key to identify rows; not pulled", fq)
+		return
+	}
+	sorted := append([]map[string]any(nil), rows...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		for _, k := range key {
+			if c := compareJSON(sorted[i][k], sorted[j][k]); c != 0 {
+				return c < 0
+			}
+		}
+		return false
+	})
+	list := &node{Kind: yaml.SequenceNode}
+	for _, row := range sorted {
+		m := flowMap()
+		for _, cn := range b.d.ColumnOrder[fq] {
+			lc := lt.Columns[cn]
+			if lc == nil || lc.Generated != "" {
+				continue
+			}
+			if v, ok := row[cn]; ok {
+				add(m, cn, jsonNode(v))
+			}
+		}
+		list.Content = append(list.Content, m)
+	}
+	d := newMap()
+	add(d, "rows", list)
+	add(t, "data", d)
+}
+
+func compareJSON(a, b any) int {
+	if x, ok := a.(json.Number); ok {
+		if y, ok := b.(json.Number); ok {
+			fx, _ := x.Float64()
+			fy, _ := y.Float64()
+			switch {
+			case fx < fy:
+				return -1
+			case fx > fy:
+				return 1
+			}
+			return 0
+		}
+	}
+	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
+}
+
+// jsonNode renders a value decoded from JSON as a YAML node.
+func jsonNode(v any) *node {
+	switch x := v.(type) {
+	case nil:
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"}
+	case bool:
+		return boolean(x)
+	case json.Number:
+		if _, err := x.Int64(); err == nil {
+			return num(x.String())
+		}
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: x.String()}
+	case string:
+		return str(x)
+	case []any:
+		n := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+		for _, e := range x {
+			n.Content = append(n.Content, jsonNode(e))
+		}
+		return n
+	case map[string]any:
+		m := flowMap()
+		for _, k := range sortedKeys(x) {
+			add(m, k, jsonNode(x[k]))
+		}
+		return m
+	}
+	return str(fmt.Sprint(v))
 }
 
 func (b *builder) statistics(t *node, lt *diff.LiveTable) {

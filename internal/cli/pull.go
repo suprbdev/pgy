@@ -1,6 +1,7 @@
 package cli
 
 import (
+    "strings"
     "fmt"
     "os"
     "path/filepath"
@@ -14,7 +15,7 @@ import (
 
 func cmdPull() *cobra.Command {
     var out string
-    var schemas []string
+    var schemas, dataTables []string
     var owners, roles, force bool
     c := &cobra.Command{
         Use:   "pull",
@@ -42,7 +43,16 @@ on stderr.`,
             if err != nil { return err }
             if err := diff.IntrospectDetails(ctx, pool, live); err != nil { return err }
             migSchema, migTable := cfg.migrationsTable()
-            res, err := pull.Build(live, pull.Options{Schemas: schemas, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == ""})
+            data := map[string][]map[string]any{}
+            for _, t := range dataTables {
+                fq := t
+                if !strings.Contains(fq, ".") { fq = "public." + fq }
+                if live.Tables[fq] == nil { return fmt.Errorf("--data %s: no such table", t) }
+                rows, err := diff.TableRows(ctx, pool, fq)
+                if err != nil { return err }
+                data[fq] = rows
+            }
+            res, err := pull.Build(live, pull.Options{Schemas: schemas, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == "", Data: data})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
             if out == "" {
@@ -68,5 +78,6 @@ on stderr.`,
     c.Flags().BoolVar(&owners, "owners", false, "Emit owner: for objects not owned by the connecting role")
     c.Flags().BoolVar(&roles, "roles", false, "Emit the cluster's roles")
     c.Flags().BoolVar(&force, "force", false, "Overwrite existing files in --out")
+    c.Flags().StringSliceVar(&dataTables, "data", nil, "Also pull the rows of these tables (schema.table, repeatable) as data: blocks")
     return c
 }

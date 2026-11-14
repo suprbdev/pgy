@@ -1236,6 +1236,32 @@ Column and domain `collate` values may name these collations schema-qualified; q
 
 ---
 
+## Reference data
+
+Lookup tables (plans, statuses, countries) can declare their rows with `data:`. pgy keeps the live table in line with them:
+
+```yaml
+schema app:
+  table plan:
+    columns:
+      code: {type: text}
+      name: {type: text}
+      seats: {type: int}
+      price: {type: "numeric(6,2)", nullable: true}
+    primaryKey: [code]
+    data:
+      key: [code]          # optional: defaults to the primary key
+      rows:
+        - {code: free, name: Free, seats: 1, price: 0}
+        - {code: pro, name: Pro, seats: 10, price: "19.99"}
+```
+
+- A row missing from the table is inserted. A row whose listed columns differ is updated, and only those columns are written. Columns a row doesn't list are left alone. With `--unsafe --prune`, rows the YAML no longer declares are deleted.
+- PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), `jsonb` (maps) and dates compare by value. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
+- Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
+- `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
+- `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`.
+
 ## Renames
 
 Without a hint, a renamed object looks like a new object plus an undeclared old one: pgy creates the new one, and `--unsafe --prune` would drop the old one along with its data. Declare the previous name with `renamedFrom` and pgy emits `ALTER ... RENAME` instead:
