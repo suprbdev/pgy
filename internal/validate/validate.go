@@ -329,6 +329,15 @@ func Database(d *schema.Database) []Issue {
 			if dm.Type == "" {
 				add(Error, "domain "+k, "has no type")
 			}
+			if dm.Check != "" && dm.Checks != nil {
+				name := dm.ConstraintName
+				if name == "" {
+					name = k[strings.IndexByte(k, '.')+1:] + "_check"
+				}
+				if _, dup := dm.Checks[name]; dup {
+					add(Error, "domain "+k, "check %s is declared by both check and checks", name)
+				}
+			}
 		}
 	}
 	for _, k := range sortedKeys(d.Sequences) {

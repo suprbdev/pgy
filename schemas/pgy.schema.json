@@ -907,6 +907,11 @@
           "type": "string",
           "description": "Optional name for the CHECK constraint."
         },
+        "checks": {
+          "type": "object",
+          "description": "Named CHECK constraints (name: expression, referencing VALUE). Authoritative: with --unsafe, undeclared checks are dropped and changed ones replaced.",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },

@@ -152,11 +152,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if dm == nil || dm.Type == "" { continue }
         out.Domains[k] = true
         ld := &LiveDomain{Default: dm.Default, NotNull: dm.NotNull, Checks: map[string]string{}}
-        if dm.Check != "" {
-            name := dm.ConstraintName
-            if name == "" { name = k[strings.IndexByte(k, '.')+1:] + "_check" }
-            ld.Checks[truncateIdent(name)] = "CHECK (" + dm.Check + ")"
-        }
+        for name, e := range desiredDomainChecks(k, dm) { ld.Checks[name] = "CHECK (" + e + ")" }
         out.DomainDefs[k] = ld
         if dm.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], dm.Grants) }
         if dm.Comment != "" { out.TypeComments[k] = dm.Comment }

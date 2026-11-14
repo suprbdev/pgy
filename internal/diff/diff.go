@@ -2520,11 +2520,31 @@ func qualifyOwnedBy(s string) string {
     return s
 }
 
+// domainCheckName is the name of a domain's single check: constraintName, or
+// PostgreSQL's default <domain>_check.
+func domainCheckName(fq string, dm *schema.Domain) string {
+    if dm.ConstraintName != "" { return truncateIdent(dm.ConstraintName) }
+    return truncateIdent(fq[strings.IndexByte(fq, '.')+1:] + "_check")
+}
+
+// desiredDomainChecks returns a domain's CHECK constraints by name: the
+// single check plus the checks map.
+func desiredDomainChecks(fq string, dm *schema.Domain) map[string]string {
+    out := map[string]string{}
+    if dm.Check != "" { out[domainCheckName(fq, dm)] = dm.Check }
+    for n, e := range dm.Checks {
+        if e != "" { out[truncateIdent(n)] = e }
+    }
+    return out
+}
+
 // domainAlterStmts reconciles an existing domain's default, NOT NULL and
-// CHECK constraint. The CHECK is matched by constraintName, or PostgreSQL's
-// default <domain>_check name. Replacing or dropping a changed CHECK
-// requires --unsafe (adding one validates every column using the domain);
-// a missing CHECK is added. The base type and collation cannot be altered.
+// CHECK constraints. Checks are matched by name; a missing one is added,
+// while replacing a changed one or dropping an undeclared one requires
+// --unsafe (adding a check validates every column using the domain). A
+// checks map makes the declared set authoritative; without one only the
+// single check's name is managed. The base type and collation cannot be
+// altered.
 func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool) []string {
     if ld == nil { return nil }
     target := "alter domain " + pqIdent(fq)
@@ -2538,19 +2558,23 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
     if dm.NotNull != ld.NotNull {
         if dm.NotNull { out = append(out, target+" set not null;") } else { out = append(out, target+" drop not null;") }
     }
-    name := dm.ConstraintName
-    if name == "" { name = fq[strings.IndexByte(fq, '.')+1:] + "_check" }
-    name = truncateIdent(name)
-    liveDef, exists := ld.Checks[name]
-    add := fmt.Sprintf("%s add constraint %s check (%s);", target, pqIdent(name), dm.Check)
-    drop := fmt.Sprintf("%s drop constraint %s;", target, pqIdent(name))
-    switch {
-    case dm.Check != "" && !exists:
-        out = append(out, add)
-    case dm.Check != "" && unsafe && !constraintDefsEqual("check ("+dm.Check+")", liveDef):
-        out = append(out, drop, add)
-    case dm.Check == "" && exists && unsafe:
-        out = append(out, drop)
+    want := desiredDomainChecks(fq, dm)
+    drop := func(name string) string { return fmt.Sprintf("%s drop constraint %s;", target, pqIdent(name)) }
+    if unsafe {
+        for _, name := range sortedKeys(ld.Checks) {
+            if _, ok := want[name]; ok { continue }
+            if dm.Checks != nil || name == domainCheckName(fq, dm) { out = append(out, drop(name)) }
+        }
+    }
+    for _, name := range sortedKeys(want) {
+        add := fmt.Sprintf("%s add constraint %s check (%s);", target, pqIdent(name), want[name])
+        liveDef, exists := ld.Checks[name]
+        switch {
+        case !exists:
+            out = append(out, add)
+        case unsafe && !constraintDefsEqual("check ("+want[name]+")", liveDef):
+            out = append(out, drop(name), add)
+        }
     }
     return out
 }
@@ -2890,6 +2914,9 @@ func renderDomain(fq string, dm *schema.Domain) string {
     if dm.Check != "" {
         if dm.ConstraintName != "" { parts = append(parts, "constraint "+pqIdent(dm.ConstraintName)) }
         parts = append(parts, fmt.Sprintf("check (%s)", dm.Check))
+    }
+    for _, n := range sortedKeys(dm.Checks) {
+        if dm.Checks[n] != "" { parts = append(parts, fmt.Sprintf("constraint %s check (%s)", pqIdent(n), dm.Checks[n])) }
     }
     return strings.Join(parts, " ") + ";"
 }

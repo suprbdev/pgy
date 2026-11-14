@@ -300,9 +300,12 @@ func (b *builder) domains() {
 			}
 			names := sortedKeys(ld.Checks)
 			if len(names) > 1 {
-				b.warn("domain %s has %d check constraints; only %s is pulled", k, len(names), names[0])
-			}
-			if len(names) > 0 {
+				cs := newMap()
+				for _, n := range names {
+					add(cs, n, str(stripCheck(ld.Checks[n])))
+				}
+				add(m, "checks", cs)
+			} else if len(names) == 1 {
 				add(m, "check", str(stripCheck(ld.Checks[names[0]])))
 				if names[0] != name+"_check" {
 					add(m, "constraintName", str(names[0]))

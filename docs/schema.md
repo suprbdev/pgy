@@ -1081,6 +1081,12 @@ schema public:
     constraintName: email_format
     comment: "validated email address"
 
+  domain score:
+    type: int
+    checks:                     # several named checks
+      score_min: VALUE >= 0
+      score_max: VALUE <= 100
+
   table users:
     dependsOn:
       - domain public.email
@@ -1097,6 +1103,7 @@ schema public:
 | `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
 | `check` | string | `CHECK` expression; use `value` to reference the value being tested |
 | `constraintName` | string | Optional name for the `CHECK` constraint |
+| `checks` | map | Named `CHECK` constraints (`name: expression`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
 | `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
