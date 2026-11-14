@@ -212,3 +212,16 @@ schema app:
 		t.Errorf("set-returning function flagged:\n%s", got)
 	}
 }
+
+func TestValidateDomainCheckDeclaredTwice(t *testing.T) {
+	p := write(t, t.TempDir(), "d.yml", `
+schema app:
+  domain score:
+    type: int
+    check: VALUE >= 0
+    checks: {score_check: VALUE <= 100}
+`)
+	if got := messages(Files([]string{p})); !strings.Contains(got, "check score_check is declared by both check and checks") {
+		t.Errorf("missing duplicate check error in:\n%s", got)
+	}
+}

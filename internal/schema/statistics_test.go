@@ -88,3 +88,20 @@ schema app:
 		t.Errorf("unset attributes must stay unmanaged: %+v", g)
 	}
 }
+
+func TestDomainChecksParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  domain score:
+    type: int
+    check: VALUE >= 0
+    checks: {score_max: VALUE <= 100, score_even: "VALUE % 2 = 0"}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm := d.Domains["app.score"]
+	if dm.Check != "VALUE >= 0" || len(dm.Checks) != 2 || dm.Checks["score_max"] != "VALUE <= 100" || dm.Checks["score_even"] != "VALUE % 2 = 0" {
+		t.Errorf("unexpected domain: %+v", dm)
+	}
+}

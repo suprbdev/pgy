@@ -191,6 +191,7 @@ type Domain struct {
     NotNull        bool
     Check          string // CHECK expression (without surrounding parens)
     ConstraintName string // optional name for the CHECK constraint
+    Checks         map[string]string // constraint name -> CHECK expression; nil = only Check is managed
     Owner          string // "" = unmanaged
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
     DependsOn      []string `yaml:"dependsOn"`
@@ -2278,6 +2279,12 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if b, ok := m["nullable"].(bool); ok { dm.NotNull = !b }
     if c, ok := m["check"].(string); ok { dm.Check = c }
     if cn, ok := m["constraintName"].(string); ok { dm.ConstraintName = cn }
+    if cs, ok := m["checks"].(map[string]any); ok {
+        dm.Checks = map[string]string{}
+        for n, v := range cs {
+            if e, ok := v.(string); ok { dm.Checks[n] = strings.TrimSpace(e) }
+        }
+    }
     if dep, ok := m["dependsOn"]; ok {
         dm.DependsOn = parseStringListFromNode(dep)
     }

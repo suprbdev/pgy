@@ -287,7 +287,9 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         hard(ix.resolveDeps(dm.DependsOn))
         hard(ix.mentions(dm.Type, typeKinds))
         hard(ix.mentions(dm.Collate, collationKinds))
-        hard(ix.mentions(dm.Check+" "+dm.Default, exprKinds))
+        exprs := []string{dm.Check, dm.Default}
+        for _, e := range dm.Checks { exprs = append(exprs, e) }
+        hard(ix.mentions(strings.Join(exprs, " "), exprKinds))
     }
     for _, sq := range d.Sequences {
         if sq == nil { continue }

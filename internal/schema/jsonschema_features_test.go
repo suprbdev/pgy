@@ -36,6 +36,9 @@ schema public:
     cost: 0.5
     rows: 10
     body: select 1
+  domain positive_even:
+    type: int
+    checks: {positive_even_pos: VALUE > 0, positive_even_even: VALUE % 2 = 0}
   aggregate mysum(int): {sfunc: public.add2, stype: int, initcond: "0", combinefunc: public.add2, parallel: safe, comment: sum}
   text search dictionary nostop: {template: snowball, options: {language: english}}
   text search configuration english_custom:
