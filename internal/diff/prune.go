@@ -206,7 +206,7 @@ func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bo
     }
     funcs, procs := []string{}, []string{}
     for norm, lf := range live.FunctionDefs {
-        if lf == nil || lf.Kind != "f" { continue }
+        if lf == nil || lf.Kind != "f" || lf.Internal { continue }
         if s, ok := collect(norm, lf.Signature); ok { funcs = append(funcs, s) }
     }
     for norm, lp := range live.ProcedureDefs {

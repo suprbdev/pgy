@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/suprbdev/pgy/internal/pull"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,6 +269,42 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 			if sql := diff.Render(diff.Plan(live, d, true)); sql != "" {
 				t.Errorf("second plan not empty:\n%s", sql)
 			}
+			assertPullRoundTrip(t, ctx, pool, live, sch)
 		})
+	}
+}
+
+// assertPullRoundTrip pulls schema sch from the database and fails unless
+// the pulled YAML diffs clean against it, with --unsafe and with --prune.
+func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, live *diff.Live, sch string) {
+	t.Helper()
+	if err := diff.IntrospectDetails(ctx, pool, live); err != nil {
+		t.Fatal(err)
+	}
+	res, err := pull.Build(live, pull.Options{Schemas: []string{sch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	paths := []string{}
+	for _, f := range res.Files {
+		p := filepath.Join(dir, f.Name)
+		if err := os.WriteFile(p, f.Content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	pulled, err := schema.LoadAndMerge(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []diff.Options{{Unsafe: true}, {Unsafe: true, Prune: true}} {
+		if sql := diff.Render(diff.PlanWith(live, pulled, opts)); sql != "" {
+			for _, f := range res.Files {
+				t.Logf("%s:\n%s", f.Name, f.Content)
+			}
+			t.Errorf("pulled YAML must diff clean (%+v), got:\n%s", opts, sql)
+			return
+		}
 	}
 }

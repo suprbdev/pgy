@@ -53,6 +53,8 @@ type Live struct{
     DefaultACLs    map[string]map[string]map[string]bool
     DefaultACLRows map[string]bool
     CurrentUser    string
+    // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
+    Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
     RoleComments map[string]string // role name -> comment (pg_shdescription)
@@ -159,6 +161,7 @@ type LiveExtension struct {
 type LiveFunction struct{
     Signature  string // "schema.name(identity args)" as introspected
     Kind       string // pg_proc.prokind: f (function), w (window), a (aggregate)
+    Internal   bool   // created implicitly by another object (e.g. a range type's constructors)
     Body       string
     Volatility string // volatile|stable|immutable
     Security   string // definer|invoker
@@ -240,6 +243,7 @@ type LiveRule struct {
     Event   string
     Instead bool
     Where   string
+    Def     string // pg_get_ruledef output
 }
 
 var ruleWhereRe = regexp.MustCompile(`(?s)\bON\s+\w+\s+TO\s+\S+\s+WHERE\s+(.*?)\s+DO\s`)
@@ -635,6 +639,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             return nil, err
         }
         if m := ruleWhereRe.FindStringSubmatch(def); m != nil { lr.Where = m[1] }
+        lr.Def = def
         key := fmt.Sprintf("%s.%s", schemaName, relName)
         t := l.Tables[key]
         if onView {
@@ -741,7 +746,8 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     funcQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
                coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text,
-               coalesce(p.proconfig, '{}'::text[])
+               coalesce(p.proconfig, '{}'::text[]),
+               exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i')
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -751,9 +757,9 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     if err != nil { return nil, err }
     for funcRows.Next() {
         var schemaName, funcName, args, src, vol, kind string
-        var secdef, strict, leakproof bool
+        var secdef, strict, leakproof, internal bool
         var config []string
-        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config); err != nil {
+        if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal); err != nil {
             funcRows.Close()
             return nil, err
         }
@@ -767,7 +773,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             continue
         }
         l.Functions[key] = true
-        lf := &LiveFunction{Signature: key, Kind: kind, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
+        lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
         if secdef { lf.Security = "definer" }
         switch vol {
         case "i": lf.Volatility = "immutable"
