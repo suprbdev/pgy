@@ -35,6 +35,7 @@ Features that encapsulate business logic, complex data structures, or procedural
 - [x] **Views** (Standard `CREATE VIEW`; `INSTEAD OF` triggers via `triggers:`; opt-in `replace: true` for `CREATE OR REPLACE` on every diff; `securityInvoker`/`securityBarrier`/`checkOption` diffed against live reloptions → `ALTER VIEW ... SET/RESET`)
 - [x] **Materialized Views** (`withData: false`; `indexes:` created and diffed like table indexes)
 - [x] **Domains** (`domain <name>:` blocks → `CREATE DOMAIN` with type/collate/default/notNull/check/constraintName; default/not null diffed → `ALTER DOMAIN`, changed check replaced under `--unsafe`; comments diffed)
+- [x] **Aggregates** (`aggregate <name>(args):` blocks → `CREATE OR REPLACE AGGREGATE` with sfunc/stype/finalfunc/combinefunc/initcond/parallel, created after their functions; diffed against `pg_aggregate`, comments, owners, prunable, pulled)
 - [x] **Procedures** (`procedure <name>(args):` blocks → `CREATE PROCEDURE`; replace-on-change via body/security/`set` diff → `CREATE OR REPLACE`; grants, `revokePublic`, comments)
 
 ## Level 3: Architecture & Security
@@ -55,7 +56,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 
 ## Removing objects
 
-- [x] **Pruning** (`diff --unsafe --prune` drops undeclared tables, views, materialized views, functions, procedures, sequences, domains and types in schemas the YAML uses, plus undeclared triggers, constraints and indexes on declared tables. Extension members, partitions, primary keys, constraint-backed or inherited indexes/constraints/triggers, column-owned sequences, aggregates and `pgy.migrations` are never dropped. One `DROP` per object kind, so dependencies within a kind need no ordering)
+- [x] **Pruning** (`diff --unsafe --prune` drops undeclared tables, views, materialized views, functions, procedures, sequences, domains and types in schemas the YAML uses, plus undeclared triggers, constraints and indexes on declared tables. Aggregates are pruned like functions. Extension members, partitions, primary keys, constraint-backed or inherited indexes/constraints/triggers, column-owned sequences, window functions and `pgy.migrations` are never dropped. One `DROP` per object kind, so dependencies within a kind need no ordering)
 
 ## Level 4: Specialized Configurations
 Advanced PostgreSQL-specific capabilities for niche use cases.

@@ -210,6 +210,7 @@
         "^sequence [^\\s].*$": { "$ref": "#/definitions/sequence" },
         "^domain [^\\s].*$": { "$ref": "#/definitions/domain" },
         "^collation [^\\s].*$": { "$ref": "#/definitions/collation" },
+        "^aggregate [^\\s].*$": { "$ref": "#/definitions/aggregate" },
         "^text search configuration [^\\s].*$": { "$ref": "#/definitions/tsConfig" },
         "^text search dictionary [^\\s].*$": { "$ref": "#/definitions/tsDictionary" }
       },
@@ -833,6 +834,23 @@
         "comment": { "type": "string" }
       },
       "required": ["template"],
+      "additionalProperties": false
+    },
+    "aggregate": {
+      "description": "Body of an `aggregate <name>(args):` declaration (CREATE OR REPLACE AGGREGATE). Use (*) for count(*)-style aggregates.",
+      "type": "object",
+      "properties": {
+        "sfunc": { "type": "string", "minLength": 1, "description": "State transition function." },
+        "stype": { "type": "string", "minLength": 1, "description": "State value data type." },
+        "finalfunc": { "type": "string" },
+        "combinefunc": { "type": "string", "description": "Combines two states, enabling parallel aggregation." },
+        "initcond": { "$ref": "#/definitions/scalar", "description": "Initial state value (as a string literal)." },
+        "parallel": { "type": "string", "enum": ["safe", "restricted", "unsafe"] },
+        "dependsOn": { "$ref": "#/definitions/stringList" },
+        "comment": { "type": "string" },
+        "owner": { "type": "string" }
+      },
+      "required": ["sfunc", "stype"],
       "additionalProperties": false
     },
     "collation": {

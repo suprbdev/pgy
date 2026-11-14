@@ -20,6 +20,7 @@ type Database struct {
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
     Procedures map[string]*Procedure `yaml:"-"`
+    Aggregates map[string]*Aggregate `yaml:"-"` // keyed like Functions: schema.name(args)
     Views map[string]*View `yaml:"-"`
     Sequences map[string]*Sequence `yaml:"-"`
     Domains map[string]*Domain `yaml:"-"`
@@ -403,6 +404,23 @@ type Function struct {
     Owner   string             // "" = unmanaged
 }
 
+// Aggregate is a CREATE AGGREGATE declaration. SFunc and SType are
+// required; the other fields are optional.
+type Aggregate struct {
+    Schema      string
+    Name        string
+    ArgsSig     string
+    SFunc       string
+    SType       string
+    FinalFunc   string
+    InitCond    string
+    CombineFunc string
+    Parallel    string // safe | restricted | unsafe
+    DependsOn   []string `yaml:"dependsOn"`
+    Comment     string
+    Owner       string
+}
+
 // Procedure is a CREATE PROCEDURE declaration (PostgreSQL 11+). Unlike
 // functions, procedures have no return type, volatility, or strictness;
 // they are invoked with CALL and may control transactions.
@@ -535,6 +553,10 @@ func Merge(dbs []*Database) *Database {
             if merged.Procedures == nil { merged.Procedures = map[string]*Procedure{} }
             for k, v := range d.Procedures { merged.Procedures[k] = v }
         }
+        if len(d.Aggregates) > 0 {
+            if merged.Aggregates == nil { merged.Aggregates = map[string]*Aggregate{} }
+            for k, v := range d.Aggregates { merged.Aggregates[k] = v }
+        }
         // merge views
         if len(d.Views) > 0 {
             if merged.Views == nil { merged.Views = map[string]*View{} }
@@ -636,6 +658,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.Types = map[string]*TypeDef{}
     out.Functions = map[string]*Function{}
     out.Procedures = map[string]*Procedure{}
+    out.Aggregates = map[string]*Aggregate{}
     out.Views = map[string]*View{}
     out.Sequences = map[string]*Sequence{}
     out.Domains = map[string]*Domain{}
@@ -951,6 +974,10 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
             pr := parseProcedure(schemaName, key, body)
             if pr != nil {
                 db.Procedures[FunctionKey(qualify(schemaName, pr.Name), pr.ArgsSig)] = pr
+            }
+        } else if strings.HasPrefix(key, "aggregate ") {
+            if ag := parseAggregate(schemaName, key, body); ag != nil {
+                db.Aggregates[FunctionKey(qualify(schemaName, ag.Name), ag.ArgsSig)] = ag
             }
         } else if strings.HasPrefix(key, "type ") {
             td := parseType(schemaName, key, body)
@@ -1481,6 +1508,27 @@ func parseFunction(schemaName, key string, body any) *Function {
     return fn
 }
 
+func parseAggregate(schemaName, key string, body any) *Aggregate {
+    nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "aggregate "))
+    ag := &Aggregate{Schema: schemaName, ArgsSig: "(*)"}
+    if i := strings.Index(nameAndSig, "("); i >= 0 {
+        ag.Name = strings.TrimSpace(nameAndSig[:i])
+        ag.ArgsSig = strings.TrimSpace(nameAndSig[i:])
+    } else {
+        ag.Name = nameAndSig
+    }
+    m, ok := body.(map[string]any)
+    if !ok { return ag }
+    str := func(k string) string { s, _ := m[k].(string); return strings.TrimSpace(s) }
+    ag.SFunc, ag.SType, ag.FinalFunc, ag.CombineFunc = str("sfunc"), str("stype"), str("finalfunc"), str("combinefunc")
+    ag.Parallel = strings.ToLower(str("parallel"))
+    if v, ok := m["initcond"]; ok { ag.InitCond = scalarToString(v) }
+    if dep, ok := m["dependsOn"]; ok { ag.DependsOn = parseStringListFromNode(dep) }
+    ag.Comment = str("comment")
+    ag.Owner = str("owner")
+    return ag
+}
+
 func parseProcedure(schemaName, key string, body any) *Procedure {
     // key format: "procedure <name>(args):"
     nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "procedure "))
@@ -1678,6 +1726,16 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         entities = append(entities, e)
         entityMap[k] = e
     }
+    for k, ag := range d.Aggregates {
+        if ag == nil { continue }
+        deps := ag.DependsOn
+        for _, fn := range []string{ag.SFunc, ag.FinalFunc, ag.CombineFunc} {
+            if fn != "" && len(resolveRoutine(fn, d.Functions)) > 0 { deps = append(append([]string{}, deps...), "function "+fn) }
+        }
+        e := Entity{Key: k, Kind: "aggregate", DependsOn: deps}
+        entities = append(entities, e)
+        entityMap[k] = e
+    }
     for k, pr := range d.Procedures {
         if pr == nil { continue }
         e := Entity{Key: k, Kind: "procedure", DependsOn: pr.DependsOn}
@@ -1727,7 +1785,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     // natural create order), then name. Without this, Kahn's queue would
     // follow Go's randomized map iteration and the buffer would differ
     // between runs on identical input.
-    kindRank := map[string]int{"extension": 0, "collation": 1, "tsdictionary": 2, "tsconfig": 3, "type": 4, "domain": 5, "sequence": 6, "function": 7, "procedure": 8, "table": 9, "view": 10}
+    kindRank := map[string]int{"extension": 0, "collation": 1, "tsdictionary": 2, "tsconfig": 3, "type": 4, "domain": 5, "sequence": 6, "function": 7, "procedure": 8, "aggregate": 9, "table": 10, "view": 11}
     entityLess := func(a, b string) bool {
         ra, rb := kindRank[entityMap[a].Kind], kindRank[entityMap[b].Kind]
         if ra != rb { return ra < rb }
@@ -1881,6 +1939,9 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
     }
     if strings.HasPrefix(raw, "procedure ") {
         return resolveRoutine(strings.TrimPrefix(raw, "procedure "), d.Procedures)
+    }
+    if strings.HasPrefix(raw, "aggregate ") {
+        return resolveRoutine(strings.TrimPrefix(raw, "aggregate "), d.Aggregates)
     }
     for _, p := range []struct {
         prefix string

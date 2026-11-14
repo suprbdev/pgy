@@ -114,8 +114,8 @@ schema SCH:
 	if exists(fmt.Sprintf(`select count(*) > 0 from pg_proc where pronamespace = '%q'::regnamespace and proname in ('old_fn', 'touch', 'old_proc')`, sch)) {
 		t.Error("undeclared functions and procedures should have been pruned")
 	}
-	if !exists(fmt.Sprintf(`select count(*) = 1 from pg_proc where pronamespace = '%q'::regnamespace and proname = 'my_sum'`, sch)) {
-		t.Error("aggregates must be kept")
+	if exists(fmt.Sprintf(`select count(*) > 0 from pg_proc where pronamespace = '%q'::regnamespace and proname = 'my_sum'`, sch)) {
+		t.Error("undeclared aggregates should have been pruned")
 	}
 	if !exists(fmt.Sprintf(`select count(*) > 0 from pg_proc where pronamespace = '%q'::regnamespace and proname = 'ltree_in'`, sch)) {
 		t.Error("extension functions must be kept")

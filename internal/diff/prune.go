@@ -206,14 +206,22 @@ func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bo
     for k, p := range desired.Procedures {
         if p != nil { want[normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig)] = true }
     }
+    for k, ag := range desired.Aggregates {
+        if ag != nil { want[normalizeFunctionSignature(schema.RoutineName(k)+aggregateArgs(ag.ArgsSig))] = true }
+    }
     collect := func(norm, sig string) (string, bool) {
         if sig == "" || want[norm] || live.ExtensionMembers["proc:"+norm] || !inScope(schema.RoutineName(sig)) { return "", false }
         name := schema.RoutineName(sig)
         return pqIdent(name) + sig[len(name):], true
     }
-    funcs, procs := []string{}, []string{}
+    funcs, procs, aggs := []string{}, []string{}, []string{}
     for norm, lf := range live.FunctionDefs {
-        if lf == nil || lf.Kind != "f" || lf.Internal { continue }
+        if lf == nil || lf.Internal { continue }
+        if lf.Kind == "a" && live.AggregateDefs[norm] != nil {
+            if s, ok := collect(norm, lf.Signature); ok { aggs = append(aggs, aggregateDropArgs(s)) }
+            continue
+        }
+        if lf.Kind != "f" { continue }
         if s, ok := collect(norm, lf.Signature); ok { funcs = append(funcs, s) }
     }
     for norm, lp := range live.ProcedureDefs {
@@ -222,10 +230,19 @@ func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bo
     }
     sort.Strings(funcs)
     sort.Strings(procs)
+    sort.Strings(aggs)
     out := []string{}
+    if len(aggs) > 0 { out = append(out, "drop aggregate "+strings.Join(aggs, ", ")+";") }
     if len(funcs) > 0 { out = append(out, "drop function "+strings.Join(funcs, ", ")+";") }
     if len(procs) > 0 { out = append(out, "drop procedure "+strings.Join(procs, ", ")+";") }
     return out
+}
+
+// aggregateDropArgs turns the empty argument list of a count(*)-style
+// aggregate into (*), as DROP AGGREGATE requires.
+func aggregateDropArgs(sig string) string {
+    if strings.HasSuffix(sig, "()") { return strings.TrimSuffix(sig, "()") + "(*)" }
+    return sig
 }
 
 func sortedKeys[V any](m map[string]V) []string {

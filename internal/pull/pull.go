@@ -61,6 +61,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.textSearch()
 	b.sequences()
 	b.routines()
+	b.aggregates()
 	b.tables()
 	b.views()
 
@@ -489,6 +490,40 @@ func (b *builder) routines() {
 }
 
 var procInRe = regexp.MustCompile(`(^|, )IN `)
+
+func (b *builder) aggregates() {
+	for _, norm := range sortedKeys(b.live.AggregateDefs) {
+		la := b.live.AggregateDefs[norm]
+		lf := b.live.FunctionDefs[norm]
+		if lf == nil || b.member("proc", norm) {
+			continue
+		}
+		name := lf.Signature
+		args := "(*)"
+		if i := strings.IndexByte(name, '('); i >= 0 {
+			if a := name[i:]; a != "()" {
+				args = a
+			}
+			name = name[:i]
+		}
+		blk, short, ok := b.block(name)
+		if !ok {
+			continue
+		}
+		m := newMap()
+		add(m, "sfunc", str(la.SFunc))
+		add(m, "stype", str(la.SType))
+		addStr(m, "finalfunc", la.FinalFunc)
+		addStr(m, "combinefunc", la.CombineFunc)
+		addStr(m, "initcond", la.InitCond)
+		if la.Parallel != "unsafe" {
+			add(m, "parallel", str(la.Parallel))
+		}
+		addStr(m, "comment", b.live.FunctionComments[norm])
+		b.owner(m, "proc:"+norm)
+		add(blk, "aggregate "+short+args, m)
+	}
+}
 
 func kindOf(r *diff.LiveRoutine) string {
 	if r.Procedure {
