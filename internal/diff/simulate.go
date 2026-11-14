@@ -183,6 +183,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lc.Nullable = c.Nullable
         lc.Default = c.Default
         if c.Identity != "" { lc.Identity = c.Identity }
+        if c.Generated != "" { lc.Generated, lc.Default = c.Generated, "" }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {
             lt.Constraints[uniqueKeyName(fq, cn)] = true
