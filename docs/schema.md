@@ -700,9 +700,9 @@ schema app:
     body: select 1
 ```
 
-Supported on: schemas, tables, columns, indexes, foreign keys, types, domains, functions, procedures, views, materialized views, sequences, roles.
+Supported on: schemas, tables, columns, indexes (also on materialized views), foreign keys, check/unique/exclude constraints, triggers, policies, types, domains, collations, functions, procedures, views, materialized views, sequences, roles, publications and event triggers.
 
-Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); foreign key comments as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`.
+Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); constraint comments (foreign keys included) as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`; trigger and policy comments as `COMMENT ON TRIGGER|POLICY <name> ON <schema>.<table>`. When a constraint, trigger or policy is dropped and recreated because its definition changed, its comment is re-applied in the same migration.
 
 Behavior:
 
