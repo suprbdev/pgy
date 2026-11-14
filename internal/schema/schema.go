@@ -49,6 +49,10 @@ type Role struct {
     ConnectionLimit int      // -1 = unset (no clause emitted)
     InRoles         []string // memberships: GRANT <parent> TO <role>
     Comment         string
+    // Managed records which attributes the YAML sets explicitly (login,
+    // superuser, createdb, createrole, replication, bypassRLS, inherit,
+    // connectionLimit); only those are reconciled on an existing role.
+    Managed map[string]bool
 }
 
 type View struct {
@@ -950,8 +954,11 @@ func parseRoles(v any) map[string]*Role {
     if !ok { return nil }
     out := map[string]*Role{}
     for name, def := range m {
-        r := &Role{Name: name, ConnectionLimit: -1}
+        r := &Role{Name: name, ConnectionLimit: -1, Managed: map[string]bool{}}
         if dm, ok := def.(map[string]any); ok {
+            for _, k := range []string{"login", "superuser", "createdb", "createrole", "replication", "bypassRLS", "inherit", "connectionLimit"} {
+                if _, ok := dm[k]; ok { r.Managed[k] = true }
+            }
             if b, ok := dm["login"].(bool); ok { r.Login = b }
             if b, ok := dm["superuser"].(bool); ok { r.Superuser = b }
             if b, ok := dm["createdb"].(bool); ok { r.CreateDB = b }

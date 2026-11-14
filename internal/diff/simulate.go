@@ -47,6 +47,20 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     for name, r := range desired.Roles {
         if r == nil { continue }
         out.Roles[name] = true
+        lr := &LiveRole{Inherit: true, ConnectionLimit: -1}
+        if prev := out.RoleDefs[name]; prev != nil { *lr = *prev }
+        if prev := out.RoleDefs[name]; prev == nil || len(r.Managed) > 0 {
+            set := func(key string, dst *bool, v bool) { if prev == nil || r.Managed[key] { *dst = v } }
+            set("login", &lr.Login, r.Login)
+            set("superuser", &lr.Superuser, r.Superuser)
+            set("createdb", &lr.CreateDB, r.CreateDB)
+            set("createrole", &lr.CreateRole, r.CreateRole)
+            set("replication", &lr.Replication, r.Replication)
+            set("bypassRLS", &lr.BypassRLS, r.BypassRLS)
+            set("inherit", &lr.Inherit, !r.NoInherit)
+            if prev == nil || r.Managed["connectionLimit"] { lr.ConnectionLimit = r.ConnectionLimit }
+        }
+        out.RoleDefs[name] = lr
         for _, parent := range r.InRoles {
             if parent == "" { continue }
             if out.RoleMembers[name] == nil { out.RoleMembers[name] = map[string]bool{} }
@@ -400,6 +414,7 @@ func cloneLive(l *Live) *Live {
         DomainDefs:         cloneMap(l.DomainDefs, func(d *LiveDomain) *LiveDomain { c := *d; c.Checks = cloneMap(d.Checks, nil); return &c }),
         Domains:            cloneSet(l.Domains),
         Roles:              cloneSet(l.Roles),
+        RoleDefs:           cloneMap(l.RoleDefs, func(r *LiveRole) *LiveRole { c := *r; return &c }),
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),

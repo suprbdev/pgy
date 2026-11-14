@@ -36,6 +36,7 @@ type Live struct{
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
     Roles      map[string]bool
+    RoleDefs   map[string]*LiveRole
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
     RoleComments map[string]string // role name -> comment (pg_shdescription)
@@ -101,6 +102,12 @@ type LiveEventTrigger struct {
     Enabled   string
     Comment   string
     Extension bool // member of an extension
+}
+
+// LiveRole is a role's attributes from pg_roles.
+type LiveRole struct {
+    Login, Superuser, CreateDB, CreateRole, Replication, BypassRLS, Inherit bool
+    ConnectionLimit int
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -279,6 +286,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Publications: map[string]*LivePublication{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
+        RoleDefs: map[string]*LiveRole{},
         RoleMembers: map[string]map[string]bool{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
@@ -1072,16 +1080,21 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     sgRows.Close()
 
     // Query existing roles (skip pg_* system roles)
-    roleQ := `select rolname from pg_roles where rolname not like 'pg\_%'`
+    roleQ := `
+        select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit
+        from pg_roles where rolname not like 'pg\_%'
+    `
     roleRows, err := pool.Query(ctx, roleQ)
     if err != nil { return nil, err }
     for roleRows.Next() {
         var roleName string
-        if err := roleRows.Scan(&roleName); err != nil {
+        lr := &LiveRole{}
+        if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit); err != nil {
             roleRows.Close()
             return nil, err
         }
         l.Roles[roleName] = true
+        l.RoleDefs[roleName] = lr
     }
     roleRows.Close()
 
@@ -1962,12 +1975,36 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
         if r == nil { continue }
         if !live.Roles[name] {
             plan.Creates = append(plan.Creates, renderRole(r))
+        } else if opts := roleAlterOptions(r, live.RoleDefs[name]); len(opts) > 0 {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s with %s;", grantRole(name), strings.Join(opts, " ")))
         }
         for _, parent := range r.InRoles {
             if parent == "" || live.RoleMembers[name][parent] { continue }
             plan.Alters = append(plan.Alters, fmt.Sprintf("grant %s to %s;", grantRole(parent), grantRole(name)))
         }
     }
+}
+
+// roleAlterOptions returns ALTER ROLE options for attributes the YAML sets
+// explicitly that differ from the live role.
+func roleAlterOptions(r *schema.Role, lr *LiveRole) []string {
+    if lr == nil { return nil }
+    out := []string{}
+    flag := func(key string, want, have bool, on, off string) {
+        if !r.Managed[key] || want == have { return }
+        if want { out = append(out, on) } else { out = append(out, off) }
+    }
+    flag("login", r.Login, lr.Login, "login", "nologin")
+    flag("superuser", r.Superuser, lr.Superuser, "superuser", "nosuperuser")
+    flag("createdb", r.CreateDB, lr.CreateDB, "createdb", "nocreatedb")
+    flag("createrole", r.CreateRole, lr.CreateRole, "createrole", "nocreaterole")
+    flag("replication", r.Replication, lr.Replication, "replication", "noreplication")
+    flag("bypassRLS", r.BypassRLS, lr.BypassRLS, "bypassrls", "nobypassrls")
+    flag("inherit", !r.NoInherit, lr.Inherit, "inherit", "noinherit")
+    if r.Managed["connectionLimit"] && r.ConnectionLimit != lr.ConnectionLimit {
+        out = append(out, fmt.Sprintf("connection limit %d", r.ConnectionLimit))
+    }
+    return out
 }
 
 func renderRole(r *schema.Role) string {
