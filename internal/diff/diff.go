@@ -60,6 +60,7 @@ type Live struct{
     DefaultACLs    map[string]map[string]map[string]bool
     DefaultACLRows map[string]bool
     CurrentUser    string
+    ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
     // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
     Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
@@ -1685,9 +1686,9 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
-    batch.add("select current_user", func(rows pgx.Rows) error {
+    batch.add("select current_user, current_setting('server_version_num')::int", func(rows pgx.Rows) error {
         for rows.Next() {
-            if err := rows.Scan(&l.CurrentUser); err != nil { return err }
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion); err != nil { return err }
         }
         return nil
     })
@@ -2357,7 +2358,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if c.Storage != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage)) }
                         continue
                     }
-                    plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe)...)
+                    plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
+                        plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
+                    })...)
                 }
                 if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
@@ -2390,7 +2393,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
     }
-    plan.Warnings = lockWarnings(live, plan)
+    plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
     return plan
 }
 
@@ -4004,7 +4007,7 @@ func Render(p *PlanDiff) string {
 // column's `using` property). Identity changes go through
 // identityAlterStmts; identity/serial columns keep their generated defaults
 // and implicit NOT NULL.
-func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool) []string {
+func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
 
@@ -4033,7 +4036,13 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     if c.Generated != "" || lc.Generated != "" {
         switch {
         case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
-            if unsafe { out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated)) }
+            switch {
+            case !unsafe:
+            case serverVersion > 0 && serverVersion < 170000:
+                warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); drop and re-add the column, along with the indexes and constraints that use it, in a hand-written migration", fq, cn, serverVersion/10000))
+            default:
+                out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
+            }
         case c.Generated == "" && lc.Generated != "":
             if unsafe { out = append(out, target+" drop expression;") }
         }

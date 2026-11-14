@@ -4960,3 +4960,19 @@ func TestCommentIndexAndForeignKeyUpdatedIfChanged(t *testing.T) {
 		t.Errorf("existing index/fk must not be recreated; creates: %v alters: %v", p.Creates, p.Alters)
 	}
 }
+
+func TestGeneratedExpressionChangeBeforePG17Warns(t *testing.T) {
+	live := liveWithTable("public.t", map[string]*LiveColumn{"a": {Type: "integer"}, "b": {Type: "integer", Nullable: true, Generated: "(a * 2)"}})
+	live.ServerVersion = 160004
+	d := &schema.Database{Tables: map[string]*schema.Table{"public.t": {Name: "t", Columns: map[string]*schema.Column{
+		"a": {Type: "int"}, "b": {Type: "int", Nullable: true, Generated: "a * 3"},
+	}}}}
+	p := Plan(live, d, true)
+	if sql := Render(p); sql != "" || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "PostgreSQL 16 has no ALTER COLUMN ... SET EXPRESSION") {
+		t.Errorf("expected only a warning, got:\n%s\n%+v", sql, p.Warnings)
+	}
+	live.ServerVersion = 170002
+	if p := Plan(live, d, true); !findAlter(p, `alter table "public"."t" alter column "b" set expression as (a * 3);`) {
+		t.Errorf("PostgreSQL 17 uses SET EXPRESSION, got %v", p.Alters)
+	}
+}

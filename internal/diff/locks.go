@@ -13,7 +13,7 @@ import (
 // rewrites, a table that already exists. Table is "schema.table".
 type Warning struct {
     Table     string `json:"table"`
-    Statement string `json:"statement"`
+    Statement string `json:"statement,omitempty"`
     Message   string `json:"message"`
 }
 

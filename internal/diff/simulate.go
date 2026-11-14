@@ -510,6 +510,7 @@ func cloneLive(l *Live) *Live {
         DefaultACLs:        cloneGrantMap(l.DefaultACLs),
         DefaultACLRows:     cloneSet(l.DefaultACLRows),
         CurrentUser:        l.CurrentUser,
+        ServerVersion:      l.ServerVersion,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),

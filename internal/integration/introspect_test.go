@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,7 +79,9 @@ func TestIntegrationExtensionSchemaAndVersion(t *testing.T) {
 	}
 	first := &schema.Extension{Name: "ltree", Schema: sch + "_a", Version: "1.1"}
 	applyPlan(t, pool, plan(first))
-	t.Cleanup(func() { pool.Exec(context.Background(), fmt.Sprintf("drop schema if exists %q, %q cascade", sch+"_a", sch+"_b")) }) //nolint
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf("drop schema if exists %q, %q cascade", sch+"_a", sch+"_b"))
+	}) //nolint
 	if sql := diff.Render(plan(first)); sql != "" {
 		t.Fatalf("expected no changes after create, got:\n%s", sql)
 	}
@@ -134,6 +137,11 @@ func TestIntegrationGeneratedColumnAlter(t *testing.T) {
 		applyPlan(t, pool, plan(desired("a * 3")))
 		if sql := diff.Render(plan(desired("a * 3"))); sql != "" {
 			t.Fatalf("expected no changes after set expression, got:\n%s", sql)
+		}
+	} else {
+		p := plan(desired("a * 3"))
+		if sql := diff.Render(p); sql != "" || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "has no ALTER COLUMN ... SET EXPRESSION") {
+			t.Fatalf("before PostgreSQL 17 an expression change must only warn, got:\n%s\nwarnings: %+v", sql, p.Warnings)
 		}
 	}
 
