@@ -3652,17 +3652,22 @@ func resolveRole(role, currentUser string) string {
 }
 
 // resolveGrantRoles returns grants with role keywords replaced by the
-// connected role, so they compare with live ACLs.
+// connected role and PUBLIC spelled as live ACLs spell it, so they compare
+// with live ACLs.
 func resolveGrantRoles(grants map[string][]string, currentUser string) map[string][]string {
-    if grants == nil || currentUser == "" { return grants }
+    if grants == nil { return grants }
+    key := func(r string) string {
+        if strings.EqualFold(strings.TrimSpace(r), "public") { return "public" }
+        return resolveRole(r, currentUser)
+    }
     changed := false
     for r := range grants {
-        if isRoleKeyword(r) { changed = true }
+        if key(r) != r { changed = true }
     }
     if !changed { return grants }
     out := make(map[string][]string, len(grants))
     for r, privs := range grants {
-        k := resolveRole(r, currentUser)
+        k := key(r)
         out[k] = append(out[k], privs...)
     }
     return out

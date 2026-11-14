@@ -41,3 +41,13 @@ func TestOwnerKeywordComparesAsConnectedRole(t *testing.T) {
 		t.Errorf("owner: current_user must match the connected role, got:\n%s", sql)
 	}
 }
+
+func TestGrantPublicSpelling(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}},
+		Grants: map[string][]string{"PUBLIC": {"select"}}}}}
+	live := Simulate(emptyLive(), d)
+	live.TableGrants["app.t"] = map[string]map[string]bool{"public": {"select": true}}
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("PUBLIC must match the live public grant, got:\n%s", sql)
+	}
+}
