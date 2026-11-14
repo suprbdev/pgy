@@ -2095,7 +2095,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
     if opts.Unsafe && opts.Prune {
-        early, late := planPrune(live, desired)
+        early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
     }
     return plan

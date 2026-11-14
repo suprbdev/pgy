@@ -13,6 +13,7 @@ type FileConfig struct {
     SchemaRoot    string   `yaml:"schema_root"`
     Schemas       []string `yaml:"schemas"`
     MigrationsDir string   `yaml:"migrations_dir"`
+    MigrationsTable string `yaml:"migrations_table"`
     BufferPath    string   `yaml:"buffer"`
     Quiet         *bool    `yaml:"quiet"`
     Verbose       *bool    `yaml:"verbose"`

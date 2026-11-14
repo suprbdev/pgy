@@ -39,8 +39,7 @@ Exit codes:
             if err != nil { return err }
             defer pool.Close()
 
-            schemaName := "pgy"
-            tableName := "migrations"
+            schemaName, tableName := cfg.migrationsTable()
             if err := db.EnsureMigrationsTable(ctx, pool, schemaName, tableName); err != nil { return err }
 
             files, err := readMigrationFiles(cfg.MigrationsDir)

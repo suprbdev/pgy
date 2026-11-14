@@ -140,3 +140,14 @@ func TestPruneEarlyDropsPrecedeColumnDrops(t *testing.T) {
 		t.Errorf("want view drop < column drop < table drop, got %d %d %d: %v", view, col, table, p.Drops)
 	}
 }
+
+func TestPruneKeepsConfiguredMigrationsTable(t *testing.T) {
+	live := pruneLive()
+	live.Tables["app.applied"] = newLiveTable()
+	p := PlanWith(live, pruneDesired(), Options{Unsafe: true, Prune: true, MigrationsTable: "app.applied"})
+	for _, d := range p.Drops {
+		if strings.Contains(d, `"app"."applied"`) {
+			t.Errorf("configured migrations table must not be pruned: %s", d)
+		}
+	}
+}

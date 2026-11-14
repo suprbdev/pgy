@@ -17,6 +17,9 @@ type GlobalConfig struct {
     SchemaRoot    string
     Schemas       []string
     MigrationsDir string
+    // MigrationsTable is the "schema.table" recording applied migrations
+    // (default pgy.migrations); an unqualified name lives in schema pgy.
+    MigrationsTable string
     BufferPath    string
     Quiet         bool
     Verbose       bool
@@ -38,6 +41,7 @@ func AttachGlobalFlags(root *cobra.Command) {
     root.PersistentFlags().StringVar(&cfg.SchemaRoot, "schema-root", getenv("PGY_SCHEMA_ROOT", "."), "Schema root directory")
     root.PersistentFlags().StringSliceVar(&cfg.Schemas, "schemas", splitCSV(getenv("PGY_SCHEMAS", "")), "Comma-separated YAML schema files (relative to schema-root unless absolute)")
     root.PersistentFlags().StringVar(&cfg.MigrationsDir, "migrations-dir", getenv("PGY_MIGRATIONS_DIR", "./migrations"), "Migrations directory")
+    root.PersistentFlags().StringVar(&cfg.MigrationsTable, "migrations-table", getenv("PGY_MIGRATIONS_TABLE", defaultMigrationsTable), "Table recording applied migrations (schema.table)")
     root.PersistentFlags().StringVar(&cfg.BufferPath, "buffer", getenv("PGY_BUFFER", "./.pgy.buffer.sql"), "Buffer SQL file path")
     root.PersistentFlags().BoolVar(&cfg.Quiet, "quiet", os.Getenv("PGY_QUIET") == "1", "Suppress non-essential output")
     root.PersistentFlags().BoolVar(&cfg.Verbose, "verbose", os.Getenv("PGY_VERBOSE") == "1", "Verbose output")
@@ -73,6 +77,9 @@ func AttachGlobalFlags(root *cobra.Command) {
         // migrations-dir
         if !f.Changed("migrations-dir") && os.Getenv("PGY_MIGRATIONS_DIR") == "" && fc.MigrationsDir != "" {
             cfg.MigrationsDir = fc.MigrationsDir
+        }
+        if !f.Changed("migrations-table") && os.Getenv("PGY_MIGRATIONS_TABLE") == "" && fc.MigrationsTable != "" {
+            cfg.MigrationsTable = fc.MigrationsTable
         }
         // buffer
         if !f.Changed("buffer") && os.Getenv("PGY_BUFFER") == "" && fc.BufferPath != "" {
@@ -127,6 +134,17 @@ func AttachGlobalFlags(root *cobra.Command) {
         cmd.SetContext(ctx)
         return nil
     }
+}
+
+const defaultMigrationsTable = "pgy.migrations"
+
+// migrationsTable returns the configured migrations table as schema and
+// table name; an unqualified name is placed in schema pgy.
+func (c *GlobalConfig) migrationsTable() (string, string) {
+    name := strings.TrimSpace(c.MigrationsTable)
+    if name == "" { name = defaultMigrationsTable }
+    if schema, table, ok := strings.Cut(name, "."); ok { return schema, table }
+    return "pgy", name
 }
 
 type ctxKey struct{}

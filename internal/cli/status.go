@@ -27,8 +27,7 @@ Exit codes:
             pool, err := db.Connect(ctx, cfg.DSN)
             if err != nil { return err }
             defer pool.Close()
-            schemaName := "pgy"
-            tableName := "migrations"
+            schemaName, tableName := cfg.migrationsTable()
             if err := db.EnsureMigrationsTable(ctx, pool, schemaName, tableName); err != nil { return err }
             applied, err := db.LoadApplied(ctx, pool, schemaName, tableName)
             if err != nil { return err }
