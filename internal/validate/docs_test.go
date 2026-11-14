@@ -27,7 +27,7 @@ func TestDocsYAMLExamplesValidate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for i, m := range yamlBlockRe.FindAllStringSubmatch(string(b), -1) {
+		for i, m := range yamlBlockRe.FindAllStringSubmatch(strings.ReplaceAll(string(b), "\r\n", "\n"), -1) {
 			block := m[1]
 			first := ""
 			for _, line := range strings.Split(block, "\n") {
