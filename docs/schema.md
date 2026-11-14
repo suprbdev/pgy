@@ -560,6 +560,20 @@ schema public:
 
 Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts).
 
+For an existing composite type, attributes the live type lacks are added with `ALTER TYPE ... ADD ATTRIBUTE` (appended, since PostgreSQL cannot insert an attribute in the middle). Under `--unsafe`, a changed attribute type emits `ALTER ATTRIBUTE ... TYPE` and attributes removed from YAML emit `DROP ATTRIBUTE`. PostgreSQL rejects both while a table column uses the type.
+
+### Range
+
+```yaml
+schema public:
+  type floatrange:
+    type: range
+    subtype: float8
+    subtypeDiff: float8mi           # optional: subtypeOpclass, collation, canonical, multirangeTypeName
+```
+
+Emitted as `CREATE TYPE ... AS RANGE (subtype = ..., ...)`, together with the multirange type PostgreSQL derives from it. Range types are create-only.
+
 ---
 
 ## Function Definitions

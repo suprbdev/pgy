@@ -63,6 +63,9 @@ type Live struct{
     ProcedureDefs map[string]*LiveProcedure
     // EnumLabels: "schema.type" -> labels in enumsortorder, for ALTER TYPE ... ADD VALUE
     EnumLabels map[string][]string
+    // CompositeAttributes: "schema.type" -> attribute name -> format_type, for
+    // ALTER TYPE ... ADD / ALTER / DROP ATTRIBUTE
+    CompositeAttributes map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name" and
     // "proc:<normalized signature>".
@@ -287,6 +290,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Procedures: map[string]bool{},
         ProcedureDefs: map[string]*LiveProcedure{},
         EnumLabels: map[string][]string{},
+        CompositeAttributes: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
         OwnedSequences: map[string]bool{},
     }
@@ -629,7 +633,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
-        and t.typtype in ('e', 'c')
+        and t.typtype in ('e', 'c', 'r')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
     typeRows, err := pool.Query(ctx, typeQ)
@@ -817,6 +821,29 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         if comment != "" { l.CollationComments[key] = comment }
     }
     collRows.Close()
+
+    attrQ := `
+        select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod)
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        join pg_class c on c.oid = t.typrelid and c.relkind = 'c'
+        join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    attrRows, err := pool.Query(ctx, attrQ)
+    if err != nil { return nil, err }
+    for attrRows.Next() {
+        var schemaName, typeName, attName, attType string
+        if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType); err != nil {
+            attrRows.Close()
+            return nil, err
+        }
+        key := fmt.Sprintf("%s.%s", schemaName, typeName)
+        if l.CompositeAttributes[key] == nil { l.CompositeAttributes[key] = map[string]string{} }
+        l.CompositeAttributes[key][attName] = attType
+    }
+    attrRows.Close()
 
     // Query existing domains
     domQ := `
@@ -1410,6 +1437,47 @@ func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
     return out
 }
 
+// compositeAlterStmts adds attributes a live composite type lacks. Under
+// --unsafe it also changes attribute types and drops attributes the YAML no
+// longer declares (both fail while a table column uses the type). Without
+// live attribute data nothing is emitted.
+func compositeAlterStmts(fq string, td *schema.TypeDef, live map[string]string, unsafe bool) []string {
+    if live == nil { return nil }
+    names := append([]string(nil), td.AttributeOrder...)
+    seen := map[string]bool{}
+    for _, n := range names { seen[n] = true }
+    for _, n := range sortedKeys(td.Attributes) {
+        if !seen[n] { names = append(names, n) }
+    }
+    out := []string{}
+    for _, n := range names {
+        t, ok := td.Attributes[n]
+        if !ok { continue }
+        lt, exists := live[n]
+        switch {
+        case !exists:
+            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s;", pqIdent(fq), pqIdent(n), t))
+        case unsafe && normalizeColumnType(t) != normalizeColumnType(lt):
+            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s;", pqIdent(fq), pqIdent(n), t))
+        }
+    }
+    if unsafe {
+        for _, n := range sortedKeys(live) {
+            if _, ok := td.Attributes[n]; !ok { out = append(out, fmt.Sprintf("alter type %s drop attribute %s;", pqIdent(fq), pqIdent(n))) }
+        }
+    }
+    return out
+}
+
+// renderRangeType emits CREATE TYPE ... AS RANGE with the options set.
+func renderRangeType(fq string, r *schema.RangeDef) string {
+    opts := []string{"subtype = " + r.Subtype}
+    for _, o := range [][2]string{{"subtype_opclass", r.SubtypeOpclass}, {"collation", r.Collation}, {"canonical", r.Canonical}, {"subtype_diff", r.SubtypeDiff}, {"multirange_type_name", r.MultirangeTypeName}} {
+        if o[1] != "" { opts = append(opts, o[0]+" = "+o[1]) }
+    }
+    return fmt.Sprintf("create type %s as range (%s);", pqIdent(fq), strings.Join(opts, ", "))
+}
+
 // enumAddValueStmts emits ALTER TYPE ... ADD VALUE for desired labels missing
 // from live, positioned BEFORE the next desired label that already exists so
 // desired order is preserved. Removed/reordered labels are ignored (postgres
@@ -1592,8 +1660,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || td == nil { continue }
             // Existing enum: add missing labels (removal/reorder unsupported by postgres)
             if live.Types[e.Key] {
-                if td.Kind == "enum" {
+                switch td.Kind {
+                case "enum":
                     plan.Alters = append(plan.Alters, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
+                case "composite":
+                    plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], unsafe)...)
                 }
                 continue
             }
@@ -1618,6 +1689,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 sort.Strings(keys)
                 for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s", pqIdent(an), td.Attributes[an])) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as (%s);", pqIdent(e.Key), strings.Join(attrs, ", ")))
+            case "range":
+                if td.Range == nil || td.Range.Subtype == "" { continue }
+                plan.Creates = append(plan.Creates, renderRangeType(e.Key, td.Range))
             }
         case "function":
             f, ok := desired.Functions[e.Key]

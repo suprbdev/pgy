@@ -279,6 +279,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         if td == nil { continue }
         hard(ix.resolveDeps(td.DependsOn))
         for _, at := range td.Attributes { hard(ix.mentions(at, typeKinds)) }
+        if td.Range != nil { hard(ix.mentions(td.Range.Subtype, typeKinds)) }
     }
     for _, dm := range d.Domains {
         if dm == nil { continue }

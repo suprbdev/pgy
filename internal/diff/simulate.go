@@ -68,6 +68,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 }
             }
         }
+        if td.Kind == "composite" {
+            attrs := map[string]string{}
+            for n, t := range out.CompositeAttributes[k] { attrs[n] = t }
+            for n, t := range td.Attributes { attrs[n] = t }
+            out.CompositeAttributes[k] = attrs
+        }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
     }
 
@@ -414,6 +420,7 @@ func cloneLive(l *Live) *Live {
             return &c
         }),
         EnumLabels: cloneMap(l.EnumLabels, func(v []string) []string { return append([]string(nil), v...) }),
+        CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),
     }

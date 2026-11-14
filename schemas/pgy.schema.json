@@ -616,10 +616,16 @@
       "additionalProperties": false
     },
     "typeDef": {
-      "description": "Body of a `type <name>:` declaration (enum or composite).",
+      "description": "Body of a `type <name>:` declaration (enum, composite or range).",
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["enum", "composite"] },
+        "type": { "type": "string", "enum": ["enum", "composite", "range"] },
+        "subtype": { "type": "string", "description": "Range: element type, e.g. timestamptz." },
+        "subtypeOpclass": { "type": "string", "description": "Range: btree operator class for the subtype." },
+        "collation": { "type": "string", "description": "Range: collation for a collatable subtype." },
+        "canonical": { "type": "string", "description": "Range: canonicalization function (discrete ranges)." },
+        "subtypeDiff": { "type": "string", "description": "Range: difference function, used by GiST." },
+        "multirangeTypeName": { "type": "string", "description": "Range: name for the multirange type (default <name>_multirange or derived)." },
         "labels": {
           "$ref": "#/definitions/stringList",
           "description": "Enum labels, in order."
