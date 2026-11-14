@@ -1771,7 +1771,11 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, td := range d.Types {
         if td == nil { continue }
-        e := Entity{Key: k, Kind: "type", DependsOn: td.DependsOn}
+        deps := td.DependsOn
+        if td.Range != nil && td.Range.SubtypeDiff != "" && len(resolveRoutine(td.Range.SubtypeDiff, d.Functions)) > 0 {
+            deps = append(append([]string{}, deps...), "function "+td.Range.SubtypeDiff)
+        }
+        e := Entity{Key: k, Kind: "type", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }

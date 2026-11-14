@@ -671,3 +671,31 @@ func TestPlanSplitWarnsOnlyForExistingTables(t *testing.T) {
         if len(s.Plan.Warnings) > 0 { t.Errorf("tables created by this plan must not warn: %+v", s.Plan.Warnings) }
     }
 }
+
+func TestPlanAggregateAndRangeComeAfterTheirFunctions(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "uses.yml": `
+schema public:
+  aggregate total(int):
+    sfunc: public.add2
+    stype: int
+  type f8range:
+    type: range
+    subtype: float8
+    subtypeDiff: public.f8diff
+`,
+        "fns.yml": `
+schema public:
+  function add2(a int, b int):
+    returns: int
+    language: sql
+    body: select a + b
+  function f8diff(a float8, b float8):
+    returns: float8
+    language: sql
+    body: select a - b
+`,
+    })
+    steps := planFiles(t, nil, p("uses.yml", "fns.yml"), ModeFile, false)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"fns", "uses"}) { t.Fatalf("got %v", got) }
+}

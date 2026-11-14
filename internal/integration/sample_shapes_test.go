@@ -6,6 +6,15 @@ func TestIntegrationSampleShapesIdempotent(t *testing.T) {
 	assertYAMLIdempotent(t, map[string]string{
 		"shapes": `
 schema SCH:
+  function f8diff(a float8, b float8):
+    returns: float8
+    language: sql
+    immutable: true
+    body: select a - b
+  type f8range:
+    type: range
+    subtype: float8
+    subtypeDiff: SCH.f8diff
   domain bıgınt:
     type: bigint
     comment: non-ASCII name

@@ -178,3 +178,31 @@ schema app:
 		}
 	}
 }
+
+func TestTopologicalSortRangeAfterSubtypeDiff(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  function f8diff(a float8, b float8):
+    returns: float8
+    language: sql
+    body: select a - b
+  type f8range:
+    type: range
+    subtype: float8
+    subtypeDiff: app.f8diff
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := TopologicalSort(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, e := range sorted {
+		pos[e.Kind+" "+e.Key] = i
+	}
+	if pos["function app.f8diff(a float8, b float8)"] > pos["type app.f8range"] {
+		t.Errorf("range type sorted before its subtype_diff function: %v", sorted)
+	}
+}

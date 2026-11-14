@@ -16,20 +16,21 @@ const (
     kindSequence  = "sequence"
     kindFunction  = "function"
     kindProcedure = "procedure"
+    kindAggregate = "aggregate"
     kindCollation = "collation"
     kindTSConfig  = "tsconfig"
     kindTSDict    = "tsdictionary"
 )
 
 var (
-    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure, kindCollation, kindTSConfig, kindTSDict}
+    allKinds    = []string{kindTable, kindView, kindType, kindDomain, kindSequence, kindFunction, kindProcedure, kindAggregate, kindCollation, kindTSConfig, kindTSDict}
     collationKinds = []string{kindCollation}
     typeKinds   = []string{kindType, kindDomain}
     callKinds    = []string{kindFunction}
-    exprKinds    = []string{kindFunction, kindType, kindDomain, kindTSConfig}
+    exprKinds    = []string{kindFunction, kindAggregate, kindType, kindDomain, kindTSConfig}
     defaultKinds = []string{kindFunction, kindSequence, kindType, kindDomain, kindTSConfig}
     returnKinds  = []string{kindType, kindDomain, kindTable, kindView}
-    policyKinds  = []string{kindTable, kindView, kindFunction, kindProcedure, kindType, kindDomain}
+    policyKinds  = []string{kindTable, kindView, kindFunction, kindAggregate, kindProcedure, kindType, kindDomain}
 )
 
 type ref struct {
@@ -57,6 +58,7 @@ func declared(d *schema.Database) []ref {
     add(kindSequence, nonNilKeys(d.Sequences))
     add(kindFunction, nonNilKeys(d.Functions))
     add(kindProcedure, nonNilKeys(d.Procedures))
+    add(kindAggregate, nonNilKeys(d.Aggregates))
     add(kindCollation, nonNilKeys(d.Collations))
     add(kindTSConfig, nonNilKeys(d.TSConfigs))
     add(kindTSDict, nonNilKeys(d.TSDictionaries))
@@ -89,6 +91,8 @@ func isDeclared(d *schema.Database, r ref) bool {
         return d.Functions[r.key] != nil
     case kindProcedure:
         return d.Procedures[r.key] != nil
+    case kindAggregate:
+        return d.Aggregates[r.key] != nil
     case kindCollation:
         return d.Collations[r.key] != nil
     case kindTSConfig:
@@ -116,6 +120,8 @@ func existsLive(l *diff.Live, r ref) bool {
         return hasSignaturePrefix(l.Functions, schema.RoutineName(r.key))
     case kindProcedure:
         return hasSignaturePrefix(l.Procedures, schema.RoutineName(r.key))
+    case kindAggregate:
+        return hasSignaturePrefix(l.Functions, schema.RoutineName(r.key))
     case kindCollation:
         return l.Collations[r.key]
     case kindTSConfig:
