@@ -206,6 +206,13 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lc.Default = c.Default
         if c.Identity != "" { lc.Identity = c.Identity }
         if c.Generated != "" { lc.Generated, lc.Default, lc.Virtual = c.Generated, "", c.Virtual }
+        if c.Collate != "" { lc.Collation = c.Collate }
+        if c.Compression == "default" {
+            lc.Compression = ""
+        } else if c.Compression != "" {
+            lc.Compression = c.Compression
+        }
+        if c.Storage != "" { lc.Storage = c.Storage }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {
             lt.Constraints[uniqueKeyName(fq, cn)] = true
@@ -260,6 +267,11 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         }
     }
     if dt.RowLevelSecurity != nil { lt.RLSEnabled = *dt.RowLevelSecurity }
+    if dt.Unlogged != nil { lt.Unlogged = *dt.Unlogged }
+    if dt.With != nil {
+        lt.Options = map[string]string{}
+        for k, v := range dt.With { lt.Options[strings.ToLower(k)] = v }
+    }
     if dt.Grants != nil { out.TableGrants[fq] = simulateGrants(out.TableGrants[fq], dt.Grants) }
     if dt.Comment != "" { out.RelComments[fq] = dt.Comment }
 }
@@ -369,6 +381,7 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     }
     c.Triggers = cloneMap(t.Triggers, nil)
     c.ConstraintInherited = cloneSet(t.ConstraintInherited)
+    c.Options = cloneMap(t.Options, nil)
     c.TriggerInherited = cloneSet(t.TriggerInherited)
     c.Policies = cloneMap(t.Policies, func(p *LivePolicy) *LivePolicy {
         if p == nil { return nil }

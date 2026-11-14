@@ -112,6 +112,8 @@ type Table struct {
     PartitionBy *PartitionBy   `yaml:"-"` // declarative partitioning key (parent tables)
     PartitionOf string         `yaml:"-"` // fully qualified parent table (partition children)
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
+    Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
+    With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
 }
 
 // PartitionBy declares a table's partitioning strategy (PARTITION BY).
@@ -165,6 +167,9 @@ type Column struct {
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
+    Collate     string `yaml:"collate"`     // COLLATE; "" = type default
+    Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
+    Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
 }
@@ -326,6 +331,12 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.Partition != nil {
                     existing.Partition = t.Partition
+                }
+                if t.Unlogged != nil {
+                    existing.Unlogged = t.Unlogged
+                }
+                if t.With != nil {
+                    existing.With = t.With
                 }
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey = t.PrimaryKey
@@ -595,6 +606,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 }
                 if cm, ok := m["comment"].(string); ok { t.Comment = cm }
                 parseTablePartitioning(t, defaultSchema, m)
+                parseTableStorage(t, m)
             }
             db.Tables[fq] = t
         }
@@ -639,6 +651,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             }
             if cm, ok := m["comment"].(string); ok { t.Comment = cm }
             parseTablePartitioning(t, schemaName, m)
+            parseTableStorage(t, m)
             db.Tables[fq] = t
         }
     }
@@ -691,6 +704,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if cm, ok := inner["comment"].(string); ok { t.Comment = cm }
                 parseTablePartitioning(t, schemaName, inner)
+                parseTableStorage(t, inner)
             }
             db.Tables[fq] = t
         } else if strings.HasPrefix(key, "function ") {
@@ -772,6 +786,9 @@ func parseColumnSpec(spec any) *Column {
         if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
+        if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
+        if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
+        if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }
@@ -1016,6 +1033,16 @@ func parseConstraints(v any) []*Constraint {
 
 // parseTablePartitioning fills partitioning properties from a table's YAML map:
 // `partitionBy` (parent), `partitionOf` + `forValues`/`default` (child).
+// parseTableStorage fills a table's unlogged flag and `with` storage
+// parameters from its YAML map.
+func parseTableStorage(t *Table, m map[string]any) {
+    if b, ok := m["unlogged"].(bool); ok { t.Unlogged = &b }
+    if w, ok := m["with"].(map[string]any); ok {
+        t.With = map[string]string{}
+        for k, v := range w { t.With[k] = scalarToString(v) }
+    }
+}
+
 func parseTablePartitioning(t *Table, schemaName string, m map[string]any) {
     if pbRaw, ok := m["partitionBy"]; ok {
         t.PartitionBy = parsePartitionBy(pbRaw)

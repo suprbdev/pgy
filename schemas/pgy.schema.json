@@ -190,6 +190,15 @@
         "default": {
           "type": "boolean",
           "description": "DEFAULT partition (used with partitionOf instead of forValues)."
+        },
+        "unlogged": {
+          "type": "boolean",
+          "description": "UNLOGGED table (not WAL-logged, emptied after a crash). Changing it on a live table rewrites it and requires --unsafe."
+        },
+        "with": {
+          "type": "object",
+          "description": "Storage parameters, e.g. {fillfactor: 70, autovacuum_vacuum_scale_factor: 0.05}. When present, live parameters not listed are reset.",
+          "additionalProperties": { "$ref": "#/definitions/scalar" }
         }
       },
       "additionalProperties": false
@@ -240,7 +249,9 @@
         "partitionBy": { "$ref": "#/definitions/partitionBy" },
         "partitionOf": { "type": "string" },
         "forValues": { "$ref": "#/definitions/partitionSpec" },
-        "default": { "type": "boolean" }
+        "default": { "type": "boolean" },
+        "unlogged": { "type": "boolean" },
+        "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
       "additionalProperties": false
@@ -273,6 +284,9 @@
           "minLength": 1,
           "description": "Generated column expression: GENERATED ALWAYS AS (expr) STORED. Overrides default and identity."
         },
+        "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the column, e.g. C or und-x-icu. Changing it on a live column requires --unsafe." },
+        "compression": { "type": "string", "enum": ["pglz", "lz4", "default"], "description": "TOAST compression method (applies to newly written values)." },
+        "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"], "description": "Column storage mode (SET STORAGE)." },
         "virtual": {
           "type": "boolean",
           "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
@@ -306,6 +320,9 @@
         },
         "generated": { "type": "string", "minLength": 1 },
         "virtual": { "type": "boolean" },
+        "collate": { "type": "string", "minLength": 1 },
+        "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
+        "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"] },
         "using": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
