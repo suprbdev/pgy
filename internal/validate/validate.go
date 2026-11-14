@@ -128,6 +128,7 @@ func Database(d *schema.Database) []Issue {
 	if _, err := schema.TopologicalSort(d); err != nil {
 		add(Error, "", "%v", err)
 	}
+	checkRenames(d, add)
 
 	for _, fq := range sortedKeys(d.Tables) {
 		t := d.Tables[fq]
@@ -558,4 +559,154 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// renameGroup collects the renamedFrom declarations sharing one namespace:
+// each source must not itself be declared, and no two objects may be
+// renamed from the same source.
+type renameGroup struct {
+	declared map[string]bool
+	sources  map[string]string
+}
+
+func newRenameGroup() *renameGroup {
+	return &renameGroup{declared: map[string]bool{}, sources: map[string]string{}}
+}
+
+func (g *renameGroup) check(obj, source string, add func(Severity, string, string, ...any)) {
+	if g.declared[source] {
+		add(Error, obj, "renamedFrom %s names an object the YAML also declares", source)
+	}
+	if prev, dup := g.sources[source]; dup {
+		add(Error, obj, "renamedFrom %s is also claimed by %s", source, prev)
+	}
+	g.sources[source] = obj
+}
+
+func qualifiedSource(key, from string) string {
+	if strings.Contains(from, ".") {
+		return from
+	}
+	return key[:strings.IndexByte(key, '.')+1] + from
+}
+
+func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)) {
+	rels, types, routines := newRenameGroup(), newRenameGroup(), newRenameGroup()
+	for k := range d.Tables {
+		rels.declared[k] = true
+	}
+	for k := range d.Views {
+		rels.declared[k] = true
+	}
+	for k := range d.Sequences {
+		rels.declared[k] = true
+	}
+	for k := range d.Types {
+		types.declared[k] = true
+	}
+	for k := range d.Domains {
+		types.declared[k] = true
+	}
+	for k := range d.Functions {
+		routines.declared[k] = true
+	}
+	for k := range d.Procedures {
+		routines.declared[k] = true
+	}
+	for _, k := range sortedKeys(d.Tables) {
+		t := d.Tables[k]
+		if t == nil {
+			continue
+		}
+		obj := "table " + k
+		if t.RenamedFrom != "" {
+			rels.check(obj, qualifiedSource(k, t.RenamedFrom), add)
+		}
+		cols := newRenameGroup()
+		for cn := range t.Columns {
+			cols.declared[cn] = true
+		}
+		for _, cn := range sortedKeys(t.Columns) {
+			if c := t.Columns[cn]; c != nil && c.RenamedFrom != "" {
+				cols.check(obj+" column "+cn, c.RenamedFrom, add)
+			}
+		}
+		named := newRenameGroup()
+		for _, ix := range t.Indexes {
+			if ix != nil {
+				named.declared[ix.Name] = true
+			}
+		}
+		for _, c := range t.Constraints {
+			if c != nil {
+				named.declared[c.Name] = true
+			}
+		}
+		for _, fk := range t.ForeignKeys {
+			if fk != nil {
+				named.declared[fk.Name] = true
+			}
+		}
+		for _, ix := range t.Indexes {
+			if ix != nil && ix.RenamedFrom != "" {
+				named.check(obj+" index "+ix.Name, ix.RenamedFrom, add)
+			}
+		}
+		for _, c := range t.Constraints {
+			if c != nil && c.RenamedFrom != "" {
+				named.check(obj+" constraint "+c.Name, c.RenamedFrom, add)
+			}
+		}
+		for _, fk := range t.ForeignKeys {
+			if fk != nil && fk.RenamedFrom != "" {
+				named.check(obj+" foreign key "+fk.Name, fk.RenamedFrom, add)
+			}
+		}
+	}
+	for _, k := range sortedKeys(d.Views) {
+		if v := d.Views[k]; v != nil && v.RenamedFrom != "" {
+			rels.check("view "+k, qualifiedSource(k, v.RenamedFrom), add)
+		}
+	}
+	for _, k := range sortedKeys(d.Sequences) {
+		if sq := d.Sequences[k]; sq != nil && sq.RenamedFrom != "" {
+			rels.check("sequence "+k, qualifiedSource(k, sq.RenamedFrom), add)
+		}
+	}
+	for _, k := range sortedKeys(d.Types) {
+		td := d.Types[k]
+		if td == nil {
+			continue
+		}
+		if td.RenamedFrom != "" {
+			types.check("type "+k, qualifiedSource(k, td.RenamedFrom), add)
+		}
+		labels := map[string]bool{}
+		for _, l := range td.Labels {
+			labels[l] = true
+		}
+		for _, label := range sortedKeys(td.RenamedLabels) {
+			if !labels[label] {
+				add(Error, "type "+k, "renamedLabels names %s, which is not one of its labels", label)
+			}
+			if old := td.RenamedLabels[label]; labels[old] {
+				add(Error, "type "+k, "renamedLabels source %s is still one of its labels", old)
+			}
+		}
+	}
+	for _, k := range sortedKeys(d.Domains) {
+		if dm := d.Domains[k]; dm != nil && dm.RenamedFrom != "" {
+			types.check("domain "+k, qualifiedSource(k, dm.RenamedFrom), add)
+		}
+	}
+	for _, k := range sortedKeys(d.Functions) {
+		if f := d.Functions[k]; f != nil && f.RenamedFrom != "" {
+			routines.check("function "+k, qualifiedSource(k, f.RenamedFrom)+f.ArgsSig, add)
+		}
+	}
+	for _, k := range sortedKeys(d.Procedures) {
+		if p := d.Procedures[k]; p != nil && p.RenamedFrom != "" {
+			routines.check("procedure "+k, qualifiedSource(k, p.RenamedFrom)+p.ArgsSig, add)
+		}
+	}
 }

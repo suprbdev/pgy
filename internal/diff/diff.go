@@ -1943,6 +1943,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 // PlanWith diffs desired against live with the given options.
 func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    live, renames := applyRenames(live, desired)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -2038,6 +2039,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             plan.Creates = append(plan.Creates, fmt.Sprintf("create schema if not exists %s;", pqIdent(schemaName)))
         }
     }
+    plan.Creates = append(plan.Creates, renames...)
     
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
 

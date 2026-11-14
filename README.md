@@ -236,6 +236,8 @@ Diff behavior highlights:
 
 These are never dropped: objects in other schemas, extension members, partitions (dropping the partitioned parent drops them), primary keys, indexes that back a constraint, constraints/triggers/indexes a partition inherits from its parent, sequences owned by a column, window functions, functions PostgreSQL created for another object (such as range type constructors), roles, schemas, extensions, and pgy's own `pgy.migrations` table.
 
+Renamed something? Add `renamedFrom: <old name>` to it (see [Renames](docs/schema.md#renames)). pgy then emits `ALTER ... RENAME` instead of creating a new object, and `--prune` does not drop the old one.
+
 > **Warning:** run `--prune` with **all** of your schema files. Running it with an explicit `--schemas` subset drops every object those files don't mention in the schemas they touch, including whole tables and their data. Always review the buffer before committing it.
 
 See `docs/feature_support.md` for the full capability matrix.

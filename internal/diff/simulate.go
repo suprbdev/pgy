@@ -10,6 +10,7 @@ import (
 func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live)
     if desired == nil { return out }
+    out, _ = applyRenames(out, desired)
 
     for _, keys := range [][]string{
         mapKeys(desired.Types), mapKeys(desired.Functions), mapKeys(desired.Procedures),

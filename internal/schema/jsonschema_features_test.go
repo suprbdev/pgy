@@ -30,6 +30,7 @@ schema public:
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
   function fast_one():
+    renamedFrom: quick_one
     returns: setof int
     language: sql
     parallel: safe
@@ -37,16 +38,27 @@ schema public:
     rows: 10
     body: select 1
   domain positive_even:
+    renamedFrom: even_positive
     type: int
     checks: {positive_even_pos: VALUE > 0, positive_even_even: VALUE % 2 = 0}
+  type feeling:
+    renamedFrom: mood
+    type: enum
+    labels: [ok, so_so]
+    renamedLabels: {so_so: meh}
+  procedure reset_ticker():
+    renamedFrom: reset_counter
+    language: sql
+    body: select 1
   aggregate mysum(int): {sfunc: public.add2, stype: int, initcond: "0", combinefunc: public.add2, parallel: safe, comment: sum}
   text search dictionary nostop: {template: snowball, options: {language: english}}
   text search configuration english_custom:
     copy: pg_catalog.english
     mappings: {asciiword: [public.nostop], email: []}
   type floatrange: {type: range, subtype: float8, subtypeDiff: float8mi, multirangeTypeName: floatmultirange}
-  sequence order_no: {as: bigint, cycle: false, ownedBy: none}
+  sequence order_no: {renamedFrom: order_seq, as: bigint, cycle: false, ownedBy: none}
   table orders:
+    renamedFrom: old_orders
     owner: app_owner
     replicaIdentity: index orders_cover
     clusterOn: orders_cover
@@ -57,7 +69,7 @@ schema public:
     columns:
       id: {type: int, identity: {generated: by default, start: 1000, increment: 5, cycle: false}}
       price: {type: numeric}
-      qty: {type: int, statisticsTarget: 1000}
+      qty: {type: int, statisticsTarget: 1000, renamedFrom: quantity}
       total: {type: numeric, generated: price * qty}
       doubled: {type: int, generated: qty * 2, virtual: true}
       code: {type: text, collate: C, compression: lz4, storage: external}
@@ -65,9 +77,10 @@ schema public:
       valid: {type: tstzrange}
     primaryKey: [id, valid without overlaps]
     indexes:
-      orders_cover: {columns: [id desc nulls last], unique: true, include: [price], nullsNotDistinct: true, with: {fillfactor: 70}, concurrently: true}
+      orders_cover: {renamedFrom: orders_old_cover, columns: [id desc nulls last], unique: true, include: [price], nullsNotDistinct: true, with: {fillfactor: 70}, concurrently: true}
     foreignKeys:
       orders_pid_fkey:
+        renamedFrom: orders_parent_fkey
         columns: [pid, period valid]
         references: {table: public.orders, columns: [id, period valid]}
         onUpdate: cascade
@@ -77,7 +90,7 @@ schema public:
         notValid: true
         enforced: false
     constraints:
-      orders_qty_check: {type: check, expression: qty > 0, noInherit: true, notValid: true, enforced: false, comment: "@name qty"}
+      orders_qty_check: {renamedFrom: orders_quantity_check, type: check, expression: qty > 0, noInherit: true, notValid: true, enforced: false, comment: "@name qty"}
       orders_code_key: {type: unique, columns: [code], nullsNotDistinct: true, deferrable: true, initiallyDeferred: true}
     triggers:
       orders_audit:
@@ -93,6 +106,7 @@ schema public:
     rules:
       orders_no_delete: {event: delete, instead: true, where: old.id > 0, do: nothing, comment: keep rows}
   view active_orders:
+    renamedFrom: open_orders
     query: select 1
     triggers:
       active_orders_ins: {timing: instead of, events: [insert], procedure: public.ins(), comment: writable}

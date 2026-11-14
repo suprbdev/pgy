@@ -632,3 +632,31 @@ schema public:
     steps := planFiles(t, nil, p("domains.yml", "fns.yml"), ModeFile, false)
     if got := stepNames(steps); !reflect.DeepEqual(got, []string{"fns", "domains"}) { t.Fatalf("got %v", got) }
 }
+
+func TestPlanRenameAcrossFilesEmittedOnce(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "old.yml": "schema public:\n  table items:\n    columns:\n      id: {type: int, primaryKey: true}\n",
+    })
+    v1, err := schema.LoadAndMerge(p("old.yml"))
+    if err != nil { t.Fatal(err) }
+    live := diff.Simulate(nil, v1)
+    _, q := writeSchemas(t, map[string]string{
+        "products.yml": "schema public:\n  table products:\n    renamedFrom: items\n    columns:\n      id: {type: int, primaryKey: true}\n",
+        "orders.yml": `
+schema public:
+  table orders:
+    columns:
+      id: {type: int, primaryKey: true}
+      product_id: {type: int}
+    foreignKeys:
+      orders_product_fkey: {columns: [product_id], references: {table: public.products, columns: [id]}}
+`,
+    })
+    steps := planFiles(t, live, q("products.yml", "orders.yml"), ModeFile, true)
+    assertEmittedOnce(t, steps)
+    all := ""
+    for _, s := range steps { all += diff.Render(s.Plan) }
+    if strings.Count(all, `alter table "public"."items" rename to "products";`) != 1 || strings.Contains(all, `create table if not exists "public"."products"`) || strings.Contains(all, "drop table") {
+        t.Fatalf("expected a single rename and no recreate:\n%s", all)
+    }
+}

@@ -219,6 +219,7 @@
     "table": {
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "columns": {
           "description": "Columns as a map of name to spec, or a list of specs with explicit `name`.",
@@ -303,6 +304,7 @@
       "description": "Table entry in the `tables:` list format.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "name": { "type": "string", "minLength": 1 },
         "schema": { "type": "string" },
@@ -372,6 +374,7 @@
     "column": {
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "type": {
           "type": "string",
           "minLength": 1,
@@ -420,6 +423,7 @@
       "description": "Column entry in the list format; same as the map form plus `name`.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "name": { "type": "string", "minLength": 1 },
         "type": { "type": "string", "minLength": 1 },
         "nullable": { "type": "boolean" },
@@ -450,6 +454,7 @@
     "index": {
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "columns": { "$ref": "#/definitions/columnRefs" },
         "unique": { "type": "boolean" },
         "using": {
@@ -498,6 +503,7 @@
     "foreignKey": {
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "columns": { "$ref": "#/definitions/columnRefs" },
         "references": {
           "type": "object",
@@ -603,6 +609,7 @@
     "constraint": {
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "type": { "type": "string", "enum": ["check", "unique", "exclude"] },
         "expression": {
           "type": "string",
@@ -681,6 +688,7 @@
       "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "returns": { "type": "string", "description": "Return type, e.g. trigger, jsonb, setof record." },
         "language": { "type": "string", "description": "e.g. sql, plpgsql." },
@@ -714,6 +722,7 @@
       "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "language": { "type": "string" },
         "security": { "type": "string", "enum": ["definer", "invoker"] },
@@ -734,6 +743,8 @@
       "description": "Body of a `type <name>:` declaration (enum, composite or range).",
       "type": "object",
       "properties": {
+        "renamedLabels": { "type": "object", "description": "Enums: new label -> previous label (ALTER TYPE ... RENAME VALUE).", "additionalProperties": { "type": "string", "minLength": 1 } },
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "enum": ["enum", "composite", "range"] },
@@ -769,6 +780,7 @@
       "description": "Body of a `view <name>:` or `materialized view <name>:` declaration.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "query": { "type": "string", "description": "The SELECT statement defining the view." },
         "replace": {
@@ -810,6 +822,7 @@
       "description": "Body of a `sequence <name>:` declaration.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "as": { "type": "string", "enum": ["smallint", "integer", "bigint"] },
@@ -907,6 +920,7 @@
       "description": "Body of a `domain <name>:` declaration.",
       "type": "object",
       "properties": {
+        "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "description": "Underlying base type." },
