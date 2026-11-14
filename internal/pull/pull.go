@@ -270,6 +270,9 @@ func (b *builder) types() {
 		default:
 			continue
 		}
+		if g := grantsNode(b.live.TypeGrants[k]); g != nil {
+			add(t, "grants", g)
+		}
 		addStr(t, "comment", b.live.TypeComments[k])
 		b.owner(t, "type:"+k)
 		add(blk, "type "+name, t)
@@ -305,6 +308,9 @@ func (b *builder) domains() {
 					add(m, "constraintName", str(names[0]))
 				}
 			}
+		}
+		if g := grantsNode(b.live.TypeGrants[k]); g != nil {
+			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
 		b.owner(m, "type:"+k)
@@ -416,6 +422,9 @@ func (b *builder) sequences() {
 		}
 		if ls.Owner != "" {
 			add(m, "ownedBy", str(ls.Owner))
+		}
+		if g := grantsNode(b.live.TableGrants[k]); g != nil {
+			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
 		b.owner(m, "rel:"+k)

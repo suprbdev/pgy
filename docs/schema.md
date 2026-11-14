@@ -852,7 +852,7 @@ Behavior:
 
 ## Grants
 
-Tables, views, materialized views, functions, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump).
+Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump).
 
 ```yaml
 schema app:
