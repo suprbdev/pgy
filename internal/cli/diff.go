@@ -31,9 +31,12 @@ concurrently, a foreign key or check added without notValid, SET NOT NULL, a
 rewriting type change, SET LOGGED/UNLOGGED, an added column whose value is
 computed per row) are reported on stderr. Use --no-warnings to silence them.
 
+With --buffer - the SQL is printed to stdout instead of written to the
+buffer file, and status messages go to stderr.
+
 Exit codes:
   0  No changes detected (schema matches live DB)
-  2  Changes detected and written to buffer file (not an error)
+  2  Changes detected and written to the buffer file or stdout (not an error)
   1  Unexpected error`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,6 +44,10 @@ Exit codes:
             cfg := FromContext(ctx)
             if prune && !unsafe {
                 return fmt.Errorf("--prune drops objects and requires --unsafe")
+            }
+            toStdout := cfg.BufferPath == "-"
+            if toStdout && (jsonOut || cfg.JSON) {
+                return fmt.Errorf("--buffer - prints the SQL to stdout and cannot be combined with --json")
             }
             migSchema, migTable := cfg.migrationsTable()
             opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable}
@@ -125,6 +132,14 @@ Exit codes:
                 _ = enc.Encode(summary)
             }
 
+            if toStdout {
+                if len(sql) == 0 {
+                    if !cfg.Quiet { fmt.Fprintln(os.Stderr, "no changes detected") }
+                    return nil
+                }
+                if _, err := os.Stdout.WriteString(sql); err != nil { return err }
+                return &exitCodeError{code: 2}
+            }
             if len(sql) == 0 {
                 if err := os.Remove(cfg.BufferPath); err != nil && !os.IsNotExist(err) {
                     return err
