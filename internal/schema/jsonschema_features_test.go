@@ -55,7 +55,7 @@ schema public:
     unlogged: false
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:
-      id: {type: int}
+      id: {type: int, identity: {generated: by default, start: 1000, increment: 5, cycle: false}}
       price: {type: numeric}
       qty: {type: int, statisticsTarget: 1000}
       total: {type: numeric, generated: price * qty}

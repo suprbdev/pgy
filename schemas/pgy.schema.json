@@ -389,7 +389,8 @@
           "description": "Identity column: \"always\", \"by default\" (aliases: byDefault, default), or true (= always).",
           "oneOf": [
             { "type": "string", "enum": ["always", "byDefault", "by default", "default"] },
-            { "type": "boolean" }
+            { "type": "boolean" },
+            { "$ref": "#/definitions/identityOptions" }
           ]
         },
         "generated": {
@@ -429,7 +430,8 @@
         "identity": {
           "oneOf": [
             { "type": "string", "enum": ["always", "byDefault", "by default", "default"] },
-            { "type": "boolean" }
+            { "type": "boolean" },
+            { "$ref": "#/definitions/identityOptions" }
           ]
         },
         "generated": { "type": "string", "minLength": 1 },
@@ -852,6 +854,20 @@
         "comment": { "type": "string" }
       },
       "required": ["template"],
+      "additionalProperties": false
+    },
+    "identityOptions": {
+      "type": "object",
+      "description": "Identity column with sequence options: GENERATED <generated> AS IDENTITY (START WITH ... INCREMENT BY ...).",
+      "properties": {
+        "generated": { "type": "string", "enum": ["always", "byDefault", "by default", "default"] },
+        "increment": { "$ref": "#/definitions/scalar" },
+        "minValue": { "$ref": "#/definitions/scalar" },
+        "maxValue": { "$ref": "#/definitions/scalar" },
+        "start": { "$ref": "#/definitions/scalar" },
+        "cache": { "$ref": "#/definitions/scalar" },
+        "cycle": { "type": "boolean" }
+      },
       "additionalProperties": false
     },
     "aggregate": {

@@ -387,6 +387,40 @@ func (b *builder) textSearch() {
 	}
 }
 
+// identityOptionsNode returns {generated, ...} for an identity column whose
+// sequence options differ from the defaults, or nil.
+func identityOptionsNode(lc *diff.LiveColumn) *node {
+	ls := lc.IdentitySequence
+	if ls == nil {
+		return nil
+	}
+	m := flowMap()
+	typeMax := map[string]string{"smallint": "32767", "integer": "2147483647", "bigint": "9223372036854775807"}[ls.Type]
+	if ls.Increment != "1" {
+		add(m, "increment", num(ls.Increment))
+	}
+	if ls.MinValue != "1" {
+		add(m, "minValue", num(ls.MinValue))
+	}
+	if ls.MaxValue != typeMax {
+		add(m, "maxValue", num(ls.MaxValue))
+	}
+	if ls.Start != ls.MinValue {
+		add(m, "start", num(ls.Start))
+	}
+	if ls.Cache != "1" {
+		add(m, "cache", num(ls.Cache))
+	}
+	if ls.Cycle {
+		add(m, "cycle", boolean(true))
+	}
+	if len(m.Content) == 0 {
+		return nil
+	}
+	m.Content = append([]*node{{Kind: yaml.ScalarNode, Value: "generated"}, str(lc.Identity)}, m.Content...)
+	return m
+}
+
 func (b *builder) sequences() {
 	for _, k := range sortedKeys(b.live.Sequences) {
 		ls := b.live.SequenceDefs[k]
@@ -649,7 +683,11 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 				add(c, "virtual", boolean(true))
 			}
 		case lc.Identity != "":
-			add(c, "identity", str(lc.Identity))
+			if opts := identityOptionsNode(lc); opts != nil {
+				add(c, "identity", opts)
+			} else {
+				add(c, "identity", str(lc.Identity))
+			}
 		case serial == "" && lc.Default != "":
 			add(c, "default", str(lc.Default))
 		}

@@ -105,3 +105,27 @@ schema app:
 		t.Errorf("unexpected domain: %+v", dm)
 	}
 }
+
+func TestIdentityOptionsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns:
+      id: {type: bigint, identity: {generated: by default, start: 1000, cycle: true}}
+      a: {type: int, identity: {start: 5}}
+      b: {type: int, identity: always}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := d.Tables["app.t"].Columns
+	if id := cols["id"]; id.Identity != "by default" || id.IdentityOptions == nil || id.IdentityOptions.Start != "1000" || id.IdentityOptions.Cycle == nil || !*id.IdentityOptions.Cycle {
+		t.Errorf("unexpected id: %+v %+v", id, id.IdentityOptions)
+	}
+	if a := cols["a"]; a.Identity != "always" || a.IdentityOptions.Start != "5" {
+		t.Errorf("an options map defaults to always: %+v", a)
+	}
+	if b := cols["b"]; b.Identity != "always" || b.IdentityOptions != nil {
+		t.Errorf("scalar identity has no options: %+v", b)
+	}
+}

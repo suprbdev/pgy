@@ -279,6 +279,7 @@ type Column struct {
     PrimaryKey bool `yaml:"primaryKey"`
     Comment  string `yaml:"comment"`
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
+    IdentityOptions *Sequence `yaml:"-"` // identity sequence options (increment, minValue, maxValue, start, cache, cycle); nil = unmanaged
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
@@ -1079,7 +1080,7 @@ func parseColumnSpec(spec any) *Column {
         if u, ok := m["unique"].(bool); ok { c.Unique = u }
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }
         if cm, ok := m["comment"].(string); ok { c.Comment = cm }
-        if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
+        if id, ok := m["identity"]; ok { c.Identity, c.IdentityOptions = parseIdentity(id), parseIdentityOptions(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
@@ -1097,6 +1098,9 @@ func parseColumnSpec(spec any) *Column {
 // bare `true` (treated as ALWAYS, the stricter form). Unknown values = unset.
 func parseIdentity(v any) string {
     switch x := v.(type) {
+    case map[string]any:
+        if g, ok := x["generated"]; ok { return parseIdentity(g) }
+        return "always"
     case bool:
         if x { return "always" }
     case string:
@@ -1108,6 +1112,20 @@ func parseIdentity(v any) string {
         }
     }
     return ""
+}
+
+// parseIdentityOptions reads the sequence options of an identity: {generated,
+// increment, minValue, maxValue, start, cache, cycle}. It returns nil for the
+// scalar forms.
+func parseIdentityOptions(v any) *Sequence {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    sq := &Sequence{}
+    for key, dst := range map[string]*string{"increment": &sq.Increment, "minValue": &sq.MinValue, "maxValue": &sq.MaxValue, "start": &sq.Start, "cache": &sq.Cache} {
+        if x, ok := m[key]; ok { *dst = defaultToString(x) }
+    }
+    if b, ok := m["cycle"].(bool); ok { sq.Cycle = &b }
+    return sq
 }
 
 // defaultToString coerces a YAML scalar default (bool, int, float) to its SQL

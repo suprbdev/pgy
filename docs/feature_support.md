@@ -53,7 +53,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Clustering** (`clusterOn: <index>|none` → `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`, diffed against `indisclustered`)
 - [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, comments, prunable)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
-- [x] **Identity Columns** (Column `identity: always | byDefault` → `GENERATED ... AS IDENTITY`; create-only, existing columns never altered; overrides `default`)
+- [x] **Identity Columns** (Column `identity: always | byDefault`, or a map with sequence options (start/increment/minValue/maxValue/cache/cycle) → `GENERATED ... AS IDENTITY (...)`; kind and options diffed → `SET GENERATED` / `SET <option>`; added to or dropped from existing columns under `--unsafe`; overrides `default`)
 
 ## Removing objects
 
