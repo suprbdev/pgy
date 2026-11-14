@@ -82,13 +82,15 @@ func MigrationVersion(name string) int {
 
 // SplitSQLStatements splits SQL on semicolons while respecting single-quoted
 // strings ('' escape), double-quoted identifiers ("" escape), dollar-quoted
-// strings ($$ or $tag$), line comments (--) and nested block comments (/* */).
-// E'...' backslash-escape strings are not supported.
+// strings ($$ or $tag$), line comments (--), nested block comments (/* */)
+// and parentheses (a multi-action CREATE RULE ... DO (a; b) is one
+// statement). E'...' backslash-escape strings are not supported.
 func SplitSQLStatements(sql string) []string {
     var statements []string
     var current strings.Builder
     n := len(sql)
     i := 0
+    depth := 0
 
     flush := func() {
         stmt := strings.TrimSpace(current.String())
@@ -169,7 +171,11 @@ func SplitSQLStatements(sql string) []string {
                 current.WriteByte(sql[i])
                 i++
             }
-        case c == ';':
+        case c == '(' || c == ')':
+            if c == '(' { depth++ } else if depth > 0 { depth-- }
+            current.WriteByte(c)
+            i++
+        case c == ';' && depth == 0:
             flush()
             i++
         default:

@@ -53,7 +53,7 @@ func planPrune(live *Live, desired *schema.Database) (early, late []string) {
             early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
         }
         if vt := live.ViewTables[fq]; !vw.Materialized && vt != nil {
-            early = append(early, pruneTableObjects(fq, &schema.Table{Triggers: vw.Triggers}, vt)...)
+            early = append(early, pruneTableObjects(fq, &schema.Table{Triggers: vw.Triggers, Rules: vw.Rules}, vt)...)
         }
     }
 
@@ -156,6 +156,13 @@ func pruneTableObjects(fq string, dt *schema.Table, lt *LiveTable) []string {
         } else {
             others = append(others, stmt)
         }
+    }
+    wantRules := map[string]bool{}
+    for _, r := range dt.Rules {
+        if r != nil { wantRules[truncateIdent(r.Name)] = true }
+    }
+    for _, name := range sortedKeys(lt.Rules) {
+        if !wantRules[name] { out = append(out, fmt.Sprintf("drop rule %s on %s;", pqIdent(name), pqIdent(fq))) }
     }
     out = append(out, fks...)
     out = append(out, others...)

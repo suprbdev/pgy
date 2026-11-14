@@ -59,7 +59,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 - [ ] **Foreign Data Wrappers (FDW)** (Servers, user mappings, and foreign tables)
 - [x] **Full Text Search Configurations** (`text search configuration` (copy or parser + managed token mappings → `ADD/ALTER/DROP MAPPING`) and `text search dictionary` (template + options, create-only) blocks; comments diffed, prunable. Custom parsers and templates are out of scope: they need C functions)
 - [x] **Collations** (`collation <name>:` blocks → `CREATE COLLATION` with provider/locale/lcCollate/lcCtype/deterministic/rules or `from`; create-only, comments diffed, pruned with `--prune`)
-- [ ] **Rules** (`CREATE RULE` query rewrites)
+- [x] **Rules** (`rules:` on tables and views → `CREATE OR REPLACE RULE`; event/instead/where compared against live, actions only re-emitted with `replace: true`; comments diffed, prunable)
 - [x] **Event Triggers** (top-level `eventTriggers:` → `CREATE EVENT TRIGGER` with event/tags/function; changed definition drop+recreate, `enabled` → `ALTER EVENT TRIGGER ... ENABLE/DISABLE/ENABLE REPLICA/ALWAYS`, comments diffed; present block authoritative for `--prune`)
 - [x] **Logical Replication — Publications** (top-level `publications:` with tables (column lists, row filters), schemas, `allTables`, `publish`, `viaPartitionRoot`; membership → `ALTER PUBLICATION ... SET`, options → `SET (...)`, comments diffed; switching `allTables` and `--prune` drops need `--unsafe`. Subscriptions are out of scope: they carry connection strings with credentials)
 - [ ] **Tablespaces** (Physical storage mapping)

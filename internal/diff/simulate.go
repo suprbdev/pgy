@@ -225,10 +225,15 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         } else {
             out.Views[k] = true
-            if len(vw.Triggers) > 0 {
+            if len(vw.Triggers)+len(vw.Rules) > 0 {
                 vt := out.ViewTables[k]
                 if vt == nil { vt = &LiveTable{}; out.ViewTables[k] = vt }
                 ensureLiveTableMaps(vt)
+                for _, r := range vw.Rules {
+                    if r == nil || r.Event == "" || r.Do == "" { continue }
+                    vt.Rules[truncateIdent(r.Name)] = &LiveRule{Event: strings.ToLower(r.Event), Instead: r.Instead, Where: r.Where}
+                    if r.Comment != "" { vt.RuleComments[truncateIdent(r.Name)] = r.Comment }
+                }
                 for _, tr := range vw.Triggers {
                     if tr == nil || tr.Procedure == "" { continue }
                     vt.Triggers[truncateIdent(tr.Name)] = ""
@@ -354,6 +359,11 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if tr == nil || tr.Procedure == "" { continue }
         lt.Triggers[truncateIdent(tr.Name)] = ""
         if tr.Comment != "" { lt.TriggerComments[truncateIdent(tr.Name)] = tr.Comment }
+    }
+    for _, r := range dt.Rules {
+        if r == nil || r.Event == "" || r.Do == "" { continue }
+        lt.Rules[truncateIdent(r.Name)] = &LiveRule{Event: strings.ToLower(r.Event), Instead: r.Instead, Where: r.Where}
+        if r.Comment != "" { lt.RuleComments[truncateIdent(r.Name)] = r.Comment }
     }
     for _, pol := range dt.Policies {
         if pol == nil || pol.Name == "" { continue }
@@ -510,6 +520,8 @@ func cloneLiveTable(t *LiveTable) *LiveTable {
     c.IndexComments = cloneMap(t.IndexComments, nil)
     c.ConstraintComments = cloneMap(t.ConstraintComments, nil)
     c.TriggerComments = cloneMap(t.TriggerComments, nil)
+    c.Rules = cloneMap(t.Rules, func(r *LiveRule) *LiveRule { cp := *r; return &cp })
+    c.RuleComments = cloneMap(t.RuleComments, nil)
     c.PolicyComments = cloneMap(t.PolicyComments, nil)
     return &c
 }
@@ -522,6 +534,8 @@ func ensureLiveTableMaps(t *LiveTable) {
     if t.Triggers == nil { t.Triggers = map[string]string{} }
     if t.ConstraintInherited == nil { t.ConstraintInherited = map[string]bool{} }
     if t.TriggerComments == nil { t.TriggerComments = map[string]string{} }
+    if t.Rules == nil { t.Rules = map[string]*LiveRule{} }
+    if t.RuleComments == nil { t.RuleComments = map[string]string{} }
     if t.PolicyComments == nil { t.PolicyComments = map[string]string{} }
     if t.TriggerInherited == nil { t.TriggerInherited = map[string]bool{} }
     if t.Policies == nil { t.Policies = map[string]*LivePolicy{} }

@@ -400,6 +400,21 @@ Triggers are compared against the live database by **definition**, not just name
 
 The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` between `FOR EACH ROW` and `EXECUTE`. Use it to guard row triggers, e.g. a supersede trigger that must not fire for rows older than the current one (`when: old.created_at <= new.created_at`) — with `AFTER ... FOR EACH ROW` triggers on multi-row inserts, every row's trigger sees the fully-inserted statement result, so unguarded triggers can outdate each other.
 
+### Rules
+
+```yaml
+rules:
+  <rule_name>:
+    event: delete          # select | insert | update | delete
+    instead: true          # DO INSTEAD (default DO ALSO)
+    where: old.id > 0      # optional condition
+    do: update app.orders set deleted = true where id = old.id   # nothing, a statement, or (stmt; stmt)
+    replace: false         # optional: re-emit CREATE OR REPLACE RULE on every diff
+    comment: soft delete
+```
+
+Rules (on tables and plain views) are emitted as `CREATE OR REPLACE RULE` after every table and function. PostgreSQL rewrites a rule's action when it stores it (adding column lists, qualifying names), so only `event`, `instead` and `where` are compared against live. Set `replace: true` while changing an action. With `--unsafe --prune`, undeclared rules on declared tables and views are dropped (views' internal `_RETURN` rule is never touched).
+
 #### Trigger creation order
 
 `CREATE TRIGGER` statements are always emitted **after** all table and function creates. A trigger function whose body references the trigger's own table (required for `language: sql` functions, whose bodies are validated at `CREATE` time) can therefore declare `dependsOn: [table <its_table>]` safely — the table does **not** need a reciprocal `dependsOn` for the function. Any `dependsOn` edge pointing at a `returns: trigger` function is ignored during ordering (nothing can reference one at `CREATE` time), so such declarations are harmless but redundant. Genuine dependency cycles are a hard error in `pgy diff`, reported with the concrete cycle path.
