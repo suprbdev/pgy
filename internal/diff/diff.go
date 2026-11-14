@@ -143,9 +143,10 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     
     // Query existing schemas
     schemaQ := `
-        select schema_name
-        from information_schema.schemata
-        where schema_name not in ('pg_catalog', 'information_schema', 'pg_toast')
+        select n.nspname
+        from pg_namespace n
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     schemaRows, err := pool.Query(ctx, schemaQ)
     if err != nil { return nil, err }
@@ -159,12 +160,15 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     }
     schemaRows.Close()
     
-    // Query all tables (not just those with columns)
+    // Query all tables (not just those with columns). pg_catalog rather than
+    // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select table_schema, table_name
-        from information_schema.tables
-        where table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and table_type = 'BASE TABLE'
+        select n.nspname, c.relname
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind in ('r', 'p')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     tableRows, err := pool.Query(ctx, tableQ)
     if err != nil { return nil, err }
@@ -196,6 +200,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where a.attnum > 0 and not a.attisdropped
         and c.relkind in ('r', 'p')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, c.relname, a.attnum
     `
     rows, err := pool.Query(ctx, q)
@@ -224,6 +229,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         where con.contype in ('p', 'f', 'c', 'u', 'x')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     conRows, err := pool.Query(ctx, conQ)
     if err != nil { return nil, err }
@@ -249,6 +255,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select schemaname, tablename, indexname
         from pg_indexes
         where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and schemaname !~ '^pg_(toast_)?temp_'
     `
     idxRows, err := pool.Query(ctx, idxQ)
     if err != nil { return nil, err }
@@ -277,6 +284,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         cross join lateral generate_series(0, x.indnkeyatts - 1) k(ord)
         join pg_opclass op on op.oid = x.indclass[k.ord]
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, t.relname, i.relname, k.ord
     `
     opcRows, err := pool.Query(ctx, opcQ)
@@ -304,6 +312,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         where not t.tgisinternal
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     trgRows, err := pool.Query(ctx, trgQ)
     if err != nil { return nil, err }
@@ -327,6 +336,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind in ('r', 'p')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     rlsRows, err := pool.Query(ctx, rlsQ)
     if err != nil { return nil, err }
@@ -360,6 +370,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_class c on c.oid = pol.polrelid
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     polRows, err := pool.Query(ctx, polQ)
     if err != nil { return nil, err }
@@ -389,6 +400,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         and t.typtype in ('e', 'c')
     `
     typeRows, err := pool.Query(ctx, typeQ)
@@ -413,6 +425,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     funcRows, err := pool.Query(ctx, funcQ)
     if err != nil { return nil, err }
@@ -451,6 +464,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_type t on t.oid = e.enumtypid
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         order by t.oid, e.enumsortorder
     `
     enumRows, err := pool.Query(ctx, enumQ)
@@ -472,6 +486,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         and t.typtype = 'd'
     `
     domRows, err := pool.Query(ctx, domQ)
@@ -502,9 +517,12 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query existing views
     viewQ := `
-        select table_schema, table_name
-        from information_schema.views
-        where table_schema not in ('pg_catalog', 'information_schema', 'pg_toast')
+        select n.nspname, c.relname
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind = 'v'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     viewRows, err := pool.Query(ctx, viewQ)
     if err != nil { return nil, err }
@@ -523,6 +541,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select schemaname, matviewname
         from pg_matviews
         where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and schemaname !~ '^pg_(toast_)?temp_'
     `
     matViewRows, err := pool.Query(ctx, matViewQ)
     if err != nil { return nil, err }
@@ -544,6 +563,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind = 'S'
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     seqRows, err := pool.Query(ctx, seqQ)
     if err != nil { return nil, err }
@@ -569,6 +589,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         cross join lateral aclexplode(c.relacl) a
         where c.relkind in ('r', 'p', 'v', 'm')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
     `
     tgRows, err := pool.Query(ctx, tgQ)
@@ -595,6 +616,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         cross join lateral aclexplode(att.attacl) a
         where c.relkind in ('r', 'p')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
     `
     cgRows, err := pool.Query(ctx, cgQ)
@@ -623,6 +645,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = p.pronamespace
         left join lateral aclexplode(p.proacl) a on true
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     fgRows, err := pool.Query(ctx, fgQ)
     if err != nil { return nil, err }
@@ -650,6 +673,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_namespace n
         cross join lateral aclexplode(n.nspacl) a
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> n.nspowner
     `
     sgRows, err := pool.Query(ctx, sgQ)
@@ -727,6 +751,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where d.classoid = 'pg_class'::regclass and d.objsubid = 0
         and c.relkind in ('r', 'p', 'v', 'm', 'S')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     rcRows, err := pool.Query(ctx, rcQ)
     if err != nil { return nil, err }
@@ -749,6 +774,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_attribute a on a.attrelid = c.oid and a.attnum = d.objsubid
         where d.classoid = 'pg_class'::regclass and d.objsubid > 0
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     ccRows, err := pool.Query(ctx, ccQ)
     if err != nil { return nil, err }
@@ -773,6 +799,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = p.pronamespace
         where d.classoid = 'pg_proc'::regclass
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     fcRows, err := pool.Query(ctx, fcQ)
     if err != nil { return nil, err }
@@ -795,6 +822,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.typnamespace
         where d.classoid = 'pg_type'::regclass
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     tcRows, err := pool.Query(ctx, tcQ)
     if err != nil { return nil, err }
@@ -815,6 +843,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = d.objoid
         where d.classoid = 'pg_namespace'::regclass
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     scRows, err := pool.Query(ctx, scQ)
     if err != nil { return nil, err }
@@ -838,6 +867,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.relnamespace
         where d.objsubid = 0
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     icRows, err := pool.Query(ctx, icQ)
     if err != nil { return nil, err }
@@ -861,6 +891,7 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_class c on c.oid = con.conrelid
         join pg_namespace n on n.oid = c.relnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     cncRows, err := pool.Query(ctx, cncQ)
     if err != nil { return nil, err }
