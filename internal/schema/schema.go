@@ -147,6 +147,7 @@ type Constraint struct {
     InitiallyDeferred bool     // unique/exclude; implies Deferrable
     NoInherit         bool     // check: NO INHERIT
     NotValid          bool     // check: added NOT VALID (existing rows not checked)
+    NotEnforced       bool     // check: NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
 }
 
 type Column struct {
@@ -158,6 +159,7 @@ type Column struct {
     Comment  string `yaml:"comment"`
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
+    Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
 }
@@ -187,6 +189,7 @@ type ForeignKey struct {
     Deferrable        bool
     InitiallyDeferred bool   // implies Deferrable
     NotValid          bool   // added NOT VALID (existing rows not checked)
+    NotEnforced       bool   // NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string // empty means unmanaged
 }
 
@@ -763,6 +766,7 @@ func parseColumnSpec(spec any) *Column {
         if cm, ok := m["comment"].(string); ok { c.Comment = cm }
         if id, ok := m["identity"]; ok { c.Identity = parseIdentity(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
+        if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }
@@ -949,6 +953,7 @@ func parseForeignKeys(v any) []*ForeignKey {
                 if b, ok := dm["deferrable"].(bool); ok { fk.Deferrable = b }
                 if b, ok := dm["initiallyDeferred"].(bool); ok { fk.InitiallyDeferred = b }
                 if b, ok := dm["notValid"].(bool); ok { fk.NotValid = b }
+                if b, ok := dm["enforced"].(bool); ok { fk.NotEnforced = !b }
                 if cm, ok := dm["comment"].(string); ok { fk.Comment = cm }
             }
             out = append(out, fk)
@@ -995,6 +1000,7 @@ func parseConstraints(v any) []*Constraint {
                 if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
                 if b, ok := dm["notValid"].(bool); ok { c.NotValid = b }
+                if b, ok := dm["enforced"].(bool); ok { c.NotEnforced = !b }
             }
             out = append(out, c)
         }

@@ -4,6 +4,8 @@ This document tracks `pgy`'s support for various PostgreSQL features within its 
 
 Features are grouped by relative complexity and impact on the diffing engine.
 
+Supported servers: PostgreSQL 15, 16, 17 and 18 (the integration suite runs against each in CI). Syntax specific to a newer release is emitted only when the YAML asks for it: `nullsNotDistinct` needs 15+ (the floor anyway), changing a generated expression needs 17+, and `virtual` generated columns, `enforced: false` and temporal `without overlaps`/`period` keys need 18+.
+
 ## Level 1: Basic Schema & Tables
 These are the foundational elements required for almost any relational database application.
 
@@ -18,7 +20,7 @@ These are the foundational elements required for almost any relational database 
 - [x] **NOT NULL Constraints** (Via column `nullable` property)
 - [x] **EXCLUDE Constraints**
 - [x] **Column Alterations** (`ALTER COLUMN ... TYPE / SET DEFAULT / DROP DEFAULT / SET NOT NULL / DROP NOT NULL` for existing columns. Types compared normalized — `varchar(255)` matches live `character varying(255)`, `serial` matches its live `integer` + `nextval` form; defaults compared with live casts stripped (`'x'::text` matches `'x'`). Type changes are gated behind `--unsafe` and support a column-level `using:` expression. Guard rails: identity columns are never altered, `nextval` defaults are never dropped, primary-key columns never emit `DROP NOT NULL`)
-- [x] **Constraint Alterations** (Changed definitions of existing FK/check/unique/exclude constraints emit `DROP CONSTRAINT` + `ADD CONSTRAINT`, gated behind `--unsafe`. Live definitions introspected via `pg_get_constraintdef()`; comparison is normalized — casts, parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so `CHECK ((email <> ''::text))` matches `email <> ''`. FK `onUpdate`/`match`/`deferrable`/`initiallyDeferred`/`notValid`, unique `nullsNotDistinct`/deferrable, check `noInherit`/`notValid` are modeled and compared; `IN`/`BETWEEN`/`LIKE` rewrites are understood. Limitation: primary keys are not compared)
+- [x] **Constraint Alterations** (Changed definitions of existing FK/check/unique/exclude constraints emit `DROP CONSTRAINT` + `ADD CONSTRAINT`, gated behind `--unsafe`. Live definitions introspected via `pg_get_constraintdef()`; comparison is normalized — casts, parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so `CHECK ((email <> ''::text))` matches `email <> ''`. FK `onUpdate`/`match`/`deferrable`/`initiallyDeferred`/`notValid`/`enforced`, unique `nullsNotDistinct`/deferrable, check `noInherit`/`notValid`/`enforced`, and PG18 temporal `without overlaps`/`period` columns are modeled and compared; `IN`/`BETWEEN`/`LIKE` rewrites are understood. Limitation: primary keys are not compared)
 - [x] **Comments** (`COMMENT ON` schemas, tables, columns, indexes, foreign keys, types, functions, views; diffed against live, PostGraphile smart tags safe)
 
 ## Level 2: Advanced Types & Logic
@@ -42,7 +44,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Grants & Privileges** (`GRANT` / `REVOKE` on tables, views, materialized views, functions, schemas, and columns — column-level via `grants:` under a column; `revokePublic` for functions; an empty list (`role: []`) revokes everything for that role while keeping the object managed; all revokes ordered before all grants so narrowing a table grant to column grants is safe)
 - [x] **Roles & Users** (Top-level `roles:` block → `CREATE ROLE` with login/superuser/createdb/createrole/replication/bypassRLS/noinherit/connection limit; `inRoles` memberships via `GRANT role TO role`; create-only, no passwords)
 - [x] **Sequences** (`sequence <name>:` blocks → `CREATE SEQUENCE IF NOT EXISTS` with as/increment/minValue/maxValue/start/cache/cycle/ownedBy; create-only, comments diffed)
-- [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
+- [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+) and a removed one `DROP EXPRESSION`)
 - [x] **Identity Columns** (Column `identity: always | byDefault` → `GENERATED ... AS IDENTITY`; create-only, existing columns never altered; overrides `default`)
 
 ## Level 4: Specialized Configurations
