@@ -2,26 +2,73 @@
 
 This document describes the structure and format of the YAML schema files used by `pgy`.
 
+## Contents
+
+- [Overview](#overview)
+- [Editor Support](#editor-support)
+- [YAML Formats](#yaml-formats)
+  - [Format 1: `schema <name>:` blocks (recommended)](#format-1-schema-name-blocks-recommended)
+  - [Format 2: `tables:` map](#format-2-tables-map)
+  - [Format 3: `tables:` list](#format-3-tables-list)
+- [Merging across files](#merging-across-files)
+- [Extensions](#extensions)
+- [Tables](#tables)
+  - [Columns](#columns)
+  - [Primary Key](#primary-key)
+  - [Indexes](#indexes)
+  - [Foreign Keys](#foreign-keys)
+  - [Triggers](#triggers)
+  - [Rules](#rules)
+  - [Constraints](#constraints)
+  - [Partitioning](#partitioning)
+  - [Inheritance](#inheritance)
+- [Views](#views)
+  - [Materialized Views](#materialized-views)
+- [Types](#types)
+  - [Enum](#enum)
+  - [Composite](#composite)
+  - [Range](#range)
+- [Domains](#domains)
+- [Sequences](#sequences)
+- [Functions](#functions)
+- [Aggregates](#aggregates)
+- [Procedures](#procedures)
+- [Collations](#collations)
+- [Text Search](#text-search)
+- [Row Level Security](#row-level-security)
+- [Roles](#roles)
+- [Grants](#grants)
+  - [Ownership](#ownership)
+  - [Default Privileges](#default-privileges)
+  - [Column-Level Grants](#column-level-grants)
+- [Comments](#comments)
+- [Publications](#publications)
+- [Event Triggers](#event-triggers)
+- [Reference Data](#reference-data)
+- [Renames](#renames)
+- [Dependencies](#dependencies)
+- [Example Schema](#example-schema)
+
 ## Overview
 
-Schema files define database objects including tables, columns, types, functions, extensions, views, materialized views, and sequences. `pgy` diffs them against a live PostgreSQL database and generates the SQL to bring the database in sync.
+Schema files declare the database you want: schemas, tables (with columns, keys, indexes, constraints, triggers, rules, policies, partitions and inheritance), views and materialized views, types, domains, sequences, functions, procedures and aggregates, collations and text search configurations, roles, grants, ownership and default privileges, publications, event triggers, and the rows of reference tables. `pgy diff` compares them with a live PostgreSQL database (15–18) and writes the SQL that brings the database in line. Anything that could lose data needs `--unsafe`, and dropping whole objects also needs `--prune`.
 
-## Editor Support (JSON Schema)
+## Editor Support
 
 A JSON Schema for schema files ships at [`schemas/pgy.schema.json`](../schemas/pgy.schema.json). Editors running [yaml-language-server](https://github.com/redhat-developer/yaml-language-server) (VS Code via the Red Hat YAML extension, Neovim, etc.) use it for validation, completion, and hover documentation.
 
 Enable it per file with a modeline at the top of the YAML file:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/main/schemas/pgy.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.19.1/schemas/pgy.schema.json
 ```
 
-(or a relative path such as `$schema=./schemas/pgy.schema.json`), or map it by filename in VS Code settings:
+Use the tag of the pgy release you run (`pgy version`), so the editor accepts exactly the keys that release understands. `main` tracks unreleased changes. A relative path such as `$schema=./schemas/pgy.schema.json` also works. Or map the schema by filename in VS Code settings:
 
 ```json
 {
   "yaml.schemas": {
-    "https://raw.githubusercontent.com/suprbdev/pgy/main/schemas/pgy.schema.json": ["pgy.yaml", "*.pgy.yml", "schema*.yml"]
+    "https://raw.githubusercontent.com/suprbdev/pgy/v0.19.1/schemas/pgy.schema.json": ["pgy.yaml", "*.pgy.yml", "schema*.yml"]
   }
 }
 ```
@@ -44,10 +91,17 @@ schema public:
     columns:
       id:
         type: uuid
-        primaryKey: true
       email:
         type: citext
         notNull: true
+      org_id:
+        type: uuid
+      active:
+        type: boolean
+        default: "true"
+      updated_at:
+        type: timestamptz
+        default: now()
     primaryKey:
       users_pkey:
         columns: [id]
@@ -132,8 +186,6 @@ tables:
         nullable: true
 ```
 
----
-
 ## Merging across files
 
 `pgy diff` accepts multiple schema files and merges them before diffing. When
@@ -155,15 +207,19 @@ This enables composable schema files: one file can declare a base table and a
 supplementary "link" file can add a foreign-key column pointing at another
 module's table (see `examples/modules/` and `examples/links/`).
 
+`post.yml`, a standalone module:
+
 ```yaml
-# post.yml — standalone module
 schema public:
   table post:
     columns:
       id: { type: uuid, primaryKey: true, default: gen_random_uuid() }
       title: { type: text, notNull: true }
+```
 
-# post_author.yml — link file; include together with post.yml and user.yml
+`post_author.yml`, a link file to load together with `post.yml` and `user.yml`:
+
+```yaml
 schema public:
   table post:
     columns:
@@ -178,8 +234,6 @@ schema public:
     dependsOn:
       - table public.user
 ```
-
----
 
 ## Extensions
 
@@ -217,8 +271,6 @@ extensions:
     schema: extensions
     version: "1.6"
 ```
-
----
 
 ## Tables
 
@@ -435,21 +487,6 @@ Triggers are compared against the live database by **definition**, not just name
 
 The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` between `FOR EACH ROW` and `EXECUTE`. Use it to guard row triggers, e.g. a supersede trigger that must not fire for rows older than the current one (`when: old.created_at <= new.created_at`) — with `AFTER ... FOR EACH ROW` triggers on multi-row inserts, every row's trigger sees the fully-inserted statement result, so unguarded triggers can outdate each other.
 
-### Rules
-
-```yaml
-rules:
-  <rule_name>:
-    event: delete          # select | insert | update | delete
-    instead: true          # DO INSTEAD (default DO ALSO)
-    where: old.id > 0      # optional condition
-    do: update app.orders set deleted = true where id = old.id   # nothing, a statement, or (stmt; stmt)
-    replace: false         # optional: re-emit CREATE OR REPLACE RULE on every diff
-    comment: soft delete
-```
-
-Rules (on tables and plain views) are emitted as `CREATE OR REPLACE RULE` after every table and function. PostgreSQL rewrites a rule's action when it stores it (adding column lists, qualifying names), so only `event`, `instead` and `where` are compared against live. Set `replace: true` while changing an action. With `--unsafe --prune`, undeclared rules on declared tables and views are dropped (views' internal `_RETURN` rule is never touched).
-
 #### Trigger creation order
 
 `CREATE TRIGGER` statements are always emitted **after** all table and function creates. A trigger function whose body references the trigger's own table (required for `language: sql` functions, whose bodies are validated at `CREATE` time) can therefore declare `dependsOn: [table <its_table>]` safely — the table does **not** need a reciprocal `dependsOn` for the function. Any `dependsOn` edge pointing at a `returns: trigger` function is ignored during ordering (nothing can reference one at `CREATE` time), so such declarations are harmless but redundant. Genuine dependency cycles are a hard error in `pgy diff`, reported with the concrete cycle path.
@@ -492,6 +529,22 @@ triggers:
 | `constraint` | boolean | Emit `CREATE CONSTRAINT TRIGGER` |
 | `deferrable` | boolean | `DEFERRABLE` (initially immediate) |
 | `initiallyDeferred` | boolean | `DEFERRABLE INITIALLY DEFERRED`; check runs at commit |
+
+### Rules
+
+```yaml
+rules:
+  <rule_name>:
+    event: delete          # select | insert | update | delete
+    instead: true          # DO INSTEAD (default DO ALSO)
+    where: old.id > 0      # optional condition
+    do: update app.orders set deleted = true where id = old.id   # nothing, a statement, or (stmt; stmt)
+    replace: false         # optional: re-emit CREATE OR REPLACE RULE on every diff
+    comment: soft delete
+```
+
+Rules (on tables and plain views) are emitted as `CREATE OR REPLACE RULE` after every table and function. PostgreSQL rewrites a rule's action when it stores it (adding column lists, qualifying names), so only `event`, `instead` and `where` are compared against live. Set `replace: true` while changing an action. With `--unsafe --prune`, undeclared rules on declared tables and views are dropped (views' internal `_RETURN` rule is never touched).
+
 
 ### Constraints
 
@@ -597,9 +650,57 @@ schema app:
 - Columns a table gets from a parent are never altered or dropped on the child. That includes columns the child also declares itself. Change them on the parent.
 - `pgy pull` emits `inherits` and leaves inherited columns out of the child. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
 
----
+## Views
 
-## Type Definitions
+Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW` and skipped if already present in the live database. Set `replace: true` to always emit `CREATE OR REPLACE VIEW` (live view definitions cannot be reliably text-compared because postgres rewrites the stored query, so replacement is opt-in).
+
+```yaml
+schema public:
+  view active_users:
+    query: "select id, email from users where active = true"
+    replace: true   # re-emit CREATE OR REPLACE on every diff
+    dependsOn:
+      - table public.users
+    grants:
+      reporting: [select]
+    securityInvoker: true   # check table permissions as the querying user (PostgreSQL 15+)
+    checkOption: local      # local | cascaded | none
+```
+
+`securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
+
+### Materialized Views
+
+Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
+
+```yaml
+schema public:
+  materialized view user_stats:
+    query: "select count(*) as total, status from users group by status"
+    withData: false
+    indexes:
+      user_stats_status:
+        columns: [status]
+        unique: true
+    dependsOn:
+      - table public.users
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `query` | string | The `SELECT` statement defining the view |
+| `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
+| `securityInvoker` | boolean | Plain views only. `security_invoker` option (PostgreSQL 15+). Omitted = unmanaged |
+| `securityBarrier` | boolean | Plain views only. `security_barrier` option. Omitted = unmanaged |
+| `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
+| `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
+| `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
+| `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
+| `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+| `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
+
+## Types
 
 Types are defined inside `schema <name>:` blocks.
 
@@ -617,7 +718,7 @@ schema public:
       - <dependency>
 ```
 
-For an existing enum, new labels are added with `ALTER TYPE ... ADD VALUE`, positioned `BEFORE` the next label that already exists so the declared order is preserved. Removing or reordering existing labels is not supported (postgres cannot drop enum values) and is silently ignored. Note: an added enum value cannot be used in the same transaction that adds it.
+For an existing enum, new labels are added with `ALTER TYPE ... ADD VALUE`, positioned `BEFORE` the next label that already exists so the declared order is preserved. Removing or reordering existing labels is not supported (PostgreSQL cannot drop enum values) and is silently ignored. To rename a label, use [`renamedLabels`](#renames). Note: an added enum value cannot be used in the same transaction that adds it.
 
 ### Composite
 
@@ -650,9 +751,96 @@ schema public:
 
 Emitted as `CREATE TYPE ... AS RANGE (subtype = ..., ...)`, together with the multirange type PostgreSQL derives from it. Range types are create-only.
 
----
+## Domains
 
-## Function Definitions
+Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with an optional default, `NOT NULL`, and `CHECK` constraints: one with `check`, or several named ones with `checks` (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`. For an existing domain, `default` and `notNull` are diffed (`ALTER DOMAIN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`; removing `default` drops it). The `check` constraint is matched by `constraintName`, or by PostgreSQL's default `<domain>_check` name: a missing one is added, while a changed or removed one is dropped and re-added only under `--unsafe`, since adding a domain constraint validates every column that uses the domain. The base type and collation cannot be changed in place. Comments are diffed against live.
+
+```yaml
+schema public:
+  domain email:
+    type: text
+    notNull: true
+    check: "value ~ '^[^@]+@[^@]+$'"
+    constraintName: email_format
+    comment: "validated email address"
+
+  domain score:
+    type: int
+    checks:                     # several named checks
+      score_min: VALUE >= 0
+      score_max: VALUE <= 100
+
+  table users:
+    dependsOn:
+      - domain public.email
+    columns:
+      email:
+        type: public.email
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `type` | string | Underlying data type (required; `as` is accepted as an alias) |
+| `collate` | string | `COLLATE` clause (collation identifier) |
+| `default` | string | `DEFAULT` expression |
+| `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
+| `check` | string | `CHECK` expression; use `value` to reference the value being tested |
+| `constraintName` | string | Optional name for the `CHECK` constraint |
+| `checks` | map | Named `CHECK` constraints (`name: expression`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
+| `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+
+Tables using a domain as a column type must declare `dependsOn: [domain <schema.name>]` so the domain is created first.
+
+## Sequences
+
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
+
+```yaml
+schema public:
+  sequence order_number_seq:
+    as: bigint
+    increment: 5
+    minValue: 10
+    maxValue: 99999
+    start: 100
+    cache: 20
+    cycle: true
+    ownedBy: orders.order_number
+    comment: "order number allocator"
+    dependsOn:
+      - table public.orders
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `as` | string | Data type: `smallint`, `integer`, or `bigint` (default `bigint`) |
+| `increment` | integer | `INCREMENT BY` step (may be negative for descending sequences) |
+| `minValue` | integer | `MINVALUE` |
+| `maxValue` | integer | `MAXVALUE` |
+| `start` | integer | `START WITH` value |
+| `cache` | integer | Number of values preallocated per session |
+| `cycle` | boolean | Wrap around when the limit is reached |
+| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
+| `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+
+To use a sequence as a column default, reference it with `nextval` and declare the ordering:
+
+```yaml
+schema public:
+  sequence order_number_seq: {}
+
+  table orders:
+    dependsOn:
+      - sequence public.order_number_seq
+    columns:
+      order_number:
+        type: bigint
+        default: nextval('public.order_number_seq')
+```
+
+## Functions
 
 Functions are defined inside `schema <name>:` blocks. The key format is `function <name>(<args>):`.
 
@@ -695,15 +883,13 @@ schema public:
 | `set` | map | `SET` configuration options (e.g. `search_path`), values as SQL. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. Signature or return type changes are not supported — rename the function instead |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. Signature or return type changes are not supported. Create a new function instead. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
 | *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
 
----
-
-## Aggregate Definitions
+## Aggregates
 
 Aggregates are defined inside `schema <name>:` blocks with `aggregate <name>(<args>):` keys (`(*)` for `count(*)`-style aggregates) and emitted as `CREATE OR REPLACE AGGREGATE` after the functions they use. A definition that differs from `pg_aggregate` is replaced in place.
 
@@ -723,7 +909,7 @@ schema app:
     comment: sum of ints
 ```
 
-## Procedure Definitions
+## Procedures
 
 Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
 
@@ -757,52 +943,68 @@ schema public:
 | `comment` | string | `COMMENT ON PROCEDURE` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
-Signature changes are not supported — rename the procedure instead.
+Signature changes are not supported. Create a new procedure instead. To rename a procedure and keep its arguments, use [`renamedFrom`](#renames).
 
----
+## Collations
 
-## Comments
-
-All object types accept a `comment:` key emitted as `COMMENT ON`. Comment text is preserved exactly (multi-line included), so PostGraphile smart tags (`@behavior`, `@name`, ...) work as-is.
+Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.
 
 ```yaml
 schema app:
-  comment: "application schema"
-  table orders:
-    comment: |-
-      @behavior +list
-      Customer orders.
+  collation case_insensitive:
+    provider: icu              # icu | libc | builtin (PostgreSQL 17+)
+    locale: und-u-ks-level2
+    deterministic: false       # equality ignores case
+    comment: case-insensitive text
+  collation c_copy:
+    from: pg_catalog.C         # copy an existing collation instead
+  table users:
     columns:
-      id:
-        type: bigint
-        comment: "@name orderId"
-      user_id:
-        type: bigint
-    indexes:
-      orders_user_idx:
-        columns: [user_id]
-        comment: "lookup by user"
-    foreignKeys:
-      fk_user:
-        columns: [user_id]
-        references: { table: app.users, columns: [id] }
-        comment: "@fieldName owner"
-  function fn():
-    returns: int
-    language: sql
-    comment: "computes things"
-    body: select 1
+      email:
+        type: text
+        collate: app.case_insensitive
 ```
 
-Supported on: schemas, tables, columns, indexes (also on materialized views), foreign keys, check/unique/exclude constraints, triggers, policies, types, domains, collations, functions, procedures, views, materialized views, sequences, roles, publications and event triggers.
+| Property | Type | Description |
+|----------|------|-------------|
+| `provider` | string | `icu`, `libc` or `builtin` |
+| `locale` | string | Locale for the provider |
+| `lcCollate` / `lcCtype` | string | libc `LC_COLLATE` / `LC_CTYPE` |
+| `deterministic` | boolean | `false` makes equal-under-collation strings compare equal (ICU only) |
+| `rules` | string | ICU tailoring rules (PostgreSQL 16+) |
+| `from` | string | Copy an existing collation (`CREATE COLLATION ... FROM`); other options are ignored |
+| `dependsOn` | list | See [Dependencies](#dependencies) |
+| `comment` | string | `COMMENT ON COLLATION`, diffed against live |
 
-Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); constraint comments (foreign keys included) as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`; trigger and policy comments as `COMMENT ON TRIGGER|POLICY <name> ON <schema>.<table>`. When a constraint, trigger or policy is dropped and recreated because its definition changed, its comment is re-applied in the same migration.
+Column and domain `collate` values may name these collations schema-qualified; quotes around names are optional.
 
-Behavior:
+## Text Search
 
-- Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
-- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
-- Single quotes are escaped automatically.
+Text search configurations and dictionaries are declared inside `schema <name>:` blocks with `text search configuration <name>:` and `text search dictionary <name>:` keys. Both are created before types and tables, so generated `tsvector` columns and indexes can use them.
+
+```yaml
+extensions: [unaccent]
+schema app:
+  text search dictionary english_nostop:
+    template: snowball
+    options: {language: english}
+  text search configuration english_unaccent:
+    copy: pg_catalog.english          # or parser: default
+    mappings:
+      asciiword: [unaccent, app.english_nostop]
+      word: [unaccent, app.english_nostop]
+      email: []                       # remove the mapping
+    comment: accent-insensitive english
+  table docs:
+    columns:
+      body: {type: text}
+      tsv:
+        type: tsvector
+        nullable: true
+        generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
+```
+
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. Dictionaries are create-only. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
 
 ## Row Level Security
 
@@ -888,8 +1090,6 @@ Behavior:
 | `connectionLimit` | integer | `CONNECTION LIMIT n`; omit for unlimited |
 | `inRoles` | list | Parent roles; each emits `GRANT <parent> TO <role>` when missing |
 | `comment` | string | `COMMENT ON ROLE` |
-
----
 
 ## Grants
 
@@ -988,152 +1188,48 @@ grant select ("email"), update ("email") on table "public"."users" to "support";
 | `grants` | map | Role name → list of privileges (e.g. `select`, `insert`, `execute`, `usage`, `create`; on columns: `select`, `insert`, `update`, `references`) |
 | `revokePublic` | boolean | Functions only. Revoke default `PUBLIC` execute |
 
----
+## Comments
 
-## View Definitions
-
-Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW` and skipped if already present in the live database. Set `replace: true` to always emit `CREATE OR REPLACE VIEW` (live view definitions cannot be reliably text-compared because postgres rewrites the stored query, so replacement is opt-in).
+All object types accept a `comment:` key emitted as `COMMENT ON`. Comment text is preserved exactly (multi-line included), so PostGraphile smart tags (`@behavior`, `@name`, ...) work as-is.
 
 ```yaml
-schema public:
-  view active_users:
-    query: "select id, email from users where active = true"
-    replace: true   # re-emit CREATE OR REPLACE on every diff
-    dependsOn:
-      - table public.users
-    grants:
-      reporting: [select]
-    securityInvoker: true   # check table permissions as the querying user (PostgreSQL 15+)
-    checkOption: local      # local | cascaded | none
-```
-
-`securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
-
-### Materialized Views
-
-Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
-
-```yaml
-schema public:
-  materialized view user_stats:
-    query: "select count(*) as total, status from users group by status"
-    withData: false
-    indexes:
-      user_stats_status:
-        columns: [status]
-        unique: true
-    dependsOn:
-      - table public.users
-```
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `query` | string | The `SELECT` statement defining the view |
-| `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
-| `securityInvoker` | boolean | Plain views only. `security_invoker` option (PostgreSQL 15+). Omitted = unmanaged |
-| `securityBarrier` | boolean | Plain views only. `security_barrier` option. Omitted = unmanaged |
-| `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
-| `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
-| `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
-| `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
-| `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
-| `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
-
----
-
-## Sequence Definitions
-
-Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
-
-```yaml
-schema public:
-  sequence order_number_seq:
-    as: bigint
-    increment: 5
-    minValue: 10
-    maxValue: 99999
-    start: 100
-    cache: 20
-    cycle: true
-    ownedBy: orders.order_number
-    comment: "order number allocator"
-    dependsOn:
-      - table public.orders
-```
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `as` | string | Data type: `smallint`, `integer`, or `bigint` (default `bigint`) |
-| `increment` | integer | `INCREMENT BY` step (may be negative for descending sequences) |
-| `minValue` | integer | `MINVALUE` |
-| `maxValue` | integer | `MAXVALUE` |
-| `start` | integer | `START WITH` value |
-| `cache` | integer | Number of values preallocated per session |
-| `cycle` | boolean | Wrap around when the limit is reached |
-| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
-| `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
-
-To use a sequence as a column default, reference it with `nextval` and declare the ordering:
-
-```yaml
-schema public:
-  sequence order_number_seq: {}
-
+schema app:
+  comment: "application schema"
   table orders:
-    dependsOn:
-      - sequence public.order_number_seq
+    comment: |-
+      @behavior +list
+      Customer orders.
     columns:
-      order_number:
+      id:
         type: bigint
-        default: nextval('public.order_number_seq')
+        comment: "@name orderId"
+      user_id:
+        type: bigint
+    indexes:
+      orders_user_idx:
+        columns: [user_id]
+        comment: "lookup by user"
+    foreignKeys:
+      fk_user:
+        columns: [user_id]
+        references: { table: app.users, columns: [id] }
+        comment: "@fieldName owner"
+  function fn():
+    returns: int
+    language: sql
+    comment: "computes things"
+    body: select 1
 ```
 
----
+Supported on: schemas, tables, columns, indexes (also on materialized views), foreign keys, check/unique/exclude constraints, triggers, policies, types, domains, collations, functions, procedures, views, materialized views, sequences, roles, publications and event triggers.
 
-## Domain Definitions
+Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); constraint comments (foreign keys included) as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`; trigger and policy comments as `COMMENT ON TRIGGER|POLICY <name> ON <schema>.<table>`. When a constraint, trigger or policy is dropped and recreated because its definition changed, its comment is re-applied in the same migration.
 
-Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with optional default, `NOT NULL`, and a `CHECK` constraint (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`. For an existing domain, `default` and `notNull` are diffed (`ALTER DOMAIN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`; removing `default` drops it). The `check` constraint is matched by `constraintName`, or by PostgreSQL's default `<domain>_check` name: a missing one is added, while a changed or removed one is dropped and re-added only under `--unsafe`, since adding a domain constraint validates every column that uses the domain. The base type and collation cannot be changed in place. Comments are diffed against live.
+Behavior:
 
-```yaml
-schema public:
-  domain email:
-    type: text
-    notNull: true
-    check: "value ~ '^[^@]+@[^@]+$'"
-    constraintName: email_format
-    comment: "validated email address"
-
-  domain score:
-    type: int
-    checks:                     # several named checks
-      score_min: VALUE >= 0
-      score_max: VALUE <= 100
-
-  table users:
-    dependsOn:
-      - domain public.email
-    columns:
-      email:
-        type: public.email
-```
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `type` | string | Underlying data type (required; `as` is accepted as an alias) |
-| `collate` | string | `COLLATE` clause (collation identifier) |
-| `default` | string | `DEFAULT` expression |
-| `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
-| `check` | string | `CHECK` expression; use `value` to reference the value being tested |
-| `constraintName` | string | Optional name for the `CHECK` constraint |
-| `checks` | map | Named `CHECK` constraints (`name: expression`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
-| `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
-
-Tables using a domain as a column type must declare `dependsOn: [domain <schema.name>]` so the domain is created first.
-
----
+- Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
+- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
+- Single quotes are escaped automatically.
 
 ## Publications
 
@@ -1147,10 +1243,11 @@ publications:
       - table: public.orders
         columns: [id, status, total]      # column list
         where: "status <> 'draft'"        # row filter
-    schemas: [billing]                    # FOR TABLES IN SCHEMA
     publish: [insert, update, delete]     # default: all actions
     viaPartitionRoot: true
     comment: change data capture
+  billing_cdc:
+    schemas: [billing]                    # FOR TABLES IN SCHEMA (not combinable with column lists)
   everything:
     allTables: true
 ```
@@ -1173,70 +1270,7 @@ eventTriggers:
 
 Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension.
 
-## Text Search
-
-Text search configurations and dictionaries are declared inside `schema <name>:` blocks with `text search configuration <name>:` and `text search dictionary <name>:` keys. Both are created before types and tables, so generated `tsvector` columns and indexes can use them.
-
-```yaml
-extensions: [unaccent]
-schema app:
-  text search dictionary english_nostop:
-    template: snowball
-    options: {language: english}
-  text search configuration english_unaccent:
-    copy: pg_catalog.english          # or parser: default
-    mappings:
-      asciiword: [unaccent, app.english_nostop]
-      word: [unaccent, app.english_nostop]
-      email: []                       # remove the mapping
-    comment: accent-insensitive english
-  table docs:
-    columns:
-      body: {type: text}
-      tsv:
-        type: tsvector
-        nullable: true
-        generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
-```
-
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. Dictionaries are create-only. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
-
-## Collation Definitions
-
-Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.
-
-```yaml
-schema app:
-  collation case_insensitive:
-    provider: icu              # icu | libc | builtin (PostgreSQL 17+)
-    locale: und-u-ks-level2
-    deterministic: false       # equality ignores case
-    comment: case-insensitive text
-  collation c_copy:
-    from: pg_catalog.C         # copy an existing collation instead
-  table users:
-    columns:
-      email:
-        type: text
-        collate: app.case_insensitive
-```
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `provider` | string | `icu`, `libc` or `builtin` |
-| `locale` | string | Locale for the provider |
-| `lcCollate` / `lcCtype` | string | libc `LC_COLLATE` / `LC_CTYPE` |
-| `deterministic` | boolean | `false` makes equal-under-collation strings compare equal (ICU only) |
-| `rules` | string | ICU tailoring rules (PostgreSQL 16+) |
-| `from` | string | Copy an existing collation (`CREATE COLLATION ... FROM`); other options are ignored |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
-| `comment` | string | `COMMENT ON COLLATION`, diffed against live |
-
-Column and domain `collate` values may name these collations schema-qualified; quotes around names are optional.
-
----
-
-## Reference data
+## Reference Data
 
 Lookup tables (plans, statuses, countries) can declare their rows with `data:`. pgy keeps the live table in line with them:
 
@@ -1328,8 +1362,6 @@ Two kinds of `dependsOn` are never needed (and can only manufacture cycles):
 A `function`/`procedure` dependency without an argument list (`function public.area`) depends on every overload of that name; with an argument list (`function public.area(w float8, h float8)`) it depends on the matching overload only, falling back to all overloads if none matches. An unqualified name resolves to `public` first, then to that name in any schema.
 
 A genuine dependency cycle is a hard error; the message shows one concrete cycle path (`a -> b -> a`) to remove.
-
----
 
 ## Example Schema
 
