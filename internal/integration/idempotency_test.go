@@ -2,14 +2,15 @@ package integration
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/suprbdev/pgy/internal/pull"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/suprbdev/pgy/internal/diff"
+	"github.com/suprbdev/pgy/internal/pull"
 	"github.com/suprbdev/pgy/internal/schema"
 )
 
@@ -269,14 +270,16 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 			if sql := diff.Render(diff.Plan(live, d, true)); sql != "" {
 				t.Errorf("second plan not empty:\n%s", sql)
 			}
-			assertPullRoundTrip(t, ctx, pool, live, sch)
+			assertPullRoundTrip(t, ctx, pool, live, sch, d)
 		})
 	}
 }
 
 // assertPullRoundTrip pulls schema sch from the database and fails unless
 // the pulled YAML diffs clean against it, with --unsafe and with --prune.
-func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, live *diff.Live, sch string) {
+// It then drops the schema, rebuilds it from the pulled YAML and requires
+// the original YAML (desired) to diff clean against the rebuilt schema.
+func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, live *diff.Live, sch string, desired *schema.Database) {
 	t.Helper()
 	if err := diff.IntrospectDetails(ctx, pool, live); err != nil {
 		t.Fatal(err)
@@ -306,6 +309,32 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 			t.Errorf("pulled YAML must diff clean (%+v), got:\n%s", opts, sql)
 			return
 		}
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf("drop schema %q cascade", sch)); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuild := diff.PlanWith(empty, pulled, diff.Options{Unsafe: true})
+	for _, s := range append(append(append(rebuild.Creates, rebuild.Alters...), rebuild.Drops...), rebuild.Concurrent...) {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			for _, f := range res.Files {
+				t.Logf("%s:\n%s", f.Name, f.Content)
+			}
+			t.Fatalf("rebuilding from pulled YAML: %q: %v", s, err)
+		}
+	}
+	rebuilt, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(diff.Plan(rebuilt, desired, true)); sql != "" {
+		for _, f := range res.Files {
+			t.Logf("%s:\n%s", f.Name, f.Content)
+		}
+		t.Errorf("schema rebuilt from pulled YAML differs from the original YAML:\n%s", sql)
 	}
 }
 

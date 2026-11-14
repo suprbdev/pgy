@@ -332,6 +332,8 @@ type LiveColumn struct{
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
     Collation   string // explicit collation differing from the type's default ("" = default)
     StatisticsTarget *int // attstattarget; nil = default
+    CollationSchema string // schema of Collation when it is not in pg_catalog
+    TypeStorage string     // the column type's default storage
     Compression string // pglz | lz4 | "" (default)
     Storage     string // plain | external | extended | main
 }
@@ -499,7 +501,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
                case a.attcompression when 'p' then 'pglz' when 'l' then 'lz4' else '' end,
                case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
-               nullif(coalesce(a.attstattarget::int, -1), -1)
+               nullif(coalesce(a.attstattarget::int, -1), -1),
+               coalesce((select cn.nspname from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
+                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation and cn.nspname <> 'pg_catalog'), ''),
+               (select case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
+                from pg_type ty where ty.oid = a.atttypid)
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -516,11 +522,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var nullable bool
             var generated, collation, compression, storage string
             var statTarget *int
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget); err != nil { return err }
+            var collSchema, typeStorage string
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, StatisticsTarget: statTarget}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema}
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             t.Columns[colName] = lc
         }
@@ -1052,12 +1059,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     tsMapQ := `
-        select n.nspname || '.' || c.cfgname, t.alias, array_agg(dd.dictname::text order by m.mapseqno)
+        select n.nspname || '.' || c.cfgname, t.alias,
+               array_agg(case when dn.nspname = 'pg_catalog' then dd.dictname::text else dn.nspname || '.' || dd.dictname end order by m.mapseqno)
         from pg_ts_config_map m
         join pg_ts_config c on c.oid = m.mapcfg
         join pg_namespace n on n.oid = c.cfgnamespace
         cross join lateral ts_token_type(c.cfgparser) t
         join pg_ts_dict dd on dd.oid = m.mapdict
+        join pg_namespace dn on dn.oid = dd.dictnamespace
         where t.tokid = m.maptokentype
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         group by 1, 2

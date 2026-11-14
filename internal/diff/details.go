@@ -128,7 +128,9 @@ func IntrospectDetails(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
             }},
         {`select n.nspname || '.' || t.typname, format_type(r.rngsubtype, null),
                  coalesce((select o.opcname from pg_opclass o where o.oid = r.rngsubopc and not o.opcdefault), ''),
-                 coalesce((select co.collname from pg_collation co where co.oid = r.rngcollation and r.rngcollation <> 100), ''),
+                 coalesce((select case when cn.nspname = 'pg_catalog' then co.collname::text else cn.nspname || '.' || co.collname end
+                           from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace
+                           where co.oid = r.rngcollation and r.rngcollation <> 100), ''),
                  coalesce(nullif(r.rngcanonical::text, '-'), ''), coalesce(nullif(r.rngsubdiff::text, '-'), ''),
                  coalesce((select mn.nspname || '.' || m.typname from pg_type m join pg_namespace mn on mn.oid = m.typnamespace
                            where m.oid = r.rngmultitypid), '')
@@ -145,7 +147,8 @@ func IntrospectDetails(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
                 return nil
             }},
         {`select n.nspname || '.' || t.typname, format_type(t.typbasetype, t.typtypmod),
-                 coalesce((select co.collname from pg_collation co join pg_type b on b.oid = t.typbasetype
+                 coalesce((select case when cn.nspname = 'pg_catalog' then co.collname::text else cn.nspname || '.' || co.collname end
+                           from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type b on b.oid = t.typbasetype
                            where co.oid = t.typcollation and t.typcollation <> b.typcollation), '')
           from pg_type t join pg_namespace n on n.oid = t.typnamespace
           where t.typtype = 'd' and ` + nsFilter,

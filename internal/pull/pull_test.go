@@ -98,3 +98,16 @@ func TestBuildQuotedTriggers(t *testing.T) {
 		}
 	}
 }
+
+func TestUnquoteIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		`"x""y"`:      `x"y`,
+		`"Weird Col"`: `Weird Col`,
+		`plain`:       `plain`,
+		`"a" || "b"`:  `"a" || "b"`,
+	} {
+		if got := unquoteIdent(in); got != want {
+			t.Errorf("unquoteIdent(%s) = %s, want %s", in, got, want)
+		}
+	}
+}

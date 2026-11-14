@@ -668,7 +668,14 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		} else {
 			add(c, "type", str(lc.Type))
 		}
-		addStr(c, "collate", lc.Collation)
+		if lc.Collation != "" && lc.CollationSchema != "" {
+			add(c, "collate", str(lc.CollationSchema+"."+lc.Collation))
+		} else {
+			addStr(c, "collate", lc.Collation)
+		}
+		if lc.Storage != "" && lc.TypeStorage != "" && lc.Storage != lc.TypeStorage {
+			add(c, "storage", str(lc.Storage))
+		}
 		addStr(c, "compression", lc.Compression)
 		if lc.StatisticsTarget != nil {
 			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
@@ -892,13 +899,18 @@ var (
 	newTableRe = regexp.MustCompile(`NEW TABLE AS (` + identPart + `)`)
 )
 
-// unquoteIdent removes the double quotes PostgreSQL puts around an
-// identifier, undoubling embedded quotes.
+// unquoteIdent removes the double quotes PostgreSQL puts around a single
+// identifier, undoubling embedded quotes. Anything else, such as an
+// expression over several quoted names, is returned unchanged.
 func unquoteIdent(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
 	}
-	return s
+	inner := s[1 : len(s)-1]
+	if strings.Contains(strings.ReplaceAll(inner, `""`, ""), `"`) {
+		return s
+	}
+	return strings.ReplaceAll(inner, `""`, `"`)
 }
 
 func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
@@ -966,7 +978,7 @@ func (b *builder) statistics(t *node, lt *diff.LiveTable) {
 		}
 		cols := make([]string, len(ls.Items))
 		for i, it := range ls.Items {
-			cols[i] = strings.Trim(stripParens(it), `"`)
+			cols[i] = unquoteIdent(stripParens(it))
 		}
 		add(m, "columns", list(cols))
 		addStr(m, "comment", ls.Comment)
@@ -1333,11 +1345,11 @@ func splitIdents(s string) []string {
 	for _, p := range splitTop(s) {
 		p = strings.TrimSpace(p)
 		if strings.HasPrefix(p, "PERIOD ") {
-			p = "period " + strings.Trim(strings.TrimPrefix(p, "PERIOD "), `"`)
+			p = "period " + unquoteIdent(strings.TrimPrefix(p, "PERIOD "))
 		} else if strings.HasSuffix(p, " WITHOUT OVERLAPS") {
-			p = strings.Trim(strings.TrimSuffix(p, " WITHOUT OVERLAPS"), `"`) + " without overlaps"
+			p = unquoteIdent(strings.TrimSuffix(p, " WITHOUT OVERLAPS")) + " without overlaps"
 		} else {
-			p = strings.Trim(p, `"`)
+			p = unquoteIdent(p)
 		}
 		out = append(out, p)
 	}
