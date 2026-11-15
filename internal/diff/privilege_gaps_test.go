@@ -60,3 +60,23 @@ func TestServerGrants(t *testing.T) {
 		t.Errorf("existing server: %s", sql)
 	}
 }
+
+func TestDefaultPrivilegesKeepRoleCase(t *testing.T) {
+	d := &schema.Database{DefaultPrivileges: []*schema.DefaultPrivilege{{Schemas: []string{"app"}, Grants: map[string]map[string][]string{
+		"tables": {"Pgy_Reader": {"select"}},
+	}}}}
+	live := emptyLive()
+	live.CurrentUser = "owner"
+	if sql := strings.Join(planDefaultPrivileges(live, d), "\n"); sql != `alter default privileges in schema "app" grant select on tables to "Pgy_Reader";` {
+		t.Errorf("got %s", sql)
+	}
+	live.DefaultACLs = map[string]map[string]map[string]bool{"owner|app|tables": {"Pgy_Reader": {"select": true}}}
+	live.DefaultACLRows = map[string]bool{"owner|app|tables": true}
+	if sql := strings.Join(planDefaultPrivileges(live, d), "\n"); sql != "" {
+		t.Errorf("a granted mixed-case role must not diff: %s", sql)
+	}
+	created := CreatedGrants(live.DefaultACLs, "owner", "app.t", "tables")
+	if !created["Pgy_Reader"]["select"] {
+		t.Errorf("created grants: %v", created)
+	}
+}

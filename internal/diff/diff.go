@@ -4161,7 +4161,7 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
                 if nsp != "" { prefix += " in schema " + pqIdent(nsp) }
                 want, have := map[string][]string{}, map[string]map[string]bool{}
                 for _, grantee := range sortedKeys(dp.Grants[kind]) {
-                    r := strings.ToLower(resolveRole(grantee, live.CurrentUser))
+                    r := grantKey(grantee, live.CurrentUser)
                     want[r] = dp.Grants[kind][grantee]
                     if h := liveG[r]; h != nil { have[r] = h }
                 }
@@ -4479,15 +4479,19 @@ func resolveRole(role, currentUser string) string {
     return role
 }
 
+// grantKey spells a grantee as live ACLs do: PUBLIC as public, role
+// keywords as the connected role, and other role names exactly.
+func grantKey(role, currentUser string) string {
+    if strings.EqualFold(strings.TrimSpace(role), "public") { return "public" }
+    return resolveRole(role, currentUser)
+}
+
 // resolveGrantRoles returns grants with role keywords replaced by the
 // connected role and PUBLIC spelled as live ACLs spell it, so they compare
 // with live ACLs.
 func resolveGrantRoles(grants map[string][]string, currentUser string) map[string][]string {
     if grants == nil { return grants }
-    key := func(r string) string {
-        if strings.EqualFold(strings.TrimSpace(r), "public") { return "public" }
-        return resolveRole(r, currentUser)
-    }
+    key := func(r string) string { return grantKey(r, currentUser) }
     changed := false
     for r := range grants {
         if key(r) != r { changed = true }

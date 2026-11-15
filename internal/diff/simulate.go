@@ -785,7 +785,7 @@ func applyDefaultPrivileges(acls map[string]map[string]map[string]bool, rows map
                 for grantee, privs := range grants {
                     set := map[string]bool{}
                     for _, p := range privs { set[strings.ToLower(p)] = true }
-                    acls[key][strings.ToLower(resolveRole(grantee, currentUser))] = set
+                    acls[key][grantKey(grantee, currentUser)] = set
                 }
             }
         }

@@ -1,0 +1,21 @@
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'Pgy_Reader') then create role "Pgy_Reader"; end if;
+end $$;
+create schema "Mx";
+grant usage on schema "Mx" to "Pgy_Reader";
+create table "Mx"."Orders" ("OrderId" int primary key, "Amount" numeric, "Note" text);
+grant select ("OrderId", "Amount"), update ("Note") on "Mx"."Orders" to "Pgy_Reader";
+create function "Mx"."AddTax"("Value" numeric, "Rate" numeric default 0.2) returns numeric language sql immutable as 'select "Value" * (1 + "Rate")';
+create function "Mx"."AddTax"("Value" int) returns int language sql immutable as 'select "Value"';
+grant execute on function "Mx"."AddTax"(numeric, numeric) to "Pgy_Reader";
+comment on function "Mx"."AddTax"(int) is 'int overload';
+create procedure "Mx"."Archive"(in "Before" date) language sql as 'select 1';
+create view "Mx"."OrderView" as select "OrderId", "Amount" * 2 as "Double" from "Mx"."Orders";
+comment on column "Mx"."OrderView"."Double" is 'twice the amount';
+grant select on "Mx"."OrderView" to "Pgy_Reader";
+create materialized view "Mx"."OrderStats" as select count(*) as "Total" from "Mx"."Orders";
+create unique index "OrderStatsTotal" on "Mx"."OrderStats" ("Total");
+alter default privileges in schema "Mx" grant select on tables to "Pgy_Reader";
+create type "Mx"."Status" as enum ('Open', 'Closed');
+grant usage on type "Mx"."Status" to "Pgy_Reader";
+create sequence "Mx"."Seq" owned by "Mx"."Orders"."OrderId";
