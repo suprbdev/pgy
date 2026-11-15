@@ -217,10 +217,14 @@ type LiveFunction struct{
     Rows       float64 // prorows (0 unless set-returning)
     Config     map[string]string // proconfig: lower-cased parameter name -> value
     Returns    string // pg_get_function_result, e.g. "SETOF integer"; "" when unknown
+    // SQLBody reports a SQL-standard body (BEGIN ATOMIC / RETURN); Body then
+    // holds PostgreSQL's rewritten form, from pg_get_function_sqlbody.
+    SQLBody bool
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
     Body     string
+    SQLBody  bool // SQL-standard body; see LiveFunction.SQLBody
     Security string // definer|invoker
     Config   map[string]string // proconfig: lower-cased parameter name -> value
 }
@@ -1027,7 +1031,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // replace-on-change. prokind routes rows: 'p' = procedure, else function.
     funcQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) as args,
-               coalesce(p.prosrc, ''), p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text,
+               case when p.prosqlbody is not null then pg_get_function_sqlbody(p.oid) else coalesce(p.prosrc, '') end,
+               p.prosqlbody is not null, p.provolatile::text, p.prosecdef, p.proisstrict, p.proleakproof, p.prokind::text,
                coalesce(p.proconfig, '{}'::text[]),
                exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i'),
                case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
@@ -1041,23 +1046,23 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
             var schemaName, funcName, args, src, vol, kind, parallel, returns string
-            var secdef, strict, leakproof, internal bool
+            var secdef, strict, leakproof, internal, sqlBody bool
             var config []string
             var cost, rows float64
-            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns); err != nil {
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
                 norm := normalizeFunctionSignature(key)
                 l.Procedures[norm] = true
-                lp := &LiveProcedure{Signature: key, Body: src, Security: "invoker", Config: parseProconfig(config)}
+                lp := &LiveProcedure{Signature: key, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config)}
                 if secdef { lp.Security = "definer" }
                 l.ProcedureDefs[norm] = lp
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -1909,14 +1914,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 // desired. Security is compared only when the YAML sets it; body comparison
 // is whitespace-trimmed (prosrc stores the body verbatim).
 func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
-    if strings.TrimSpace(p.Body) != strings.TrimSpace(lp.Body) { return true }
+    if routineBodyChanged(p.Language, p.Body, p.Replace, lp.Body, lp.SQLBody) { return true }
     if p.Security != "" && strings.ToLower(p.Security) != lp.Security { return true }
     if len(configClauses(p.Set, lp.Config)) > 0 { return true }
     return false
 }
 
-// parseProconfig turns pg_proc.proconfig entries ("name=value") into a map
-// keyed by lower-cased parameter name.
 // parseFDWOptions parses foreign-data wrapper options ("name=value", as
 // srvoptions, ftoptions and attfdwoptions store them), keeping names as
 // written since wrappers may treat them case-sensitively.
@@ -1928,6 +1931,8 @@ func parseFDWOptions(entries []string) map[string]string {
     return out
 }
 
+// parseProconfig turns pg_proc.proconfig entries ("name=value") into a map
+// keyed by lower-cased parameter name.
 func parseProconfig(entries []string) map[string]string {
     out := map[string]string{}
     for _, e := range entries {
@@ -2376,8 +2381,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if lf == nil || returnsChanged(f.Returns, lf.Returns) { continue }
                 // Empty YAML body means the body is unmanaged (attribute-only
                 // declaration, e.g. marking an extension function leakproof).
-                bodyChanged := strings.TrimSpace(f.Body) != "" &&
-                    strings.TrimSpace(f.Body) != strings.TrimSpace(lf.Body)
+                bodyChanged := routineBodyChanged(f.Language, f.Body, f.Replace, lf.Body, lf.SQLBody)
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
@@ -2414,8 +2418,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             verb := "create function"
             if found { verb = "create or replace function" }
             if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
-            stmt := fmt.Sprintf("%s %s returns %s language %s%s as %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, dollarQuote(body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, stmt, createsRelations)...)
+            stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, routineBodySQL(f.Language, body))
+            plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, body, stmt, createsRelations)...)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
             if !ok || pr == nil { continue }
@@ -2440,8 +2444,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
-            stmt := fmt.Sprintf("%s %s language %s%s as %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, dollarQuote(pr.Body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, stmt, createsRelations)...)
+            stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
+            plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, pr.Body, stmt, createsRelations)...)
         case "aggregate":
             ag := desired.Aggregates[e.Key]
             if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
@@ -3281,6 +3285,32 @@ func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *Li
     return makeObjectName(table+"_"+cn, "not_null")
 }
 
+// routineBodySQL renders a routine body for CREATE: a SQL-standard body
+// (BEGIN ATOMIC / RETURN) as written, anything else as a dollar-quoted
+// string after AS.
+func routineBodySQL(language, body string) string {
+    if schema.IsSQLStandardBody(language, body) {
+        return strings.TrimRight(strings.TrimSpace(body), "; \n\t")
+    }
+    return "as " + dollarQuote(body)
+}
+
+// routineBodyChanged reports whether a routine's declared body differs from
+// the live one. An empty body is unmanaged. A change between a string body
+// and a SQL-standard one always counts; two SQL-standard bodies are compared
+// only with replace, since PostgreSQL stores a rewritten form.
+func routineBodyChanged(language, body string, replace bool, liveBody string, liveSQLBody bool) bool {
+    if strings.TrimSpace(body) == "" { return false }
+    standard := schema.IsSQLStandardBody(language, body)
+    switch {
+    case standard != liveSQLBody:
+        return true
+    case standard:
+        return replace
+    }
+    return strings.TrimSpace(body) != strings.TrimSpace(liveBody)
+}
+
 // plansNewRelations reports whether desired declares a table, view or
 // materialized view that live lacks.
 func plansNewRelations(live *Live, desired *schema.Database) bool {
@@ -3294,12 +3324,14 @@ func plansNewRelations(live *Live, desired *schema.Database) bool {
 }
 
 // routineCreateStmts returns stmt, the CREATE of a function or procedure
-// written in language. PostgreSQL checks a SQL-language body against the
-// catalog at CREATE time, so when the plan also creates relations the body
-// may read, stmt is wrapped in SET / RESET check_function_bodies, as pg_dump
-// does; the body is then checked when the routine first runs.
-func routineCreateStmts(language, stmt string, createsRelations bool) []string {
-    if !createsRelations || !strings.EqualFold(strings.TrimSpace(language), "sql") { return []string{stmt} }
+// written in language. PostgreSQL checks a SQL-language string body against
+// the catalog at CREATE time, so when the plan also creates relations the
+// body may read, stmt is wrapped in SET / RESET check_function_bodies, as
+// pg_dump does; the body is then checked when the routine first runs.
+// SQL-standard bodies are always parsed at CREATE, so they are not wrapped:
+// their dependencies must be created first.
+func routineCreateStmts(language, body, stmt string, createsRelations bool) []string {
+    if !createsRelations || !strings.EqualFold(strings.TrimSpace(language), "sql") || schema.IsSQLStandardBody(language, body) { return []string{stmt} }
     return []string{"set check_function_bodies = off;", stmt, "reset check_function_bodies;"}
 }
 

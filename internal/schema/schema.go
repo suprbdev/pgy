@@ -498,6 +498,9 @@ type Function struct {
     Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
     Body string
+    // Replace re-emits a SQL-standard body (BEGIN ATOMIC / RETURN), which
+    // PostgreSQL rewrites when it stores it, so it cannot be compared.
+    Replace bool
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
     RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
@@ -534,12 +537,23 @@ type Procedure struct {
     Security string // definer/invoker
     Set      map[string]string
     Body     string
+    Replace  bool // re-emit a SQL-standard body; see Function.Replace
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
     RevokePublic bool          // revoke default PUBLIC execute
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// IsSQLStandardBody reports whether body, for a routine in language, is a
+// SQL-standard body (BEGIN ATOMIC ... END or RETURN expr) written after the
+// routine's attributes rather than as a string literal.
+func IsSQLStandardBody(language, body string) bool {
+    if !strings.EqualFold(strings.TrimSpace(language), "sql") { return false }
+    words := strings.Fields(strings.ToLower(body))
+    if len(words) == 0 { return false }
+    return words[0] == "return" || (len(words) > 1 && words[0] == "begin" && words[1] == "atomic")
 }
 
 func LoadAndMerge(paths []string) (*Database, error) {
@@ -1717,6 +1731,7 @@ func parseFunction(schemaName, key string, body any) *Function {
         }
     }
     if b, ok := m["body"].(string); ok { fn.Body = b }
+    if r, ok := m["replace"].(bool); ok { fn.Replace = r }
     if dep, ok := m["dependsOn"]; ok {
         fn.DependsOn = parseStringListFromNode(dep)
     }
@@ -1771,6 +1786,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
         }
     }
     if b, ok := m["body"].(string); ok { pr.Body = b }
+    if r, ok := m["replace"].(bool); ok { pr.Replace = r }
     if dep, ok := m["dependsOn"]; ok {
         pr.DependsOn = parseStringListFromNode(dep)
     }

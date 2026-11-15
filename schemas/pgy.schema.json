@@ -770,6 +770,7 @@
       "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
       "type": "object",
       "properties": {
+        "replace": { "type": "boolean", "description": "Re-emit a SQL-standard body (BEGIN ATOMIC ... END or RETURN expr) with CREATE OR REPLACE. PostgreSQL stores such bodies rewritten, so pgy does not compare them; set this while changing one." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "returns": { "type": "string", "description": "Return type, e.g. trigger, jsonb, setof record." },
@@ -804,6 +805,7 @@
       "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL.",
       "type": "object",
       "properties": {
+        "replace": { "type": "boolean", "description": "Re-emit a SQL-standard body (BEGIN ATOMIC ... END or RETURN expr) with CREATE OR REPLACE. PostgreSQL stores such bodies rewritten, so pgy does not compare them; set this while changing one." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "language": { "type": "string" },

@@ -519,6 +519,9 @@ func (b *builder) routines() {
 			}
 			addSet(m, lp.Config)
 			add(m, "body", literal(lp.Body))
+			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
+				add(m, "dependsOn", list(deps))
+			}
 		} else {
 			lf := b.live.FunctionDefs[norm]
 			if lf == nil || lf.Kind != "f" {
@@ -549,6 +552,9 @@ func (b *builder) routines() {
 			}
 			addSet(m, lf.Config)
 			add(m, "body", literal(lf.Body))
+			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
+				add(m, "dependsOn", list(deps))
+			}
 		}
 		if !b.live.FunctionPublicExec[norm] {
 			add(m, "revokePublic", boolean(true))

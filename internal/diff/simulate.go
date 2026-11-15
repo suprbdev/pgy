@@ -224,7 +224,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         } else {
             lp.Config = prev.Config
         }
-        lp.Body = pr.Body
+        lp.Body, lp.SQLBody = pr.Body, schema.IsSQLStandardBody(pr.Language, pr.Body)
         if pr.Security != "" { lp.Security = strings.ToLower(pr.Security) }
         out.Procedures[norm] = true
         out.ProcedureDefs[norm] = lp
@@ -320,7 +320,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
         lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: defaultFunctionCost(f.Language), Rows: defaultFunctionRows(f.Returns)}
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body))
         if prev != nil && !replaced { *lf = *prev }
-        if hasBody { lf.Body, lf.Returns = f.Body, f.Returns }
+        if hasBody { lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body) }
         if f.Volatility != "" { lf.Volatility = strings.ToLower(f.Volatility) }
         if f.Security != "" { lf.Security = strings.ToLower(f.Security) }
         if f.Strict != nil { lf.Strict = *f.Strict }

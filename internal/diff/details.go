@@ -27,6 +27,10 @@ type LiveDetails struct {
     TSDictionaries  map[string]*schema.TSDictionary
     ViewDeps        map[string][]string // view or materialized view -> views / materialized views it reads
     Populated       map[string]bool     // materialized view -> has data
+    // RoutineDeps: normalized routine signature -> dependsOn entries
+    // ("table x", "view x", "function x(args)", ...) for routines with a
+    // SQL-standard body, whose references PostgreSQL records in pg_depend.
+    RoutineDeps map[string][]string
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, text search parsers
     // and templates), excluding extension members.
@@ -73,7 +77,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         PartitionBounds: map[string]string{}, Routines: map[string]*LiveRoutine{}, ViewQueries: map[string]string{},
         CompositeOrder: map[string][]string{}, Ranges: map[string]*schema.RangeDef{}, DomainTypes: map[string]LiveDomainType{},
         Collations: map[string]*schema.Collation{}, TSParsers: map[string]string{}, TSDictionaries: map[string]*schema.TSDictionary{},
-        ViewDeps: map[string][]string{}, Populated: map[string]bool{},
+        ViewDeps: map[string][]string{}, Populated: map[string]bool{}, RoutineDeps: map[string][]string{},
     }
     l.Details = d
     const unsupportedQ = `
@@ -140,6 +144,29 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 var identity string
                 if err := scan(&r.Schema, &r.Name, &identity, &r.Arguments, &r.Returns, &r.Language, &r.Procedure); err != nil { return err }
                 d.Routines[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", r.Schema, r.Name, identity))] = r
+                return nil
+            }},
+        {`select n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+                 case when d.refclassid = 'pg_class'::regclass then
+                        case c.relkind when 'v' then 'view ' when 'm' then 'materialized view ' when 'S' then 'sequence ' else 'table ' end
+                        || cn.nspname || '.' || c.relname
+                      else case when rp.prokind = 'p' then 'procedure ' else 'function ' end
+                        || rn.nspname || '.' || rp.proname || '(' || pg_get_function_identity_arguments(rp.oid) || ')' end
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          join pg_depend d on d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'n'
+          left join pg_class c on d.refclassid = 'pg_class'::regclass and c.oid = d.refobjid
+          left join pg_namespace cn on cn.oid = c.relnamespace
+          left join pg_proc rp on d.refclassid = 'pg_proc'::regclass and rp.oid = d.refobjid
+          left join pg_namespace rn on rn.oid = rp.pronamespace
+          where p.prosqlbody is not null and p.prokind in ('f', 'p') and ` + nsFilter + `
+          and (c.oid is not null and c.relkind in ('r', 'p', 'f', 'v', 'm', 'S') or rp.oid is not null and rp.oid <> p.oid and rn.nspname not in ('pg_catalog', 'information_schema'))
+          order by 1, 2`,
+            func(scan func(...any) error) error {
+                var sig, dep string
+                if err := scan(&sig, &dep); err != nil { return err }
+                key := normalizeFunctionSignature(sig)
+                if deps := d.RoutineDeps[key]; len(deps) == 0 || deps[len(deps)-1] != dep { d.RoutineDeps[key] = append(deps, dep) }
                 return nil
             }},
         {`select n.nspname || '.' || c.relname, pg_get_viewdef(c.oid, true), c.relkind = 'm' and c.relispopulated
