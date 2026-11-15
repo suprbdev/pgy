@@ -454,7 +454,9 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u', coalesce(c.reloptions, '{}'::text[]),
+        select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u',
+               coalesce(c.reloptions, '{}'::text[]) ||
+               coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
                case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
                     when 'i' then 'index ' || coalesce((select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
                                                         where x.indrelid = c.oid and x.indisreplident), '')
