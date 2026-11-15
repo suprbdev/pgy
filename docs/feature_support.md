@@ -64,6 +64,7 @@ How pgy plans, reviews and applies changes safely.
 - [x] **Offline validation** (`pgy validate`: JSON Schema, unknown columns, unresolvable dependencies, cycles, invalid combinations; `pgy diff` repeats its errors as warnings)
 - [x] **Split migrations** (`diff --split` writes one migration per schema file or directory, ordered by dependencies, with cross-file references deferred to the group that can satisfy them)
 - [x] **Transaction-free migrations** (`-- pgy:no-transaction`; generated for `concurrently: true` indexes, including the `ON ONLY` + per-partition + `ATTACH` sequence on partitioned tables; interrupted builds are completed or rebuilt)
+- [x] **Lock retries** (`migrate --lock-timeout D --retries N [--retry-wait D]` rolls back and retries a transactional migration that hit `lock_timeout` or a deadlock, with doubling waits up to 30s)
 - [x] **Two-step constraint validation** (`notValid: true`, then dropping it emits `VALIDATE CONSTRAINT`; NOT VALID foreign keys on partitioned tables before PostgreSQL 18 are handled)
 
 - [x] **Lock warnings** (`pgy diff` reports statements that lock or rewrite existing tables on stderr and in `--json`: non-concurrent index builds, foreign keys and checks added without `NOT VALID`, primary key/unique/exclude constraints, `SET NOT NULL` without a validated `IS NOT NULL` check, rewriting type changes, `SET LOGGED/UNLOGGED`, and added columns with volatile defaults, stored generated expressions, identity or serial; `--no-warnings` to silence)
