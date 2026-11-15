@@ -702,6 +702,11 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		if lc.StatisticsTarget != nil {
 			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
 		}
+		for _, o := range [][2]string{{"n_distinct", "nDistinct"}, {"n_distinct_inherited", "nDistinctInherited"}} {
+			if v, err := strconv.ParseFloat(lc.Options[o[0]], 64); err == nil {
+				add(c, o[1], floatNum(v))
+			}
+		}
 		if lc.Nullable {
 			add(c, "nullable", boolean(true))
 		}

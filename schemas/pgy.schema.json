@@ -441,6 +441,8 @@
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"], "description": "TOAST compression method (applies to newly written values)." },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"], "description": "Column storage mode (SET STORAGE)." },
         "statisticsTarget": { "type": "integer", "minimum": -1, "description": "Per-column statistics target (SET STATISTICS); -1 restores the default." },
+        "nDistinct": { "type": "number", "minimum": -1, "description": "Planner override for the number of distinct values (SET (n_distinct = ...)): a positive count, or a negative fraction of the row count (-1 = all distinct). 0 removes the override." },
+        "nDistinctInherited": { "type": "number", "minimum": -1, "description": "Like nDistinct, for statistics gathered across inheritance children and partitions (n_distinct_inherited)." },
         "virtual": {
           "type": "boolean",
           "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
@@ -480,6 +482,8 @@
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"] },
         "statisticsTarget": { "type": "integer", "minimum": -1 },
+        "nDistinct": { "type": "number", "minimum": -1 },
+        "nDistinctInherited": { "type": "number", "minimum": -1 },
         "using": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }

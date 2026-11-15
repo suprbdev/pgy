@@ -2,6 +2,7 @@ package diff
 
 import (
     "sort"
+    "strconv"
     "strings"
 
     "github.com/suprbdev/pgy/internal/schema"
@@ -375,6 +376,14 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if c.StatisticsTarget != nil {
             lc.StatisticsTarget = nil
             if v := *c.StatisticsTarget; v >= 0 { lc.StatisticsTarget = &v }
+        }
+        for name, v := range map[string]*float64{"n_distinct": c.NDistinct, "n_distinct_inherited": c.NDistinctInherited} {
+            if v == nil { continue }
+            opts := map[string]string{}
+            for k, ov := range lc.Options { opts[k] = ov }
+            delete(opts, name)
+            if *v != 0 { opts[name] = strconv.FormatFloat(*v, 'g', -1, 64) }
+            lc.Options = opts
         }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {

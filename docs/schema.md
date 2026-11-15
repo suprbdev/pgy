@@ -307,6 +307,8 @@ database:
 | `compression` | string | `pglz`, `lz4` or `default`: TOAST compression method. Diffed against live → `ALTER COLUMN ... SET COMPRESSION` (affects newly written values only). Omitted = unmanaged |
 | `storage` | string | `plain`, `external`, `extended` or `main` → `ALTER COLUMN ... SET STORAGE`, diffed against live. Omitted = unmanaged |
 | `statisticsTarget` | integer | Per-column planner statistics target → `ALTER COLUMN ... SET STATISTICS <n>` (0 disables collection, -1 restores the default), diffed against live. Omitted = unmanaged |
+| `nDistinct` | number | Planner override for the column's number of distinct values → `ALTER COLUMN ... SET (n_distinct = <n>)`: a positive count, or a negative fraction of the row count (`-1` = every value distinct). `0` removes the override. Diffed against live; omitted = unmanaged. Takes effect at the next `ANALYZE` |
+| `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
