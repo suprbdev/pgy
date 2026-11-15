@@ -55,8 +55,19 @@ type LiveDomainType struct {
     Collation string
 }
 
-// IntrospectDetails fills l.Details from the database.
+// IntrospectDetails fills l.Details from the database. Like Introspect, it
+// retries when another session's DDL invalidates an object mid-read.
 func IntrospectDetails(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
+    var err error
+    for attempt := 0; attempt < 3; attempt++ {
+        if err = introspectDetailsOnce(ctx, pool, l); err == nil || !isCatalogRace(err) {
+            return err
+        }
+    }
+    return err
+}
+
+func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
     d := &LiveDetails{
         ColumnOrder: map[string][]string{}, PartitionKeys: map[string]string{}, PartitionOf: map[string]string{},
         PartitionBounds: map[string]string{}, Routines: map[string]*LiveRoutine{}, ViewQueries: map[string]string{},
