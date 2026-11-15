@@ -552,6 +552,7 @@
           "type": "string",
           "description": "Operator class applied to every column (e.g. gin_trgm_ops)."
         },
+        "collations": { "type": "object", "description": "Per-column COLLATE, keyed by the columns entry (e.g. {name: C}).", "additionalProperties": { "type": "string", "minLength": 1 } },
         "opclasses": {
           "type": "object",
           "description": "Per-column operator class overrides; keys match entries in columns.",
@@ -844,14 +845,15 @@
         },
         "attributes": {
           "type": "object",
-          "description": "Composite attributes: `{ <name>: { type: <sql type> } }`, or the shorthand `{ <name>: <sql type> }`.",
+          "description": "Composite attributes: `{ <name>: { type: <sql type>, collate: <collation> } }`, or the shorthand `{ <name>: <sql type> }`.",
           "additionalProperties": {
             "oneOf": [
               { "type": "string", "minLength": 1 },
               {
                 "type": "object",
                 "properties": {
-                  "type": { "type": "string", "minLength": 1 }
+                  "type": { "type": "string", "minLength": 1 },
+                  "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the attribute; changing it on a live type requires --unsafe." }
                 },
                 "required": ["type"],
                 "additionalProperties": false

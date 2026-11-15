@@ -101,6 +101,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             for n, t := range out.CompositeAttributes[k] { attrs[n] = t }
             for n, t := range td.Attributes { attrs[n] = t }
             out.CompositeAttributes[k] = attrs
+            if td.AttributeCollations != nil {
+                if out.CompositeCollations == nil { out.CompositeCollations = map[string]map[string]string{} }
+                out.CompositeCollations[k] = cloneMap(td.AttributeCollations, nil)
+            }
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
         if td.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], td.Grants) }
@@ -594,6 +598,7 @@ func cloneLive(l *Live) *Live {
         EnumLabels: cloneMap(l.EnumLabels, func(v []string) []string { return append([]string(nil), v...) }),
         AggregateDefs: cloneMap(l.AggregateDefs, func(a *LiveAggregate) *LiveAggregate { c := *a; return &c }),
         CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
+        CompositeCollations: cloneMap(l.CompositeCollations, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),

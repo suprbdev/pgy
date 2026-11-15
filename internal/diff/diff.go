@@ -104,6 +104,9 @@ type Live struct{
     // CompositeAttributes: "schema.type" -> attribute name -> format_type, for
     // ALTER TYPE ... ADD / ALTER / DROP ATTRIBUTE
     CompositeAttributes map[string]map[string]string
+    // CompositeCollations: "schema.type" -> attribute -> COLLATE, for
+    // attributes whose collation differs from their type's default
+    CompositeCollations map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name" and
     // "proc:<normalized signature>".
@@ -357,6 +360,9 @@ type LiveIndex struct {
 type LiveIndexOpclass struct {
     Name    string
     Default bool
+    // Collation is the key column's COLLATE when it differs from the
+    // column's (or, for an expression, its type's) default; "" otherwise.
+    Collation string
 }
 
 // LivePolicy is a policy as it exists in the live database. Cmd/Roles/Using/
@@ -477,6 +483,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         AggregateDefs: map[string]*LiveAggregate{},
         Partitions: map[string][]string{},
         CompositeAttributes: map[string]map[string]string{},
+        CompositeCollations: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
         OwnedSequences: map[string]bool{},
     }
@@ -701,7 +708,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
     // flagged so a desired index without an explicit opclass matches.
     opcQ := `
-        select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault
+        select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault,
+               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(
+                        (select a.attcollation from pg_attribute a where a.attrelid = x.indrelid and a.attnum = x.indkey[k.ord] and x.indkey[k.ord] > 0),
+                        (select ty.typcollation from pg_attribute ia join pg_type ty on ty.oid = ia.atttypid where ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1))
+                    then ''
+                    else (select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
+                          from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace where co.oid = x.indcollation[k.ord]) end
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
@@ -714,13 +727,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
-            var schemaName, tableName, idxName, opcName string
+            var schemaName, tableName, idxName, opcName, collation string
             var opcDefault bool
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation); err != nil {
                 return err
             }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation})
             }
         }
         return nil
@@ -1279,7 +1292,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     attrQ := `
-        select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod)
+        select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod),
+               coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
+                         from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
+                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation), '')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         join pg_class c on c.oid = t.typrelid and c.relkind = 'c'
@@ -1289,13 +1305,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(attrQ, func(attrRows pgx.Rows) error {
         for attrRows.Next() {
-            var schemaName, typeName, attName, attType string
-            if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType); err != nil {
+            var schemaName, typeName, attName, attType, collation string
+            if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType, &collation); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, typeName)
             if l.CompositeAttributes[key] == nil { l.CompositeAttributes[key] = map[string]string{} }
             l.CompositeAttributes[key][attName] = attType
+            if collation != "" {
+                if l.CompositeCollations[key] == nil { l.CompositeCollations[key] = map[string]string{} }
+                l.CompositeCollations[key][attName] = collation
+            }
         }
         return nil
     })
@@ -2088,7 +2108,7 @@ func formatFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) 
 // --unsafe it also changes attribute types and drops attributes the YAML no
 // longer declares (both fail while a table column uses the type). Without
 // live attribute data nothing is emitted.
-func compositeAlterStmts(fq string, td *schema.TypeDef, live map[string]string, unsafe bool) []string {
+func compositeAlterStmts(fq string, td *schema.TypeDef, live, liveColl map[string]string, unsafe bool) []string {
     if live == nil { return nil }
     names := append([]string(nil), td.AttributeOrder...)
     seen := map[string]bool{}
@@ -2103,9 +2123,9 @@ func compositeAlterStmts(fq string, td *schema.TypeDef, live map[string]string, 
         lt, exists := live[n]
         switch {
         case !exists:
-            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s;", pqIdent(fq), pqIdent(n), t))
-        case unsafe && normalizeColumnType(t) != normalizeColumnType(lt):
-            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s;", pqIdent(fq), pqIdent(n), t))
+            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s;", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n)))
+        case unsafe && (normalizeColumnType(t) != normalizeColumnType(lt) || collationName(td.AttributeCollations[n]) != collationName(liveColl[n])):
+            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s;", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n)))
         }
     }
     if unsafe {
@@ -2114,6 +2134,13 @@ func compositeAlterStmts(fq string, td *schema.TypeDef, live map[string]string, 
         }
     }
     return out
+}
+
+// attributeCollate renders " collate <c>" for a composite attribute with an
+// explicit collation, or "".
+func attributeCollate(td *schema.TypeDef, attr string) string {
+    if c := td.AttributeCollations[attr]; c != "" { return " collate " + collationIdent(c) }
+    return ""
 }
 
 // renderRangeType emits CREATE TYPE ... AS RANGE with the options set.
@@ -2350,7 +2377,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 case "enum":
                     plan.Prelude = append(plan.Prelude, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
                 case "composite":
-                    plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], unsafe)...)
+                    plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], live.CompositeCollations[e.Key], unsafe)...)
                 }
                 continue
             }
@@ -2366,14 +2393,14 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 emitted := map[string]bool{}
                 for _, an := range td.AttributeOrder {
                     if at, ok := td.Attributes[an]; ok && !emitted[an] {
-                        attrs = append(attrs, fmt.Sprintf("%s %s", pqIdent(an), at))
+                        attrs = append(attrs, fmt.Sprintf("%s %s%s", pqIdent(an), at, attributeCollate(td, an)))
                         emitted[an] = true
                     }
                 }
                 keys := make([]string, 0, len(td.Attributes))
                 for k := range td.Attributes { if !emitted[k] { keys = append(keys, k) } }
                 sort.Strings(keys)
-                for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s", pqIdent(an), td.Attributes[an])) }
+                for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s%s", pqIdent(an), td.Attributes[an], attributeCollate(td, an))) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as (%s);", pqIdent(e.Key), strings.Join(attrs, ", ")))
             case "range":
                 if td.Range == nil || td.Range.Subtype == "" { continue }
@@ -5492,6 +5519,7 @@ func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
         base, ordering := splitIndexOrdering(c)
         elem := pqIdent(base)
         if isIndexExpression(base) && cols[base] == nil { elem = "(" + base + ")" }
+        if coll := indexColumnCollation(ix, c); coll != "" { elem += " collate " + collationIdent(coll) }
         if oc := indexColumnOpclass(ix, c); oc != "" { elem += " " + oc }
         if ordering != "" { elem += " " + ordering }
         parts = append(parts, elem)
@@ -5567,8 +5595,19 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
         } else if !strings.EqualFold(oc, live[i].Name) {
             return true
         }
+        if collationName(indexColumnCollation(ix, c)) != collationName(live[i].Collation) { return true }
     }
     return false
+}
+
+// indexColumnCollation returns the COLLATE for one index column entry, keyed
+// by the entry with or without its ordering suffix; "" means the default.
+func indexColumnCollation(ix *schema.Index, col string) string {
+    if v, ok := ix.Collations[col]; ok { return v }
+    if base, _ := splitIndexOrdering(col); base != col {
+        if v, ok := ix.Collations[base]; ok { return v }
+    }
+    return ""
 }
 
 // indexColumnOpclass returns the operator class for one index column entry:

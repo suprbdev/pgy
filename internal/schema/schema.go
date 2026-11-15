@@ -383,6 +383,7 @@ type Index struct {
     Where     string            // partial index predicate
     Opclass   string            // operator class applied to every column (e.g. gin_trgm_ops)
     Opclasses map[string]string // per-column operator class overrides; key matches the columns entry
+    Collations map[string]string // per-column COLLATE; key matches the columns entry
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
@@ -463,6 +464,7 @@ type TypeDef struct {
     Labels []string // enum
     Range  *RangeDef // range
     Attributes map[string]string // composite: name->type
+    AttributeCollations map[string]string // composite: name -> COLLATE; unset = the type's default
     AttributeOrder []string      // composite: YAML declaration order (filled from node tree)
     DependsOn []string `yaml:"dependsOn"`
     Comment string
@@ -1437,6 +1439,7 @@ func parseIndexes(v any) []*Index {
                         if s, ok := v.(string); ok { ix.Opclasses[col] = s }
                     }
                 }
+                if cm, ok := dm["collations"].(map[string]any); ok { ix.Collations = stringMap(cm) }
             }
             out = append(out, ix)
         }
@@ -1818,6 +1821,10 @@ func parseType(schemaName, key string, body any) *TypeDef {
         for k, v := range attrs {
             if mm, ok := v.(map[string]any); ok {
                 if t, ok := mm["type"].(string); ok { td.Attributes[k] = t }
+                if c, ok := mm["collate"].(string); ok && strings.TrimSpace(c) != "" {
+                    if td.AttributeCollations == nil { td.AttributeCollations = map[string]string{} }
+                    td.AttributeCollations[k] = strings.TrimSpace(c)
+                }
             } else if t, ok := v.(string); ok && strings.TrimSpace(t) != "" {
                 td.Attributes[k] = strings.TrimSpace(t)
             }

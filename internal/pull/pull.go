@@ -282,6 +282,7 @@ func (b *builder) types() {
 			for _, a := range b.d.CompositeOrder[k] {
 				spec := flowMap()
 				add(spec, "type", str(b.live.CompositeAttributes[k][a]))
+				addStr(spec, "collate", b.live.CompositeCollations[k][a])
 				add(attrs, a, spec)
 			}
 			add(t, "attributes", attrs)
@@ -947,7 +948,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 		m := newMap()
 		cols := make([]string, len(li.Keys))
 		opcs := lt.IndexOpclasses[name]
-		var perCol *node
+		var perCol, colls *node
 		for i, k := range li.Keys {
 			col := k
 			if li.Descending[i] {
@@ -965,6 +966,12 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 				}
 				add(perCol, col, str(opcs[i].Name))
 			}
+			if i < len(opcs) && opcs[i].Collation != "" {
+				if colls == nil {
+					colls = flowMap()
+				}
+				add(colls, col, str(opcs[i].Collation))
+			}
 		}
 		add(m, "columns", list(cols))
 		if li.Unique {
@@ -975,6 +982,9 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 		}
 		if perCol != nil {
 			add(m, "opclasses", perCol)
+		}
+		if colls != nil {
+			add(m, "collations", colls)
 		}
 		if len(li.Include) > 0 {
 			add(m, "include", list(li.Include))
