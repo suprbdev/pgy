@@ -380,6 +380,9 @@ type LiveColumn struct{
     StatisticsTarget *int // attstattarget; nil = default
     Options     map[string]string // attoptions (n_distinct, n_distinct_inherited)
     FDWOptions  map[string]string // attfdwoptions of a foreign table column
+    // NotNullNotValid names a NOT VALID not-null constraint on the column
+    // (PostgreSQL 18+), which is enforced for new rows but not yet validated.
+    NotNullNotValid string
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -604,6 +607,27 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
             if len(fdwoptions) > 0 { lc.FDWOptions = parseFDWOptions(fdwoptions) }
             t.Columns[colName] = lc
+        }
+        return nil
+    })
+
+    nnQ := `
+        select n.nspname, c.relname, a.attname, con.conname
+        from pg_constraint con
+        join pg_class c on c.oid = con.conrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = con.conrelid and a.attnum = con.conkey[1]
+        where con.contype = 'n' and not con.convalidated
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(nnQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var schemaName, tableName, colName, conName string
+            if err := rows.Scan(&schemaName, &tableName, &colName, &conName); err != nil { return err }
+            if t := l.Tables[schemaName+"."+tableName]; t != nil {
+                if lc := t.Columns[colName]; lc != nil { lc.NotNullNotValid = conName }
+            }
         }
         return nil
     })
@@ -2576,6 +2600,15 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, newColumnStmts(fq, cn, c)...)
                         continue
                     }
+                    if name := notNullNotValidName(fq, cn, c, lc, lt, dt, pkCols, live.ServerVersion); name != "" {
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), pqIdent(cn)))
+                        plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name)))
+                        enforced := *lc
+                        enforced.Nullable = false
+                        lc = &enforced
+                    } else if lc.NotNullNotValid != "" && !c.Nullable {
+                        plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
+                    }
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })...)
@@ -3224,6 +3257,28 @@ func hasForeignPartition(live *Live, fq string) bool {
         if hasForeignPartition(live, child) { return true }
     }
     return false
+}
+
+// notNullNotValidName returns the constraint name to make existing column
+// cn NOT NULL with, on PostgreSQL 18+, instead of SET NOT NULL, which scans
+// the table under an ACCESS EXCLUSIVE lock: the plan adds the constraint
+// NOT VALID (enforced for new rows, no scan) and validates it in the
+// no-transaction migration, which scans under SHARE UPDATE EXCLUSIVE. It
+// returns "" when SET NOT NULL is used: before PostgreSQL 18, on primary
+// key, identity and generated columns, on foreign tables and partitions,
+// and when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip
+// the scan.
+func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
+    switch {
+    case serverVersion < 180000, c.Nullable, !lc.Nullable:
+        return ""
+    case c.PrimaryKey, pkCols[cn], c.Identity != "", c.Generated != "", isSerialType(c.Type):
+        return ""
+    case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn):
+        return ""
+    }
+    _, table := splitQualified(fq)
+    return makeObjectName(table+"_"+cn, "not_null")
 }
 
 // plansNewRelations reports whether desired declares a table, view or

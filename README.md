@@ -173,7 +173,7 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 | `ADD FOREIGN KEY` | checks every row while blocking writes on both tables | `notValid: true`, then remove it in a later migration, so pgy emits `VALIDATE CONSTRAINT`, which doesn't block writes |
 | `ADD CHECK` | scans the table under `ACCESS EXCLUSIVE` | the same two steps |
 | `ADD PRIMARY KEY` / `UNIQUE` / `EXCLUDE` | builds an index under `ACCESS EXCLUSIVE` | schedule a maintenance window |
-| `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE`; skipped if a validated `CHECK (col IS NOT NULL)` exists | add that check first |
+| `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE`; skipped if a validated `CHECK (col IS NOT NULL)` exists | add that check first. On PostgreSQL 18 pgy does this itself: it adds the constraint `NOT VALID` and validates it in the follow-up no-transaction migration, which doesn't block writes |
 | `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
 | `SET LOGGED` / `SET UNLOGGED` | rewrites the table | — |
 | `ADD COLUMN` with a volatile default, a stored generated expression, identity or serial | writes every row | add the column bare, then backfill |
