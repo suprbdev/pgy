@@ -1503,6 +1503,9 @@ func (b *builder) database() *node {
 			add(e, "name", str(name))
 			add(e, "ifNotExists", boolean(true))
 			add(e, "schema", str(le.Schema))
+			if le.Comment != "" && le.Comment != le.DefaultComment {
+				add(e, "comment", str(le.Comment))
+			}
 			exts.Content = append(exts.Content, e)
 		}
 		if len(exts.Content) > 0 {

@@ -184,3 +184,13 @@ schema app:
 		t.Errorf("server grants: %v", db.Servers["remote"].Grants)
 	}
 }
+
+func TestExtensionCommentParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte("extensions:\n  - {name: pg_trgm, comment: trigram matching}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Extensions) != 1 || db.Extensions[0].Comment != "trigram matching" {
+		t.Errorf("extensions: %+v", db.Extensions)
+	}
+}

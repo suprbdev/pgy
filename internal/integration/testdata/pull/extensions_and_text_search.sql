@@ -1,0 +1,15 @@
+create schema ext;
+create extension if not exists citext with schema ext;
+create extension if not exists pg_trgm with schema ext;
+comment on extension pg_trgm is 'trigram matching';
+create schema s17;
+create text search dictionary s17.simple_nostop (template = pg_catalog.simple, accept = false, stopwords = english);
+comment on text search dictionary s17.simple_nostop is 'simple dict';
+create text search configuration s17.cfg (copy = pg_catalog.english);
+alter text search configuration s17.cfg alter mapping for asciiword with s17.simple_nostop, english_stem;
+comment on text search configuration s17.cfg is 'custom config';
+create collation s17.num (provider = icu, locale = 'en-u-kn-true');
+create collation s17.posix_c from "C";
+create table s17.t (id int primary key, name ext.citext, body text);
+create index t_body_trgm on s17.t using gin (body ext.gin_trgm_ops);
+create index t_name_ci on s17.t (name collate s17.num);

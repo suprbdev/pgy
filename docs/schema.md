@@ -264,6 +264,7 @@ extensions: [pg_trgm, pgcrypto]
 | `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing. A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged |
 | `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
+| `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
 ```yaml

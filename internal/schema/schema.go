@@ -478,6 +478,7 @@ type Extension struct {
     Version     string   `yaml:"version"` // VERSION; empty = default version, never updated
     Cascade     bool     `yaml:"cascade"`
     DependsOn   []string `yaml:"dependsOn"`
+    Comment     string   `yaml:"comment"` // COMMENT ON EXTENSION; "" = unmanaged
 }
 
 type TypeDef struct {
@@ -874,6 +875,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                     if sc, ok := v["schema"].(string); ok { ext.Schema = strings.TrimSpace(sc) }
                     if ver, ok := v["version"]; ok { ext.Version = scalarToString(ver) }
                     if b, ok := v["cascade"].(bool); ok { ext.Cascade = b }
+                    if c, ok := v["comment"].(string); ok { ext.Comment = c }
                     if dep, ok := v["dependsOn"]; ok {
                         ext.DependsOn = parseStringListFromNode(dep)
                     }

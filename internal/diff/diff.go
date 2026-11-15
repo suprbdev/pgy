@@ -224,6 +224,10 @@ type LiveExtension struct {
     Schema      string
     Version     string
     Relocatable bool
+    Comment     string
+    // DefaultComment is the comment the extension's control file gives it,
+    // which CREATE EXTENSION sets.
+    DefaultComment string
 }
 
 type LiveFunction struct{
@@ -1441,19 +1445,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query existing extensions
     extQ := `
-        select e.extname, n.nspname, e.extversion, e.extrelocatable
+        select e.extname, n.nspname, e.extversion, e.extrelocatable,
+               coalesce(obj_description(e.oid, 'pg_extension'), ''),
+               coalesce((select a.comment from pg_available_extensions a where a.name = e.extname), '')
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
     `
     batch.add(extQ, func(extRows pgx.Rows) error {
         for extRows.Next() {
-            var extName, extSchema, extVersion string
+            var extName, extSchema, extVersion, comment, defaultComment string
             var relocatable bool
-            if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable); err != nil {
+            if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable, &comment, &defaultComment); err != nil {
                 return err
             }
             l.Extensions[extName] = true
-            l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable}
+            l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable, Comment: comment, DefaultComment: defaultComment}
         }
         return nil
     })
@@ -2448,6 +2454,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             continue
         }
         plan.Creates = append(plan.Creates, renderExtension(ext))
+        if ext.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment))) }
     }
     planServers(plan, live, desired)
     
@@ -6011,6 +6018,9 @@ func extensionAlterStmts(ext *schema.Extension, le *LiveExtension) []string {
     }
     if ext.Version != "" && ext.Version != le.Version {
         out = append(out, fmt.Sprintf("alter extension %s update to %s;", pqIdent(ext.Name), quoteString(ext.Version)))
+    }
+    if ext.Comment != "" && ext.Comment != le.Comment {
+        out = append(out, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment)))
     }
     return out
 }
