@@ -1247,7 +1247,7 @@ defaultPrivileges:
     functions: {public: []}   # stop granting EXECUTE to PUBLIC by default
 ```
 
-Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them.
+Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them. An object created by the plan that declares its own `grants` is compared against what those defaults give it, so grants it doesn't list are revoked in the same migration. `grants: {}` therefore keeps a new table free of them. When a database has default privileges that some older objects lack, `pgy pull` writes `grants: {}` on those objects, so a rebuild doesn't hand them grants the original never had.
 
 ### Column-Level Grants
 

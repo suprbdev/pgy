@@ -3906,6 +3906,12 @@ func planGrants(live *Live, desired *schema.Database) []string {
         revokes = append(revokes, rv...)
         grants = append(grants, gr...)
     }
+    acls := cloneGrantMap(live.DefaultACLs)
+    if acls == nil { acls = map[string]map[string]map[string]bool{} }
+    rows := cloneMap(live.DefaultACLRows, nil)
+    if rows == nil { rows = map[string]bool{} }
+    applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
+    created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
 
     schemaNames := make([]string, 0, len(desired.SchemaGrants))
     for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
@@ -3921,7 +3927,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
         dt := desired.Tables[k]
         if dt == nil { continue }
         if dt.Grants != nil {
-            add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, dt.Owner)))
+            liveG := live.TableGrants[k]
+            if live.Tables[k] == nil { liveG = created(k, "tables") }
+            add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), liveG, objectOwner(live, "rel:"+k, dt.Owner)))
         }
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -3935,17 +3943,23 @@ func planGrants(live *Live, desired *schema.Database) []string {
 
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
-            add(ownedGrantDiff("sequence "+pqIdent(k), resolveGrantRoles(sq.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, sq.Owner)))
+            liveG := live.TableGrants[k]
+            if !live.Sequences[k] { liveG = created(k, "sequences") }
+            add(ownedGrantDiff("sequence "+pqIdent(k), resolveGrantRoles(sq.Grants, live.CurrentUser), liveG, objectOwner(live, "rel:"+k, sq.Owner)))
         }
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil && td.Grants != nil {
-            add(ownedGrantDiff("type "+pqIdent(k), resolveGrantRoles(td.Grants, live.CurrentUser), live.TypeGrants[k], objectOwner(live, "type:"+k, td.Owner)))
+            liveG := live.TypeGrants[k]
+            if !live.Types[k] { liveG = created(k, "types") }
+            add(ownedGrantDiff("type "+pqIdent(k), resolveGrantRoles(td.Grants, live.CurrentUser), liveG, objectOwner(live, "type:"+k, td.Owner)))
         }
     }
     for _, k := range sortedKeys(desired.Domains) {
         if dm := desired.Domains[k]; dm != nil && dm.Grants != nil {
-            add(ownedGrantDiff("domain "+pqIdent(k), resolveGrantRoles(dm.Grants, live.CurrentUser), live.TypeGrants[k], objectOwner(live, "type:"+k, dm.Owner)))
+            liveG := live.TypeGrants[k]
+            if !live.Domains[k] { liveG = created(k, "types") }
+            add(ownedGrantDiff("domain "+pqIdent(k), resolveGrantRoles(dm.Grants, live.CurrentUser), liveG, objectOwner(live, "type:"+k, dm.Owner)))
         }
     }
 
@@ -3958,7 +3972,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range viewNames {
         vw := desired.Views[k]
         if vw == nil || vw.Grants == nil { continue }
-        add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(vw.Grants, live.CurrentUser), live.TableGrants[k], objectOwner(live, "rel:"+k, vw.Owner)))
+        liveG := live.TableGrants[k]
+        if !live.Views[k] && !live.MatViews[k] { liveG = created(k, "tables") }
+        add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(vw.Grants, live.CurrentUser), liveG, objectOwner(live, "rel:"+k, vw.Owner)))
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -3977,7 +3993,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if f.Grants != nil {
-            add(ownedGrantDiff(target, resolveGrantRoles(f.Grants, live.CurrentUser), live.FunctionGrants[norm], objectOwner(live, "proc:"+norm, f.Owner)))
+            liveG := live.FunctionGrants[norm]
+            if !liveFuncs[norm] { liveG = created(name, "functions") }
+            add(ownedGrantDiff(target, resolveGrantRoles(f.Grants, live.CurrentUser), liveG, objectOwner(live, "proc:"+norm, f.Owner)))
         }
     }
 
@@ -3998,10 +4016,30 @@ func planGrants(live *Live, desired *schema.Database) []string {
             }
         }
         if pr.Grants != nil {
-            add(ownedGrantDiff(target, resolveGrantRoles(pr.Grants, live.CurrentUser), live.FunctionGrants[norm], objectOwner(live, "proc:"+norm, pr.Owner)))
+            liveG := live.FunctionGrants[norm]
+            if !live.Procedures[norm] { liveG = created(name, "functions") }
+            add(ownedGrantDiff(target, resolveGrantRoles(pr.Grants, live.CurrentUser), liveG, objectOwner(live, "proc:"+norm, pr.Owner)))
         }
     }
     return append(revokes, grants...)
+}
+
+// CreatedGrants returns the grants an object of kind (tables, sequences,
+// functions or types) named fq receives from default privileges when role
+// creates it: the role's global and per-schema defaults from acls (as
+// Live.DefaultACLs), without PUBLIC.
+func CreatedGrants(acls map[string]map[string]map[string]bool, role, fq, kind string) map[string]map[string]bool {
+    nsp, _, _ := strings.Cut(fq, ".")
+    var out map[string]map[string]bool
+    for _, key := range []string{role + "||" + kind, role + "|" + nsp + "|" + kind} {
+        for grantee, privs := range acls[key] {
+            if grantee == "public" || len(privs) == 0 { continue }
+            if out == nil { out = map[string]map[string]bool{} }
+            if out[grantee] == nil { out[grantee] = map[string]bool{} }
+            for p := range privs { out[grantee][p] = true }
+        }
+    }
+    return out
 }
 
 // grantDiffStmts returns revoke and grant statements reconciling desired
