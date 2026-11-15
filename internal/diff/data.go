@@ -85,19 +85,19 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         textKey := make([]string, len(key))
         for i, k := range key {
             q := pqIdent(k)
-            join[i] = fmt.Sprintf("t.%s = (r.v).%s", q, q)
-            liveKey[i] = "t." + q
+            join[i] = fmt.Sprintf("pgy_row.%s = (r.v).%s", q, q)
+            liveKey[i] = "pgy_row." + q
             declKey[i] = "(jsonb_populate_record(null::" + tbl + ", e.j))." + q
-            textKey[i] = fmt.Sprintf("%s, t.%s::text", quoteString(k), q)
+            textKey[i] = fmt.Sprintf("%s, pgy_row.%s::text", quoteString(k), q)
         }
         diffQ := `
             with d as (select e.j, e.i - 1 as i from jsonb_array_elements($1::jsonb) with ordinality e(j, i)),
                  r as (select d.i, d.j, jsonb_populate_record(null::` + tbl + `, d.j) as v from d)
-            select r.i, t.` + pqIdent(key[0]) + ` is null,
-                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(t) -> k is distinct from to_jsonb(r.v) -> k), '{}')
-            from r left join ` + from + ` t on ` + strings.Join(join, " and ") + `
-            where t.` + pqIdent(key[0]) + ` is null
-               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(t) -> k is distinct from to_jsonb(r.v) -> k)`
+            select r.i, pgy_row.` + pqIdent(key[0]) + ` is null,
+                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k), '{}')
+            from r left join ` + from + ` pgy_row on ` + strings.Join(join, " and ") + `
+            where pgy_row.` + pqIdent(key[0]) + ` is null
+               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k)`
         ld := &LiveTableData{Changed: map[int][]string{}}
         missing := map[int]bool{}
         qr, err := pool.Query(ctx, diffQ, string(rows))
@@ -137,7 +137,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         }
         extraQ := `
             select jsonb_build_object(` + strings.Join(textKey, ", ") + `)
-            from ` + from + ` t
+            from ` + from + ` pgy_row
             where not exists (select 1 from jsonb_array_elements($1::jsonb) e(j)
                               where (` + strings.Join(liveKey, ", ") + `) = (` + strings.Join(declKey, ", ") + `))
             order by ` + strings.Join(liveKey, ", ")
@@ -231,10 +231,19 @@ func arrayLiteral(list []any) string {
 // the same coercion the comparison uses, so a map becomes a record for a
 // composite column and an object for a json column; anything else is a
 // plain literal.
-func dataSQL(fq, col string, v any) string {
-    if !containsMap(v) { return sqlValue(v) }
+func dataSQL(fq string, dt *schema.Table, col string, v any) string {
+    if !containsMap(v) && !isJSONColumn(dt, col) { return sqlValue(v) }
     b, _ := json.Marshal(map[string]any{col: dataValue(v)})
     return fmt.Sprintf("(jsonb_populate_record(null::%s, %s::jsonb)).%s", pqIdent(fq), quoteString(string(b)), pqIdent(col))
+}
+
+// isJSONColumn reports whether dt declares col as json or jsonb, whose YAML
+// values are JSON documents (a list or string is not an array or text
+// literal), so they are always converted by jsonb_populate_record.
+func isJSONColumn(dt *schema.Table, col string) bool {
+    if dt == nil || dt.Columns[col] == nil { return false }
+    t := strings.ToLower(strings.TrimSpace(dt.Columns[col].Type))
+    return t == "json" || t == "jsonb" || t == "pg_catalog.json" || t == "pg_catalog.jsonb"
 }
 
 func containsMap(v any) bool {
@@ -272,7 +281,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
     names, vals := make([]string, len(cols)), make([]string, len(cols))
     overriding := ""
     for i, cn := range cols {
-        names[i], vals[i] = pqIdent(cn), dataSQL(fq, cn, row[cn])
+        names[i], vals[i] = pqIdent(cn), dataSQL(fq, dt, cn, row[cn])
         if c := dt.Columns[cn]; c != nil && c.Identity == "always" { overriding = " overriding system value" }
     }
     return fmt.Sprintf("insert into %s (%s)%s values (%s);", pqIdent(fq), strings.Join(names, ", "), overriding, strings.Join(vals, ", "))
@@ -343,10 +352,10 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 row := dt.Data.Rows[i]
                 set := []string{}
                 for _, cn := range ld.Changed[i] {
-                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, cn, row[cn]))) }
+                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, k, row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
             }
         }
     }
@@ -375,7 +384,7 @@ func partitioned(live *Live, dt *schema.Table, fq string) bool {
 // json.Number), for pgy pull --data. partitioned reads through a
 // partitioned table into its partitions.
 func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned bool) ([]map[string]any, error) {
-    rows, err := pool.Query(ctx, "select to_jsonb(t)::text from "+dataTarget(fq, partitioned)+" t")
+    rows, err := pool.Query(ctx, "select to_jsonb(pgy_row)::text from "+dataTarget(fq, partitioned)+" pgy_row")
     if err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
     defer rows.Close()
     out := []map[string]any{}

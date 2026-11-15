@@ -78,10 +78,10 @@ func TestDataFromSnapshot(t *testing.T) {
 }
 
 func TestDataSQLRoutesMapsThroughPopulateRecord(t *testing.T) {
-	if got := dataSQL("app.t", "p", map[string]any{"a": 1}); got != `(jsonb_populate_record(null::"app"."t", '{"p":{"a":1}}'::jsonb))."p"` {
+	if got := dataSQL("app.t", nil, "p", map[string]any{"a": 1}); got != `(jsonb_populate_record(null::"app"."t", '{"p":{"a":1}}'::jsonb))."p"` {
 		t.Errorf("got %s", got)
 	}
-	if got := dataSQL("app.t", "n", 5); got != "5" {
+	if got := dataSQL("app.t", nil, "n", 5); got != "5" {
 		t.Errorf("scalars stay literals, got %s", got)
 	}
 }
@@ -94,6 +94,24 @@ func TestDollarTag(t *testing.T) {
 	} {
 		if got := dollarTag(body); got != want {
 			t.Errorf("dollarTag(%q) = %s, want %s", body, got, want)
+		}
+	}
+}
+
+func TestDataJSONColumnValues(t *testing.T) {
+	dt := &schema.Table{Columns: map[string]*schema.Column{"j": {Type: "jsonb"}, "js": {Type: "json"}, "arr": {Type: "text[]"}}}
+	for _, c := range []struct {
+		col  string
+		v    any
+		want string
+	}{
+		{"j", []any{}, `(jsonb_populate_record(null::"app"."t", '{"j":[]}'::jsonb))."j"`},
+		{"j", "just a string", `(jsonb_populate_record(null::"app"."t", '{"j":"just a string"}'::jsonb))."j"`},
+		{"js", 123, `(jsonb_populate_record(null::"app"."t", '{"js":123}'::jsonb))."js"`},
+		{"arr", []any{}, `'{}'`},
+	} {
+		if got := dataSQL("app.t", dt, c.col, c.v); got != c.want {
+			t.Errorf("dataSQL(%s, %v) = %s, want %s", c.col, c.v, got, c.want)
 		}
 	}
 }
