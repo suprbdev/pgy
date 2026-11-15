@@ -283,6 +283,8 @@ type Table struct {
     PrimaryKey []string        `yaml:"-"`
     PrimaryKeyName string      `yaml:"-"` // constraint name; "" = PostgreSQL's default <table>_pkey
     PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
+    PrimaryKeyInclude []string `yaml:"-"` // INCLUDE (non-key) columns of the primary key's index
+    PrimaryKeyWith map[string]string `yaml:"-"` // storage parameters of the primary key's index
     ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
@@ -347,6 +349,8 @@ type Constraint struct {
     Type              string   // check, unique, exclude
     Expression        string   // for check or exclude
     Columns           []string // for unique
+    Include           []string // unique: INCLUDE (non-key) columns
+    With              map[string]string // unique: index storage parameters, WITH (name = value)
     NullsNotDistinct  bool     // unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     Deferrable        bool     // unique/exclude
     InitiallyDeferred bool     // unique/exclude; implies Deferrable
@@ -365,7 +369,7 @@ type Column struct {
     PrimaryKey bool `yaml:"primaryKey"`
     Comment  string `yaml:"comment"`
     Identity string `yaml:"identity"` // "" (none), "always", or "by default"
-    IdentityOptions *Sequence `yaml:"-"` // identity sequence options (increment, minValue, maxValue, start, cache, cycle); nil = unmanaged
+    IdentityOptions *Sequence `yaml:"-"` // identity sequence options (increment, minValue, maxValue, start, cache, cycle, and Name: sequenceName, unqualified = the table's schema); nil = unmanaged
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
@@ -663,6 +667,7 @@ func Merge(dbs []*Database) *Database {
                 }
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey, existing.PrimaryKeyName, existing.PrimaryKeyComment = t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment
+                    existing.PrimaryKeyInclude, existing.PrimaryKeyWith = t.PrimaryKeyInclude, t.PrimaryKeyWith
                 }
                 if t.ForceRowLevelSecurity != nil {
                     existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
@@ -997,7 +1002,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := m["primaryKey"]; ok {
-                    t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
+                    t.parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := m["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -1055,7 +1060,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             fq := qualify(schemaName, name)
             t := &Table{Name: fq, Columns: parseColumns(m["columns"]) }
             if pkRaw, ok := m["primaryKey"]; ok {
-                t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
+                t.parsePrimaryKey(pkRaw)
             }
             if idxRaw, ok := m["indexes"]; ok {
                 t.Indexes = parseIndexes(idxRaw)
@@ -1125,7 +1130,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := inner["primaryKey"]; ok {
-                    t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
+                    t.parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := inner["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -1318,6 +1323,7 @@ func parseIdentityOptions(v any) *Sequence {
         if x, ok := m[key]; ok { *dst = defaultToString(x) }
     }
     if b, ok := m["cycle"].(bool); ok { sq.Cycle = &b }
+    if s, ok := m["sequenceName"].(string); ok { sq.Name = strings.TrimSpace(s) }
     return sq
 }
 
@@ -1618,6 +1624,8 @@ func parseConstraints(v any) []*Constraint {
                 if e, ok := dm["def"].(string); ok { c.Expression = e } // alias
                 if cols, ok := dm["columns"]; ok { c.Columns = parseStringListFromNode(cols) }
                 if b, ok := dm["nullsNotDistinct"].(bool); ok { c.NullsNotDistinct = b }
+                if v, ok := dm["include"]; ok { c.Include = parseStringListFromNode(v) }
+                if w, ok := dm["with"].(map[string]any); ok { c.With = stringMap(w) }
                 if b, ok := dm["deferrable"].(bool); ok { c.Deferrable = b }
                 if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
@@ -2435,18 +2443,21 @@ func parseDefaultPrivileges(v any) []*DefaultPrivilege {
     return out
 }
 
-// parsePrimaryKey parses a table's primaryKey: a column list, or a named
-// block {<constraint name>: {columns: [...]}} that also names the
-// constraint.
-func parsePrimaryKey(v any) ([]string, string, string) {
-    if m, ok := v.(map[string]any); ok && len(m) == 1 {
-        for name, def := range m {
-            comment := ""
-            if dm, ok := def.(map[string]any); ok { comment, _ = dm["comment"].(string) }
-            return parseStringListFromNode(v), strings.TrimSpace(name), comment
-        }
+// parsePrimaryKey sets t's primary key from its primaryKey value: a column
+// list, or a block {<constraint name>: {columns, include, with, comment}}
+// that also names the constraint.
+func (t *Table) parsePrimaryKey(v any) {
+    t.PrimaryKey = parseStringListFromNode(v)
+    m, ok := v.(map[string]any)
+    if !ok || len(m) != 1 { return }
+    for name, def := range m {
+        t.PrimaryKeyName = strings.TrimSpace(name)
+        dm, ok := def.(map[string]any)
+        if !ok { continue }
+        t.PrimaryKeyComment, _ = dm["comment"].(string)
+        if inc, ok := dm["include"]; ok { t.PrimaryKeyInclude = parseStringListFromNode(inc) }
+        if w, ok := dm["with"].(map[string]any); ok { t.PrimaryKeyWith = stringMap(w) }
     }
-    return parseStringListFromNode(v), "", ""
 }
 
 // tableKey returns the table name a schema block key declares, and whether

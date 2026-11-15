@@ -20,6 +20,7 @@ var columnAttributeCases = map[string]string{
 	"identity_always":   `{type: bigint, identity: always}`,
 	"identity_default":  `{type: bigint, identity: by default}`,
 	"identity_options":  `{type: bigint, identity: {generated: always, start: 100, increment: 5, cache: 10}}`,
+	"identity_named":    `{type: bigint, identity: {generated: always, sequenceName: b_custom_seq}}`,
 	"generated":         `{type: int, nullable: true, generated: id * 2}`,
 	"collate":           `{type: text, nullable: true, collate: C}`,
 	"compression":       `{type: text, nullable: true, compression: pglz}`,

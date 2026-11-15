@@ -12,10 +12,10 @@ These are the foundational elements required for almost any relational database 
 - [x] **Schemas** (Custom namespaces)
 - [x] **Tables** (Base tables)
 - [x] **Columns** (Data types, nullability, defaults)
-- [x] **Primary Keys** (column `primaryKey: true`, a column list, or a named block that renames a live key and takes a `comment`)
+- [x] **Primary Keys** (column `primaryKey: true`, a column list, or a named block that renames a live key and takes `include`, `with` and a `comment`)
 - [x] **Foreign Keys** (`onDelete`/`onUpdate`, `match`, `deferrable`/`initiallyDeferred`, `notValid`)
 - [x] **Indexes** (`concurrently: true` → `CREATE INDEX CONCURRENTLY` in a no-transaction migration, or for partitioned tables `ON ONLY` + per-partition concurrent builds + `ATTACH PARTITION`; indexes left invalid by an interrupted build are completed or rebuilt; Including unique indexes, non-btree methods via `using:` — gist/gin/brin/hash/spgist — partial indexes via `where:`, operator classes via `opclass:`/`opclasses:`, expression indexes, per-column sort order — `desc`, `nulls last` —, `include` covering columns, `nullsNotDistinct`, `with` storage parameters, `statisticsTargets` for expression columns (`ALTER INDEX ... ALTER COLUMN n SET STATISTICS`, changed in place) and `concurrently` (built in a separate no-transaction migration). Live definitions are compared in full; a changed index is dropped and recreated under `--unsafe`. Names over 63 bytes are truncated the way PostgreSQL stores them)
-- [x] **UNIQUE Constraints** (Table-level and column-level; `nullsNotDistinct`, `deferrable`/`initiallyDeferred`)
+- [x] **UNIQUE Constraints** (Table-level and column-level; `nullsNotDistinct`, `deferrable`/`initiallyDeferred`, and `include`/`with` for the constraint's index)
 - [x] **CHECK Constraints** (`noInherit`, `notValid`)
 - [x] **NOT NULL Constraints** (Via column `nullable` property)
 - [x] **EXCLUDE Constraints**
@@ -55,7 +55,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Clustering** (`clusterOn: <index>|none` → `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`, diffed against `indisclustered`)
 - [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, `statisticsTarget` → `ALTER STATISTICS ... SET STATISTICS`, comments, prunable)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+; a warning on 15/16) and a removed one `DROP EXPRESSION`)
-- [x] **Identity Columns** (Column `identity: always | byDefault`, or a map with sequence options (start/increment/minValue/maxValue/cache/cycle) → `GENERATED ... AS IDENTITY (...)`; kind and options diffed → `SET GENERATED` / `SET <option>`; added to or dropped from existing columns under `--unsafe`; overrides `default`)
+- [x] **Identity Columns** (Column `identity: always | byDefault`, or a map with sequence options (start/increment/minValue/maxValue/cache/cycle, and `sequenceName`, renamed in place) → `GENERATED ... AS IDENTITY (...)`; kind and options diffed → `SET GENERATED` / `SET <option>`; added to or dropped from existing columns under `--unsafe`; overrides `default`)
 
 ## Migration Workflow
 How pgy plans, reviews and applies changes safely.

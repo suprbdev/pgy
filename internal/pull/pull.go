@@ -421,14 +421,18 @@ func (b *builder) textSearch() {
 	}
 }
 
-// identityOptionsNode returns {generated, ...} for an identity column whose
-// sequence options differ from the defaults, or nil.
-func identityOptionsNode(lc *diff.LiveColumn) *node {
+// identityOptionsNode returns {generated, ...} for identity column cn of
+// table fq when its sequence's name or options differ from the defaults, or
+// nil.
+func identityOptionsNode(fq, cn string, lc *diff.LiveColumn) *node {
 	ls := lc.IdentitySequence
 	if ls == nil {
 		return nil
 	}
 	m := flowMap()
+	if s, table, _ := strings.Cut(fq, "."); ls.Name != "" && ls.Name != s+"."+table+"_"+cn+"_seq" {
+		add(m, "sequenceName", str(strings.TrimPrefix(ls.Name, s+".")))
+	}
 	typeMax := map[string]string{"smallint": "32767", "integer": "2147483647", "bigint": "9223372036854775807"}[ls.Type]
 	if ls.Increment != "1" {
 		add(m, "increment", num(ls.Increment))
@@ -713,9 +717,12 @@ func (b *builder) tables() {
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {
 				name := diff.LivePrimaryKeyName(lt)
-				if note := lt.ConstraintComments[name]; name != "" && (name != diff.DefaultPrimaryKeyName(fq) || note != "") {
+				li := lt.IndexDefs[name]
+				params := li != nil && (len(li.Include) > 0 || len(li.Options) > 0)
+				if note := lt.ConstraintComments[name]; name != "" && (name != diff.DefaultPrimaryKeyName(fq) || note != "" || params) {
 					cols := flowMap()
 					add(cols, "columns", list(pk))
+					indexParameters(cols, li)
 					addStr(cols, "comment", note)
 					m := newMap()
 					add(m, name, cols)
@@ -848,7 +855,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 				add(c, "virtual", boolean(true))
 			}
 		case lc.Identity != "":
-			if opts := identityOptionsNode(lc); opts != nil {
+			if opts := identityOptionsNode(fq, cn, lc); opts != nil {
 				add(c, "identity", opts)
 			} else {
 				add(c, "identity", str(lc.Identity))
@@ -866,7 +873,6 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 }
 
 var (
-	pkRe       = regexp.MustCompile(`(?s)^PRIMARY KEY \((.*)\)`)
 	fkRe       = regexp.MustCompile(`(?s)^FOREIGN KEY \((.*?)\) REFERENCES (.+?)\((.*?)\)(.*)$`)
 	uniqueRe   = regexp.MustCompile(`(?s)^UNIQUE( NULLS NOT DISTINCT)? \((.*?)\)(.*)$`)
 	checkRe    = regexp.MustCompile(`(?s)^CHECK (.*?)( NO INHERIT)?( NOT VALID)?( NOT ENFORCED)?$`)
@@ -875,11 +881,57 @@ var (
 
 func pkColumns(lt *diff.LiveTable) []string {
 	for _, def := range lt.ConstraintDefs {
-		if m := pkRe.FindStringSubmatch(def); m != nil {
-			return splitIdents(m[1])
+		if rest, ok := strings.CutPrefix(def, "PRIMARY KEY "); ok {
+			if inner, ok := parenGroup(rest); ok {
+				return splitIdents(inner)
+			}
 		}
 	}
 	return nil
+}
+
+// parenGroup returns the text inside the parenthesis s starts with, up to
+// its matching ")", skipping parentheses inside quotes.
+func parenGroup(s string) (string, bool) {
+	if !strings.HasPrefix(s, "(") {
+		return "", false
+	}
+	depth, quote := 0, byte(0)
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth--; depth == 0 {
+				return s[1:i], true
+			}
+		}
+	}
+	return "", false
+}
+
+// indexParameters adds the include and with keys for the index backing a
+// primary key or unique constraint.
+func indexParameters(m *node, li *diff.LiveIndex) {
+	if li == nil {
+		return
+	}
+	if len(li.Include) > 0 {
+		add(m, "include", list(li.Include))
+	}
+	if len(li.Options) > 0 {
+		w := flowMap()
+		for _, k := range sortedKeys(li.Options) {
+			add(w, k, str(li.Options[k]))
+		}
+		add(m, "with", w)
+	}
 }
 
 func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
@@ -932,6 +984,7 @@ func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
 			c := newMap()
 			add(c, "type", str("unique"))
 			add(c, "columns", list(splitIdents(m[2])))
+			indexParameters(c, lt.IndexDefs[name])
 			if m[1] != "" {
 				add(c, "nullsNotDistinct", boolean(true))
 			}

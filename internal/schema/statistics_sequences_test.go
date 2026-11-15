@@ -111,3 +111,29 @@ schema app:
 		}
 	}
 }
+
+func TestKeyIndexParametersAndIdentityNameParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns:
+      id: {type: bigint, identity: {generated: always, sequenceName: custom_seq}}
+      code: {type: text}
+    primaryKey: {t_pk: {columns: [id], include: [code], with: {fillfactor: 80}}}
+    constraints:
+      t_uq: {type: unique, columns: [code], include: [id], with: {fillfactor: 70}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := db.Tables["app.t"]
+	if tb.PrimaryKeyName != "t_pk" || len(tb.PrimaryKeyInclude) != 1 || tb.PrimaryKeyWith["fillfactor"] != "80" {
+		t.Errorf("primary key: %q %v %v", tb.PrimaryKeyName, tb.PrimaryKeyInclude, tb.PrimaryKeyWith)
+	}
+	if ct := tb.Constraints[0]; len(ct.Include) != 1 || ct.Include[0] != "id" || ct.With["fillfactor"] != "70" {
+		t.Errorf("unique: %+v", ct)
+	}
+	if o := tb.Columns["id"].IdentityOptions; o == nil || o.Name != "custom_seq" {
+		t.Errorf("identity: %+v", o)
+	}
+}
