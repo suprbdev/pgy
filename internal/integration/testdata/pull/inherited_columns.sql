@@ -1,0 +1,16 @@
+create schema s14;
+create table s14.m (id int not null, at date not null, v int default 0, note text) partition by range (at);
+create table s14.m_2025 partition of s14.m (v default 5, constraint m_2025_v_pos check (v >= 0)) for values from ('2025-01-01') to ('2026-01-01') with (fillfactor = 90);
+create table s14.m_default partition of s14.m default;
+comment on table s14.m_2025 is 'year partition';
+comment on column s14.m_2025.note is 'partition column note';
+create index m_2025_note on s14.m_2025 (note);
+alter table s14.m_2025 alter column note set statistics 200;
+create table s14.h (id int not null, k text) partition by hash (id);
+create table s14.h0 partition of s14.h for values with (modulus 2, remainder 0);
+create table s14.h1 partition of s14.h for values with (modulus 2, remainder 1) partition by list (k);
+create table s14.h1_a partition of s14.h1 for values in ('a', null);
+create table s14.h1_rest partition of s14.h1 default;
+create table s14.parent (a int, b int check (b > 0));
+create table s14.kid (c int, constraint kid_c_nn check (c is not null) no inherit) inherits (s14.parent);
+alter table s14.kid alter column a set default 7;

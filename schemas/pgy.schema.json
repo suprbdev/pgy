@@ -408,6 +408,12 @@
           "additionalProperties": { "$ref": "#/definitions/scalar" }
         }
       },
+      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] } ] } },
+      "then": {
+        "properties": {
+          "columns": { "anyOf": [ { "type": "array" }, { "type": "object", "additionalProperties": { "required": ["type"] } } ] }
+        }
+      },
       "additionalProperties": false
     },
     "tableListItem": {
@@ -491,6 +497,12 @@
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
+      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] } ] } },
+      "then": {
+        "properties": {
+          "columns": { "anyOf": [ { "type": "array" }, { "type": "object", "additionalProperties": { "required": ["type"] } } ] }
+        }
+      },
       "additionalProperties": false
     },
     "column": {
@@ -540,7 +552,6 @@
         "grants": { "$ref": "#/definitions/grants" },
         "comment": { "type": "string" }
       },
-      "required": ["type"],
       "additionalProperties": false
     },
     "columnListItem": {

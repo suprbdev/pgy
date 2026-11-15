@@ -240,7 +240,9 @@ func Database(d *schema.Database) []Issue {
 				continue
 			}
 			if strings.TrimSpace(c.Type) == "" {
-				add(Error, obj, "column %s has no type", cn)
+				if !inheritsColumn(d, t, cn) {
+					add(Error, obj, "column %s has no type", cn)
+				}
 			} else if strings.Count(c.Type, "(") != strings.Count(c.Type, ")") {
 				add(Error, obj, "column %s has type %q with unbalanced parentheses; in a flow mapping a comma ends the value, so quote it: {type: \"numeric(12,2)\"}", cn, c.Type)
 			}
@@ -514,6 +516,23 @@ func checkDeps(d *schema.Database, obj string, deps []string, add func(Severity,
 			add(Error, obj, "dependsOn %q matches nothing declared", dep)
 		}
 	}
+}
+
+// inheritsColumn reports whether table t gets column cn from a parent, so
+// that a declaration without a type sets what t keeps of it: t is a
+// partition, or one of its INHERITS parents declares the column (or isn't
+// declared, so pgy can't tell).
+func inheritsColumn(d *schema.Database, t *schema.Table, cn string) bool {
+	if t.PartitionOf != "" {
+		return true
+	}
+	for _, p := range t.Inherits {
+		pt := d.Tables[qualifyPublic(p)]
+		if pt == nil || pt.Columns[cn] != nil || inheritsColumn(d, pt, cn) {
+			return true
+		}
+	}
+	return false
 }
 
 // columnName returns the column an index/constraint entry names, or "" when

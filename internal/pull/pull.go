@@ -756,6 +756,9 @@ func (b *builder) tables() {
 		} else {
 			add(t, "partitionOf", str(parent))
 			b.partitionBound(t, fq)
+			if cols := b.columns(fq, lt); len(cols.Content) > 0 {
+				add(t, "columns", cols)
+			}
 		}
 		if key := b.d.PartitionKeys[fq]; key != "" {
 			add(t, "partitionBy", partitionBy(key))
@@ -840,7 +843,13 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 	cols := newMap()
 	for _, cn := range b.d.ColumnOrder[fq] {
 		lc := lt.Columns[cn]
-		if lc == nil || lc.Inherited {
+		if lc == nil {
+			continue
+		}
+		if lc.Inherited {
+			if c := inheritedColumnNode(lc, b.parentColumn(fq, lt, cn)); c != nil {
+				add(cols, cn, c)
+			}
 			continue
 		}
 		c := flowMap()
@@ -903,6 +912,58 @@ var (
 	checkRe    = regexp.MustCompile(`(?s)^CHECK (.*?)( NO INHERIT)?( NOT VALID)?( NOT ENFORCED)?$`)
 	fkActionRe = regexp.MustCompile(`ON (UPDATE|DELETE) (CASCADE|RESTRICT|SET NULL(?: \([^)]*\))?|SET DEFAULT(?: \([^)]*\))?|NO ACTION)`)
 )
+
+// parentColumn returns the column cn of table fq's partition parent, or of
+// the first INHERITS parent that has it, or nil.
+func (b *builder) parentColumn(fq string, lt *diff.LiveTable, cn string) *diff.LiveColumn {
+	parents := lt.Inherits
+	if p := b.d.PartitionOf[fq]; p != "" {
+		parents = []string{p}
+	}
+	for _, p := range parents {
+		if pt := b.live.Tables[p]; pt != nil && pt.Columns[cn] != nil {
+			return pt.Columns[cn]
+		}
+	}
+	return nil
+}
+
+// inheritedColumnNode returns the settings a partition or inheritance child
+// keeps of an inherited column that it doesn't simply copy from parent: a
+// different default, storage or compression, NOT NULL the parent lacks, and
+// the statistics target, n_distinct and comment, which it never copies. It
+// returns nil when there are none.
+func inheritedColumnNode(lc, parent *diff.LiveColumn) *node {
+	if parent == nil {
+		parent = &diff.LiveColumn{Nullable: true}
+	}
+	c := flowMap()
+	if lc.Default != "" && lc.Default != parent.Default {
+		add(c, "default", str(lc.Default))
+	}
+	if !lc.Nullable && parent.Nullable {
+		add(c, "nullable", boolean(false))
+	}
+	if lc.Storage != "" && lc.Storage != parent.Storage {
+		add(c, "storage", str(lc.Storage))
+	}
+	if lc.Compression != "" && lc.Compression != parent.Compression {
+		add(c, "compression", str(lc.Compression))
+	}
+	if lc.StatisticsTarget != nil {
+		add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
+	}
+	for _, o := range [][2]string{{"n_distinct", "nDistinct"}, {"n_distinct_inherited", "nDistinctInherited"}} {
+		if v, err := strconv.ParseFloat(lc.Options[o[0]], 64); err == nil {
+			add(c, o[1], floatNum(v))
+		}
+	}
+	addStr(c, "comment", lc.Comment)
+	if len(c.Content) == 0 {
+		return nil
+	}
+	return c
+}
 
 func pkColumns(lt *diff.LiveTable) []string {
 	for _, def := range lt.ConstraintDefs {
