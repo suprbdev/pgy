@@ -295,6 +295,7 @@ type Table struct {
     Columns map[string]*Column `yaml:"columns"`
     Foreign *ForeignTable      `yaml:"-"` // set for `foreign table <name>:` declarations
     PrimaryKey []string        `yaml:"-"`
+    Of             string      `yaml:"-"` // composite type of a typed table (CREATE TABLE ... OF); its columns come from the type
     PrimaryKeyName string      `yaml:"-"` // constraint name; "" = PostgreSQL's default <table>_pkey
     PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
     PrimaryKeyInclude []string `yaml:"-"` // INCLUDE (non-key) columns of the primary key's index
@@ -663,6 +664,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.PartitionOf != "" {
                     existing.PartitionOf = t.PartitionOf
+                }
+                if t.Of != "" {
+                    existing.Of = t.Of
                 }
                 if t.Inherits != nil {
                     existing.Inherits = t.Inherits
@@ -1701,6 +1705,7 @@ func parseTableStorage(t *Table, m map[string]any) {
 }
 
 func parseTablePartitioning(t *Table, schemaName string, m map[string]any) {
+    if of, ok := m["of"].(string); ok && strings.TrimSpace(of) != "" { t.Of = qualify(schemaName, strings.TrimSpace(of)) }
     if inh, ok := m["inherits"]; ok {
         t.Inherits = []string{}
         for _, p := range parseStringListFromNode(inh) { t.Inherits = append(t.Inherits, qualify(schemaName, p)) }
@@ -2120,6 +2125,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
             deps = append(append([]string{}, deps...), "table "+t.PartitionOf)
         }
         for _, p := range t.Inherits { deps = append(append([]string{}, deps...), "table "+p) }
+        if t.Of != "" && d.Types[t.Of] != nil { deps = append(append([]string{}, deps...), "type "+t.Of) }
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e

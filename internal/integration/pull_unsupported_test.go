@@ -39,7 +39,6 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 	for _, want := range []string{
 		"operator x.===(integer, integer) is not supported by pgy and was left out",
 		"cast (x.amount as numeric) is not supported by pgy and was left out",
-		"table x.addresses is a typed table (OF x.addr)",
 		"function x.rn is written in internal and cannot be pulled",
 		"ordered-set aggregate x.my_mode(ORDER BY anyelement) is not supported by pgy and was left out",
 	} {

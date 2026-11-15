@@ -304,6 +304,7 @@ type LiveTable struct{
     ConstraintInherited map[string]bool
     TriggerInherited    map[string]bool
     IsPartition bool            // relispartition: a partition of a partitioned table
+    OfType      string          // "schema.type" of a typed table's composite type (reloftype), or ""
     Inherits    []string        // INHERITS parents (not partitioning), in inhseqno order
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
@@ -570,7 +571,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
                     when 'i' then 'index ' || coalesce((select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
                                                         where x.indrelid = c.oid and x.indisreplident), '')
-                    else 'default' end
+                    else 'default' end,
+               coalesce((select tn.nspname || '.' || ty.typname from pg_type ty join pg_namespace tn on tn.oid = ty.typnamespace where ty.oid = c.reloftype), '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_foreign_table ft on ft.ftrelid = c.oid
@@ -584,15 +586,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, server string
             var isPartition, partitioned, unlogged, noToast, foreign bool
             var reloptions, ftoptions []string
-            var replident string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident); err != nil {
+            var replident, ofType string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             lt := newLiveTable()
             lt.NoToast = noToast
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
-            lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident
+            lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
             l.Tables[key] = lt
         }
         return nil
@@ -2309,8 +2311,10 @@ func formatFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) 
 // --unsafe it also changes attribute types and drops attributes the YAML no
 // longer declares (both fail while a table column uses the type). Without
 // live attribute data nothing is emitted.
-func compositeAlterStmts(fq string, td *schema.TypeDef, live, liveColl map[string]string, unsafe bool) []string {
+func compositeAlterStmts(fq string, td *schema.TypeDef, live, liveColl map[string]string, unsafe, cascade bool) []string {
     if live == nil { return nil }
+    tail := ";"
+    if cascade { tail = " cascade;" }
     names := append([]string(nil), td.AttributeOrder...)
     seen := map[string]bool{}
     for _, n := range names { seen[n] = true }
@@ -2324,14 +2328,14 @@ func compositeAlterStmts(fq string, td *schema.TypeDef, live, liveColl map[strin
         lt, exists := live[n]
         switch {
         case !exists:
-            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s;", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n)))
+            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s%s", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n), tail))
         case unsafe && (normalizeColumnType(t) != normalizeColumnType(lt) || collationName(td.AttributeCollations[n]) != collationName(liveColl[n])):
-            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s;", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n)))
+            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s%s", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n), tail))
         }
     }
     if unsafe {
         for _, n := range sortedKeys(live) {
-            if _, ok := td.Attributes[n]; !ok { out = append(out, fmt.Sprintf("alter type %s drop attribute %s;", pqIdent(fq), pqIdent(n))) }
+            if _, ok := td.Attributes[n]; !ok { out = append(out, fmt.Sprintf("alter type %s drop attribute %s%s", pqIdent(fq), pqIdent(n), tail)) }
         }
     }
     return out
@@ -2581,7 +2585,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 case "enum":
                     plan.Prelude = append(plan.Prelude, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
                 case "composite":
-                    plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], live.CompositeCollations[e.Key], unsafe)...)
+                    plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], live.CompositeCollations[e.Key], unsafe, typedTableUses(live, e.Key))...)
                 }
                 continue
             }
@@ -2829,6 +2833,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 unlogged := ""
                 if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                 create := fmt.Sprintf("create %stable if not exists %s (%s)", unlogged, pqIdent(fq), strings.Join(cols, ", "))
+                if dt.Of != "" { create = fmt.Sprintf("create %stable if not exists %s of %s", unlogged, pqIdent(fq), pqIdent(dt.Of)) }
                 if len(dt.Inherits) > 0 {
                     parents := make([]string, len(dt.Inherits))
                     for i, p := range dt.Inherits { parents[i] = pqIdent(p) }
@@ -2864,7 +2869,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
-                    if (ok && lc.Inherited) || (!ok && inheritedColumn(dt, c, nil)) {
+                    if (ok && inheritedColumn(dt, c, lc)) || (!ok && inheritedColumn(dt, c, nil)) {
                         plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...)
                         continue
                     }
@@ -2899,6 +2904,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                 }
                 if dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
                 // apply any missing constraints, indexes, triggers
@@ -2906,7 +2912,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 // drops
-                if unsafe && dt.PartitionOf == "" {
+                if unsafe && dt.PartitionOf == "" && dt.Of == "" && lt.OfType == "" {
                     dropCols := []string{}
                     for cn, lc := range lt.Columns {
                         if _, ok := dt.Columns[cn]; !ok && !lc.Inherited && !parentDeclaresColumn(desired, dt, cn, 0) { dropCols = append(dropCols, cn) }
@@ -3290,10 +3296,51 @@ func partitionKeyExpr(s string) string {
 
 // inheritedColumn reports whether c, declared on dt, sets what dt keeps of
 // a column it inherits rather than declaring the column: every column of a
-// partition, a column the live table inherits, or a column of an
-// inheritance child declared without a type.
+// partition or typed table, a column the live table inherits, or a column
+// of an inheritance child declared without a type.
 func inheritedColumn(dt *schema.Table, c *schema.Column, lc *LiveColumn) bool {
-    return dt.PartitionOf != "" || (lc != nil && lc.Inherited) || (c.Type == "" && len(dt.Inherits) > 0)
+    return dt.PartitionOf != "" || dt.Of != "" || (lc != nil && lc.Inherited) || (c.Type == "" && len(dt.Inherits) > 0)
+}
+
+// typedTableStmts links existing table lt to the composite type dt names
+// with ALTER TABLE ... OF, which PostgreSQL allows only when the columns
+// match the type exactly. A live typed table that dt doesn't type, or types
+// differently, is unlinked with NOT OF under --unsafe; without it that is
+// reported.
+func typedTableStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool, warn func(string)) []string {
+    if lt.OfType != "" && (dt.Of == "" || !sameType(dt.Of, lt.OfType)) {
+        if !unsafe {
+            warn(fmt.Sprintf("%s is a typed table (OF %s), which the YAML doesn't declare; ALTER TABLE ... NOT OF needs --unsafe", fq, lt.OfType))
+            return nil
+        }
+        out := []string{fmt.Sprintf("alter table %s not of;", pqIdent(fq))}
+        if dt.Of != "" { out = append(out, fmt.Sprintf("alter table %s of %s;", pqIdent(fq), pqIdent(dt.Of))) }
+        return out
+    }
+    if dt.Of != "" && lt.OfType == "" {
+        return []string{fmt.Sprintf("alter table %s of %s;", pqIdent(fq), pqIdent(dt.Of))}
+    }
+    return nil
+}
+
+// sameType compares two "schema.name" type names, ignoring quotes and
+// treating an unqualified name as public's.
+func sameType(a, b string) bool {
+    norm := func(s string) string {
+        s = strings.ReplaceAll(strings.TrimSpace(s), `"`, "")
+        if !strings.Contains(s, ".") { s = "public." + s }
+        return s
+    }
+    return norm(a) == norm(b)
+}
+
+// typedTableUses reports whether a live typed table is OF composite type fq,
+// which makes ALTER TYPE ... ATTRIBUTE need CASCADE.
+func typedTableUses(live *Live, fq string) bool {
+    for _, lt := range live.Tables {
+        if lt != nil && lt.OfType != "" && sameType(lt.OfType, fq) { return true }
+    }
+    return false
 }
 
 // inheritedColumnStmts sets what a partition or inheritance child declares

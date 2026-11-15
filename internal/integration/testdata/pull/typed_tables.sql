@@ -1,0 +1,10 @@
+create schema tt;
+create schema tty;
+create type tty.addr as (street text, city text, zip int);
+create table tt.addresses of tty.addr (city with options default 'Paris' not null, primary key (street));
+alter table tt.addresses alter column zip set statistics 100;
+comment on column tt.addresses.city is 'city name';
+comment on table tt.addresses is 'typed';
+create index addresses_zip on tt.addresses (zip);
+create type tt."Point" as ("X" int, "Y" int);
+create table tt."Points" of tt."Point";

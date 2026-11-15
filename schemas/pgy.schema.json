@@ -327,6 +327,7 @@
           "required": ["rows"],
           "additionalProperties": false
         },
+        "of": { "type": "string", "minLength": 1, "description": "Composite type of a typed table (CREATE TABLE ... OF type). Its columns come from the type; list them only to set their options (default, nullable: false, comment, ...), without a type." },
         "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
@@ -408,7 +409,7 @@
           "additionalProperties": { "$ref": "#/definitions/scalar" }
         }
       },
-      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] } ] } },
+      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] }, { "required": ["of"] } ] } },
       "then": {
         "properties": {
           "columns": { "anyOf": [ { "type": "array" }, { "type": "object", "additionalProperties": { "required": ["type"] } } ] }
@@ -430,6 +431,7 @@
           "required": ["rows"],
           "additionalProperties": false
         },
+        "of": { "type": "string", "minLength": 1, "description": "Composite type of a typed table (CREATE TABLE ... OF type). Its columns come from the type; list them only to set their options (default, nullable: false, comment, ...), without a type." },
         "inherits": { "$ref": "#/definitions/stringList", "description": "Parent tables (INHERITS). Columns that only exist because a parent has them are left to the parent." },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
@@ -497,7 +499,7 @@
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
-      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] } ] } },
+      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] }, { "required": ["of"] } ] } },
       "then": {
         "properties": {
           "columns": { "anyOf": [ { "type": "array" }, { "type": "object", "additionalProperties": { "required": ["type"] } } ] }
