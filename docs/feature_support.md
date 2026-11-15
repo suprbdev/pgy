@@ -95,7 +95,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 | `internal/diff` | SQL generation for each feature: create, skip when present, alter, unsafe gating, prune; normalization of live definitions; renames; lock warnings; reference data |
 | `internal/group` | split migrations: ordering, deferral of cross-file references, each statement emitted once |
 | `internal/pull`, `internal/validate` | YAML generation from live definitions; validation rules; every complete YAML example in the docs passes `pgy validate` |
-| `internal/integration` | against a real server: each feature is applied, a second diff must be empty, the database is pulled, the pulled YAML must diff clean, and a schema rebuilt from it must match the original YAML |
+| `internal/integration` | against a real server: each feature is applied, a second diff must be empty, the database is pulled, the pulled YAML must diff clean, and a schema rebuilt from it must match the original YAML; realistic SQL schemas in `testdata/pull` are pulled and rebuilt into a second database, and with `PGY_TEST_PGDUMP` set (as in CI) `pg_dump --schema-only` of the rebuild must match the original |
 | `internal/cli` | commands end to end: diff → commit → migrate → status across schema versions, no-transaction migrations, configuration |
 
 *Adding a feature touches the YAML model and parser (`internal/schema`), introspection, the plan and the simulator (`internal/diff`), `pgy pull`, `pgy validate`, the JSON Schema (`schemas/pgy.schema.json`) and the docs, and ships with unit and integration tests.*

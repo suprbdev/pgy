@@ -79,6 +79,12 @@ func TestIntegrationPullFixtures(t *testing.T) {
 				dump()
 				t.Errorf("rebuilt database differs from the pulled YAML:\n%s", sql)
 			}
+			if a := pgDump(t, "pgytest_pull_"+name); a != "" {
+				if d := dumpDifferences(a, pgDump(t, "pgytest_pull_"+name+"_copy")); len(d) > 0 {
+					dump()
+					t.Errorf("pg_dump of the rebuilt database differs from the original:\n%s", strings.Join(d, "\n"))
+				}
+			}
 		})
 	}
 }
