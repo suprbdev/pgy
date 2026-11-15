@@ -77,10 +77,17 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
     early = append(early, dropList("view", undeclared(live.Views, isView, "rel"))...)
     early = append(early, dropList("materialized view", undeclared(live.MatViews, isView, "rel"))...)
 
-    tables := map[string]bool{}
+    tables, foreignTables := map[string]bool{}, map[string]bool{}
     for k, lt := range live.Tables {
-        if lt != nil && !lt.IsPartition && k != migrationsTable { tables[k] = true }
+        switch {
+        case lt == nil || lt.IsPartition || k == migrationsTable:
+        case lt.Foreign != nil:
+            foreignTables[k] = true
+        default:
+            tables[k] = true
+        }
     }
+    late = append(late, dropList("foreign table", undeclared(foreignTables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
     late = append(late, dropList("table", undeclared(tables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
 
     late = append(late, pruneRoutines(live, desired, inScope)...)

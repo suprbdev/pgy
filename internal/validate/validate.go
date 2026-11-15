@@ -642,6 +642,11 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 		routines.declared[k] = true
 	}
 	for _, k := range sortedKeys(d.Tables) {
+		if t := d.Tables[k]; t != nil && t.Foreign != nil && d.Servers != nil && d.Servers[t.Foreign.Server] == nil {
+			add(Error, "foreign table "+k, "uses server %s, which servers: does not declare", t.Foreign.Server)
+		}
+	}
+	for _, k := range sortedKeys(d.Tables) {
 		t := d.Tables[k]
 		if t == nil {
 			continue

@@ -57,7 +57,10 @@ func unquoteFQ(s string) string {
 // UNLOGGED, and added columns whose values must be computed per row.
 func lockWarnings(live *Live, p *PlanDiff) []Warning {
     if live == nil { return nil }
-    exists := func(fq string) bool { return live.Tables[fq] != nil || live.MatViewTables[fq] != nil }
+    exists := func(fq string) bool {
+        if lt := live.Tables[fq]; lt != nil { return lt.Foreign == nil }
+        return live.MatViewTables[fq] != nil
+    }
     out := []Warning{}
     warn := func(fq, stmt, format string, args ...any) {
         out = append(out, Warning{Table: fq, Statement: stmt, Message: fmt.Sprintf(format, args...)})
@@ -108,7 +111,7 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
         if m := lockTypeRe.FindStringSubmatch(stmt); m != nil {
             fq, col, rest := unquoteFQ(m[1]), unquoteFQ(m[2]), m[3]
             lt := live.Tables[fq]
-            if lt == nil || lt.Columns[col] == nil { continue }
+            if lt == nil || lt.Foreign != nil || lt.Columns[col] == nil { continue }
             to, using := rest, false
             if i := strings.Index(to, " using "); i >= 0 { to, using = to[:i], true }
             if i := strings.Index(to, " collate "); i >= 0 { to = to[:i] }

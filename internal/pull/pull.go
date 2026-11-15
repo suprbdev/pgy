@@ -632,6 +632,12 @@ func (b *builder) tables() {
 			if len(lt.Inherits) > 0 {
 				add(t, "inherits", list(lt.Inherits))
 			}
+			if lt.Foreign != nil {
+				add(t, "server", str(lt.Foreign.Server))
+				if len(lt.Foreign.Options) > 0 {
+					add(t, "options", stringsNode(lt.Foreign.Options))
+				}
+			}
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {
 				add(t, "primaryKey", list(pk))
@@ -659,7 +665,7 @@ func (b *builder) tables() {
 		b.triggers(t, fq, lt)
 		b.rules(t, lt)
 		b.statistics(t, lt)
-		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" {
+		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" && lt.Foreign == nil {
 			add(t, "replicaIdentity", str(ri))
 		}
 		addStr(t, "clusterOn", lt.ClusteredOn)
@@ -672,8 +678,45 @@ func (b *builder) tables() {
 		}
 		addStr(t, "comment", b.live.RelComments[fq])
 		b.owner(t, "rel:"+fq)
-		add(blk, "table "+name, t)
+		key := "table "
+		if lt.Foreign != nil {
+			key = "foreign table "
+		}
+		add(blk, key+name, t)
 	}
+}
+
+// stringsNode renders a map of strings as a flow mapping in key order.
+func stringsNode(m map[string]string) *node {
+	n := flowMap()
+	for _, k := range sortedKeys(m) {
+		add(n, k, str(m[k]))
+	}
+	return n
+}
+
+// servers renders the foreign servers no extension owns.
+func (b *builder) servers() *node {
+	if len(b.live.Servers) == 0 {
+		return nil
+	}
+	out := newMap()
+	for _, name := range sortedKeys(b.live.Servers) {
+		ls := b.live.Servers[name]
+		s := newMap()
+		add(s, "wrapper", str(ls.Wrapper))
+		addStr(s, "type", ls.Type)
+		addStr(s, "version", ls.Version)
+		if len(ls.Options) > 0 {
+			add(s, "options", stringsNode(ls.Options))
+		}
+		if b.opts.Owners {
+			addStr(s, "owner", ls.Owner)
+		}
+		addStr(s, "comment", ls.Comment)
+		add(out, name, s)
+	}
+	return out
 }
 
 func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
@@ -701,6 +744,9 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		addStr(c, "compression", lc.Compression)
 		if lc.StatisticsTarget != nil {
 			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
+		}
+		if len(lc.FDWOptions) > 0 {
+			add(c, "options", stringsNode(lc.FDWOptions))
 		}
 		for _, o := range [][2]string{{"n_distinct", "nDistinct"}, {"n_distinct_inherited", "nDistinctInherited"}} {
 			if v, err := strconv.ParseFloat(lc.Options[o[0]], 64); err == nil {
@@ -1397,6 +1443,9 @@ func (b *builder) database() *node {
 			add(pubs, name, p)
 		}
 		add(doc, "publications", pubs)
+	}
+	if srv := b.servers(); srv != nil {
+		add(doc, "servers", srv)
 	}
 	ets := newMap()
 	for _, name := range sortedKeys(b.live.EventTriggers) {

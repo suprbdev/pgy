@@ -108,6 +108,21 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 
     simulateOwnersAndDefaults(out, desired)
 
+    for name, s := range desired.Servers {
+        if s == nil { continue }
+        ls := &LiveServer{Wrapper: s.Wrapper, Type: s.Type, Version: s.Version, Owner: s.Owner, Comment: s.Comment}
+        if prev := out.Servers[name]; prev != nil {
+            ls.UserMapping, ls.Options = prev.UserMapping, prev.Options
+            if s.Version == "" { ls.Version = prev.Version }
+            if s.Owner == "" { ls.Owner = prev.Owner }
+            if s.Comment == "" { ls.Comment = prev.Comment }
+        } else if s.Owner == "" {
+            ls.Owner = out.CurrentUser
+        }
+        if s.Options != nil { ls.Options = cloneMap(s.Options, nil) }
+        if out.Servers == nil { out.Servers = map[string]*LiveServer{} }
+        out.Servers[name] = ls
+    }
     for name, p := range desired.Publications {
         if p == nil { continue }
         lp := &LivePublication{AllTables: p.AllTables, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
@@ -385,6 +400,9 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             if *v != 0 { opts[name] = strconv.FormatFloat(*v, 'g', -1, 64) }
             lc.Options = opts
         }
+        if c.FDWOptions != nil {
+            lc.FDWOptions = cloneMap(c.FDWOptions, nil)
+        }
         if c.Comment != "" { lc.Comment = c.Comment }
         if c.Unique {
             lt.Constraints[uniqueKeyName(fq, cn)] = true
@@ -460,6 +478,12 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     }
     if dt.RowLevelSecurity != nil { lt.RLSEnabled = *dt.RowLevelSecurity }
     if dt.Unlogged != nil { lt.Unlogged = *dt.Unlogged }
+    if dt.Foreign != nil {
+        lf := &LiveForeignTable{Server: dt.Foreign.Server}
+        if lt.Foreign != nil { lf.Options = lt.Foreign.Options }
+        if dt.Foreign.Options != nil { lf.Options = cloneMap(dt.Foreign.Options, nil) }
+        lt.Foreign = lf
+    }
     if dt.PartitionBy != nil { lt.Partitioned = true }
     if dt.Inherits != nil { lt.Inherits = append([]string(nil), dt.Inherits...) }
     if dt.With != nil {
@@ -526,6 +550,7 @@ func cloneLive(l *Live) *Live {
         TSConfigs:          cloneMap(l.TSConfigs, func(m map[string][]string) map[string][]string { return cloneMap(m, func(v []string) []string { return append([]string(nil), v...) }) }),
         TSDictionaries:     cloneSet(l.TSDictionaries),
         TSComments:         cloneMap(l.TSComments, nil),
+        Servers:            cloneMap(l.Servers, func(s *LiveServer) *LiveServer { c := *s; c.Options = cloneMap(s.Options, nil); return &c }),
         Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
         EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),

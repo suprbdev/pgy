@@ -25,13 +25,14 @@ can be adopted without writing YAML by hand. The output diffs clean against
 the database it was pulled from.
 
 Without --out the YAML is printed as one document. With --out, one file per
-schema (<schema>.yml) plus database.yml (extensions, publications, event
-triggers, default privileges, roles) is written to that directory.
+schema (<schema>.yml) plus database.yml (extensions, foreign servers,
+publications, event triggers, default privileges, roles) is written to that
+directory.
 
-Objects pgy cannot express (functions written in C, foreign tables,
-operators, operator classes and families, conversions, base types, text
-search parsers and templates) are reported on stderr; objects that belong
-to an extension are not.`,
+Objects pgy cannot express (functions written in C, operators, operator
+classes and families, conversions, base types, text search parsers and
+templates) are reported on stderr; objects that belong to an extension are
+not.`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()

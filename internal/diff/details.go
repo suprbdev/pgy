@@ -27,9 +27,9 @@ type LiveDetails struct {
     TSDictionaries  map[string]*schema.TSDictionary
     ViewDeps        map[string][]string // view or materialized view -> views / materialized views it reads
     Populated       map[string]bool     // materialized view -> has data
-    // Unsupported lists objects pgy cannot express (foreign tables,
-    // operators, operator classes and families, conversions, base types,
-    // text search parsers and templates), excluding extension members.
+    // Unsupported lists objects pgy cannot express (operators, operator
+    // classes and families, conversions, base types, text search parsers
+    // and templates), excluding extension members.
     Unsupported []UnsupportedObject
 }
 
@@ -78,8 +78,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
     l.Details = d
     const unsupportedQ = `
         with objs(kind, nsp, name, classid, objid) as (
-            select 'foreign table', c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid from pg_class c where c.relkind = 'f'
-            union all select 'operator', o.oprnamespace, o.oprname || '(' || coalesce(format_type(o.oprleft, null), 'none') || ', ' || coalesce(format_type(o.oprright, null), 'none') || ')', 'pg_operator'::regclass, o.oid from pg_operator o
+            select 'operator', o.oprnamespace, o.oprname || '(' || coalesce(format_type(o.oprleft, null), 'none') || ', ' || coalesce(format_type(o.oprright, null), 'none') || ')', 'pg_operator'::regclass, o.oid from pg_operator o
             union all select 'operator class', c.opcnamespace, c.opcname::text, 'pg_opclass'::regclass, c.oid from pg_opclass c
             union all select 'operator family', f.opfnamespace, f.opfname::text, 'pg_opfamily'::regclass, f.oid from pg_opfamily f
             union all select 'conversion', c.connamespace, c.conname::text, 'pg_conversion'::regclass, c.oid from pg_conversion c
@@ -106,7 +105,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
     }{
         {`select n.nspname || '.' || c.relname, a.attname, c.relkind::text
           from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
-          where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'c') and ` + nsFilter + `
+          where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'c', 'f') and ` + nsFilter + `
           order by 1, a.attnum`,
             func(scan func(...any) error) error {
                 var rel, att, kind string

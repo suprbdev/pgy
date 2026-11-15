@@ -154,6 +154,14 @@ func TestJSONSchemaRejectsInvalid(t *testing.T) {
         "schema public:\n  table t:\n    columns:\n      id: {primaryKey: true}\n",
         // bad trigger timing
         "schema public:\n  table t:\n    columns: {id: {type: uuid}}\n    triggers:\n      trg: {timing: befor, events: [update], procedure: f()}\n",
+        // foreign table without a server
+        "schema public:\n  foreign table f:\n    columns: {id: {type: int}}\n",
+        // foreign tables have no indexes
+        "schema public:\n  foreign table f:\n    server: s\n    columns: {id: {type: int}}\n    indexes:\n      i: {columns: [id]}\n",
+        // foreign table columns cannot be primary keys
+        "schema public:\n  foreign table f:\n    server: s\n    columns: {id: {type: int, primaryKey: true}}\n",
+        // server without a wrapper
+        "servers:\n  s: {options: {host: h}}\n",
     }
     for i, y := range invalid {
         if err := s.Validate(yamlToJSONValue(t, []byte(y))); err == nil {

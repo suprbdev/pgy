@@ -57,6 +57,46 @@
         "additionalProperties": false
       }
     },
+    "servers": {
+      "description": "Foreign servers (CREATE SERVER). When present, --unsafe --prune drops servers not listed. User mappings are not managed: their options hold credentials.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "wrapper"
+        ],
+        "properties": {
+          "wrapper": {
+            "type": "string",
+            "minLength": 1,
+            "description": "FOREIGN DATA WRAPPER, e.g. postgres_fdw or file_fdw (provided by the extension of that name). Cannot be changed in place."
+          },
+          "type": {
+            "type": "string",
+            "description": "TYPE. Cannot be changed in place."
+          },
+          "version": {
+            "$ref": "#/definitions/scalar",
+            "description": "VERSION, diffed against live."
+          },
+          "options": {
+            "type": "object",
+            "description": "Wrapper options (OPTIONS (...)), e.g. host, port and dbname for postgres_fdw. Authoritative when present: unlisted options are dropped.",
+            "additionalProperties": {
+              "$ref": "#/definitions/scalar"
+            }
+          },
+          "owner": {
+            "type": "string",
+            "description": "Owner role (ALTER SERVER ... OWNER TO), diffed against live."
+          },
+          "comment": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "publications": {
       "description": "Logical replication publications (CREATE PUBLICATION). When present, --unsafe --prune drops publications not listed.",
       "type": "object",
@@ -226,7 +266,8 @@
         "^collation [^\\s].*$": { "$ref": "#/definitions/collation" },
         "^aggregate [^\\s].*$": { "$ref": "#/definitions/aggregate" },
         "^text search configuration [^\\s].*$": { "$ref": "#/definitions/tsConfig" },
-        "^text search dictionary [^\\s].*$": { "$ref": "#/definitions/tsDictionary" }
+        "^text search dictionary [^\\s].*$": { "$ref": "#/definitions/tsDictionary" },
+        "^foreign table [^\\s].*$": { "$ref": "#/definitions/foreignTable" }
       },
       "additionalProperties": false
     },
@@ -965,6 +1006,128 @@
         "comment": { "type": "string" }
       },
       "additionalProperties": false
+    },
+    "foreignTable": {
+      "description": "Body of a `foreign table <name>:` declaration (CREATE FOREIGN TABLE).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server"
+      ],
+      "properties": {
+        "server": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Foreign server the table reads through, usually declared under servers:. Cannot be changed in place."
+        },
+        "options": {
+          "type": "object",
+          "description": "Foreign-data wrapper table options (OPTIONS (...)), e.g. schema_name and table_name for postgres_fdw. Authoritative when present: unlisted options are dropped.",
+          "additionalProperties": {
+            "$ref": "#/definitions/scalar"
+          }
+        },
+        "columns": {
+          "description": "Columns as a map of name to spec.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/foreignColumn"
+          }
+        },
+        "comment": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "$ref": "#/definitions/stringList"
+        },
+        "grants": {
+          "$ref": "#/definitions/grants"
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner role (ALTER ... OWNER TO), diffed against live."
+        },
+        "renamedFrom": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op."
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/constraint"
+          }
+        },
+        "triggers": {"type": "object", "additionalProperties": {"$ref": "#/definitions/trigger"}}
+      }
+    },
+    "foreignColumn": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "description": "Foreign table column: a table column without keys, identity, generation or storage settings, plus the wrapper's column options.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "PostgreSQL data type, e.g. uuid, text, timestamptz, numeric(10,2)."
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "notNull": {
+          "type": "boolean",
+          "description": "Inverse of nullable."
+        },
+        "default": {
+          "$ref": "#/definitions/scalar",
+          "description": "SQL default expression (e.g. now(), gen_random_uuid()) or literal. Bare booleans/numbers are rendered as SQL literals."
+        },
+        "collate": {
+          "type": "string",
+          "minLength": 1,
+          "description": "COLLATE for the column, e.g. C or und-x-icu. Changing it on a live column requires --unsafe."
+        },
+        "comment": {
+          "type": "string"
+        },
+        "grants": {
+          "$ref": "#/definitions/grants"
+        },
+        "renamedFrom": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op."
+        },
+        "statisticsTarget": {
+          "type": "integer",
+          "minimum": -1,
+          "description": "Per-column statistics target (SET STATISTICS); -1 restores the default."
+        },
+        "nDistinct": {
+          "type": "number",
+          "minimum": -1,
+          "description": "Planner override for the number of distinct values (SET (n_distinct = ...)): a positive count, or a negative fraction of the row count (-1 = all distinct). 0 removes the override."
+        },
+        "nDistinctInherited": {
+          "type": "number",
+          "minimum": -1,
+          "description": "Like nDistinct, for statistics gathered across inheritance children and partitions (n_distinct_inherited)."
+        },
+        "using": {
+          "type": "string",
+          "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
+        },
+        "options": {
+          "type": "object",
+          "description": "Foreign-data wrapper column options (OPTIONS (...)), e.g. column_name for postgres_fdw. Authoritative when present: unlisted options are dropped.",
+          "additionalProperties": {
+            "$ref": "#/definitions/scalar"
+          }
+        }
+      }
     },
     "domain": {
       "description": "Body of a `domain <name>:` declaration.",

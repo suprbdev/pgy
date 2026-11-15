@@ -25,7 +25,20 @@ defaultPrivileges:
   - functions: {public: []}
 eventTriggers:
   log_ddl: {event: ddl_command_end, tags: [CREATE TABLE], function: public.log_ddl(), enabled: always, comment: audit}
+servers:
+  warehouse: {wrapper: postgres_fdw, version: 2, options: {host: wh.internal, port: 5432}, owner: app_owner, comment: analytics}
+  files: {wrapper: file_fdw}
 schema public:
+  foreign table remote_orders:
+    server: warehouse
+    options: {schema_name: public, table_name: orders}
+    columns:
+      id: {type: bigint, notNull: true}
+      total: {type: "numeric(12,2)", nullable: true, default: 0, options: {column_name: amount}, comment: total}
+    constraints: {remote_orders_total: {type: check, expression: total >= 0}}
+    grants: {app_read: [select]}
+    owner: app_owner
+    comment: remote
   owner: app_owner
   collation ci: {provider: icu, locale: und-u-ks-level2, deterministic: false, comment: ci}
   collation c_copy: {from: pg_catalog.C}
