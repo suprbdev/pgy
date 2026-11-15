@@ -79,8 +79,18 @@ func Files(paths []string) []Issue {
 			issues = append(issues, Issue{Severity: Error, File: p, Message: err.Error()})
 			continue
 		}
+		type loaded struct {
+			d   *schema.Database
+			err error
+		}
+		load := make(chan loaded, 1)
+		go func() {
+			d, err := schema.Load(p)
+			load <- loaded{d, err}
+		}()
 		var doc any
 		if err := yaml.Unmarshal(b, &doc); err != nil {
+			<-load
 			issues = append(issues, Issue{Severity: Error, File: p, Message: "invalid YAML: " + err.Error()})
 			continue
 		}
@@ -89,7 +99,8 @@ func Files(paths []string) []Issue {
 				issues = append(issues, schemaIssues(p, verr)...)
 			}
 		}
-		d, err := schema.Load(p)
+		l := <-load
+		d, err := l.d, l.err
 		if err != nil {
 			issues = append(issues, Issue{Severity: Error, File: p, Message: err.Error()})
 			continue
