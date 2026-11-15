@@ -308,3 +308,17 @@ database:
 		t.Errorf("settings = %v", d.DatabaseSettings)
 	}
 }
+
+func TestDatabaseRoleSettingsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+database:
+  roles:
+    app_user: {statement_timeout: 5s}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.DatabaseRoleSettings["app_user"]["statement_timeout"] != "5s" {
+		t.Errorf("settings = %v", d.DatabaseRoleSettings)
+	}
+}

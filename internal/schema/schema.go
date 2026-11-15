@@ -39,6 +39,7 @@ type Database struct {
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
     DefaultPrivileges []*DefaultPrivilege `yaml:"-"`
     DatabaseSettings  map[string]string   `yaml:"-"` // ALTER DATABASE ... SET for the target database; nil = unmanaged
+    DatabaseRoleSettings map[string]map[string]string `yaml:"-"` // role -> ALTER ROLE ... IN DATABASE ... SET settings
 }
 
 // Role is a cluster-level role (CREATE ROLE). Passwords are intentionally
@@ -695,6 +696,10 @@ func Merge(dbs []*Database) *Database {
             if merged.DatabaseSettings == nil { merged.DatabaseSettings = map[string]string{} }
             for k, v := range d.DatabaseSettings { merged.DatabaseSettings[k] = v }
         }
+        for role, set := range d.DatabaseRoleSettings {
+            if merged.DatabaseRoleSettings == nil { merged.DatabaseRoleSettings = map[string]map[string]string{} }
+            merged.DatabaseRoleSettings[role] = set
+        }
         // merge schema comments
         if len(d.SchemaComments) > 0 {
             if merged.SchemaComments == nil { merged.SchemaComments = map[string]string{} }
@@ -819,6 +824,16 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
         if set, ok := dbRaw["set"].(map[string]any); ok {
             out.DatabaseSettings = map[string]string{}
             for k, v := range set { out.DatabaseSettings[k] = scalarToString(v) }
+        }
+        if roles, ok := dbRaw["roles"].(map[string]any); ok {
+            out.DatabaseRoleSettings = map[string]map[string]string{}
+            for role, def := range roles {
+                set := map[string]string{}
+                if m, ok := def.(map[string]any); ok {
+                    for k, v := range m { set[k] = scalarToString(v) }
+                }
+                out.DatabaseRoleSettings[role] = set
+            }
         }
     }
     if pubRaw, ok := root["publications"]; ok {

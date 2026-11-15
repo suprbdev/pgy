@@ -49,3 +49,25 @@ func TestDatabaseSettings(t *testing.T) {
 		t.Errorf("database settings are unmanaged without a database block, got:\n%s", sql)
 	}
 }
+
+func TestDatabaseRoleSettings(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{}, DatabaseRoleSettings: map[string]map[string]string{
+		"app":          {"search_path": "app, public"},
+		"current_user": {"statement_timeout": "5s"},
+	}}
+	live := emptyLive()
+	live.CurrentUser = "deployer"
+	live.DatabaseRoleConfig = map[string]map[string]string{"app": {"work_mem": "8MB"}, "deployer": {"statement_timeout": "5s"}}
+	sql := Render(Plan(live, d, false))
+	for _, want := range []string{
+		`do $$ begin execute format('alter role "app" in database %I set search_path = app, public', current_database()); end $$;`,
+		`do $$ begin execute format('alter role "app" in database %I reset work_mem', current_database()); end $$;`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "current_user") {
+		t.Errorf("current_user's settings already match the connected role:\n%s", sql)
+	}
+}

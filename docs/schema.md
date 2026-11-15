@@ -283,9 +283,11 @@ database:
     timezone: UTC
     search_path: "app, public"
     statement_timeout: 30s
+  roles:                        # ALTER ROLE ... IN DATABASE ... SET
+    app_user: {statement_timeout: 5s}
 ```
 
-When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
+`roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
 
 ## Tables
 
