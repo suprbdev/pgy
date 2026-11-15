@@ -23,3 +23,10 @@ func TestIsCatalogRace(t *testing.T) {
 		}
 	}
 }
+
+func TestNullScanCountsAsCatalogRace(t *testing.T) {
+	err := fmt.Errorf("introspection query 13: %w (%v)", errObjectVanished, errors.New("can't scan into dest[2]: cannot scan NULL into *string"))
+	if !isCatalogRace(err) {
+		t.Error("a NULL from a dropped object must be retried like other catalog races")
+	}
+}

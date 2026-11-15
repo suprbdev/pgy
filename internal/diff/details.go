@@ -324,6 +324,9 @@ func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
         err = handle(rows)
         rows.Close()
         if err == nil { err = rows.Err() }
+        if err != nil && strings.Contains(err.Error(), "cannot scan NULL") {
+            return fmt.Errorf("introspection query %d: %w (%v)", i+1, errObjectVanished, err)
+        }
         if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }
     }
     return br.Close()

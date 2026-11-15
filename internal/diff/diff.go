@@ -409,9 +409,16 @@ func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     return nil, err
 }
 
+// errObjectVanished marks a NULL where an introspection query expects a
+// value: catalog functions such as pg_get_function_identity_arguments
+// return NULL for an object another session dropped after the query's
+// snapshot was taken.
+var errObjectVanished = errors.New("object dropped while being read")
+
 // isCatalogRace reports whether err comes from a catalog object being
 // dropped or altered by another session while it was being read.
 func isCatalogRace(err error) bool {
+    if errors.Is(err, errObjectVanished) { return true }
     var pgErr *pgconn.PgError
     if !errors.As(err, &pgErr) { return false }
     if pgErr.Code == "XX000" {
