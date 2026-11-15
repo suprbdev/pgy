@@ -170,13 +170,13 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 | Statement | Why | Instead |
 |-----------|-----|---------|
 | `CREATE INDEX` | blocks writes while the index builds | `concurrently: true` |
-| `ADD FOREIGN KEY` | checks every row while blocking writes on both tables | `notValid: true`, then remove it in a later migration, so pgy emits `VALIDATE CONSTRAINT`, which doesn't block writes |
-| `ADD CHECK` | scans the table under `ACCESS EXCLUSIVE` | the same two steps |
 | `ADD PRIMARY KEY` / `UNIQUE` / `EXCLUDE` | builds an index under `ACCESS EXCLUSIVE` | schedule a maintenance window |
 | `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE`; skipped if a validated `CHECK (col IS NOT NULL)` exists | add that check first. On PostgreSQL 18 pgy does this itself: it adds the constraint `NOT VALID` and validates it in the follow-up no-transaction migration, which doesn't block writes |
 | `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
 | `SET LOGGED` / `SET UNLOGGED` | rewrites the table | — |
 | `ADD COLUMN` with a volatile default, a stored generated expression, identity or serial | writes every row | add the column bare, then backfill |
+
+Foreign keys and checks added to an existing table don't need a warning: pgy adds them `NOT VALID` in the main migration, which enforces them for new rows straight away, and validates the existing rows in the no-transaction migration after it. `VALIDATE CONSTRAINT` doesn't block reads or writes. If existing rows violate the constraint, that migration fails and the constraint stays `NOT VALID`; fix the rows and migrate again (`pgy diff` emits the pending `VALIDATE` meanwhile). Set `notValid: true` to leave a constraint unvalidated. Before PostgreSQL 18 a partitioned table's foreign key cannot be `NOT VALID`, so it is still added validated, with a warning.
 
 Even a quick `ALTER TABLE` waits for its lock behind long-running queries, and every query that arrives meanwhile waits behind it. `pgy migrate --lock-timeout 2s --retries 5` gives up on a lock after two seconds instead, rolls the migration back and tries again, waiting `--retry-wait` (2s by default) before the first retry and twice as long before each later one, up to 30s. Deadlocks are retried the same way. Migrations without a transaction are never retried, because a failure can leave part of them applied.
 

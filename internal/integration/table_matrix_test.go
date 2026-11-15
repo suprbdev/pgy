@@ -97,8 +97,8 @@ func convergeYAMLWith(t *testing.T, pool *pgxpool.Pool, sch, y string, opts diff
 	}
 	plan := diff.PlanWith(introspect(t, pool, d), d, opts)
 	applyPlan(t, pool, plan)
-	if again := diff.Render(diff.PlanWith(introspect(t, pool, d), d, opts)); again != "" {
-		t.Fatalf("plan did not converge:\n%s\nafter applying:\n%s", again, diff.Render(plan))
+	if again := diff.PlanWith(introspect(t, pool, d), d, opts); diff.Render(again)+diff.RenderConcurrent(again) != "" {
+		t.Fatalf("plan did not converge:\n%s%s\nafter applying:\n%s%s", diff.Render(again), diff.RenderConcurrent(again), diff.Render(plan), diff.RenderConcurrent(plan))
 	}
-	return diff.Render(plan)
+	return diff.Render(plan) + diff.RenderConcurrent(plan)
 }

@@ -63,8 +63,6 @@ func TestLockWarnings(t *testing.T) {
 	all := strings.Join(got, "\n")
 	for _, want := range []string{
 		"CREATE INDEX t_note_idx blocks writes to app.t",
-		"adding foreign key t_ref_fkey checks every row of app.t",
-		"adding check t_id_check scans all of app.t",
 		"adding unique t_note_key builds its index",
 		"adding a primary key builds its index under an ACCESS EXCLUSIVE lock, blocking reads and writes on app.p",
 		"SET NOT NULL on app.t.ref scans the whole table",
@@ -77,10 +75,45 @@ func TestLockWarnings(t *testing.T) {
 			t.Errorf("missing warning %q in:\n%s", want, all)
 		}
 	}
-	for _, unwanted := range []string{"t_name_idx", "t_n_check", "t_id_fkey", "app.t.name", "app.t.amount", "column at ", "new_id_idx", "app.new"} {
+	for _, unwanted := range []string{"t_name_idx", "t_n_check", "t_id_fkey", "t_ref_fkey", "t_id_check", "app.t.name", "app.t.amount", "column at ", "new_id_idx", "app.new"} {
 		if strings.Contains(all, unwanted) {
 			t.Errorf("unexpected warning mentioning %q in:\n%s", unwanted, all)
 		}
+	}
+	for _, want := range []string{
+		`alter table "app"."t" add constraint "t_id_check" check (id > 0) not valid;`,
+		`alter table "app"."t" add constraint "t_ref_fkey" foreign key ("ref") references "app"."p"("id") not valid;`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("checks and foreign keys on existing tables are added NOT VALID; missing %q in\n%s", want, Render(p))
+		}
+	}
+	for _, want := range []string{`validate constraint "t_id_check";`, `validate constraint "t_ref_fkey";`} {
+		if !strings.Contains(strings.Join(p.Concurrent, "\n"), want) {
+			t.Errorf("missing %q in the no-transaction part: %v", want, p.Concurrent)
+		}
+	}
+	if strings.Contains(strings.Join(p.Concurrent, "\n"), "t_n_check") || strings.Contains(strings.Join(p.Concurrent, "\n"), "t_id_fkey") {
+		t.Errorf("notValid: true constraints stay unvalidated: %v", p.Concurrent)
+	}
+}
+
+func TestPartitionedForeignKeyBeforePG18AddedValidated(t *testing.T) {
+	live := lockLive()
+	live.ServerVersion = 170000
+	live.Tables["app.t"].Partitioned = true
+	d := lockDB()
+	d.Tables["app.t"].PartitionBy = &schema.PartitionBy{Type: "range", Columns: []string{"id"}}
+	p := PlanWith(live, d, Options{Unsafe: true})
+	if !findAlter(p, `alter table "app"."t" add constraint "t_ref_fkey" foreign key ("ref") references "app"."p"("id");`) {
+		t.Errorf("before PostgreSQL 18 a partitioned table's foreign key cannot be NOT VALID:\n%s", Render(p))
+	}
+	found := false
+	for _, w := range p.Warnings {
+		found = found || strings.Contains(w.Message, "adding foreign key t_ref_fkey checks every row of app.t")
+	}
+	if !found {
+		t.Errorf("expected the lock warning, got %+v", p.Warnings)
 	}
 }
 

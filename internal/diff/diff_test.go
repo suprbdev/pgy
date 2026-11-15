@@ -2860,8 +2860,11 @@ func TestFKOnUpdateChangeRecreatedUnsafe(t *testing.T) {
 		{Name: "f", Columns: []string{"id"}, RefTable: "orgs", RefColumns: []string{"id"}},
 	})
 	p := Plan(live, desired, true)
-	if !findAlter(p, `drop constraint "f"`) || !findAlter(p, `add constraint "f" foreign key ("id") references "orgs"("id");`) {
+	if !findAlter(p, `drop constraint "f"`) || !findAlter(p, `add constraint "f" foreign key ("id") references "orgs"("id") not valid;`) {
 		t.Errorf("dropping ON UPDATE CASCADE is a definition change; alters: %v", p.Alters)
+	}
+	if len(p.Concurrent) != 1 || !strings.Contains(p.Concurrent[0], `validate constraint "f"`) {
+		t.Errorf("the re-added foreign key is validated in the no-transaction migration: %v", p.Concurrent)
 	}
 }
 

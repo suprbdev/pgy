@@ -25,9 +25,16 @@ func TestValidateConstraintWhenNotValidRemoved(t *testing.T) {
 	}}}
 	p := Plan(live, d, false)
 	for _, want := range []string{`alter table "app"."t" validate constraint "t_id_check";`, `alter table "app"."t" validate constraint "t_ref_fkey";`} {
-		if !findAlter(p, want) {
-			t.Errorf("missing %q in\n%s", want, Render(p))
+		found := false
+		for _, s := range p.Concurrent {
+			found = found || s == want
 		}
+		if !found {
+			t.Errorf("VALIDATE belongs in the no-transaction migration; missing %q in %v", want, p.Concurrent)
+		}
+	}
+	if sql := Render(p); sql != "" {
+		t.Errorf("only VALIDATE statements expected, got:\n%s", sql)
 	}
 	d.Tables["app.t"].Constraints[0].NotValid = true
 	d.Tables["app.t"].ForeignKeys[0].NotValid = true
