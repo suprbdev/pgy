@@ -105,6 +105,10 @@ var objectChangeCases = map[string][2]string{
 		"  function add2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a + b\n  aggregate total(int):\n    sfunc: SCH.add2\n    stype: int\n    initcond: \"0\"",
 		"  function add2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a + b\n  aggregate total(int):\n    sfunc: SCH.add2\n    stype: int\n    initcond: \"0\"\n    combinefunc: SCH.add2\n    parallel: safe\n    comment: sum",
 	},
+	"aggregate_moving": {
+		"  function add2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a + b\n  function sub2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a - b\n  aggregate total(int):\n    sfunc: SCH.add2\n    stype: int\n    initcond: \"0\"",
+		"  function add2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a + b\n  function sub2(a int, b int):\n    returns: int\n    language: sql\n    immutable: true\n    body: select a - b\n  aggregate total(int):\n    sfunc: SCH.add2\n    stype: int\n    initcond: \"0\"\n    sspace: 8\n    msfunc: SCH.add2\n    minvfunc: SCH.sub2\n    mstype: int\n    minitcond: \"0\"\n    mfinalfuncModify: shareable\n    sortop: \">\"",
+	},
 }
 
 func TestIntegrationObjectChangeMatrix(t *testing.T) {

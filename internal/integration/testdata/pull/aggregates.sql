@@ -1,0 +1,10 @@
+create schema s12;
+create function s12.sfunc(state int, x int) returns int language sql immutable as 'select state + x';
+create function s12.inv(state int, x int) returns int language sql immutable as 'select state - x';
+create function s12.fin(state int, x int) returns int language sql immutable as 'select state';
+create function s12.big(state int, x int) returns int language sql immutable as 'select greatest(state, x)';
+create aggregate s12.total(int) (sfunc = s12.sfunc, stype = int, initcond = '0', msfunc = s12.sfunc, minvfunc = s12.inv, mstype = int, minitcond = '0', msspace = 16, mfinalfunc = s12.fin, mfinalfunc_extra, mfinalfunc_modify = shareable, parallel = safe);
+create aggregate s12.extra(int) (sfunc = s12.sfunc, stype = int, finalfunc = s12.fin, finalfunc_extra, finalfunc_modify = read_write, sspace = 64);
+create aggregate s12.mymax(int) (sfunc = s12.big, stype = int, sortop = >, combinefunc = s12.big, parallel = safe);
+create aggregate s12.myavg(numeric) (sfunc = numeric_avg_accum, stype = internal, finalfunc = numeric_avg, combinefunc = numeric_avg_combine, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, sspace = 128, parallel = safe);
+comment on aggregate s12.total(int) is 'running total';

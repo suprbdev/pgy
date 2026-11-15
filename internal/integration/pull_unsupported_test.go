@@ -27,7 +27,8 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		create cast (x.amount as numeric) with function x.amount_num(x.amount) as assignment;
 		create type x.addr as (street text, city text);
 		create table x.addresses of x.addr (primary key (street));
-		create function x.rn() returns bigint language internal window as 'window_row_number';`); err != nil {
+		create function x.rn() returns bigint language internal window as 'window_row_number';
+		create aggregate x.my_mode(order by anyelement) (sfunc = ordered_set_transition, stype = internal, finalfunc = mode_final, finalfunc_extra);`); err != nil {
 		t.Fatal(err)
 	}
 	res, err := pull.Build(introspectAll(t, db), pull.Options{})
@@ -40,6 +41,7 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		"cast (x.amount as numeric) is not supported by pgy and was left out",
 		"table x.addresses is a typed table (OF x.addr)",
 		"function x.rn is written in internal and cannot be pulled",
+		"ordered-set aggregate x.my_mode(ORDER BY anyelement) is not supported by pgy and was left out",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)

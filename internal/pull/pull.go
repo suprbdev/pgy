@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/suprbdev/pgy/internal/diff"
+	"github.com/suprbdev/pgy/internal/schema"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -643,6 +644,25 @@ func (b *builder) aggregates() {
 		addStr(m, "initcond", la.InitCond)
 		if la.Parallel != "unsafe" {
 			add(m, "parallel", str(la.Parallel))
+		}
+		for _, o := range schema.AggregateOptions {
+			v := la.Options[o[1]]
+			switch {
+			case strings.HasSuffix(o[1], "_extra"):
+				if v == "true" {
+					add(m, o[0], boolean(true))
+				}
+			case strings.HasSuffix(o[1], "_modify"):
+				if v != "read_only" {
+					addStr(m, o[0], v)
+				}
+			case strings.HasSuffix(o[1], "space"):
+				if v != "0" && v != "" {
+					add(m, o[0], num(v))
+				}
+			default:
+				addStr(m, o[0], v)
+			}
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "proc:"+norm)

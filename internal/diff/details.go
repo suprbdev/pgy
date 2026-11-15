@@ -32,8 +32,9 @@ type LiveDetails struct {
     // SQL-standard body, whose references PostgreSQL records in pg_depend.
     RoutineDeps map[string][]string
     // Unsupported lists objects pgy cannot express (operators, operator
-    // classes and families, conversions, base types, casts, text search
-    // parsers and templates, and typed tables), excluding extension members.
+    // classes and families, conversions, base types, casts, ordered-set and
+    // hypothetical-set aggregates, text search parsers and templates, and
+    // typed tables), excluding extension members.
     Unsupported []UnsupportedObject
 }
 
@@ -96,6 +97,9 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
             union all select 'typed table', c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid, format_type(c.reloftype, null)
               from pg_class c where c.reloftype <> 0 and c.relkind in ('r', 'p')
+            union all select case a.aggkind when 'o' then 'ordered-set aggregate' else 'hypothetical-set aggregate' end, p.pronamespace,
+                   p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', 'pg_proc'::regclass, p.oid, ''
+              from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where a.aggkind <> 'n' 
         )
         select distinct o.kind, n.nspname, o.name, o.detail
         from objs o join pg_namespace n on n.oid = o.nsp
