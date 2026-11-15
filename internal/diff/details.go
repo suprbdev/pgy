@@ -312,12 +312,21 @@ func (b *queryBatch) add(sql string, handle func(pgx.Rows) error) {
 }
 
 // run sends every query in one batch and feeds each result to its handler
-// in the order the queries were added.
+// in the order the queries were added. The batch runs in one read-only
+// transaction, so every query sees the same snapshot, with JIT compilation
+// off: catalog queries never gain from it, and on large catalogs their cost
+// estimates cross jit_above_cost and compiling doubles introspection time.
 func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
     batch := &pgx.Batch{}
+    batch.Queue("begin isolation level repeatable read read only")
+    batch.Queue("set local jit = off")
     for _, q := range b.sqls { batch.Queue(q) }
+    batch.Queue("commit")
     br := pool.SendBatch(ctx, batch)
     defer func() { _ = br.Close() }()
+    for j := 0; j < 2; j++ {
+        if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }
+    }
     for i, handle := range b.handlers {
         rows, err := br.Query()
         if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }
@@ -329,5 +338,6 @@ func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
         }
         if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }
     }
+    if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }
     return br.Close()
 }
