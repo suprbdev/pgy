@@ -46,6 +46,8 @@ type Live struct{
     TSComments       map[string]string // "config:schema.name" / "dict:schema.name" -> comment
     EventTriggers map[string]*LiveEventTrigger
     Publications  map[string]*LivePublication
+    // Servers: foreign servers that no extension owns, by name
+    Servers       map[string]*LiveServer
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
@@ -114,6 +116,25 @@ type Live struct{
     // TableData: "schema.table" -> comparison of its declared data rows
     // with the live rows; filled by IntrospectData
     TableData map[string]*LiveTableData
+}
+
+// LiveServer is a foreign server from pg_foreign_server.
+type LiveServer struct {
+    Wrapper string
+    Type    string
+    Version string
+    Options map[string]string
+    Owner   string
+    Comment string
+    // UserMapping reports whether the connected role, or PUBLIC, has a
+    // user mapping for the server.
+    UserMapping bool
+}
+
+// LiveForeignTable is what pg_foreign_table records for a foreign table.
+type LiveForeignTable struct {
+    Server  string
+    Options map[string]string
 }
 
 // LivePublication is a publication from pg_publication and its table and
@@ -240,6 +261,7 @@ type LiveTable struct{
     Unlogged    bool            // relpersistence = 'u'
     Options     map[string]string // reloptions: lower-cased name -> value
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
+    Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
@@ -356,6 +378,7 @@ type LiveColumn struct{
     Collation   string // explicit collation differing from the type's default ("" = default)
     StatisticsTarget *int // attstattarget; nil = default
     Options     map[string]string // attoptions (n_distinct, n_distinct_inherited)
+    FDWOptions  map[string]string // attfdwoptions of a foreign table column
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -413,6 +436,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         TSComments: map[string]string{},
         EventTriggers: map[string]*LiveEventTrigger{},
         Publications: map[string]*LivePublication{},
+        Servers: map[string]*LiveServer{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleDefs: map[string]*LiveRole{},
@@ -465,6 +489,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
         select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u', c.reltoastrelid = 0,
+               c.relkind = 'f', coalesce(fs.srvname, ''), coalesce(ft.ftoptions, '{}'::text[]),
                coalesce(c.reloptions, '{}'::text[]) ||
                coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
                case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
@@ -473,22 +498,25 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                     else 'default' end
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
-        where c.relkind in ('r', 'p')
+        left join pg_foreign_table ft on ft.ftrelid = c.oid
+        left join pg_foreign_server fs on fs.oid = ft.ftserver
+        where c.relkind in ('r', 'p', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(tableQ, func(tableRows pgx.Rows) error {
         for tableRows.Next() {
-            var schemaName, tableName string
-            var isPartition, partitioned, unlogged, noToast bool
-            var reloptions []string
+            var schemaName, tableName, server string
+            var isPartition, partitioned, unlogged, noToast, foreign bool
+            var reloptions, ftoptions []string
             var replident string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &reloptions, &replident); err != nil {
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             lt := newLiveTable()
             lt.NoToast = noToast
+            if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident
             l.Tables[key] = lt
         }
@@ -545,13 +573,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                (select case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
                 from pg_type ty where ty.oid = a.atttypid),
                a.attinhcount > 0,
-               coalesce(a.attoptions, '{}'::text[])
+               coalesce(a.attoptions, '{}'::text[]),
+               coalesce(a.attfdwoptions, '{}'::text[])
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum
         where a.attnum > 0 and not a.attisdropped
-        and c.relkind in ('r', 'p')
+        and c.relkind in ('r', 'p', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, c.relname, a.attnum
@@ -564,14 +593,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var statTarget *int
             var collSchema, typeStorage string
             var inherited bool
-            var attoptions []string
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions); err != nil { return err }
+            var attoptions, fdwoptions []string
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
             lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited}
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
+            if len(fdwoptions) > 0 { lc.FDWOptions = parseFDWOptions(fdwoptions) }
             t.Columns[colName] = lc
         }
         return nil
@@ -1035,6 +1065,27 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
     
+    serverQ := `
+        select s.srvname, w.fdwname, coalesce(s.srvtype, ''), coalesce(s.srvversion, ''),
+               coalesce(s.srvoptions, '{}'::text[]), pg_get_userbyid(s.srvowner),
+               coalesce(obj_description(s.oid, 'pg_foreign_server'), ''),
+               exists (select 1 from pg_user_mappings um where um.srvid = s.oid and (um.umuser = 0 or um.usename = current_user))
+        from pg_foreign_server s
+        join pg_foreign_data_wrapper w on w.oid = s.srvfdw
+        where not exists (select 1 from pg_depend d where d.classid = 'pg_foreign_server'::regclass and d.objid = s.oid and d.deptype = 'e')
+    `
+    batch.add(serverQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var name string
+            var options []string
+            ls := &LiveServer{}
+            if err := rows.Scan(&name, &ls.Wrapper, &ls.Type, &ls.Version, &options, &ls.Owner, &ls.Comment, &ls.UserMapping); err != nil { return err }
+            ls.Options = parseFDWOptions(options)
+            l.Servers[name] = ls
+        }
+        return nil
+    })
+
     pubQ := `
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
                coalesce(d.description, '')
@@ -1337,7 +1388,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         cross join lateral aclexplode(c.relacl) a
-        where c.relkind in ('r', 'p', 'v', 'm', 'S')
+        where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
@@ -1363,7 +1414,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         join pg_attribute att on att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
         cross join lateral aclexplode(att.attacl) a
-        where c.relkind in ('r', 'p')
+        where c.relkind in ('r', 'p', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
@@ -1500,7 +1551,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_class c on c.oid = d.objoid
         join pg_namespace n on n.oid = c.relnamespace
         where d.classoid = 'pg_class'::regclass and d.objsubid = 0
-        and c.relkind in ('r', 'p', 'v', 'm', 'S')
+        and c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
@@ -1690,7 +1741,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     ownerQ := `
         select 'rel:' || n.nspname || '.' || c.relname, pg_get_userbyid(c.relowner)
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
-        where c.relkind in ('r', 'p', 'v', 'm', 'S')
+        where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
         union all
         select 'type:' || n.nspname || '.' || t.typname, pg_get_userbyid(t.typowner)
@@ -1840,6 +1891,17 @@ func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
 
 // parseProconfig turns pg_proc.proconfig entries ("name=value") into a map
 // keyed by lower-cased parameter name.
+// parseFDWOptions parses foreign-data wrapper options ("name=value", as
+// srvoptions, ftoptions and attfdwoptions store them), keeping names as
+// written since wrappers may treat them case-sensitively.
+func parseFDWOptions(entries []string) map[string]string {
+    out := map[string]string{}
+    for _, e := range entries {
+        if k, v, ok := strings.Cut(e, "="); ok { out[k] = v }
+    }
+    return out
+}
+
 func parseProconfig(entries []string) map[string]string {
     out := map[string]string{}
     for _, e := range entries {
@@ -2223,6 +2285,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
         plan.Creates = append(plan.Creates, renderExtension(ext))
     }
+    planServers(plan, live, desired)
     
     // Topologically sort remaining entities (types, functions, tables) respecting dependsOn.
     // On a cycle the sort still returns every entity (cycle members appended in
@@ -2459,6 +2522,12 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                     sort.Strings(cols)
                 }
+                if dt.Foreign != nil {
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s) server %s%s;", pqIdent(fq), strings.Join(cols, ", "), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
+                    plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    continue
+                }
                 unlogged := ""
                 if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                 create := fmt.Sprintf("create %stable if not exists %s (%s)", unlogged, pqIdent(fq), strings.Join(cols, ", "))
@@ -2505,7 +2574,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })...)
                 }
-                if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                if dt.PartitionOf == "" && dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, live, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
@@ -2539,6 +2609,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
+        if desired.Servers != nil {
+            for _, name := range sortedKeys(live.Servers) {
+                if desired.Servers[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop server %s;", quoteIdent(name))) }
+            }
+        }
     }
     plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
     return plan
@@ -3026,6 +3101,96 @@ func inCurrentDatabase(prefix, clause string) string {
     return "do " + dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString(prefix+strings.ReplaceAll(clause, "%", "%%")))) + ";"
 }
 
+// planServers creates and reconciles the declared foreign servers. A
+// changed wrapper or type cannot be altered and is reported as a warning.
+// Dropping undeclared servers is part of pruning.
+func planServers(plan *PlanDiff, live *Live, desired *schema.Database) {
+    for _, name := range sortedKeys(desired.Servers) {
+        s := desired.Servers[name]
+        if s == nil { continue }
+        ident := quoteIdent(name)
+        ls := live.Servers[name]
+        if ls == nil {
+            stmt := "create server " + ident
+            if s.Type != "" { stmt += " type " + quoteString(s.Type) }
+            if s.Version != "" { stmt += " version " + quoteString(s.Version) }
+            plan.Creates = append(plan.Creates, stmt+" foreign data wrapper "+quoteIdent(s.Wrapper)+fdwOptionsClause(s.Options)+";")
+        } else {
+            if s.Wrapper != ls.Wrapper || s.Type != ls.Type {
+                plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("server %s: its foreign-data wrapper or type changed, which ALTER SERVER cannot do; drop and recreate it, with its foreign tables and user mappings, in a hand-written migration", name)})
+            }
+            if s.Version != "" && s.Version != ls.Version {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter server %s version %s;", ident, quoteString(s.Version)))
+            }
+            if clause := fdwOptionsAlter(s.Options, ls.Options); clause != "" {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter server %s %s;", ident, clause))
+            }
+        }
+        if s.Owner != "" && (ls == nil || resolveRole(s.Owner, live.CurrentUser) != ls.Owner) {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter server %s owner to %s;", ident, grantRole(s.Owner)))
+        }
+        if s.Comment != "" && (ls == nil || s.Comment != ls.Comment) {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("comment on server %s is %s;", ident, quoteString(s.Comment)))
+        }
+        if s.Wrapper == "postgres_fdw" && (ls == nil || !ls.UserMapping) {
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("server %s has no user mapping for the connected role or PUBLIC; create one outside pgy (its options hold credentials) before querying its foreign tables", name)})
+        }
+    }
+}
+
+// foreignTableAlterStmts reconciles a live foreign table's options and its
+// columns' options. A changed server cannot be altered and is reported
+// through warn.
+func foreignTableAlterStmts(fq string, dt *schema.Table, lt *LiveTable, warn func(string)) []string {
+    if lt.Foreign == nil {
+        warn(fmt.Sprintf("%s is declared as a foreign table but is a table in the database; it is left as it is", fq))
+        return nil
+    }
+    out := []string{}
+    if dt.Foreign.Server != lt.Foreign.Server {
+        warn(fmt.Sprintf("foreign table %s: server changed from %s to %s, which ALTER FOREIGN TABLE cannot do; drop and recreate it in a hand-written migration", fq, lt.Foreign.Server, dt.Foreign.Server))
+    }
+    if clause := fdwOptionsAlter(dt.Foreign.Options, lt.Foreign.Options); clause != "" {
+        out = append(out, fmt.Sprintf("alter foreign table %s %s;", pqIdent(fq), clause))
+    }
+    for _, cn := range sortedKeys(dt.Columns) {
+        c, lc := dt.Columns[cn], lt.Columns[cn]
+        if c == nil || lc == nil { continue }
+        if clause := fdwOptionsAlter(c.FDWOptions, lc.FDWOptions); clause != "" {
+            out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), pqIdent(cn), clause))
+        }
+    }
+    return out
+}
+
+// fdwOptionsClause renders " options (name 'value', ...)" for a CREATE, or
+// "" when there are none.
+func fdwOptionsClause(opts map[string]string) string {
+    if len(opts) == 0 { return "" }
+    parts := make([]string, 0, len(opts))
+    for _, k := range sortedKeys(opts) { parts = append(parts, quoteIdent(k)+" "+quoteString(opts[k])) }
+    return " options (" + strings.Join(parts, ", ") + ")"
+}
+
+// fdwOptionsAlter renders "options (add ..., set ..., drop ...)" turning
+// have into want, or "" when they match. A nil want is unmanaged.
+func fdwOptionsAlter(want, have map[string]string) string {
+    if want == nil { return "" }
+    parts := []string{}
+    for _, k := range sortedKeys(want) {
+        if v, ok := have[k]; !ok {
+            parts = append(parts, "add "+quoteIdent(k)+" "+quoteString(want[k]))
+        } else if v != want[k] {
+            parts = append(parts, "set "+quoteIdent(k)+" "+quoteString(want[k]))
+        }
+    }
+    for _, k := range sortedKeys(have) {
+        if _, ok := want[k]; !ok { parts = append(parts, "drop "+quoteIdent(k)) }
+    }
+    if len(parts) == 0 { return "" }
+    return "options (" + strings.Join(parts, ", ") + ")"
+}
+
 // plansNewRelations reports whether desired declares a table, view or
 // materialized view that live lacks.
 func plansNewRelations(live *Live, desired *schema.Database) bool {
@@ -3323,7 +3488,9 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     for _, k := range tableNames {
         dt := desired.Tables[k]
         if dt == nil { continue }
-        comment("table "+pqIdent(k), dt.Comment, live.RelComments[k])
+        kind := "table "
+        if dt.Foreign != nil { kind = "foreign table " }
+        comment(kind+pqIdent(k), dt.Comment, live.RelComments[k])
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
         sort.Strings(colNames)
@@ -4565,10 +4732,13 @@ func columnStorageStmts(fq string, dt *schema.Table) []string {
 
 // newColumnStmts emits the column settings CREATE TABLE and ADD COLUMN
 // cannot carry: SET STORAGE (accepted inline only from PostgreSQL 16), SET
-// STATISTICS and attribute options.
+// STATISTICS, attribute options and a foreign table column's options.
 func newColumnStmts(fq, cn string, c *schema.Column) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    if clause := fdwOptionsAlter(c.FDWOptions, nil); clause != "" {
+        out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), pqIdent(cn), clause))
+    }
     if c.Storage != "" { out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage)) }
     if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
         out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))

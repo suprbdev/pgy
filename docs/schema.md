@@ -23,6 +23,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Constraints](#constraints)
   - [Partitioning](#partitioning)
   - [Inheritance](#inheritance)
+- [Foreign Tables](#foreign-tables)
 - [Views](#views)
   - [Materialized Views](#materialized-views)
 - [Types](#types)
@@ -668,6 +669,58 @@ schema app:
 - On an existing table, a parent missing from the live table is added with `ALTER TABLE ... INHERIT`. With `--unsafe`, a live parent the list no longer names is removed with `NO INHERIT`, and its columns stay on the child. `inherits: []` removes every parent. Without the key, parents are unmanaged.
 - Columns a table gets from a parent are never altered or dropped on the child. That includes columns the child also declares itself. Change them on the parent.
 - `pgy pull` emits `inherits` and leaves inherited columns out of the child. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
+
+## Foreign Tables
+
+Foreign tables read through a foreign server, which a foreign-data wrapper such as `postgres_fdw` or `file_fdw` provides. Declare the wrapper's extension under `extensions:`, the servers under a top-level `servers:` block, and each table as a `foreign table <name>:` key in a `schema <name>:` block.
+
+```yaml
+extensions: [postgres_fdw]
+
+servers:
+  warehouse:
+    wrapper: postgres_fdw
+    options: {host: wh.internal, port: "5432", dbname: analytics}
+    comment: analytics warehouse
+
+schema reporting:
+  foreign table orders:
+    server: warehouse
+    options: {schema_name: public, table_name: orders}
+    columns:
+      id: {type: bigint}
+      total: {type: "numeric(12,2)", nullable: true, options: {column_name: amount}}
+    grants:
+      reporting_role: [select]
+    comment: orders in the warehouse
+```
+
+Servers are created after extensions and before everything else. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change instead. A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables. Without the block, servers are unmanaged.
+
+User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none.
+
+Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped. PostgreSQL cannot move a foreign table to another server, so a changed `server` is reported. Check constraints, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`. Foreign tables take no primary keys, indexes, foreign keys, partitioning or storage settings. `pgy pull` writes servers to `database.yml` and foreign tables to their schema's file.
+
+Server properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `wrapper` | string | Required. `FOREIGN DATA WRAPPER`, usually the name of the extension providing it |
+| `type` | string | `TYPE`. Cannot be changed in place |
+| `version` | string | `VERSION`, diffed against live |
+| `options` | map | Wrapper options. Authoritative when present; omitted = unmanaged |
+| `owner` | string | Owner role, diffed against live |
+| `comment` | string | `COMMENT ON SERVER` |
+
+Foreign table properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `server` | string | Required. The server the table reads through |
+| `options` | map | Wrapper table options. Authoritative when present; omitted = unmanaged |
+| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `collate`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options |
+| `constraints` | map | Check constraints, as on [tables](#constraints) |
+| `grants`, `owner`, `comment`, `renamedFrom`, `dependsOn` | | As on tables |
 
 ## Views
 

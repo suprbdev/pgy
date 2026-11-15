@@ -29,12 +29,14 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 	}
 	got := strings.Join(res.Warnings, "\n")
 	for _, want := range []string{
-		"foreign table x.remote_items is not supported by pgy and was left out",
 		"operator x.===(integer, integer) is not supported by pgy and was left out",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "remote_items") {
+		t.Errorf("foreign tables are pulled, not reported:\n%s", got)
 	}
 	if strings.Contains(got, "operator class") || strings.Contains(got, "gist") {
 		t.Errorf("extension members must not be reported:\n%s", got)

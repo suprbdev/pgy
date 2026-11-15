@@ -34,6 +34,9 @@ type Database struct {
     // Publications is nil when the YAML has no publications block
     // (unmanaged) and authoritative for pruning when present.
     Publications map[string]*Publication `yaml:"-"`
+    // Servers is nil when the YAML has no servers block (foreign servers
+    // unmanaged) and authoritative for pruning when present.
+    Servers map[string]*Server `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
@@ -83,6 +86,27 @@ type View struct {
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// Server is a CREATE SERVER declaration: a foreign server reached through a
+// foreign-data wrapper, usually one an extension such as postgres_fdw
+// provides. User mappings are out of scope, since their options hold
+// credentials.
+type Server struct {
+    Name    string
+    Wrapper string            // FOREIGN DATA WRAPPER
+    Type    string            // TYPE; "" = none
+    Version string            // VERSION; "" = unmanaged
+    Options map[string]string // OPTIONS; nil = unmanaged, present = authoritative
+    Owner   string            // "" = unmanaged
+    Comment string
+}
+
+// ForeignTable holds what makes a table a CREATE FOREIGN TABLE: the server
+// it reads through and the wrapper's table options.
+type ForeignTable struct {
+    Server  string
+    Options map[string]string // OPTIONS; nil = unmanaged, present = authoritative
 }
 
 // Publication is a logical replication CREATE PUBLICATION declaration.
@@ -252,6 +276,7 @@ type Domain struct {
 type Table struct {
     Name    string             `yaml:"name"`
     Columns map[string]*Column `yaml:"columns"`
+    Foreign *ForeignTable      `yaml:"-"` // set for `foreign table <name>:` declarations
     PrimaryKey []string        `yaml:"-"`
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
@@ -343,6 +368,7 @@ type Column struct {
     StatisticsTarget *int `yaml:"statisticsTarget"` // SET STATISTICS; -1 = default; nil = unmanaged
     NDistinct          *float64 `yaml:"-"` // SET (n_distinct = ...); 0 = no override (RESET); nil = unmanaged
     NDistinctInherited *float64 `yaml:"-"` // SET (n_distinct_inherited = ...); 0 = no override (RESET); nil = unmanaged
+    FDWOptions map[string]string `yaml:"-"` // foreign table columns: OPTIONS (...); nil = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -592,6 +618,9 @@ func Merge(dbs []*Database) *Database {
                 if t.With != nil {
                     existing.With = t.With
                 }
+                if t.Foreign != nil {
+                    existing.Foreign = t.Foreign
+                }
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey = t.PrimaryKey
                 }
@@ -670,6 +699,10 @@ func Merge(dbs []*Database) *Database {
         if d.Publications != nil {
             if merged.Publications == nil { merged.Publications = map[string]*Publication{} }
             for k, v := range d.Publications { merged.Publications[k] = v }
+        }
+        if d.Servers != nil {
+            if merged.Servers == nil { merged.Servers = map[string]*Server{} }
+            for k, v := range d.Servers { merged.Servers[k] = v }
         }
         if d.EventTriggers != nil {
             if merged.EventTriggers == nil { merged.EventTriggers = map[string]*EventTrigger{} }
@@ -838,6 +871,9 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                 out.DatabaseRoleSettings[role] = set
             }
         }
+    }
+    if srvRaw, ok := root["servers"]; ok {
+        out.Servers = parseServers(srvRaw)
     }
     if pubRaw, ok := root["publications"]; ok {
         out.Publications = parsePublications(pubRaw)
@@ -1033,11 +1069,15 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
     m, ok := v.(map[string]any)
     if !ok { return }
     for key, body := range m {
-        if strings.HasPrefix(key, "table ") {
-            tname := strings.TrimSpace(strings.TrimPrefix(key, "table "))
+        if tname, foreign := tableKey(key); tname != "" {
             fq := qualify(schemaName, tname)
             t := &Table{Name: fq, Columns: map[string]*Column{}}
+            if foreign { t.Foreign = &ForeignTable{} }
             if inner, ok := body.(map[string]any); ok {
+                if foreign {
+                    if s, ok := inner["server"].(string); ok { t.Foreign.Server = strings.TrimSpace(s) }
+                    if o, ok := inner["options"].(map[string]any); ok { t.Foreign.Options = stringMap(o) }
+                }
                 if cRaw, ok := inner["columns"]; ok {
                     t.Columns = parseColumns(cRaw)
                 }
@@ -1193,6 +1233,7 @@ func parseColumnSpec(spec any) *Column {
     if v, ok := m["statisticsTarget"].(int); ok { c.StatisticsTarget = &v }
     c.NDistinct = floatPtr(m["nDistinct"])
     c.NDistinctInherited = floatPtr(m["nDistinctInherited"])
+    if o, ok := m["options"].(map[string]any); ok { c.FDWOptions = stringMap(o) }
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }
@@ -1796,8 +1837,7 @@ func fillColumnOrderFromNode(root *yaml.Node, db *Database, schemaName string) {
             for j := 0; j+1 < len(v.Content); j += 2 {
                 tk := v.Content[j]
                 tv := v.Content[j+1]
-                if strings.HasPrefix(tk.Value, "table ") && tv.Kind == yaml.MappingNode {
-                    tname := strings.TrimSpace(strings.TrimPrefix(tk.Value, "table "))
+                if tname, _ := tableKey(tk.Value); tname != "" && tv.Kind == yaml.MappingNode {
                     fq := qualify(schemaName, tname)
                     // find columns mapping
                     for k2 := 0; k2+1 < len(tv.Content); k2 += 2 {
@@ -2140,6 +2180,7 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
         prefix string
         has    func(string) bool
     }{
+        {"foreign table ", func(k string) bool { return d.Tables[k] != nil && d.Tables[k].Foreign != nil }},
         {"table ", func(k string) bool { return d.Tables[k] != nil }},
         {"type ", func(k string) bool { return d.Types[k] != nil }},
         {"domain ", func(k string) bool { return d.Domains[k] != nil }},
@@ -2308,6 +2349,42 @@ func parseDefaultPrivileges(v any) []*DefaultPrivilege {
             }
         }
         out = append(out, dp)
+    }
+    return out
+}
+
+// tableKey returns the table name a schema block key declares, and whether
+// it is a `foreign table`, or "" for keys of other kinds.
+func tableKey(key string) (string, bool) {
+    if rest, ok := strings.CutPrefix(key, "foreign table "); ok { return strings.TrimSpace(rest), true }
+    if rest, ok := strings.CutPrefix(key, "table "); ok { return strings.TrimSpace(rest), false }
+    return "", false
+}
+
+// stringMap renders a YAML mapping of scalars as strings.
+func stringMap(m map[string]any) map[string]string {
+    out := make(map[string]string, len(m))
+    for k, v := range m { out[k] = scalarToString(v) }
+    return out
+}
+
+// parseServers parses { name: {wrapper, type, version, options, owner,
+// comment} }.
+func parseServers(v any) map[string]*Server {
+    out := map[string]*Server{}
+    m, ok := v.(map[string]any)
+    if !ok { return out }
+    for name, raw := range m {
+        s := &Server{Name: name}
+        if b, ok := raw.(map[string]any); ok {
+            if w, ok := b["wrapper"].(string); ok { s.Wrapper = strings.TrimSpace(w) }
+            if t, ok := b["type"].(string); ok { s.Type = t }
+            if ver, ok := b["version"]; ok && ver != nil { s.Version = scalarToString(ver) }
+            if o, ok := b["options"].(map[string]any); ok { s.Options = stringMap(o) }
+            if o, ok := b["owner"].(string); ok { s.Owner = strings.TrimSpace(o) }
+            if c, ok := b["comment"].(string); ok { s.Comment = c }
+        }
+        out[name] = s
     }
     return out
 }

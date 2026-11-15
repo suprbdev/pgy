@@ -386,3 +386,24 @@ schema app:
 		t.Errorf("materialized view flagged:\n%s", got)
 	}
 }
+
+func TestValidateForeignTableServer(t *testing.T) {
+	p := write(t, t.TempDir(), "f.yml", `
+servers:
+  warehouse: {wrapper: postgres_fdw}
+schema app:
+  foreign table known:
+    server: warehouse
+    columns: {id: {type: int}}
+  foreign table unknown:
+    server: elsewhere
+    columns: {id: {type: int}}
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "foreign table app.unknown: uses server elsewhere, which servers: does not declare") {
+		t.Errorf("missing server error in:\n%s", got)
+	}
+	if strings.Contains(got, "app.known") {
+		t.Errorf("declared server flagged:\n%s", got)
+	}
+}
