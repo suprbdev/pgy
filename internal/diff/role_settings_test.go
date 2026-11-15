@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/schema"
@@ -26,5 +27,25 @@ func TestRoleSettings(t *testing.T) {
 	d.Roles["app"].Set = nil
 	if p := Plan(live, d, false); len(p.Alters) != 0 {
 		t.Errorf("settings are unmanaged without set, got %v", p.Alters)
+	}
+}
+
+func TestDatabaseSettings(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{}, DatabaseSettings: map[string]string{"timezone": "Europe/Paris", "work_mem": "100%"}}
+	live := emptyLive()
+	live.DatabaseConfig = map[string]string{"statement_timeout": "30s", "timezone": "UTC"}
+	sql := Render(Plan(live, d, false))
+	for _, want := range []string{
+		`do $$ begin execute format('alter database %I set timezone = ''Europe/Paris''', current_database()); end $$;`,
+		`do $$ begin execute format('alter database %I set work_mem = ''100%%''', current_database()); end $$;`,
+		`do $$ begin execute format('alter database %I reset statement_timeout', current_database()); end $$;`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in\n%s", want, sql)
+		}
+	}
+	d.DatabaseSettings = nil
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("database settings are unmanaged without a database block, got:\n%s", sql)
 	}
 }
