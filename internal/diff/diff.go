@@ -196,6 +196,7 @@ type LiveDomain struct {
     Default string
     NotNull bool
     Checks  map[string]string
+    CheckComments map[string]string // constraint name -> comment
 }
 
 // LiveExtension is an installed extension's schema, version and whether it
@@ -272,6 +273,7 @@ type LiveTable struct{
     Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
+    RLSForced   bool            // relforcerowsecurity: policies apply to the table owner too
 }
 // indexedRelation returns the live table or materialized view with the given
 // key, which is where index introspection rows are recorded.
@@ -963,7 +965,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query row level security state
     rlsQ := `
-        select n.nspname, c.relname, c.relrowsecurity
+        select n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         where c.relkind in ('r', 'p')
@@ -973,13 +975,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(rlsQ, func(rlsRows pgx.Rows) error {
         for rlsRows.Next() {
             var schemaName, tableName string
-            var enabled bool
-            if err := rlsRows.Scan(&schemaName, &tableName, &enabled); err != nil {
+            var enabled, forced bool
+            if err := rlsRows.Scan(&schemaName, &tableName, &enabled, &forced); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             if t := l.Tables[key]; t != nil {
-                t.RLSEnabled = enabled
+                t.RLSEnabled, t.RLSForced = enabled, forced
             }
         }
         return nil
@@ -1326,7 +1328,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.typname,
                coalesce(pg_get_expr(t.typdefaultbin, 0), t.typdefault, ''), t.typnotnull,
                coalesce((select array_agg(c.conname order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
-               coalesce((select array_agg(pg_get_constraintdef(c.oid) order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}')
+               coalesce((select array_agg(pg_get_constraintdef(c.oid) order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
+               coalesce((select array_agg(coalesce(obj_description(c.oid, 'pg_constraint'), '') order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -1337,15 +1340,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for domRows.Next() {
             var schemaName, domName, def string
             var notNull bool
-            var conNames, conDefs []string
-            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs); err != nil {
+            var conNames, conDefs, conComments []string
+            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs, &conComments); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, domName)
             l.Domains[key] = true
-            ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}}
+            ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}, CheckComments: map[string]string{}}
             for i := range conNames {
                 if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
+                if i < len(conComments) && conComments[i] != "" { ld.CheckComments[conNames[i]] = conComments[i] }
             }
             l.DomainDefs[key] = ld
         }
@@ -3350,6 +3354,23 @@ func routineBodyChanged(language, body string, replace bool, liveBody string, li
     return strings.TrimSpace(body) != strings.TrimSpace(liveBody)
 }
 
+// LivePrimaryKeyName returns the name of lt's primary key constraint, or ""
+// when it has none (or its constraints are unknown).
+func LivePrimaryKeyName(lt *LiveTable) string {
+    if lt == nil { return "" }
+    for _, name := range sortedKeys(lt.ConstraintDefs) {
+        if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(lt.ConstraintDefs[name])), "PRIMARY KEY") { return name }
+    }
+    return ""
+}
+
+// DefaultPrimaryKeyName is the name PostgreSQL gives table fq's primary key
+// when none is declared: <table>_pkey, truncated to fit.
+func DefaultPrimaryKeyName(fq string) string {
+    _, table := splitQualified(fq)
+    return makeObjectName(table, "pkey")
+}
+
 // plansNewRelations reports whether desired declares a table, view or
 // materialized view that live lacks.
 func plansNewRelations(live *Live, desired *schema.Database) bool {
@@ -3641,6 +3662,11 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         if dm == nil { continue }
         // domain comments live in pg_type's pg_description entries
         comment("domain "+pqIdent(k), dm.Comment, live.TypeComments[k])
+        var liveCC map[string]string
+        if ld := live.DomainDefs[k]; ld != nil { liveCC = ld.CheckComments }
+        for _, cn := range sortedKeys(dm.CheckComments) {
+            comment(fmt.Sprintf("constraint %s on domain %s", quoteIdent(truncateIdent(cn)), pqIdent(k)), dm.CheckComments[cn], liveCC[truncateIdent(cn)])
+        }
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -4300,17 +4326,23 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     }
 
     // Primary key — check by type, not name (Postgres auto-names it tablename_pkey)
+    pkAdd := "add primary key"
+    if dt.PrimaryKeyName != "" { pkAdd = "add constraint " + quoteIdent(truncateIdent(dt.PrimaryKeyName)) + " primary key" }
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), constraintColumns(dt.PrimaryKey)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s);", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
             for cn, c := range dt.Columns { if c.PrimaryKey { pkCols = append(pkCols, cn) } }
             sort.Strings(pkCols)
             if len(pkCols) > 0 {
-                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add primary key (%s);", pqIdent(fq), joinIdentList(pkCols)))
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s);", pqIdent(fq), pkAdd, joinIdentList(pkCols)))
             }
+        }
+    } else if want := truncateIdent(dt.PrimaryKeyName); want != "" {
+        if have := LivePrimaryKeyName(lt); have != "" && have != want {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(have), quoteIdent(want)))
         }
     }
 
@@ -4713,6 +4745,14 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
                 }
             } else if unsafe && lt != nil && lt.RLSEnabled {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s disable row level security;", pqIdent(fq)))
+            }
+        }
+        if f := dt.ForceRowLevelSecurity; f != nil {
+            switch {
+            case *f && (lt == nil || !lt.RLSForced):
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s force row level security;", pqIdent(fq)))
+            case !*f && unsafe && lt != nil && lt.RLSForced:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s no force row level security;", pqIdent(fq)))
             }
         }
 

@@ -338,6 +338,7 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/policy" }
         },
+        "forceRowLevelSecurity": { "type": "boolean", "description": "FORCE ROW LEVEL SECURITY: policies apply to the table owner too. Turning it off requires --unsafe. Omitted = unmanaged." },
         "rowLevelSecurity": {
           "type": "boolean",
           "description": "true = ENABLE ROW LEVEL SECURITY, false = DISABLE (requires --unsafe). Omit to leave unmanaged."
@@ -436,6 +437,7 @@
           "additionalProperties": { "$ref": "#/definitions/policy" }
         },
         "rowLevelSecurity": { "type": "boolean" },
+        "forceRowLevelSecurity": { "type": "boolean" },
         "grants": { "$ref": "#/definitions/grants" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
@@ -1160,8 +1162,18 @@
         },
         "checks": {
           "type": "object",
-          "description": "Named CHECK constraints (name: expression, referencing VALUE). Authoritative: with --unsafe, undeclared checks are dropped and changed ones replaced.",
-          "additionalProperties": { "type": "string", "minLength": 1 }
+          "description": "Named CHECK constraints (name: expression, referencing VALUE), or name: {check, comment} to also comment the constraint. Authoritative: with --unsafe, undeclared checks are dropped and changed ones replaced.",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              {
+                "type": "object",
+                "properties": { "check": { "type": "string", "minLength": 1 }, "comment": { "type": "string" } },
+                "required": ["check"],
+                "additionalProperties": false
+              }
+            ]
+          }
         },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }

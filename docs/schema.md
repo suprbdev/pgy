@@ -409,6 +409,8 @@ primaryKey:
     columns: [col1, col2]
 ```
 
+The block form names the constraint: it is created as `CONSTRAINT <constraint_name> PRIMARY KEY`, and a live primary key with another name is renamed (`ALTER TABLE ... RENAME CONSTRAINT`, which renames its index too). With the list form or `primaryKey: true` columns, PostgreSQL's default `<table>_pkey` is used and the live name is left alone. `pgy pull` writes the block form for primary keys whose name isn't the default.
+
 PostgreSQL 18 temporal keys are written inline in the column list: `primaryKey: [id, valid without overlaps]` (the last column must be a range type; scalar columns need the `btree_gist` extension). The same `without overlaps` suffix works in `unique` constraint columns, and foreign keys reference them with a `period` prefix: `columns: [room_id, period valid]`, `references: {table: rooms, columns: [id, period valid]}`.
 
 ### Indexes
@@ -863,7 +865,7 @@ schema public:
 | `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
 | `check` | string | `CHECK` expression; use `value` to reference the value being tested |
 | `constraintName` | string | Optional name for the `CHECK` constraint |
-| `checks` | map | Named `CHECK` constraints (`name: expression`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
+| `checks` | map | Named `CHECK` constraints (`name: expression`, or `name: {check: expression, comment: text}` to also set `COMMENT ON CONSTRAINT ... ON DOMAIN`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
 | `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -1131,6 +1133,7 @@ schema app:
 | Property | Type | Description |
 |----------|------|-------------|
 | `rowLevelSecurity` | boolean | `true` emits `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` when not already enabled. `false` emits `... DISABLE ROW LEVEL SECURITY` when currently enabled, and only under `--unsafe`. Omit the key to leave the live setting alone |
+| `forceRowLevelSecurity` | boolean | `true` emits `ALTER TABLE ... FORCE ROW LEVEL SECURITY`, so policies apply to the table owner too. `false` emits `NO FORCE ROW LEVEL SECURITY`, only under `--unsafe` since it widens access. Omitted = unmanaged |
 | `policies.<name>.as` | string | `permissive` (default) or `restrictive`. Permissive policies are OR-ed together; every restrictive policy must also pass |
 | `policies.<name>.for` | string | `select` \| `insert` \| `update` \| `delete` \| `all`. Omit for `ALL` |
 | `policies.<name>.to` | string or list | Role(s). Omit for all roles |

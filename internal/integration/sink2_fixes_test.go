@@ -57,3 +57,28 @@ schema SCH:
 		t.Errorf("a changed index collation is rebuilt under --unsafe:\n%s", sql)
 	}
 }
+
+func TestIntegrationPrimaryKeyRenameAndForceRLS(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	convergeYAML(t, pool, sch, `
+schema SCH:
+  table t:
+    columns: {id: {type: int}}
+    primaryKey: [id]
+    rowLevelSecurity: true
+`)
+	sql := convergeYAML(t, pool, sch, `
+schema SCH:
+  table t:
+    columns: {id: {type: int}}
+    primaryKey: {t_pk: {columns: [id]}}
+    rowLevelSecurity: true
+    forceRowLevelSecurity: true
+`)
+	for _, want := range []string{`rename constraint "t_pkey" to "t_pk"`, "force row level security"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in:\n%s", want, sql)
+		}
+	}
+}
