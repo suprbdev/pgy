@@ -90,3 +90,51 @@ func TestMaterializedViewWithNoDataAndIndexes(t *testing.T) {
 		t.Errorf("missing matview index should be created, got %+v", p.Creates)
 	}
 }
+
+func TestMaterializedViewStorageParams(t *testing.T) {
+	vw := &schema.View{Name: "mv", Materialized: true, Query: "select 1 as id", WithData: schema.BoolPtr(false),
+		With: map[string]string{"fillfactor": "70", "toast.autovacuum_enabled": "false"}}
+	d := &schema.Database{Tables: map[string]*schema.Table{}, Views: map[string]*schema.View{"public.mv": vw}}
+	want := `create materialized view if not exists "public"."mv" with (fillfactor = 70, toast.autovacuum_enabled = false) as select 1 as id with no data;`
+	if p := Plan(emptyLive(), d, false); len(p.Creates) != 1 || p.Creates[0] != want {
+		t.Errorf("want %q, got %+v", want, p.Creates)
+	}
+
+	live := emptyLive()
+	live.MatViews["public.mv"] = true
+	lt := newLiveTable()
+	lt.Options = map[string]string{"fillfactor": "70", "toast.autovacuum_enabled": "false"}
+	live.MatViewTables = map[string]*LiveTable{"public.mv": lt}
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("matching storage parameters must not diff, got:\n%s", sql)
+	}
+
+	lt.Options = map[string]string{"fillfactor": "50", "autovacuum_enabled": "false"}
+	p := Plan(live, d, false)
+	for _, want := range []string{
+		`alter materialized view "public"."mv" set (fillfactor = 70, toast.autovacuum_enabled = false);`,
+		`alter materialized view "public"."mv" reset (autovacuum_enabled);`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %q in %+v", want, p.Alters)
+		}
+	}
+
+	vw.With = nil
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("without with, storage parameters are unmanaged, got:\n%s", sql)
+	}
+}
+
+func TestStorageParamsSkipToastWithoutToastTable(t *testing.T) {
+	lt := newLiveTable()
+	lt.Options = map[string]string{"fillfactor": "70"}
+	with := map[string]string{"fillfactor": "70", "toast.autovacuum_enabled": "false"}
+	if got := storageParamStmts("table", "public.t", with, lt); len(got) != 1 || got[0] != `alter table "public"."t" set (toast.autovacuum_enabled = false);` {
+		t.Errorf("with a TOAST table the toast parameter must be set, got %v", got)
+	}
+	lt.NoToast = true
+	if got := storageParamStmts("table", "public.t", with, lt); len(got) != 0 {
+		t.Errorf("without a TOAST table toast parameters are discarded by PostgreSQL, got %v", got)
+	}
+}

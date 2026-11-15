@@ -238,6 +238,7 @@ type LiveTable struct{
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
     Options     map[string]string // reloptions: lower-cased name -> value
+    NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
     HasPK       bool            // whether a primary key constraint exists
     RLSEnabled  bool            // row level security enabled
 }
@@ -461,7 +462,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query all tables (not just those with columns). pg_catalog rather than
     // information_schema, which hides objects the role has no privilege on.
     tableQ := `
-        select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u',
+        select n.nspname, c.relname, c.relispartition, c.relkind = 'p', c.relpersistence = 'u', c.reltoastrelid = 0,
                coalesce(c.reloptions, '{}'::text[]) ||
                coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
                case c.relreplident when 'f' then 'full' when 'n' then 'nothing'
@@ -477,14 +478,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(tableQ, func(tableRows pgx.Rows) error {
         for tableRows.Next() {
             var schemaName, tableName string
-            var isPartition, partitioned, unlogged bool
+            var isPartition, partitioned, unlogged, noToast bool
             var reloptions []string
             var replident string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &reloptions, &replident); err != nil {
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &reloptions, &replident); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             lt := newLiveTable()
+            lt.NoToast = noToast
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident
             l.Tables[key] = lt
         }
@@ -493,20 +495,29 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     
     // Query existing materialized views
     matViewQ := `
-        select schemaname, matviewname
-        from pg_matviews
-        where schemaname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and schemaname !~ '^pg_(toast_)?temp_'
+        select n.nspname, c.relname, c.reltoastrelid = 0,
+               coalesce(c.reloptions, '{}'::text[]) ||
+               coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[])
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where c.relkind = 'm'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(matViewQ, func(matViewRows pgx.Rows) error {
         for matViewRows.Next() {
             var schemaName, viewName string
-            if err := matViewRows.Scan(&schemaName, &viewName); err != nil {
+            var noToast bool
+            var reloptions []string
+            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, viewName)
             l.MatViews[key] = true
-            l.MatViewTables[key] = newLiveTable()
+            lt := newLiveTable()
+            lt.NoToast = noToast
+            lt.Options = parseProconfig(reloptions)
+            l.MatViewTables[key] = lt
         }
         return nil
     })
@@ -2375,9 +2386,13 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s as %s", pqIdent(e.Key), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
+                } else if vw.With != nil {
+                    lt := live.MatViewTables[e.Key]
+                    if lt == nil { lt = newLiveTable() }
+                    plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, lt)...)
                 }
                 if len(vw.Indexes) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
@@ -4455,20 +4470,31 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
         out = append(out, fmt.Sprintf("alter table %s set %s;", pqIdent(fq), mode))
     }
     if dt.With == nil { return out }
+    return append(out, storageParamStmts("table", fq, dt.With, lt)...)
+}
+
+// storageParamStmts emits ALTER <kind> ... SET (...) / RESET (...) so the
+// relation's storage parameters match with exactly: live parameters with
+// does not list are reset. toast.* parameters are skipped while the
+// relation has no TOAST table, since PostgreSQL silently discards them.
+func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) []string {
+    out := []string{}
     set, reset := []string{}, []string{}
     want := map[string]bool{}
-    for _, k := range sortedKeys(dt.With) {
+    live := lt.Options
+    for _, k := range sortedKeys(with) {
         want[strings.ToLower(k)] = true
-        lv, ok := lt.Options[strings.ToLower(k)]
-        if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(dt.With[k])) {
-            set = append(set, k+" = "+dt.With[k])
+        if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
+        lv, ok := live[strings.ToLower(k)]
+        if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(with[k])) {
+            set = append(set, k+" = "+with[k])
         }
     }
-    for _, k := range sortedKeys(lt.Options) {
+    for _, k := range sortedKeys(live) {
         if !want[k] { reset = append(reset, k) }
     }
-    if len(set) > 0 { out = append(out, fmt.Sprintf("alter table %s set (%s);", pqIdent(fq), strings.Join(set, ", "))) }
-    if len(reset) > 0 { out = append(out, fmt.Sprintf("alter table %s reset (%s);", pqIdent(fq), strings.Join(reset, ", "))) }
+    if len(set) > 0 { out = append(out, fmt.Sprintf("alter %s %s set (%s);", kind, pqIdent(fq), strings.Join(set, ", "))) }
+    if len(reset) > 0 { out = append(out, fmt.Sprintf("alter %s %s reset (%s);", kind, pqIdent(fq), strings.Join(reset, ", "))) }
     return out
 }
 

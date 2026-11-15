@@ -350,7 +350,7 @@ schema public:
         collate: C
 ```
 
-`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone.
+`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
 
 #### Replica identity and extended statistics
 
@@ -688,13 +688,14 @@ schema public:
 
 ### Materialized Views
 
-Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
+Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
 
 ```yaml
 schema public:
   materialized view user_stats:
     query: "select count(*) as total, status from users group by status"
     withData: false
+    with: {autovacuum_enabled: false}
     indexes:
       user_stats_status:
         columns: [status]
@@ -711,6 +712,7 @@ schema public:
 | `securityBarrier` | boolean | Plain views only. `security_barrier` option. Omitted = unmanaged |
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
+| `with` | map | Materialized views only. Storage parameters, authoritative when present. Omitted = unmanaged |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |

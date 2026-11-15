@@ -234,6 +234,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if vw == nil || vw.Query == "" { continue }
         if vw.Materialized {
             out.MatViews[k] = true
+            if vw.With != nil {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                lt.Options = map[string]string{}
+                for o, v := range vw.With { lt.Options[strings.ToLower(o)] = v }
+            }
             if len(vw.Indexes) > 0 {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
