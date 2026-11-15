@@ -233,6 +233,22 @@ func (b *builder) extensionSchema(s string) bool {
 	return false
 }
 
+// serialSequenceName reports whether seq is the name PostgreSQL gives the
+// sequence of serial column cn of table fq: <table>_<column>_seq, which it
+// shortens, or numbers on a clash, when that is taken or too long.
+func serialSequenceName(fq, cn, seq string) bool {
+	schema, table, _ := strings.Cut(fq, ".")
+	want := schema + "." + table + "_" + cn + "_seq"
+	if seq == want {
+		return true
+	}
+	seqSchema, name, _ := strings.Cut(seq, ".")
+	if seqSchema != schema || !strings.HasPrefix(name, table) && len(table+"_"+cn+"_seq") <= 63 {
+		return false
+	}
+	return regexp.MustCompile(`_seq\d*$`).MatchString(name)
+}
+
 func (b *builder) collectSerials() {
 	b.serials, b.serialSeqs = map[string]string{}, map[string]bool{}
 	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
@@ -247,7 +263,7 @@ func (b *builder) collectSerials() {
 				seq = schemaOf(fq) + "." + seq
 			}
 			ls := b.live.SequenceDefs[seq]
-			if ls == nil || ls.Owner != fq+"."+cn {
+			if ls == nil || ls.Owner != fq+"."+cn || lc.Nullable || !serialSequenceName(fq, cn, seq) {
 				continue
 			}
 			kind := map[string]string{"integer": "serial", "bigint": "bigserial", "smallint": "smallserial"}[lc.Type]
@@ -932,7 +948,7 @@ func indexParameters(m *node, li *diff.LiveIndex) {
 		return
 	}
 	if len(li.Include) > 0 {
-		add(m, "include", list(li.Include))
+		add(m, "include", list(plainIdents(li.Include)))
 	}
 	if len(li.Options) > 0 {
 		w := flowMap()
@@ -1066,7 +1082,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 		opcs := lt.IndexOpclasses[name]
 		var perCol, colls, targets *node
 		for i, k := range li.Keys {
-			col := k
+			col := plainIdents([]string{k})[0]
 			if li.Descending[i] {
 				col += " desc"
 				if !li.NullsFirst[i] {
@@ -1112,7 +1128,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 			add(m, "statisticsTargets", targets)
 		}
 		if len(li.Include) > 0 {
-			add(m, "include", list(li.Include))
+			add(m, "include", list(plainIdents(li.Include)))
 		}
 		if li.NullsNotDistinct {
 			add(m, "nullsNotDistinct", boolean(true))
@@ -1423,6 +1439,21 @@ func boundValues(s string) []string {
 
 var numericRe = regexp.MustCompile(`^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$`)
 
+var quotedIdentRe = regexp.MustCompile(`^"(?:[^"]|"")+"$`)
+
+// plainIdents unquotes entries that are just a quoted identifier, as
+// PostgreSQL prints mixed-case names; expressions are left alone.
+func plainIdents(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = n
+		if quotedIdentRe.MatchString(n) {
+			out[i] = unquoteIdent(n)
+		}
+	}
+	return out
+}
+
 func partitionBy(key string) *node {
 	m := flowMap()
 	strategy, rest, _ := strings.Cut(key, " ")
@@ -1430,7 +1461,11 @@ func partitionBy(key string) *node {
 	rest = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(rest), "("), ")")
 	cols := []string{}
 	for _, c := range splitTop(rest) {
-		cols = append(cols, strings.TrimSpace(c))
+		c = strings.TrimSpace(c)
+		if quotedIdentRe.MatchString(c) {
+			c = unquoteIdent(c)
+		}
+		cols = append(cols, c)
 	}
 	add(m, "columns", list(cols))
 	return m

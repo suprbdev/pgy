@@ -3128,15 +3128,19 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
 
 // renderPartitionBy renders "range ("col1", "col2")" etc. for PARTITION BY.
 // Plain identifiers are quoted; anything else (an expression) passes through.
+var quotedIdentRe = regexp.MustCompile(`^"(?:[^"]|"")+"$`)
+
 func renderPartitionBy(pb *schema.PartitionBy) string {
     cols := make([]string, 0, len(pb.Columns))
     for _, c := range pb.Columns { cols = append(cols, partitionKeyExpr(c)) }
     return strings.ToLower(pb.Type) + " (" + strings.Join(cols, ", ") + ")"
 }
 
-// partitionKeyExpr quotes a partition key column unless it looks like an
-// expression (contains parens, spaces, or an operator).
+// partitionKeyExpr quotes a partition key column unless it is quoted
+// already or looks like an expression (contains parens, spaces, or an
+// operator).
 func partitionKeyExpr(s string) string {
+    if quotedIdentRe.MatchString(s) { return s }
     if strings.ContainsAny(s, "() ,+-/*") {
         return "(" + s + ")"
     }
@@ -5998,7 +6002,9 @@ func isIndexExpression(s string) bool {
 
 func joinIdentList(cols []string) string {
     parts := make([]string, 0, len(cols))
-    for _, c := range cols { parts = append(parts, pqIdent(c)) }
+    for _, c := range cols {
+        if quotedIdentRe.MatchString(c) { parts = append(parts, c) } else { parts = append(parts, pqIdent(c)) }
+    }
     return strings.Join(parts, ", ")
 }
 
