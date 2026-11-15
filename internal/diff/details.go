@@ -122,7 +122,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                  coalesce((select pn.nspname || '.' || p.relname from pg_inherits i join pg_class p on p.oid = i.inhparent
                            join pg_namespace pn on pn.oid = p.relnamespace where i.inhrelid = c.oid and c.relispartition), '')
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
-          where c.relkind in ('r', 'p') and (c.relkind = 'p' or c.relispartition) and ` + nsFilter,
+          where c.relkind in ('r', 'p', 'f') and (c.relkind = 'p' or c.relispartition) and ` + nsFilter,
             func(scan func(...any) error) error {
                 var rel, key, bound, parent string
                 if err := scan(&rel, &key, &bound, &parent); err != nil { return err }

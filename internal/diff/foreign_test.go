@@ -133,3 +133,30 @@ func TestForeignTableChangesRaiseNoLockWarnings(t *testing.T) {
 		t.Errorf("a foreign table holds no local rows, unexpected warning: %s", w.Message)
 	}
 }
+
+func TestConcurrentIndexWithForeignPartitionBuiltPlain(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["app"] = true
+	parent := newLiveTable()
+	parent.Partitioned = true
+	parent.Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.m"] = parent
+	remote := newLiveTable()
+	remote.IsPartition = true
+	remote.Foreign = &LiveForeignTable{Server: "s"}
+	live.Tables["app.m_us"] = remote
+	live.Partitions = map[string][]string{"app.m": {"app.m_us"}}
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.m": {
+		Name:        "app.m",
+		Columns:     map[string]*schema.Column{"id": {Type: "int"}},
+		PartitionBy: &schema.PartitionBy{Type: "list", Columns: []string{"id"}},
+		Indexes:     []*schema.Index{{Name: "m_id", Columns: []string{"id"}, Concurrently: true}},
+	}}}
+	p := Plan(live, d, false)
+	if len(p.Concurrent) != 0 || !findCreate(p, `create index if not exists "m_id" on "app"."m"("id");`) {
+		t.Errorf("expected a plain index build, got creates %v, concurrent %v", p.Creates, p.Concurrent)
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(p.Warnings[0].Message, "foreign partitions") {
+		t.Errorf("expected a foreign partition warning, got %+v", p.Warnings)
+	}
+}

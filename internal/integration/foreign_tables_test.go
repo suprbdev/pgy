@@ -125,3 +125,81 @@ schema SCH:
 `, "SRV", srv),
 	})
 }
+
+func TestIntegrationForeignPartitions(t *testing.T) {
+	pool := connect(t)
+	srv := foreignServer(t, pool, "parts")
+	assertYAMLIdempotent(t, map[string]string{
+		"foreign_partitions": strings.ReplaceAll(`
+extensions: [postgres_fdw]
+servers:
+  SRV: {wrapper: postgres_fdw, options: {dbname: shards}}
+schema SCH:
+  function touch():
+    returns: trigger
+    language: plpgsql
+    body: begin return new; end
+  table m:
+    columns:
+      id: {type: int}
+      region: {type: text}
+    partitionBy: {list: [region]}
+    indexes: {m_id: {columns: [id]}}
+  table m_eu:
+    partitionOf: SCH.m
+    forValues: {in: [eu]}
+  foreign table m_us:
+    server: SRV
+    partitionOf: SCH.m
+    forValues: {in: [us]}
+    options: {table_name: m_us}
+  foreign table audit:
+    server: SRV
+    columns: {id: {type: int}}
+    triggers:
+      audit_touch: {timing: before, events: [insert], level: row, procedure: SCH.touch()}
+`, "SRV", srv),
+	})
+}
+
+func TestIntegrationConcurrentIndexWithForeignPartition(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	srv := foreignServer(t, pool, "conc")
+	opts := diff.Options{Unsafe: true, Prune: true}
+	base := strings.ReplaceAll(`
+extensions: [postgres_fdw]
+servers:
+  SRV: {wrapper: postgres_fdw}
+schema SCH:
+  table m:
+    columns: {id: {type: int}, region: {type: text}}
+    partitionBy: {list: [region]}
+INDEX
+  table m_eu:
+    partitionOf: SCH.m
+    forValues: {in: [eu]}
+  foreign table m_us:
+    server: SRV
+    partitionOf: SCH.m
+    forValues: {in: [us]}
+`, "SRV", srv)
+	convergeYAMLWith(t, pool, sch, strings.Replace(base, "INDEX\n", "", 1), opts)
+	sql := convergeYAMLWith(t, pool, sch, strings.Replace(base, "INDEX", "    indexes: {m_region: {columns: [region], concurrently: true}}", 1), opts)
+	if strings.Contains(sql, "concurrently") || !strings.Contains(sql, `create index if not exists "m_region" on "`+sch+`"."m"`) {
+		t.Errorf("with a foreign partition the index must be built without CONCURRENTLY:\n%s", sql)
+	}
+}
+
+func TestIntegrationForeignTableRename(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	srv := foreignServer(t, pool, "rename")
+	opts := diff.Options{Unsafe: true, Prune: true}
+	base := "extensions: [postgres_fdw]\nservers:\n  " + srv + ": {wrapper: postgres_fdw}\nschema SCH:\n"
+	convergeYAMLWith(t, pool, sch, base+"  foreign table a:\n    server: "+srv+"\n    columns: {id: {type: int}}\n", opts)
+	sql := convergeYAMLWith(t, pool, sch, base+"  foreign table b:\n    server: "+srv+"\n    renamedFrom: a\n    columns: {id: {type: int}}\n", opts)
+	if !strings.Contains(sql, `rename to "b"`) || strings.Contains(sql, "drop foreign table") {
+		t.Errorf("expected a rename, not a drop and create:\n%s", sql)
+	}
+}

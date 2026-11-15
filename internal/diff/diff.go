@@ -2496,7 +2496,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if lt == nil {
                 if dt.PartitionOf != "" {
                     // partition children inherit columns from the parent
-                    plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
+                    if dt.Foreign != nil {
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s partition of %s %s server %s%s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
+                    } else {
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
+                    }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
                 }
@@ -3189,6 +3193,16 @@ func fdwOptionsAlter(want, have map[string]string) string {
     }
     if len(parts) == 0 { return "" }
     return "options (" + strings.Join(parts, ", ") + ")"
+}
+
+// hasForeignPartition reports whether partitioned table fq has a foreign
+// table among its partitions, at any level.
+func hasForeignPartition(live *Live, fq string) bool {
+    for _, child := range live.Partitions[fq] {
+        if lt := live.Tables[child]; lt != nil && lt.Foreign != nil { return true }
+        if hasForeignPartition(live, child) { return true }
+    }
+    return false
 }
 
 // plansNewRelations reports whether desired declares a table, view or
@@ -4153,6 +4167,13 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
         concurrent := ix.Concurrently && lt != nil && dt.PartitionBy == nil
         partitioned := ix.Concurrently && lt != nil && dt.PartitionBy != nil
+        foreignParts := partitioned && hasForeignPartition(live, fq)
+        if foreignParts {
+            partitioned = false
+            if !liveIndexes[name] || (lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid) {
+                plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("index %s: %s has foreign partitions, which cannot be indexed, so an index built partition by partition never becomes valid; it is built without CONCURRENTLY, which skips them", name, fq)})
+            }
+        }
         how := " index"
         if concurrent { how = " index concurrently" }
         elems, tail := renderIndexElems(ix, dt.Columns), renderIndexTail(ix)
@@ -4165,6 +4186,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             return fmt.Sprintf("create%s%s if not exists %s on %s%s%s(%s)%s;", uniq, h, pqIdent(bare), o, pqIdent(table), using, elems, tail)
         }
         idxFq := schemaPrefixOf(fq) + name
+        if foreignParts && liveIndexes[name] && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt)
+            continue
+        }
         if liveIndexes[name] && (concurrent || partitioned) && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
             if partitioned {
                 plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...)

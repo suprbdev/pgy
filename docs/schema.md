@@ -699,7 +699,7 @@ Servers are created after extensions and before everything else. Their `version`
 
 User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none.
 
-Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped. PostgreSQL cannot move a foreign table to another server, so a changed `server` is reported. Check constraints, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`. Foreign tables take no primary keys, indexes, foreign keys, partitioning or storage settings. `pgy pull` writes servers to `database.yml` and foreign tables to their schema's file.
+Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped. PostgreSQL cannot move a foreign table to another server, so a changed `server` is reported. Check constraints, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`. A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or storage settings, and cannot be partitioned themselves. `pgy pull` writes servers to `database.yml` and foreign tables to their schema's file.
 
 Server properties:
 
@@ -718,6 +718,7 @@ Foreign table properties:
 |----------|------|-------------|
 | `server` | string | Required. The server the table reads through |
 | `options` | map | Wrapper table options. Authoritative when present; omitted = unmanaged |
+| `partitionOf`, `forValues`, `default` | | Attach as a partition of a local partitioned table, as for [partitions](#partitioning) |
 | `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `collate`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options |
 | `constraints` | map | Check constraints, as on [tables](#constraints) |
 | `grants`, `owner`, `comment`, `renamedFrom`, `dependsOn` | | As on tables |

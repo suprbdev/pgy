@@ -628,15 +628,15 @@ func (b *builder) tables() {
 		}
 		t := newMap()
 		parent := b.d.PartitionOf[fq]
+		if lt.Foreign != nil {
+			add(t, "server", str(lt.Foreign.Server))
+			if len(lt.Foreign.Options) > 0 {
+				add(t, "options", stringsNode(lt.Foreign.Options))
+			}
+		}
 		if parent == "" {
 			if len(lt.Inherits) > 0 {
 				add(t, "inherits", list(lt.Inherits))
-			}
-			if lt.Foreign != nil {
-				add(t, "server", str(lt.Foreign.Server))
-				if len(lt.Foreign.Options) > 0 {
-					add(t, "options", stringsNode(lt.Foreign.Options))
-				}
 			}
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {

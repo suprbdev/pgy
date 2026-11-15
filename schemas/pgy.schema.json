@@ -1020,6 +1020,9 @@
           "minLength": 1,
           "description": "Foreign server the table reads through, usually declared under servers:. Cannot be changed in place."
         },
+        "partitionOf": {"type": "string", "description": "Parent table this table is a partition of (schema-qualified or resolved against the current schema)."},
+        "forValues": {"$ref": "#/definitions/partitionSpec"},
+        "default": {"type": "boolean", "description": "DEFAULT partition (used with partitionOf instead of forValues)."},
         "options": {
           "type": "object",
           "description": "Foreign-data wrapper table options (OPTIONS (...)), e.g. schema_name and table_name for postgres_fdw. Authoritative when present: unlisted options are dropped.",
