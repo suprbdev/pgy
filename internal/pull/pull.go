@@ -442,7 +442,11 @@ func identityOptionsNode(lc *diff.LiveColumn) *node {
 func (b *builder) sequences() {
 	for _, k := range sortedKeys(b.live.Sequences) {
 		ls := b.live.SequenceDefs[k]
-		if ls == nil || b.member("rel", k) || b.serialSeqs[k] {
+		if ls == nil || b.member("rel", k) {
+			continue
+		}
+		if b.serialSeqs[k] {
+			b.serialSequence(k, ls)
 			continue
 		}
 		if b.live.OwnedSequences[k] && ls.Owner == "" {
@@ -485,6 +489,30 @@ func (b *builder) sequences() {
 		b.owner(m, "rel:"+k)
 		add(blk, "sequence "+name, m)
 	}
+}
+
+// serialSequence writes the grants and comment of a serial column's
+// sequence, which the column creates, as a sequence block that depends on
+// the column's table, so a rebuild applies them once the table exists.
+func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
+	g := grantsNode(b.live.TableGrants[k])
+	comment := b.live.RelComments[k]
+	if g == nil && comment == "" {
+		return
+	}
+	blk, name, ok := b.block(k)
+	if !ok {
+		return
+	}
+	m := newMap()
+	if g != nil {
+		add(m, "grants", g)
+	}
+	addStr(m, "comment", comment)
+	if i := strings.LastIndexByte(ls.Owner, '.'); i > 0 {
+		add(m, "dependsOn", list([]string{"table " + ls.Owner[:i]}))
+	}
+	add(blk, "sequence "+name, m)
 }
 
 func (b *builder) routines() {

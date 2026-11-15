@@ -407,3 +407,25 @@ schema app:
 		t.Errorf("declared server flagged:\n%s", got)
 	}
 }
+
+func TestValidateSerialSequenceNeedsDependsOn(t *testing.T) {
+	p := write(t, t.TempDir(), "s.yml", `
+schema app:
+  table audit:
+    columns: {id: {type: bigserial}}
+  table events:
+    columns: {id: {type: serial}}
+  sequence audit_id_seq:
+    grants: {public: [usage]}
+  sequence events_id_seq:
+    grants: {public: [usage]}
+    dependsOn: [table app.events]
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "sequence app.audit_id_seq: is the sequence that serial column app.audit.id creates; add dependsOn: [table app.audit]") {
+		t.Errorf("missing serial sequence warning in:\n%s", got)
+	}
+	if strings.Contains(got, "events_id_seq") {
+		t.Errorf("a serial sequence with dependsOn must not be flagged:\n%s", got)
+	}
+}

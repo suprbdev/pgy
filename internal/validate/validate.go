@@ -365,9 +365,24 @@ func Database(d *schema.Database) []Issue {
 			}
 		}
 	}
+	serialSeqs := map[string]string{}
+	for _, tk := range sortedKeys(d.Tables) {
+		if t := d.Tables[tk]; t != nil {
+			for cn, c := range t.Columns {
+				if c != nil && isSerialType(c.Type) {
+					if name := tk + "_" + cn + "_seq"; len(name)-strings.IndexByte(name, '.')-1 <= 63 {
+						serialSeqs[name] = tk
+					}
+				}
+			}
+		}
+	}
 	for _, k := range sortedKeys(d.Sequences) {
 		if sq := d.Sequences[k]; sq != nil {
 			checkDeps(d, "sequence "+k, sq.DependsOn, add)
+			if table := serialSeqs[k]; table != "" && !dependsOnTable(sq.DependsOn, table) {
+				add(Warning, "sequence "+k, "is the sequence that serial column %s.%s creates; add dependsOn: [table %s] so a fresh build applies it after the table instead of creating a separate sequence first", table, strings.TrimSuffix(strings.TrimPrefix(k, table+"_"), "_seq"), table)
+			}
 			if owner := sq.OwnedBy; owner != "" && !strings.EqualFold(owner, "none") {
 				parts := strings.Split(owner, ".")
 				if len(parts) >= 2 {
@@ -881,4 +896,22 @@ func checkOwnerGrants(d *schema.Database, add func(Severity, string, string, ...
 	for _, s := range sortedKeys(d.SchemaGrants) {
 		check("schema "+s, d.SchemaOwners[s], d.SchemaGrants[s])
 	}
+}
+
+func isSerialType(t string) bool {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "serial", "smallserial", "bigserial", "serial2", "serial4", "serial8":
+		return true
+	}
+	return false
+}
+
+// dependsOnTable reports whether deps names table, qualified or in public.
+func dependsOnTable(deps []string, table string) bool {
+	for _, dep := range deps {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(dep), "table "); ok && qualifyPublic(strings.TrimSpace(rest)) == table {
+			return true
+		}
+	}
+	return false
 }

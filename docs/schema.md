@@ -915,6 +915,19 @@ schema public:
         default: nextval('public.order_number_seq')
 ```
 
+A `serial`/`bigserial` column creates its own sequence, `<table>_<column>_seq`. To grant on it or comment it, declare a `sequence` block of that name holding only `grants` and `comment`, with `dependsOn` on the table. pgy then applies them after the column has created the sequence, instead of creating a separate one first. `pgy validate` warns when the `dependsOn` is missing, and `pgy pull` writes such blocks itself:
+
+```yaml
+schema app:
+  table audit:
+    columns:
+      id: {type: bigserial, primaryKey: true}
+    grants: {app_role: [insert]}
+  sequence audit_id_seq:
+    grants: {app_role: [usage]}     # nextval() needs USAGE on the sequence
+    dependsOn: [table app.audit]
+```
+
 ## Functions
 
 Functions are defined inside `schema <name>:` blocks. The key format is `function <name>(<args>):`.
