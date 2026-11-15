@@ -44,6 +44,7 @@ Exit codes:
 
             files, err := readMigrationFiles(cfg.MigrationsDir)
             if err != nil { return err }
+            allFiles := files
             if until != "" {
                 if files, err = filterUntil(files, until); err != nil { return err }
             }
@@ -59,6 +60,9 @@ Exit codes:
             }
 
             if dryRun {
+                applied, err := db.LoadApplied(ctx, pool, schemaName, tableName)
+                if err != nil { return err }
+                printHistoryWarnings(allFiles, applied)
                 toApply, err := pending()
                 if err != nil { return err }
                 for _, f := range toApply { fmt.Println(f) }
@@ -68,6 +72,9 @@ Exit codes:
             }
 
             return db.WithAdvisoryLock(ctx, pool, func(ctx context.Context) error {
+                applied, err := db.LoadApplied(ctx, pool, schemaName, tableName)
+                if err != nil { return err }
+                printHistoryWarnings(allFiles, applied)
                 toApply, err := pending()
                 if err != nil { return err }
                 if len(toApply) == 0 && !cfg.Quiet { fmt.Println("no pending migrations") }

@@ -33,6 +33,7 @@ Exit codes:
             if err != nil { return err }
             files, err := readMigrationFiles(cfg.MigrationsDir)
             if err != nil { return err }
+            printHistoryWarnings(files, applied)
             pending := 0
             last := ""
             for _, f := range files {
