@@ -2119,7 +2119,9 @@ func compositeAlterStmts(fq string, td *schema.TypeDef, live map[string]string, 
 // renderRangeType emits CREATE TYPE ... AS RANGE with the options set.
 func renderRangeType(fq string, r *schema.RangeDef) string {
     opts := []string{"subtype = " + r.Subtype}
-    for _, o := range [][2]string{{"subtype_opclass", r.SubtypeOpclass}, {"collation", r.Collation}, {"canonical", r.Canonical}, {"subtype_diff", r.SubtypeDiff}, {"multirange_type_name", r.MultirangeTypeName}} {
+    collation := ""
+    if r.Collation != "" { collation = collationIdent(r.Collation) }
+    for _, o := range [][2]string{{"subtype_opclass", r.SubtypeOpclass}, {"collation", collation}, {"canonical", r.Canonical}, {"subtype_diff", r.SubtypeDiff}, {"multirange_type_name", r.MultirangeTypeName}} {
         if o[1] != "" { opts = append(opts, o[0]+" = "+o[1]) }
     }
     return fmt.Sprintf("create type %s as range (%s);", pqIdent(fq), strings.Join(opts, ", "))
@@ -2536,7 +2538,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     if dt.Foreign != nil {
                         plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s partition of %s %s server %s%s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     } else {
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition)))
+                        sub := ""
+                        if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s%s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub))
                     }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue

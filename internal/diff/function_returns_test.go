@@ -128,3 +128,16 @@ func TestSQLStandardBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeCollationAndSubPartitionRendered(t *testing.T) {
+	if got := renderRangeType("app.r", &schema.RangeDef{Subtype: "text", Collation: "C"}); got != `create type "app"."r" as range (subtype = text, collation = "C");` {
+		t.Errorf("renderRangeType = %s", got)
+	}
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"app.r":  {Name: "app.r", Columns: map[string]*schema.Column{"at": {Type: "date"}, "region": {Type: "text"}}, PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"at"}}},
+		"app.r1": {Name: "app.r1", PartitionOf: "app.r", Partition: &schema.PartitionSpec{From: []string{"'2025-01-01'"}, To: []string{"'2026-01-01'"}, Modulus: -1, Remainder: -1}, PartitionBy: &schema.PartitionBy{Type: "list", Columns: []string{"region"}}},
+	}}
+	if sql := Render(Plan(emptyLive(), d, false)); !strings.Contains(sql, `partition of "app"."r" for values from ('2025-01-01') to ('2026-01-01') partition by list ("region");`) {
+		t.Errorf("a partition that is itself partitioned needs PARTITION BY:\n%s", sql)
+	}
+}
