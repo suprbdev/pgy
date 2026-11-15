@@ -1,7 +1,9 @@
 package cli
 
 import (
+    "encoding/json"
     "fmt"
+    "os"
     "path/filepath"
     "sort"
 
@@ -33,17 +35,24 @@ Exit codes:
             if err != nil { return err }
             files, err := readMigrationFiles(cfg.MigrationsDir)
             if err != nil { return err }
-            printHistoryWarnings(files, applied)
-            pending := 0
+            warnings := historyWarnings(files, applied)
+            pending := []string{}
             last := ""
             for _, f := range files {
                 base := filepath.Base(f)
                 last = base
-                if _, ok := applied[base]; !ok { pending++ }
+                if _, ok := applied[base]; !ok { pending = append(pending, base) }
             }
             current := currentVersion(applied)
-            fmt.Printf("current: %s\nlast: %s\npending: %d\n", current, last, pending)
-            if pending > 0 { return &exitCodeError{code: 2} }
+            if cfg.JSON {
+                enc := json.NewEncoder(os.Stdout)
+                enc.SetIndent("", "  ")
+                if err := enc.Encode(map[string]any{"current": current, "last": last, "applied": len(applied), "pending": pending, "warnings": warnings}); err != nil { return err }
+            } else {
+                for _, w := range warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
+                fmt.Printf("current: %s\nlast: %s\npending: %d\n", current, last, len(pending))
+            }
+            if len(pending) > 0 { return &exitCodeError{code: 2} }
             return nil
         },
     }

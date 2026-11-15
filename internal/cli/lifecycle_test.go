@@ -132,6 +132,12 @@ schema SCH:
 	if code := exitCode(run(cmdStatus())); code != 0 {
 		t.Errorf("status exit code %d after migrating everything", code)
 	}
+	cfg.JSON = true
+	out, err := captureStdout(t, func() error { return run(cmdStatus()) })
+	cfg.JSON = false
+	if err != nil || !strings.Contains(out, `"pending": []`) || !strings.Contains(out, `"warnings": []`) || !strings.Contains(out, `"current": "000`) {
+		t.Errorf("status --json: %v\n%s", err, out)
+	}
 	if code := exitCode(run(cmdDiff(), "--unsafe", "--prune", "--no-warnings")); code != 0 {
 		b, _ := os.ReadFile(cfg.BufferPath)
 		t.Errorf("final diff not empty:\n%s", b)

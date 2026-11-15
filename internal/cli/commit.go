@@ -34,6 +34,11 @@ func cmdCommit() *cobra.Command {
                 }
                 return err
             }
+            if !cfg.Quiet {
+                for _, f := range staleSchemaFiles(cfg) {
+                    fmt.Fprintf(os.Stderr, "warning: %s changed after the buffer was written; run pgy diff again if the change should be in this migration\n", f)
+                }
+            }
             parts := []group.Section{{SQL: string(b)}}
             if sections := group.Parse(string(b)); sections != nil {
                 parts = parts[:0]
@@ -99,6 +104,20 @@ func nextMigrationNumber(dir string) (int, error) {
     sort.Ints(nums)
     if len(nums) == 0 { return 1, nil }
     return nums[len(nums)-1] + 1, nil
+}
+
+// staleSchemaFiles returns the schema files modified after the buffer was
+// written, so their changes are not in it.
+func staleSchemaFiles(cfg *GlobalConfig) []string {
+    bi, err := os.Stat(cfg.BufferPath)
+    if err != nil { return nil }
+    paths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
+    if err != nil { return nil }
+    out := []string{}
+    for _, p := range paths {
+        if fi, err := os.Stat(p); err == nil && fi.ModTime().After(bi.ModTime()) { out = append(out, p) }
+    }
+    return out
 }
 
 func slugify(s string) string {
