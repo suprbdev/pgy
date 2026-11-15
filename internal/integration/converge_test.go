@@ -13,7 +13,8 @@ import (
 )
 
 // convergeYAML applies the --unsafe plan for y (with SCH replaced by sch),
-// fails unless a second plan is empty, and returns the applied SQL.
+// fails unless a second plan is empty, and returns the applied SQL,
+// including the statements that run outside a transaction.
 func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "s.yml")
@@ -27,10 +28,10 @@ func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 	plan := diff.Plan(introspect(t, pool, d), d, true)
 	applyPlan(t, pool, plan)
 	live := introspect(t, pool, d)
-	if again := diff.Render(diff.Plan(live, d, true)); again != "" {
-		t.Fatalf("plan did not converge:\n%s", again)
+	if again := diff.Plan(live, d, true); diff.Render(again)+diff.RenderConcurrent(again) != "" {
+		t.Fatalf("plan did not converge:\n%s%s", diff.Render(again), diff.RenderConcurrent(again))
 	}
-	return diff.Render(plan)
+	return diff.Render(plan) + diff.RenderConcurrent(plan)
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }

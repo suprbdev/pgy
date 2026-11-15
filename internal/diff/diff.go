@@ -4251,18 +4251,28 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         def := renderFKDef(fk)
         fkName := truncateIdent(fk.Name)
+        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(fkName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), def)
+        partitionedBefore18 := dt.PartitionBy != nil && live.ServerVersion > 0 && live.ServerVersion < 180000
+        split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18
+        if split {
+            c := *fk
+            c.NotValid = true
+            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), renderFKDef(&c))
+        }
         if liveConstraints[fkName] {
             liveDef, ok := liveConstraintDefs[fkName]
             switch {
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fkName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
-                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(fkName)))
+                plan.Concurrent = append(plan.Concurrent, validate)
             }
             continue
         }
         *deferredFKs = append(*deferredFKs, stmt)
+        if split { plan.Concurrent = append(plan.Concurrent, validate) }
     }
 
     // Indexes (always use IF NOT EXISTS)
@@ -4340,18 +4350,27 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         def := renderConstraintDef(ct)
         if def == "" { continue }
         ctName := truncateIdent(ct.Name)
+        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(ctName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), def)
+        split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced
+        if split {
+            c := *ct
+            c.NotValid = true
+            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), renderConstraintDef(&c))
+        }
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
             switch {
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ctName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
-                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(ctName)))
+                plan.Concurrent = append(plan.Concurrent, validate)
             }
             continue
         }
         plan.Alters = append(plan.Alters, stmt)
+        if split { plan.Concurrent = append(plan.Concurrent, validate) }
     }
 
     // Column-level unique flags — emit as named unique constraints
