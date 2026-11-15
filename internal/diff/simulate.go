@@ -424,14 +424,17 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     for cn, c := range dt.Columns {
         if c == nil { continue }
         lc := lt.Columns[cn]
+        override := inheritedColumn(dt, c, lc)
         if lc == nil {
-            lc = &LiveColumn{}
+            lc = &LiveColumn{Inherited: override}
             lt.Columns[cn] = lc
         }
         if c.Type != "" { lc.Type = c.Type }
-        lc.Nullable = c.Nullable
-        if !c.Nullable { lc.NotNullNotValid = "" }
-        lc.Default = c.Default
+        if !override || c.NullableSet {
+            lc.Nullable = c.Nullable
+            if !c.Nullable { lc.NotNullNotValid = "" }
+        }
+        if !override || c.Default != "" { lc.Default = c.Default }
         if c.Identity != "" {
             lc.Identity = c.Identity
             ls := &LiveSequence{}

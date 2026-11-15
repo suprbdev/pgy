@@ -378,6 +378,7 @@ type Constraint struct {
 type Column struct {
     Type     string `yaml:"type"`
     Nullable bool   `yaml:"nullable"`
+    NullableSet bool `yaml:"-"` // nullable or notNull was written; on a partition's or child's inherited column, nullability is managed only then
     Default  string `yaml:"default"`
     Unique   bool   `yaml:"unique"`
     PrimaryKey bool `yaml:"primaryKey"`
@@ -1286,8 +1287,8 @@ func parseColumnSpec(spec any) *Column {
     if m, ok := spec.(map[string]any); ok {
         if t, ok := m["type"].(string); ok { c.Type = t }
         if v, ok := m["renamedFrom"].(string); ok { c.RenamedFrom = strings.TrimSpace(v) }
-        if n, ok := m["nullable"].(bool); ok { c.Nullable = n }
-        if nn, ok := m["notNull"].(bool); ok { c.Nullable = !nn }
+        if n, ok := m["nullable"].(bool); ok { c.Nullable, c.NullableSet = n, true }
+        if nn, ok := m["notNull"].(bool); ok { c.Nullable, c.NullableSet = !nn, true }
         if d, ok := m["default"]; ok { c.Default = defaultToString(d) }
         if u, ok := m["unique"].(bool); ok { c.Unique = u }
         if pk, ok := m["primaryKey"].(bool); ok { c.PrimaryKey = pk }

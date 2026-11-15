@@ -662,6 +662,7 @@ Notes:
 
 - Both parents and partitions are created when missing, and the bounds of existing partitions are never altered. A declared partition that exists as an ordinary table (for example one that was detached) is attached with `ALTER TABLE ... ATTACH PARTITION`, which scans it to check its rows fit the bound. pgy never emits `DETACH PARTITION`.
 - Indexes, foreign keys, constraints, and triggers declared on a partition child apply to that child as usual.
+- A partition takes its columns from the parent, but can set its own options for them under `columns:`, without a type: `columns: {value: {default: 5, statisticsTarget: 200, comment: tuned for 2025}}`. The options are `default`, `nullable: false` (it can only add NOT NULL), `storage`, `compression`, `statisticsTarget`, `nDistinct`, `nDistinctInherited` and `comment`. Each one is set after the partition is created and diffed against live, and options left out keep what the partition copied from the parent (or nothing, for the statistics target, `n_distinct` and the comment, which PostgreSQL doesn't copy). `pgy pull` writes only the options that differ from the parent's.
 - PostgreSQL requires a partitioned table's primary key to include the partition key columns.
 
 ### Inheritance
@@ -683,7 +684,8 @@ schema app:
 - The child is created after its parents.
 - On an existing table, a parent missing from the live table is added with `ALTER TABLE ... INHERIT`. With `--unsafe`, a live parent the list no longer names is removed with `NO INHERIT`, and its columns stay on the child. `inherits: []` removes every parent. Without the key, parents are unmanaged.
 - Columns a table gets from a parent are never altered or dropped on the child. That includes columns the child also declares itself. Change them on the parent.
-- `pgy pull` emits `inherits` and leaves inherited columns out of the child. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
+- An inherited column can be listed on the child without a type to set the child's own options for it, as for [partitions](#partitioning): `columns: {created_at: {default: "now()", comment: child timestamp}}`. `pgy validate` accepts a column without a type only on a partition, or on a child one of whose parents declares it.
+- `pgy pull` emits `inherits` and leaves inherited columns out of the child, apart from the options the child sets for them. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
 
 ## Foreign Tables
 

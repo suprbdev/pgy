@@ -45,3 +45,37 @@ schema app:
 		}
 	}
 }
+
+func TestValidateTypelessColumns(t *testing.T) {
+	p := write(t, t.TempDir(), "i.yml", `
+schema app:
+  table plain:
+    columns: {x: {default: 1}}
+  table m:
+    columns: {at: {type: date}, v: {type: int}}
+    partitionBy: {range: [at]}
+  table m1:
+    partitionOf: app.m
+    forValues: {from: ["2025-01-01"], to: ["2026-01-01"]}
+    columns: {v: {default: 5}}
+  table base:
+    columns: {a: {type: int}}
+  table kid:
+    inherits: [app.base]
+    columns: {a: {default: 7}, b: {default: 1}}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{"app.plain: column x has no type", "app.kid: column b has no type"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"column v has no type", "column a has no type"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("unexpected %q in:\n%s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "table plain > columns > x: missing properties: 'type'") || strings.Contains(got, "m1") || strings.Contains(got, "table kid > columns > a") {
+		t.Errorf("the JSON Schema must require types except on partitions and children:\n%s", got)
+	}
+}

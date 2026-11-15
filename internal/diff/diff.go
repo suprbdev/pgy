@@ -2785,13 +2785,20 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                         plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With)))
                     }
+                    for _, cn := range sortedKeys(dt.Columns) {
+                        if c := dt.Columns[cn]; c != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...) }
+                    }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
+                inherited := []string{}
+                for _, cn := range sortedKeys(dt.Columns) {
+                    if c := dt.Columns[cn]; c != nil && inheritedColumn(dt, c, nil) { inherited = append(inherited, cn) }
+                }
                 if len(dt.ColumnOrder) > 0 {
                     for _, cn := range dt.ColumnOrder {
-                        if c, ok := dt.Columns[cn]; ok {
+                        if c, ok := dt.Columns[cn]; ok && !inheritedColumn(dt, c, nil) {
                             cols = append(cols, renderColumn(cn, c))
                         }
                     }
@@ -2803,13 +2810,16 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if !found { rest = append(rest, cn) }
                     }
                     sort.Strings(rest)
-                    for _, cn := range rest { cols = append(cols, renderColumn(cn, dt.Columns[cn])) }
+                    for _, cn := range rest {
+                        if c := dt.Columns[cn]; !inheritedColumn(dt, c, nil) { cols = append(cols, renderColumn(cn, c)) }
+                    }
                 } else {
                     for cn, c := range dt.Columns {
-                        cols = append(cols, renderColumn(cn, c))
+                        if !inheritedColumn(dt, c, nil) { cols = append(cols, renderColumn(cn, c)) }
                     }
                     sort.Strings(cols)
                 }
+                for _, cn := range inherited { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil)...) }
                 if dt.Foreign != nil {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s) server %s%s;", pqIdent(fq), strings.Join(cols, ", "), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
@@ -2845,12 +2855,19 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
+                } else {
+                    for _, cn := range sortedKeys(dt.Columns) {
+                        if c, lc := dt.Columns[cn], lt.Columns[cn]; c != nil && lc != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...) }
+                    }
                 }
                 sort.Strings(colNames)
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
-                    if ok && lc.Inherited { continue }
+                    if (ok && lc.Inherited) || (!ok && inheritedColumn(dt, c, nil)) {
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...)
+                        continue
+                    }
                     if !ok {
                         // ADD COLUMN is emitted into Creates at the table's
                         // topological position, not Alters: Render puts all
@@ -3269,6 +3286,43 @@ func partitionKeyExpr(s string) string {
         return "(" + s + ")"
     }
     return pqIdent(s)
+}
+
+// inheritedColumn reports whether c, declared on dt, sets what dt keeps of
+// a column it inherits rather than declaring the column: every column of a
+// partition, a column the live table inherits, or a column of an
+// inheritance child declared without a type.
+func inheritedColumn(dt *schema.Table, c *schema.Column, lc *LiveColumn) bool {
+    return dt.PartitionOf != "" || (lc != nil && lc.Inherited) || (c.Type == "" && len(dt.Inherits) > 0)
+}
+
+// inheritedColumnStmts sets what a partition or inheritance child declares
+// for column cn it inherits: a default, NOT NULL (only when nullable is
+// written, and only adding it), storage, compression, the statistics
+// target and n_distinct. Settings left out are unmanaged, so the parent's
+// copies stay. lc is the live column, nil for a table this plan creates.
+func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []string {
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    if lc == nil { lc = &LiveColumn{Nullable: true} }
+    out := []string{}
+    if c.Default != "" && !defaultsEqual(c.Default, lc.Default) {
+        out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
+    }
+    if c.NullableSet && !c.Nullable && lc.Nullable {
+        out = append(out, target+" set not null;")
+    }
+    if c.Storage != "" && c.Storage != lc.Storage {
+        out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
+    }
+    if c.Compression != "" {
+        want := c.Compression
+        if want == "default" { want = "" }
+        if want != lc.Compression { out = append(out, fmt.Sprintf("%s set compression %s;", target, c.Compression)) }
+    }
+    if c.StatisticsTarget != nil && *c.StatisticsTarget != statisticsTargetOf(lc) {
+        out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
+    }
+    return append(out, attributeOptionStmts(target, c, lc)...)
 }
 
 // attachesPartition reports whether the plan attaches existing table lt to
