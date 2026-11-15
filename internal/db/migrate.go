@@ -143,6 +143,11 @@ func SplitSQLStatements(sql string) []string {
     n := len(sql)
     i := 0
     depth := 0
+    // lead holds the statement's first words; in CREATE FUNCTION/PROCEDURE,
+    // block counts BEGIN/CASE ... END nesting so the semicolons inside a
+    // BEGIN ATOMIC body do not end the statement (as psql does).
+    var lead []string
+    block := 0
 
     flush := func() {
         stmt := strings.TrimSpace(current.String())
@@ -150,6 +155,7 @@ func SplitSQLStatements(sql string) []string {
             statements = append(statements, stmt)
         }
         current.Reset()
+        lead, block = nil, 0
     }
     // consumeQuoted copies a quote-delimited region where a doubled delimiter
     // is an escape (covers both '...''...' and "..."".."").
@@ -249,9 +255,24 @@ func SplitSQLStatements(sql string) []string {
             if c == '(' { depth++ } else if depth > 0 { depth-- }
             current.WriteByte(c)
             i++
-        case c == ';' && depth == 0:
+        case c == ';' && depth == 0 && block == 0:
             flush()
             i++
+        case isIdentStart(c) && (i == 0 || !isDollarTagChar(sql[i-1])):
+            j := i
+            for j < n && isDollarTagChar(sql[j]) { j++ }
+            word := strings.ToLower(sql[i:j])
+            current.WriteString(sql[i:j])
+            i = j
+            if len(lead) < 4 { lead = append(lead, word) }
+            if isRoutineStatement(lead) {
+                switch word {
+                case "begin", "case":
+                    block++
+                case "end":
+                    if block > 0 { block-- }
+                }
+            }
         default:
             current.WriteByte(c)
             i++
@@ -266,6 +287,15 @@ func isDollarTagChar(c byte) bool {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func isIdentStart(c byte) bool { return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
+
+// isRoutineStatement reports whether a statement starting with lead is
+// CREATE [OR REPLACE] FUNCTION or PROCEDURE.
+func isRoutineStatement(lead []string) bool {
+    if len(lead) >= 2 && lead[0] == "create" && (lead[1] == "function" || lead[1] == "procedure") { return true }
+    return len(lead) >= 4 && lead[0] == "create" && lead[1] == "or" && lead[2] == "replace" && (lead[3] == "function" || lead[3] == "procedure")
+}
 
 func RecordApplied(ctx context.Context, pool *PoolShim, schema, table, name, checksum string, appliedAt time.Time) error {
     q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1,$2,$3,$4) on conflict (version) do nothing", pqIdent(schema), pqIdent(table))

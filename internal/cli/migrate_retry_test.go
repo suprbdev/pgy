@@ -73,3 +73,36 @@ func TestMigrateRetriesOnLockTimeout(t *testing.T) {
         t.Fatalf("column b missing after retry: %q %v", cols, err)
     }
 }
+
+func TestMigrateAppliesBeginAtomicBodies(t *testing.T) {
+    dsn := os.Getenv("PGY_TEST_DSN")
+    if dsn == "" { t.Skip("PGY_TEST_DSN not set") }
+    ctx := context.Background()
+    pool, err := pgxpool.New(ctx, dsn)
+    if err != nil { t.Fatal(err) }
+    defer pool.Close()
+    cleanup := func() {
+        pool.Exec(ctx, `drop table if exists public.pgytest_cli_atomic cascade; drop function if exists public.pgytest_cli_atomic_f(int); drop procedure if exists public.pgytest_cli_atomic_p()`) //nolint
+        pool.Exec(ctx, `delete from pgy.migrations where version = 9401`) //nolint
+    }
+    cleanup()
+    t.Cleanup(cleanup)
+    dir := t.TempDir()
+    writeFiles(t, dir, map[string]string{"9401_atomic.sql": `create table public.pgytest_cli_atomic (id int);
+create function public.pgytest_cli_atomic_f(a int) returns int language sql
+begin atomic
+  select case when a > 0 then a else -a end;
+end;
+create procedure public.pgytest_cli_atomic_p() language sql begin atomic insert into public.pgytest_cli_atomic values (1); delete from public.pgytest_cli_atomic where id = 1; end;
+`})
+    c := cmdMigrate()
+    c.SetArgs(nil)
+    c.SilenceUsage, c.SilenceErrors = true, true
+    if err := c.ExecuteContext(context.WithValue(ctx, ctxKey{}, &GlobalConfig{DSN: dsn, MigrationsDir: dir, Quiet: true})); err != nil {
+        t.Fatalf("migration with BEGIN ATOMIC bodies failed: %v", err)
+    }
+    var v int
+    if err := pool.QueryRow(ctx, `select public.pgytest_cli_atomic_f(-3)`).Scan(&v); err != nil || v != 3 {
+        t.Errorf("function result %d, %v", v, err)
+    }
+}

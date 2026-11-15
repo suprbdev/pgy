@@ -23,3 +23,31 @@ func TestSplitSQLEscapeStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitSQLBeginAtomicBodies(t *testing.T) {
+	sql := `create function f(a int) returns int language sql
+begin atomic
+  select case when a > 0 then a else -a end;
+end;
+CREATE OR REPLACE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC insert into t values (1); delete from t where false; END;
+create function g() returns int language sql return case when true then 1 end;
+create table x (id int, "end" int);
+insert into x values (1, 2);
+`
+	got := SplitSQLStatements(sql)
+	want := []string{
+		"create function f(a int) returns int language sql\nbegin atomic\n  select case when a > 0 then a else -a end;\nend",
+		"CREATE OR REPLACE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC insert into t values (1); delete from t where false; END",
+		"create function g() returns int language sql return case when true then 1 end",
+		`create table x (id int, "end" int)`,
+		"insert into x values (1, 2)",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d statements %q", len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("statement %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
