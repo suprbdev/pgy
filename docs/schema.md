@@ -62,15 +62,15 @@ A JSON Schema for schema files ships at [`schemas/pgy.schema.json`](../schemas/p
 Enable it per file with a modeline at the top of the YAML file:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/suprbdev/pgy/v0.34.2/schemas/pgy.schema.json
+# yaml-language-server: $schema=https://github.com/suprbdev/pgy/releases/latest/download/pgy.schema.json
 ```
 
-Use the tag of the pgy release you run (`pgy version`), so the editor accepts exactly the keys that release understands. `main` tracks unreleased changes. A relative path such as `$schema=./schemas/pgy.schema.json` also works. Or map the schema by filename in VS Code settings:
+That URL always serves the latest release's schema. To match an older pgy you run, pin it to that release instead: `https://github.com/suprbdev/pgy/releases/download/vX.Y.Z/pgy.schema.json` (releases from v0.34.3 attach it). A relative path such as `$schema=./schemas/pgy.schema.json` also works. Or map the schema by filename in VS Code settings:
 
 ```json
 {
   "yaml.schemas": {
-    "https://raw.githubusercontent.com/suprbdev/pgy/v0.34.2/schemas/pgy.schema.json": ["pgy.yaml", "*.pgy.yml", "schema*.yml"]
+    "https://github.com/suprbdev/pgy/releases/latest/download/pgy.schema.json": ["pgy.yaml", "*.pgy.yml", "schema*.yml"]
   }
 }
 ```
