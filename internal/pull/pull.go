@@ -974,7 +974,11 @@ func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
 				if a[1] == "UPDATE" {
 					key = "onUpdate"
 				}
-				add(fk, key, str(strings.ToLower(a[2])))
+				action, cols, _ := strings.Cut(a[2], " (")
+				if cols != "" {
+					cols = " (" + cols
+				}
+				add(fk, key, str(strings.ToLower(action)+cols))
 			}
 			deferral(fk, tail)
 			if strings.Contains(tail, "NOT ENFORCED") {

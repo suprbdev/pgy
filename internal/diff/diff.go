@@ -5558,10 +5558,21 @@ func constraintColumnName(c string) string {
     return c
 }
 
+// fkAction normalizes an ON DELETE / ON UPDATE action: the keywords are
+// lower-cased and a SET NULL / SET DEFAULT column list is quoted like other
+// column lists, keeping names that are already quoted.
 func fkAction(a string) string {
-    a = strings.Join(strings.Fields(strings.ToLower(a)), " ")
-    if a == "no action" { return "" }
-    return a
+    action, cols, _ := strings.Cut(a, "(")
+    action = strings.Join(strings.Fields(strings.ToLower(action)), " ")
+    if action == "no action" { return "" }
+    if cols == "" { return action }
+    names := []string{}
+    for _, c := range strings.Split(strings.TrimSuffix(strings.TrimSpace(cols), ")"), ",") {
+        c = strings.TrimSpace(c)
+        if len(c) >= 2 && strings.HasPrefix(c, `"`) && strings.HasSuffix(c, `"`) { c = strings.ReplaceAll(c[1:len(c)-1], `""`, `"`) }
+        if c != "" { names = append(names, c) }
+    }
+    return action + " (" + constraintColumns(names) + ")"
 }
 
 func deferralClause(deferrable, initiallyDeferred bool) string {
