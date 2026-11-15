@@ -4350,10 +4350,13 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 
     if !c.Nullable && lc.Nullable {
         out = append(out, target+" set not null;")
-    } else if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && lc.Identity == "" {
+    }
+    out = append(out, identityAlterStmts(target, c, lc, unsafe)...)
+    droppingIdentity := lc.Identity != "" && c.Identity == "" && unsafe && c.Generated == ""
+    if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && (lc.Identity == "" || droppingIdentity) {
         out = append(out, target+" drop not null;")
     }
-    return append(out, identityAlterStmts(target, c, lc, unsafe)...)
+    return out
 }
 
 // identityAlterStmts reconciles an identity column: SET GENERATED for a

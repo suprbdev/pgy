@@ -75,3 +75,23 @@ func TestAddedColumnGetsStatisticsAndOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestDroppedIdentityColumnBecomesNullable(t *testing.T) {
+	live := emptyLive()
+	lt := newLiveTable()
+	lt.Columns["b"] = &LiveColumn{Type: "bigint", Identity: "always"}
+	live.Tables["app.t"] = lt
+	live.Schemas["app"] = true
+	d := nDistinctDB(map[string]*schema.Column{"b": {Type: "bigint", Nullable: true}})
+	got := Plan(live, d, true).Alters
+	want := []string{
+		`alter table "app"."t" alter column "b" drop identity if exists;`,
+		`alter table "app"."t" alter column "b" drop not null;`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("want %v, got %v", want, got)
+	}
+	if got := Plan(live, d, false).Alters; len(got) != 0 {
+		t.Errorf("without --unsafe the identity and its NOT NULL stay, got %v", got)
+	}
+}
