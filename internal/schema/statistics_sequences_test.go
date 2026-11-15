@@ -194,3 +194,13 @@ func TestExtensionCommentParse(t *testing.T) {
 		t.Errorf("extensions: %+v", db.Extensions)
 	}
 }
+
+func TestViewColumnDefaultsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte("schema app:\n  view v:\n    query: select 1 as a\n    columnDefaults: {a: 0, b: \"'x'\"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cd := db.Views["app.v"].ColumnDefaults; cd["a"] != "0" || cd["b"] != "'x'" {
+		t.Errorf("columnDefaults: %v", cd)
+	}
+}

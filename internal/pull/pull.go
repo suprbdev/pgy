@@ -1535,6 +1535,13 @@ func (b *builder) views() {
 			}
 			add(m, "columnComments", cm)
 		}
+		if cd := b.live.ViewColumnDefaults[k]; len(cd) > 0 {
+			dm := flowMap()
+			for _, col := range sortedKeys(cd) {
+				add(dm, col, str(cd[col]))
+			}
+			add(m, "columnDefaults", dm)
+		}
 		b.owner(m, "rel:"+k)
 		add(blk, key, m)
 	}

@@ -341,6 +341,7 @@ func Database(d *schema.Database) []Issue {
 					{"securityBarrier", vw.SecurityBarrier != nil, false},
 					{"checkOption", vw.CheckOption != "", false},
 					{"replace", vw.Replace, false},
+					{"columnDefaults", len(vw.ColumnDefaults) > 0, false},
 				} {
 					switch {
 					case o.set && o.object:
