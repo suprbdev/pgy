@@ -46,7 +46,13 @@ schema SCH:
 		msgs = append(msgs, w.Message)
 	}
 	all := strings.Join(msgs, "\n")
-	for _, want := range []string{"CREATE INDEX events_kind_idx blocks writes to " + sch + ".events", "SET NOT NULL on " + sch + ".events.kind"} {
+	wants := []string{"CREATE INDEX events_kind_idx blocks writes to " + sch + ".events"}
+	if live.ServerVersion < 180000 {
+		wants = append(wants, "SET NOT NULL on "+sch+".events.kind")
+	} else if strings.Contains(all, "SET NOT NULL") || !strings.Contains(diff.Render(plan), `not null "kind" not valid`) {
+		t.Errorf("PostgreSQL 18 adds the not-null constraint NOT VALID instead of warning about SET NOT NULL:\n%s\n%s", all, diff.Render(plan))
+	}
+	for _, want := range wants {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing %q in:\n%s\nplan:\n%s", want, all, diff.Render(plan))
 		}

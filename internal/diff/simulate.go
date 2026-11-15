@@ -368,6 +368,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         }
         if c.Type != "" { lc.Type = c.Type }
         lc.Nullable = c.Nullable
+        if !c.Nullable { lc.NotNullNotValid = "" }
         lc.Default = c.Default
         if c.Identity != "" {
             lc.Identity = c.Identity
