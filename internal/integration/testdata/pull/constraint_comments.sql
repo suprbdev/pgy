@@ -1,0 +1,11 @@
+create schema cc;
+create table cc.plain (id int primary key, n int);
+comment on constraint plain_pkey on cc.plain is 'default-named key';
+create table cc.named (id int, n int, constraint named_key primary key (id));
+comment on constraint named_key on cc.named is 'named key';
+create table cc.quiet (id int primary key);
+create domain cc.pos as int constraint pos_check check (value > 0);
+comment on constraint pos_check on domain cc.pos is 'positive';
+create table cc.child (id int primary key, plain_id int constraint child_plain_fk references cc.plain, n int constraint child_n_check check (n > 0));
+comment on constraint child_plain_fk on cc.child is 'fk note';
+comment on constraint child_n_check on cc.child is 'check note';

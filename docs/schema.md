@@ -410,9 +410,10 @@ Can be declared at the column level (`primaryKey: true`) or as a table-level blo
 primaryKey:
   <constraint_name>:
     columns: [col1, col2]
+    comment: "natural key"    # optional: COMMENT ON CONSTRAINT
 ```
 
-The block form names the constraint: it is created as `CONSTRAINT <constraint_name> PRIMARY KEY`, and a live primary key with another name is renamed (`ALTER TABLE ... RENAME CONSTRAINT`, which renames its index too). With the list form or `primaryKey: true` columns, PostgreSQL's default `<table>_pkey` is used and the live name is left alone. `pgy pull` writes the block form for primary keys whose name isn't the default.
+The block form names the constraint: it is created as `CONSTRAINT <constraint_name> PRIMARY KEY`, and a live primary key with another name is renamed (`ALTER TABLE ... RENAME CONSTRAINT`, which renames its index too). With the list form or `primaryKey: true` columns, PostgreSQL's default `<table>_pkey` is used and the live name is left alone. `comment` is diffed against the live key's comment, which a rename keeps. `pgy pull` writes the block form for primary keys whose name isn't the default or that have a comment.
 
 PostgreSQL 18 temporal keys are written inline in the column list: `primaryKey: [id, valid without overlaps]` (the last column must be a range type; scalar columns need the `btree_gist` extension). The same `without overlaps` suffix works in `unique` constraint columns, and foreign keys reference them with a `period` prefix: `columns: [room_id, period valid]`, `references: {table: rooms, columns: [id, period valid]}`.
 
@@ -1328,7 +1329,7 @@ schema app:
     body: select 1
 ```
 
-Supported on: schemas, tables, columns, indexes (also on materialized views), foreign keys, check/unique/exclude constraints, triggers, policies, types, domains, collations, functions, procedures, views, materialized views, sequences, roles, publications and event triggers.
+Supported on: schemas, tables, columns, primary keys, indexes (also on materialized views), foreign keys, check/unique/exclude constraints, triggers, policies, types, domains, collations, functions, procedures, views, materialized views, sequences, roles, publications and event triggers.
 
 Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named indexes use the derived name); constraint comments (foreign keys included) as `COMMENT ON CONSTRAINT <name> ON <schema>.<table>`; trigger and policy comments as `COMMENT ON TRIGGER|POLICY <name> ON <schema>.<table>`. When a constraint, trigger or policy is dropped and recreated because its definition changed, its comment is re-applied in the same migration.
 

@@ -282,6 +282,7 @@ type Table struct {
     Foreign *ForeignTable      `yaml:"-"` // set for `foreign table <name>:` declarations
     PrimaryKey []string        `yaml:"-"`
     PrimaryKeyName string      `yaml:"-"` // constraint name; "" = PostgreSQL's default <table>_pkey
+    PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
     ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
@@ -646,7 +647,7 @@ func Merge(dbs []*Database) *Database {
                     existing.Foreign = t.Foreign
                 }
                 if len(existing.PrimaryKey) == 0 {
-                    existing.PrimaryKey, existing.PrimaryKeyName = t.PrimaryKey, t.PrimaryKeyName
+                    existing.PrimaryKey, existing.PrimaryKeyName, existing.PrimaryKeyComment = t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment
                 }
                 if t.ForceRowLevelSecurity != nil {
                     existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
@@ -981,7 +982,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := m["primaryKey"]; ok {
-                    t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
+                    t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := m["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -1039,7 +1040,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             fq := qualify(schemaName, name)
             t := &Table{Name: fq, Columns: parseColumns(m["columns"]) }
             if pkRaw, ok := m["primaryKey"]; ok {
-                t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
+                t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
             }
             if idxRaw, ok := m["indexes"]; ok {
                 t.Indexes = parseIndexes(idxRaw)
@@ -1109,7 +1110,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := inner["primaryKey"]; ok {
-                    t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
+                    t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment = parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := inner["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -2409,11 +2410,15 @@ func parseDefaultPrivileges(v any) []*DefaultPrivilege {
 // parsePrimaryKey parses a table's primaryKey: a column list, or a named
 // block {<constraint name>: {columns: [...]}} that also names the
 // constraint.
-func parsePrimaryKey(v any) ([]string, string) {
+func parsePrimaryKey(v any) ([]string, string, string) {
     if m, ok := v.(map[string]any); ok && len(m) == 1 {
-        for name := range m { return parseStringListFromNode(v), strings.TrimSpace(name) }
+        for name, def := range m {
+            comment := ""
+            if dm, ok := def.(map[string]any); ok { comment, _ = dm["comment"].(string) }
+            return parseStringListFromNode(v), strings.TrimSpace(name), comment
+        }
     }
-    return parseStringListFromNode(v), ""
+    return parseStringListFromNode(v), "", ""
 }
 
 // tableKey returns the table name a schema block key declares, and whether

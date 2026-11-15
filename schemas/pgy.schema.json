@@ -204,6 +204,26 @@
         }
       ]
     },
+    "primaryKey": {
+      "description": "Primary key columns, either as a list or as a block naming the constraint: `{ <name>: { columns: [...], comment: ... } }`.",
+      "oneOf": [
+        { "$ref": "#/definitions/stringList" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "columns": { "$ref": "#/definitions/stringList" },
+              "comment": { "type": "string", "description": "COMMENT ON CONSTRAINT for the primary key." }
+            },
+            "required": ["columns"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
     "grants": {
       "description": "Privileges per role: `{ <role>: [select, insert, ...] }`. An empty list revokes all privileges for that role; omitting the grants block leaves live privileges unmanaged.",
       "type": "object",
@@ -301,7 +321,7 @@
             }
           ]
         },
-        "primaryKey": { "$ref": "#/definitions/columnRefs" },
+        "primaryKey": { "$ref": "#/definitions/primaryKey" },
         "indexes": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/index" }
@@ -399,7 +419,7 @@
             }
           ]
         },
-        "primaryKey": { "$ref": "#/definitions/columnRefs" },
+        "primaryKey": { "$ref": "#/definitions/primaryKey" },
         "indexes": {
           "type": "object",
           "additionalProperties": { "$ref": "#/definitions/index" }

@@ -3734,6 +3734,15 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(cn)), c.Comment, have)
         }
         lt := live.Tables[k]
+        if dt.PrimaryKeyComment != "" {
+            name, have := truncateIdent(dt.PrimaryKeyName), ""
+            if ln := LivePrimaryKeyName(lt); ln != "" {
+                have = lt.ConstraintComments[ln]
+                if name == "" { name = ln }
+            }
+            if name == "" { name = DefaultPrimaryKeyName(k) }
+            comment(fmt.Sprintf("constraint %s on %s", pqIdent(name), pqIdent(k)), dt.PrimaryKeyComment, have)
+        }
         for _, fk := range dt.ForeignKeys {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)

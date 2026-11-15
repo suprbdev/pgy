@@ -427,6 +427,25 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         }
     }
     if len(dt.PrimaryKey) > 0 { lt.HasPK = true }
+    if lt.HasPK {
+        name, old := truncateIdent(dt.PrimaryKeyName), LivePrimaryKeyName(lt)
+        if name == "" { name = old }
+        if name == "" { name = DefaultPrimaryKeyName(fq) }
+        switch {
+        case old == "":
+            lt.ConstraintDefs[name] = "PRIMARY KEY"
+            lt.Constraints[name] = true
+        case old != name:
+            lt.ConstraintDefs[name], lt.Constraints[name] = lt.ConstraintDefs[old], true
+            delete(lt.ConstraintDefs, old)
+            delete(lt.Constraints, old)
+            if c, ok := lt.ConstraintComments[old]; ok {
+                lt.ConstraintComments[name] = c
+                delete(lt.ConstraintComments, old)
+            }
+        }
+        if dt.PrimaryKeyComment != "" { lt.ConstraintComments[name] = dt.PrimaryKeyComment }
+    }
 
     for _, fk := range dt.ForeignKeys {
         if fk == nil || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
