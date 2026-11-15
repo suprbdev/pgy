@@ -88,3 +88,43 @@ func TestSQLFunctionBodyUncheckedOnlyWithNewRelations(t *testing.T) {
 		t.Errorf("with every relation already present, bodies are checked as usual:\n%s", sql)
 	}
 }
+
+func TestSQLStandardBodies(t *testing.T) {
+	for body, want := range map[string]bool{
+		"begin atomic select 1; end": true,
+		"BEGIN\n  ATOMIC select 1; END": true,
+		"return x * 2":               true,
+		"select 1":                   false,
+		"begin return 1; end":        false,
+	} {
+		if got := schema.IsSQLStandardBody("sql", body); got != want {
+			t.Errorf("IsSQLStandardBody(%q) = %v", body, got)
+		}
+	}
+	if schema.IsSQLStandardBody("plpgsql", "return 1") {
+		t.Error("only language sql has SQL-standard bodies")
+	}
+	if got := routineBodySQL("sql", "begin atomic select 1; end;\n"); got != "begin atomic select 1; end" {
+		t.Errorf("routineBodySQL = %q", got)
+	}
+	if got := routineBodySQL("sql", "select 1"); got != "as $$\nselect 1\n$$" {
+		t.Errorf("routineBodySQL = %q", got)
+	}
+	cases := []struct {
+		body, live      string
+		replace, liveStd bool
+		want            bool
+	}{
+		{"begin atomic select 1; end", "BEGIN ATOMIC\n SELECT 1;\nEND", false, true, false},
+		{"begin atomic select 2; end", "BEGIN ATOMIC\n SELECT 1;\nEND", true, true, true},
+		{"select 1", "BEGIN ATOMIC\n SELECT 1;\nEND", false, true, true},
+		{"begin atomic select 1; end", "select 1", false, false, true},
+		{"select 1", "select 1", false, false, false},
+		{"", "anything", false, true, false},
+	}
+	for _, c := range cases {
+		if got := routineBodyChanged("sql", c.body, c.replace, c.live, c.liveStd); got != c.want {
+			t.Errorf("routineBodyChanged(%q, replace=%v, live std=%v) = %v, want %v", c.body, c.replace, c.liveStd, got, c.want)
+		}
+	}
+}
