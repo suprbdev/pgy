@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/schema"
@@ -68,5 +69,26 @@ func TestTableOptionsSkippedAndAltered(t *testing.T) {
 	d.Views["app.v"].ColumnComments = nil
 	if sql := Render(Plan(live, d, false)); sql != "" {
 		t.Errorf("unmanaged options must not diff, got:\n%s", sql)
+	}
+}
+
+func TestClusterAndReplicaIdentityFollowPrimaryKey(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {
+		Name: "t", ClusterOn: "t_pkey", ReplicaIdentity: "index t_pkey",
+		Columns: map[string]*schema.Column{"id": {Type: "int", PrimaryKey: true}},
+	}}}
+	alters := Plan(emptyLive(), d, false).Alters
+	pos := func(sub string) int {
+		for i, s := range alters {
+			if strings.Contains(s, sub) {
+				return i
+			}
+		}
+		t.Fatalf("missing %q in %v", sub, alters)
+		return -1
+	}
+	pk := pos("add primary key")
+	if pos("cluster on") < pk || pos("replica identity using index") < pk {
+		t.Errorf("CLUSTER ON and REPLICA IDENTITY must follow the primary key they use: %v", alters)
 	}
 }

@@ -2462,9 +2462,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
+                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
-                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
             } else {
                 // existing table: add missing columns, reconcile attributes
                 // of columns present in both
@@ -2496,11 +2496,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     })...)
                 }
                 if dt.PartitionOf == "" { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
-                if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
-                if stmt := clusterOnStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
                 // apply any missing constraints, indexes, triggers
                 applyTableConstraints(plan, live, fq, dt, lt, &deferredFKs, &deferredTriggers, unsafe)
+                if stmt := replicaIdentityStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
+                if stmt := clusterOnStmt(fq, dt, lt); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 // drops
                 if unsafe && dt.PartitionOf == "" {
                     dropCols := []string{}
