@@ -322,3 +322,23 @@ database:
 		t.Errorf("settings = %v", d.DatabaseRoleSettings)
 	}
 }
+
+func TestColumnNDistinctParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns:
+      a: {type: int, nDistinct: -0.25, nDistinctInherited: 1000}
+      b: {type: int}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := d.Tables["app.t"].Columns
+	if a := cols["a"]; a.NDistinct == nil || *a.NDistinct != -0.25 || a.NDistinctInherited == nil || *a.NDistinctInherited != 1000 {
+		t.Errorf("a = %+v", a)
+	}
+	if b := cols["b"]; b.NDistinct != nil || b.NDistinctInherited != nil {
+		t.Errorf("unset options must stay nil: %+v", b)
+	}
+}

@@ -341,6 +341,8 @@ type Column struct {
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
     Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
     StatisticsTarget *int `yaml:"statisticsTarget"` // SET STATISTICS; -1 = default; nil = unmanaged
+    NDistinct          *float64 `yaml:"-"` // SET (n_distinct = ...); 0 = no override (RESET); nil = unmanaged
+    NDistinctInherited *float64 `yaml:"-"` // SET (n_distinct_inherited = ...); 0 = no override (RESET); nil = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -1189,6 +1191,8 @@ func parseColumnSpec(spec any) *Column {
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }
     if v, ok := m["statisticsTarget"].(int); ok { c.StatisticsTarget = &v }
+    c.NDistinct = floatPtr(m["nDistinct"])
+    c.NDistinctInherited = floatPtr(m["nDistinctInherited"])
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
     }

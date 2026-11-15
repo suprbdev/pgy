@@ -354,6 +354,7 @@ type LiveColumn struct{
     Virtual   bool   // generated column is VIRTUAL (PostgreSQL 18+), not STORED
     Collation   string // explicit collation differing from the type's default ("" = default)
     StatisticsTarget *int // attstattarget; nil = default
+    Options     map[string]string // attoptions (n_distinct, n_distinct_inherited)
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -542,7 +543,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation and cn.nspname <> 'pg_catalog'), ''),
                (select case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
                 from pg_type ty where ty.oid = a.atttypid),
-               a.attinhcount > 0
+               a.attinhcount > 0,
+               coalesce(a.attoptions, '{}'::text[])
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -561,12 +563,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var statTarget *int
             var collSchema, typeStorage string
             var inherited bool
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited); err != nil { return err }
+            var attoptions []string
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
             lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited}
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
+            if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
             t.Columns[colName] = lc
         }
         return nil
@@ -2484,7 +2488,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         // otherwise run before the column exists and force a
                         // two-migration split.
                         plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
-                        if c.Storage != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage)) }
+                        plan.Alters = append(plan.Alters, newColumnStmts(fq, cn, c)...)
                         continue
                     }
                     plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
@@ -4317,6 +4321,7 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     if c.StatisticsTarget != nil && *c.StatisticsTarget != statisticsTargetOf(lc) {
         out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
     }
+    out = append(out, attributeOptionStmts(target, c, lc)...)
 
     if c.Generated != "" || lc.Generated != "" {
         switch {
@@ -4441,20 +4446,52 @@ func renderStorageParams(with map[string]string) string {
     return " with (" + strings.Join(parts, ", ") + ")"
 }
 
-// columnStorageStmts emits SET STORAGE for the columns of a newly created
-// table that declare one (CREATE TABLE only accepts STORAGE from PostgreSQL 16).
+// columnStorageStmts emits newColumnStmts for every column of a newly
+// created table.
 func columnStorageStmts(fq string, dt *schema.Table) []string {
     out := []string{}
     for _, cn := range sortedKeys(dt.Columns) {
-        c := dt.Columns[cn]
-        if c == nil { continue }
-        if c.Storage != "" {
-            out = append(out, fmt.Sprintf("alter table %s alter column %s set storage %s;", pqIdent(fq), pqIdent(cn), c.Storage))
-        }
-        if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
-            out = append(out, fmt.Sprintf("alter table %s alter column %s set statistics %d;", pqIdent(fq), pqIdent(cn), *c.StatisticsTarget))
+        if c := dt.Columns[cn]; c != nil { out = append(out, newColumnStmts(fq, cn, c)...) }
+    }
+    return out
+}
+
+// newColumnStmts emits the column settings CREATE TABLE and ADD COLUMN
+// cannot carry: SET STORAGE (accepted inline only from PostgreSQL 16), SET
+// STATISTICS and attribute options.
+func newColumnStmts(fq, cn string, c *schema.Column) []string {
+    out := []string{}
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    if c.Storage != "" { out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage)) }
+    if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
+        out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
+    }
+    return append(out, attributeOptionStmts(target, c, &LiveColumn{})...)
+}
+
+// attributeOptionStmts emits SET (...) / RESET (...) for the attribute
+// options c manages that differ from lc. A value of 0 means no override,
+// which PostgreSQL's ANALYZE treats the same as an unset option.
+func attributeOptionStmts(target string, c *schema.Column, lc *LiveColumn) []string {
+    set, reset := []string{}, []string{}
+    for _, o := range []struct {
+        name string
+        want *float64
+    }{{"n_distinct", c.NDistinct}, {"n_distinct_inherited", c.NDistinctInherited}} {
+        if o.want == nil { continue }
+        cur := 0.0
+        if v, ok := lc.Options[o.name]; ok { cur, _ = strconv.ParseFloat(v, 64) }
+        switch *o.want {
+        case cur:
+        case 0:
+            reset = append(reset, o.name)
+        default:
+            set = append(set, o.name+" = "+strconv.FormatFloat(*o.want, 'g', -1, 64))
         }
     }
+    out := []string{}
+    if len(set) > 0 { out = append(out, fmt.Sprintf("%s set (%s);", target, strings.Join(set, ", "))) }
+    if len(reset) > 0 { out = append(out, fmt.Sprintf("%s reset (%s);", target, strings.Join(reset, ", "))) }
     return out
 }
 
