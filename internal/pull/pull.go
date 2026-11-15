@@ -59,6 +59,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b := &builder{live: live, d: live.Details, opts: opts, res: &Result{}, blocks: map[string]*node{}}
 	b.collectSerials()
 	b.schemas()
+	b.unsupported()
 	b.types()
 	b.domains()
 	b.collations()
@@ -145,6 +146,19 @@ func (b *builder) schemaHasObjectsBesidesMigrations(s string) bool {
 		}
 	}
 	return false
+}
+
+// unsupported warns about objects in the pulled schemas that pgy cannot
+// express, so the YAML is known to be incomplete.
+func (b *builder) unsupported() {
+	if b.live.Details == nil {
+		return
+	}
+	for _, o := range b.live.Details.Unsupported {
+		if b.wantSchema(o.Schema) {
+			b.warn("%s %s.%s is not supported by pgy and was left out", o.Kind, o.Schema, o.Name)
+		}
+	}
 }
 
 func (b *builder) block(fq string) (*node, string, bool) {

@@ -28,8 +28,10 @@ Without --out the YAML is printed as one document. With --out, one file per
 schema (<schema>.yml) plus database.yml (extensions, publications, event
 triggers, default privileges, roles) is written to that directory.
 
-Objects pgy cannot express (such as functions written in C) are reported
-on stderr.`,
+Objects pgy cannot express (functions written in C, foreign tables,
+operators, operator classes and families, conversions, base types, text
+search parsers and templates) are reported on stderr; objects that belong
+to an extension are not.`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
