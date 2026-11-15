@@ -12,6 +12,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Format 3: `tables:` list](#format-3-tables-list)
 - [Merging across files](#merging-across-files)
 - [Extensions](#extensions)
+- [Database Settings](#database-settings)
 - [Tables](#tables)
   - [Columns](#columns)
   - [Primary Key](#primary-key)
@@ -271,6 +272,20 @@ extensions:
     schema: extensions
     version: "1.6"
 ```
+
+## Database Settings
+
+A top-level `database:` block manages settings of the database pgy is connected to, for all roles (`ALTER DATABASE ... SET`):
+
+```yaml
+database:
+  set:
+    timezone: UTC
+    search_path: "app, public"
+    statement_timeout: 30s
+```
+
+When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
 
 ## Tables
 

@@ -27,6 +27,14 @@
         ]
       }
     },
+    "database": {
+      "description": "Settings of the target database.",
+      "type": "object",
+      "properties": {
+        "set": { "type": "object", "description": "ALTER DATABASE ... SET parameters (for all roles). Authoritative: unlisted settings are reset.", "additionalProperties": { "$ref": "#/definitions/scalar" } }
+      },
+      "additionalProperties": false
+    },
     "defaultPrivileges": {
       "description": "ALTER DEFAULT PRIVILEGES: privileges granted automatically on objects created later. Grantees not listed are unmanaged; [] revokes everything from a grantee.",
       "type": "array",

@@ -60,6 +60,9 @@ type Live struct{
     DefaultACLs    map[string]map[string]map[string]bool
     DefaultACLRows map[string]bool
     CurrentUser    string
+    // DatabaseConfig: ALTER DATABASE ... SET settings of the connected
+    // database (for all roles): lower-cased name -> value
+    DatabaseConfig map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
     // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
     Details *LiveDetails
@@ -1719,9 +1722,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
-    batch.add("select current_user, current_setting('server_version_num')::int", func(rows pgx.Rows) error {
+    batch.add(`select current_user, current_setting('server_version_num')::int,
+                      coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
+                                where d.datname = current_database() and s.setrole = 0), '{}'::text[])`, func(rows pgx.Rows) error {
         for rows.Next() {
-            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion); err != nil { return err }
+            var config []string
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config); err != nil { return err }
+            l.DatabaseConfig = parseProconfig(config)
         }
         return nil
     })
@@ -2150,6 +2157,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, renames...)
     
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
+    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
+        plan.Creates = append(plan.Creates, "do "+dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString("alter database %I "+strings.ReplaceAll(c, "%", "%%"))))+";")
+    }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
     extNames := make([]string, 0, len(desired.Extensions))

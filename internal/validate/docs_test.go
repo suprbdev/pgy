@@ -10,7 +10,7 @@ import (
 
 var (
 	yamlBlockRe   = regexp.MustCompile("(?s)```yaml\n(.*?)```")
-	topLevelKeyRe = regexp.MustCompile(`(?m)^(schema \S|tables:|extensions:|roles:|types:|functions:|views:|sequences:|domains:|publications:|eventTriggers:|defaultPrivileges:|schemas:)`)
+	topLevelKeyRe = regexp.MustCompile(`(?m)^(schema \S|tables:|extensions:|roles:|types:|functions:|views:|sequences:|domains:|publications:|eventTriggers:|defaultPrivileges:|schemas:|database:)`)
 )
 
 // TestDocsYAMLExamplesValidate checks every complete YAML example in the

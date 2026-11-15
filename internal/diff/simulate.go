@@ -11,6 +11,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live)
     if desired == nil { return out }
     out, _ = applyRenames(out, desired)
+    if desired.DatabaseSettings != nil { out.DatabaseConfig = simulateConfig(desired.DatabaseSettings) }
     for fq, dt := range desired.Tables {
         if dt != nil && dt.Data != nil {
             if out.TableData == nil { out.TableData = map[string]*LiveTableData{} }
@@ -518,6 +519,7 @@ func cloneLive(l *Live) *Live {
         DefaultACLs:        cloneGrantMap(l.DefaultACLs),
         DefaultACLRows:     cloneSet(l.DefaultACLRows),
         CurrentUser:        l.CurrentUser,
+        DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         ServerVersion:      l.ServerVersion,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleComments:       cloneMap(l.RoleComments, nil),

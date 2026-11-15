@@ -295,3 +295,16 @@ roles:
 		t.Errorf("set = %v", set)
 	}
 }
+
+func TestDatabaseSettingsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+database:
+  set: {timezone: UTC, statement_timeout: 30s}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.DatabaseSettings["timezone"] != "UTC" || d.DatabaseSettings["statement_timeout"] != "30s" {
+		t.Errorf("settings = %v", d.DatabaseSettings)
+	}
+}

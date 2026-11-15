@@ -38,6 +38,7 @@ type Database struct {
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
     DefaultPrivileges []*DefaultPrivilege `yaml:"-"`
+    DatabaseSettings  map[string]string   `yaml:"-"` // ALTER DATABASE ... SET for the target database; nil = unmanaged
 }
 
 // Role is a cluster-level role (CREATE ROLE). Passwords are intentionally
@@ -690,6 +691,10 @@ func Merge(dbs []*Database) *Database {
             for k, v := range d.SchemaOwners { merged.SchemaOwners[k] = v }
         }
         merged.DefaultPrivileges = append(merged.DefaultPrivileges, d.DefaultPrivileges...)
+        if d.DatabaseSettings != nil {
+            if merged.DatabaseSettings == nil { merged.DatabaseSettings = map[string]string{} }
+            for k, v := range d.DatabaseSettings { merged.DatabaseSettings[k] = v }
+        }
         // merge schema comments
         if len(d.SchemaComments) > 0 {
             if merged.SchemaComments == nil { merged.SchemaComments = map[string]string{} }
@@ -809,6 +814,12 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     }
     if dpRaw, ok := root["defaultPrivileges"]; ok {
         out.DefaultPrivileges = parseDefaultPrivileges(dpRaw)
+    }
+    if dbRaw, ok := root["database"].(map[string]any); ok {
+        if set, ok := dbRaw["set"].(map[string]any); ok {
+            out.DatabaseSettings = map[string]string{}
+            for k, v := range set { out.DatabaseSettings[k] = scalarToString(v) }
+        }
     }
     if pubRaw, ok := root["publications"]; ok {
         out.Publications = parsePublications(pubRaw)
