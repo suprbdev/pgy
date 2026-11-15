@@ -72,4 +72,6 @@ jobs:
       - name: Integration tests (PostgreSQL ${{ matrix.postgres }})
         env:
           PGY_TEST_DSN: postgres://pgy:pgy@localhost:5433/pgytest
+          # the service container's own pg_dump, which matches the server version
+          PGY_TEST_PGDUMP: docker exec -e PGPASSWORD=pgy ${{ job.services.postgres.id }} pg_dump -h localhost -U pgy
         run: go test -count=1 ./internal/cli/... ./internal/integration/...
