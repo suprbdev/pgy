@@ -185,7 +185,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             if o.v != "" { *o.dst = strings.TrimSpace(o.v) }
         }
         if sq.Cycle != nil { ls.Cycle = *sq.Cycle }
-        if sq.OwnedBy != "" { ls.Owner = qualifyOwnedBy(sq.OwnedBy) }
+        if sq.OwnedBy != "" { ls.Owner = qualifyOwnedBy(k, sq.OwnedBy) }
         out.SequenceDefs[k] = ls
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
         if sq.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], sq.Grants) }
@@ -304,7 +304,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
         lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: defaultFunctionCost(f.Language), Rows: defaultFunctionRows(f.Returns)}
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body))
         if prev != nil && !replaced { *lf = *prev }
-        if hasBody { lf.Body = f.Body }
+        if hasBody { lf.Body, lf.Returns = f.Body, f.Returns }
         if f.Volatility != "" { lf.Volatility = strings.ToLower(f.Volatility) }
         if f.Security != "" { lf.Security = strings.ToLower(f.Security) }
         if f.Strict != nil { lf.Strict = *f.Strict }

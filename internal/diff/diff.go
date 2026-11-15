@@ -194,6 +194,7 @@ type LiveFunction struct{
     Cost       float64 // procost
     Rows       float64 // prorows (0 unless set-returning)
     Config     map[string]string // proconfig: lower-cased parameter name -> value
+    Returns    string // pg_get_function_result, e.g. "SETOF integer"; "" when unknown
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
@@ -975,7 +976,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce(p.proconfig, '{}'::text[]),
                exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i'),
                case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
-               p.procost::float8, p.prorows::float8
+               p.procost::float8, p.prorows::float8,
+               case when p.prokind = 'p' then '' else coalesce(pg_get_function_result(p.oid), '') end
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -983,11 +985,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
-            var schemaName, funcName, args, src, vol, kind, parallel string
+            var schemaName, funcName, args, src, vol, kind, parallel, returns string
             var secdef, strict, leakproof, internal bool
             var config []string
             var cost, rows float64
-            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows); err != nil {
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
@@ -1000,7 +1002,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config)}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -2092,6 +2094,7 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
+    live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -2101,7 +2104,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SQL-language bodies, which are validated at CREATE time) without forming
     // a table->function->table cycle.
     deferredTriggers := []string{}
-    plan := &PlanDiff{}
+    plan := &PlanDiff{Warnings: recreateWarnings}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
     // policies, and memberships later in the plan
@@ -2275,7 +2278,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             found := liveFuncs[normalizedDesired]
             if found {
                 lf := live.FunctionDefs[normalizedDesired]
-                if lf == nil { continue }
+                if lf == nil || returnsChanged(f.Returns, lf.Returns) { continue }
                 // Empty YAML body means the body is unmanaged (attribute-only
                 // declaration, e.g. marking an extension function leakproof).
                 bodyChanged := strings.TrimSpace(f.Body) != "" &&
@@ -2315,6 +2318,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             body := f.Body
             verb := "create function"
             if found { verb = "create or replace function" }
+            if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s as %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, dollarQuote(body))
             plan.Creates = append(plan.Creates, stmt)
         case "procedure":
@@ -2383,7 +2387,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 // OWNED BY goes into Alters (rendered after all Creates):
                 // the owning table may itself be created by this plan, and
                 // CREATE SEQUENCE ... OWNED BY would fail before it exists.
-                plan.Alters = append(plan.Alters, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(e.Key), ownedByIdent(sq.OwnedBy)))
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(e.Key), ownedByIdent(e.Key, sq.OwnedBy)))
             }
         case "view":
             vw, ok := desired.Views[e.Key]
@@ -2704,18 +2708,22 @@ func sequenceAlterStmts(fq string, sq *schema.Sequence, ls *LiveSequence) []stri
     }
     out := []string{}
     if len(opts) > 0 { out = append(out, fmt.Sprintf("alter sequence %s %s;", pqIdent(fq), strings.Join(opts, " "))) }
-    if sq.OwnedBy != "" && qualifyOwnedBy(sq.OwnedBy) != ls.Owner {
-        out = append(out, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(fq), ownedByIdent(sq.OwnedBy)))
+    if sq.OwnedBy != "" && qualifyOwnedBy(fq, sq.OwnedBy) != ls.Owner {
+        out = append(out, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(fq), ownedByIdent(fq, sq.OwnedBy)))
     }
     return out
 }
 
-// qualifyOwnedBy returns an OWNED BY target as "schema.table.column" (public
-// when unqualified), or "" for none.
-func qualifyOwnedBy(s string) string {
+// qualifyOwnedBy returns sequence seq's OWNED BY target as
+// "schema.table.column" (in seq's schema when unqualified, since PostgreSQL
+// requires the two to share a schema), or "" for none.
+func qualifyOwnedBy(seq, s string) string {
     s = strings.TrimSpace(s)
     if strings.EqualFold(s, "none") { return "" }
-    if strings.Count(s, ".") == 1 { return "public." + s }
+    if strings.Count(s, ".") == 1 {
+        seqSchema, _, _ := strings.Cut(seq, ".")
+        return seqSchema + "." + s
+    }
     return s
 }
 
@@ -3012,6 +3020,62 @@ func inCurrentDatabase(prefix, clause string) string {
     return "do " + dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString(prefix+strings.ReplaceAll(clause, "%", "%%")))) + ";"
 }
 
+// recreateChangedFunctions finds desired functions whose return type differs
+// from live, which CREATE OR REPLACE cannot change. Under --unsafe each is
+// planned as new: the returned live is a copy without it (or its comment,
+// grants, owner and PUBLIC EXECUTE, which DROP FUNCTION discards), and
+// recreated maps its normalized signature to the DROP FUNCTION to run first.
+// Without --unsafe, live is returned unchanged with a warning per function.
+func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, warns []Warning) {
+    out = live
+    if live == nil || desired == nil { return out, nil, nil }
+    for _, k := range sortedKeys(desired.Functions) {
+        f := desired.Functions[k]
+        if f == nil || strings.TrimSpace(f.Body) == "" { continue }
+        fname := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(fname + f.ArgsSig)
+        lf := live.FunctionDefs[norm]
+        if lf == nil || !returnsChanged(f.Returns, lf.Returns) { continue }
+        if !unsafe {
+            warns = append(warns, Warning{Message: fmt.Sprintf("function %s%s: return type changed from %s to %s; that drops and recreates the function, which needs --unsafe", fname, f.ArgsSig, lf.Returns, f.Returns)})
+            continue
+        }
+        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
+        recreated[norm] = fmt.Sprintf("drop function %s;", pqIdent(fname)+grantFuncArgs(f.ArgsSig))
+        delete(out.Functions, lf.Signature)
+        delete(out.FunctionDefs, norm)
+        delete(out.FunctionComments, norm)
+        delete(out.FunctionGrants, norm)
+        delete(out.FunctionPublicExec, norm)
+        delete(out.Owners, "proc:"+norm)
+    }
+    return out, recreated, warns
+}
+
+// returnsChanged reports whether a function's declared return type differs
+// from the live one. Only "[setof] type" forms are compared, ignoring schema
+// qualifiers and type modifiers (PostgreSQL keeps neither in a function's
+// result type); RETURNS TABLE and unknown live types never count as changed.
+func returnsChanged(desired, live string) bool {
+    a, ok := returnTypeKey(desired)
+    if !ok { return false }
+    b, ok := returnTypeKey(live)
+    return ok && a != b
+}
+
+var typmodRe = regexp.MustCompile(`\([^()]*\)`)
+
+func returnTypeKey(s string) (string, bool) {
+    s = strings.ToLower(strings.Join(strings.Fields(s), " "))
+    if s == "" || strings.HasPrefix(s, "table(") || strings.HasPrefix(s, "table ") { return "", false }
+    setof := ""
+    if rest, ok := strings.CutPrefix(s, "setof "); ok { setof, s = "setof ", rest }
+    s = typmodRe.ReplaceAllString(s, "")
+    s = strings.ReplaceAll(s, `"`, "")
+    if i := strings.LastIndexByte(s, '.'); i >= 0 { s = s[i+1:] }
+    return setof + normalizeColumnType(strings.TrimSpace(s)), true
+}
+
 // dollarTag returns a dollar-quote delimiter that does not occur in body:
 // $$, else $body$, $body1$, ...
 func dollarTag(body string) string {
@@ -3155,10 +3219,11 @@ func renderDomain(fq string, dm *schema.Domain) string {
     return strings.Join(parts, " ") + ";"
 }
 
-// ownedByIdent quotes a table.column (or schema.table.column) OWNED BY target.
-func ownedByIdent(s string) string {
+// ownedByIdent quotes sequence seq's table.column (or schema.table.column)
+// OWNED BY target, schema-qualified.
+func ownedByIdent(seq, s string) string {
     if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
-    parts := strings.Split(s, ".")
+    parts := strings.Split(qualifyOwnedBy(seq, s), ".")
     for i := range parts { parts[i] = `"` + parts[i] + `"` }
     return strings.Join(parts, ".")
 }

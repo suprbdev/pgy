@@ -23,7 +23,7 @@ func TestSequenceAltered(t *testing.T) {
 	p := Plan(live, seqDB(sq), false)
 	want := []string{
 		`alter sequence "public"."s" as bigint increment by 5 maxvalue 1000000 cache 20 cycle;`,
-		`alter sequence "public"."s" owned by "orders"."id";`,
+		`alter sequence "public"."s" owned by "public"."orders"."id";`,
 	}
 	if len(p.Alters) != 2 || p.Alters[0] != want[0] || p.Alters[1] != want[1] {
 		t.Errorf("want %v, got %v", want, p.Alters)

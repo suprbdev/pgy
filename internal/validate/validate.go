@@ -371,7 +371,11 @@ func Database(d *schema.Database) []Issue {
 			if owner := sq.OwnedBy; owner != "" && !strings.EqualFold(owner, "none") {
 				parts := strings.Split(owner, ".")
 				if len(parts) >= 2 {
-					table := qualifyPublic(strings.Join(parts[:len(parts)-1], "."))
+					table := strings.Join(parts[:len(parts)-1], ".")
+					if len(parts) == 2 {
+						seqSchema, _, _ := strings.Cut(k, ".")
+						table = seqSchema + "." + table
+					}
 					if t := d.Tables[table]; t != nil && len(t.Columns) > 0 && t.Columns[parts[len(parts)-1]] == nil {
 						add(Error, "sequence "+k, "owned by unknown column %s", owner)
 					}

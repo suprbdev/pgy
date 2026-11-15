@@ -842,7 +842,7 @@ schema public:
 | `start` | integer | `START WITH` value |
 | `cache` | integer | Number of values preallocated per session |
 | `cycle` | boolean | Wrap around when the limit is reached |
-| `ownedBy` | string | `table.column` (or `schema.table.column`) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
+| `ownedBy` | string | `table.column` (or `schema.table.column`; the table must be in the sequence's schema) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
 | `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -904,7 +904,7 @@ schema public:
 | `set` | map | `SET` configuration options (e.g. `search_path`), values as SQL. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. Signature or return type changes are not supported. Create a new function instead. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the arguments declares a different function: the old one stays, or is dropped with `--unsafe --prune`. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
 | *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
