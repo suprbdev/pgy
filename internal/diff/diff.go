@@ -191,6 +191,7 @@ type LiveSequence struct {
     Cycle     bool
     Owner     string
     Unlogged  bool // relpersistence = 'u'
+    Name      string // "schema.sequence"
 }
 
 // LiveDomain is a domain's default, NOT NULL flag and CHECK constraints
@@ -1464,6 +1465,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, seqName)
+            ls.Name = key
             l.Sequences[key] = true
             l.SequenceDefs[key] = ls
             if t := l.Tables[idSchema+"."+idTable]; t != nil && idColumn != "" {
@@ -3816,7 +3818,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
             name := truncateIdent(ct.Name)
             have := ""
-            if lt != nil && !constraintRecreated(lt, name, renderConstraintDef(ct), unsafe) { have = lt.ConstraintComments[name] }
+            if lt != nil && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct)) { have = lt.ConstraintComments[name] }
             comment(fmt.Sprintf("constraint %s on %s", pqIdent(name), pqIdent(k)), ct.Comment, have)
         }
         for _, tr := range dt.Triggers {
@@ -4407,7 +4409,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     if dt.PrimaryKeyName != "" { pkAdd = "add constraint " + quoteIdent(truncateIdent(dt.PrimaryKeyName)) + " primary key" }
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s);", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
@@ -4573,7 +4575,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
             switch {
-            case unsafe && ok && !constraintDefsEqual(def, liveDef):
+            case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
@@ -5006,7 +5008,7 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     if !c.Nullable && lc.Nullable {
         out = append(out, target+" set not null;")
     }
-    out = append(out, identityAlterStmts(target, c, lc, unsafe)...)
+    out = append(out, identityAlterStmts(fq, target, c, lc, unsafe)...)
     droppingIdentity := lc.Identity != "" && c.Identity == "" && unsafe && c.Generated == ""
     if c.Nullable && !lc.Nullable && !c.PrimaryKey && !pkCols[cn] && c.Identity == "" && (lc.Identity == "" || droppingIdentity) {
         out = append(out, target+" drop not null;")
@@ -5019,7 +5021,7 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 // it also adds an identity to an existing column (dropping its default
 // first; the new sequence starts at start, not past existing values) and
 // drops one the YAML no longer declares.
-func identityAlterStmts(target string, c *schema.Column, lc *LiveColumn, unsafe bool) []string {
+func identityAlterStmts(fq, target string, c *schema.Column, lc *LiveColumn, unsafe bool) []string {
     switch {
     case c.Identity == "" && lc.Identity == "":
         return nil
@@ -5042,8 +5044,19 @@ func identityAlterStmts(target string, c *schema.Column, lc *LiveColumn, unsafe 
             if *o.Cycle { sets = append(sets, "set cycle") } else { sets = append(sets, "set no cycle") }
         }
     }
-    if len(sets) == 0 { return nil }
-    return []string{target + " " + strings.Join(sets, " ") + ";"}
+    out := []string{}
+    if len(sets) > 0 { out = append(out, target+" "+strings.Join(sets, " ")+";") }
+    if o, ls := c.IdentityOptions, lc.IdentitySequence; o != nil && o.Name != "" && ls != nil && ls.Name != "" {
+        if want := IdentitySequenceName(fq, o.Name); want != ls.Name { out = append(out, relocateStmts("sequence", ls.Name, want, "")...) }
+    }
+    return out
+}
+
+// IdentitySequenceName qualifies an identity column's sequenceName with the
+// table's schema, where PostgreSQL creates an unqualified one.
+func IdentitySequenceName(fq, name string) string {
+    if strings.Contains(name, ".") { return name }
+    return schemaPrefixOf(fq) + name
 }
 
 type identityOptionField struct {
@@ -5066,6 +5079,7 @@ func identityOptionFields(o *schema.Sequence) []identityOptionField {
 func identityOptionsClause(o *schema.Sequence) string {
     if o == nil { return "" }
     parts := []string{}
+    if o.Name != "" { parts = append(parts, "sequence name "+pqIdent(o.Name)) }
     for _, f := range identityOptionFields(o) {
         if f.want != "" { parts = append(parts, f.clause+" "+f.want) }
     }
@@ -5414,6 +5428,14 @@ func deferralClause(deferrable, initiallyDeferred bool) string {
 
 // renderConstraintDef renders the definition body of a named check/unique/
 // exclude constraint. Returns "" for unknown constraint types.
+// indexParameters renders the INCLUDE and WITH clauses of a primary key or
+// unique constraint's index.
+func indexParameters(include []string, with map[string]string) string {
+    out := ""
+    if len(include) > 0 { out = " include (" + constraintColumns(include) + ")" }
+    return out + renderStorageParams(with)
+}
+
 func renderConstraintDef(ct *schema.Constraint) string {
     switch strings.ToLower(ct.Type) {
     case "check":
@@ -5423,7 +5445,7 @@ func renderConstraintDef(ct *schema.Constraint) string {
     case "unique":
         nulls := ""
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
-        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
         return fmt.Sprintf("exclude %s", ct.Expression) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
@@ -5724,12 +5746,32 @@ func indexDefinitionDiffers(ix *schema.Index, li *LiveIndex) bool {
         if !constraintDefsEqual(c, li.Include[i]) { return true }
     }
     if !constraintDefsEqual(ix.Where, li.Predicate) { return true }
-    if len(ix.With) != len(li.Options) { return true }
-    for k, v := range ix.With {
-        lv, ok := li.Options[strings.ToLower(k)]
-        if !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(lv)) { return true }
+    return !storageOptionsEqual(ix.With, li.Options)
+}
+
+// storageOptionsEqual compares a YAML with block with an index's reloptions
+// (lower-cased names), ignoring quotes and case in values.
+func storageOptionsEqual(want, live map[string]string) bool {
+    if len(want) != len(live) { return false }
+    for k, v := range want {
+        lv, ok := live[strings.ToLower(k)]
+        if !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(lv)) { return false }
     }
-    return false
+    return true
+}
+
+var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\s*=[^)]*\)`)
+
+// constraintMatchesLive compares named constraint ct with its live
+// definition from pg_get_constraintdef. Index storage parameters are left
+// out of the text comparison; when the YAML sets with, it is compared with
+// the backing index's options instead.
+func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bool {
+    strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
+    if !constraintDefsEqual(strip(renderConstraintDef(ct)), strip(lt.ConstraintDefs[name])) { return false }
+    if ct.With == nil { return true }
+    li := lt.IndexDefs[name]
+    return li != nil && storageOptionsEqual(ct.With, li.Options)
 }
 
 func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {

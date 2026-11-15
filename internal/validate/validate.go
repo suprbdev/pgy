@@ -153,6 +153,7 @@ func Database(d *schema.Database) []Issue {
 			}
 		}
 		need("primary key", t.PrimaryKey)
+		need("primary key include", t.PrimaryKeyInclude)
 		for _, ix := range t.Indexes {
 			if ix == nil {
 				continue
@@ -178,6 +179,7 @@ func Database(d *schema.Database) []Issue {
 			switch strings.ToLower(ct.Type) {
 			case "unique":
 				need("constraint "+ct.Name, ct.Columns)
+				need("constraint "+ct.Name+" include", ct.Include)
 			case "check", "exclude":
 				if strings.TrimSpace(ct.Expression) == "" {
 					add(Error, obj, "constraint %s has no expression", ct.Name)

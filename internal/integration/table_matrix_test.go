@@ -53,6 +53,7 @@ var tableAttributeCases = map[string]string{
 	"rule":             `    rules: {t_no_delete: {event: delete, instead: true, do: nothing}}`,
 	"statistics":       `    statistics: {t_ab_stats: {kinds: [ndistinct, dependencies], columns: [a, b]}}`,
 	"statistics_target": `    statistics: {t_ab_stats: {columns: [a, b], statisticsTarget: 500}}`,
+	"unique_include":    `    constraints: {t_b_uq: {type: unique, columns: [b], include: [a], with: {fillfactor: 70}}}`,
 	"grants":           `    grants: {public: [select, insert]}`,
 	"replica_full":     `    replicaIdentity: full`,
 	"replica_index":    `    replicaIdentity: index t_pkey`,

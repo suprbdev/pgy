@@ -403,6 +403,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
                     if v := strings.TrimSpace(f.v); v != "" { *f.dst = v }
                 }
                 if o.Cycle != nil { ls.Cycle = *o.Cycle }
+                if o.Name != "" { ls.Name = IdentitySequenceName(fq, o.Name) }
             }
             lc.IdentitySequence = ls
         }

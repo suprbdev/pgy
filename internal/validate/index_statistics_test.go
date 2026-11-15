@@ -28,3 +28,20 @@ schema app:
 		t.Errorf("valid statisticsTargets flagged:\n%s", got)
 	}
 }
+
+func TestValidateKeyIncludeColumns(t *testing.T) {
+	p := write(t, t.TempDir(), "k.yml", `
+schema app:
+  table a:
+    columns: {x: {type: int}, y: {type: text}}
+    primaryKey: {a_pk: {columns: [x], include: [nope]}}
+    constraints:
+      a_uq: {type: unique, columns: [y], include: [missing]}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{`primary key include references unknown column "nope"`, `constraint a_uq include references unknown column "missing"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
