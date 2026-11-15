@@ -111,3 +111,24 @@ func TestUnquoteIdent(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildExtensionsKeepTheirSchema(t *testing.T) {
+	live := &diff.Live{
+		Extensions:    map[string]bool{"citext": true, "pgcrypto": true},
+		ExtensionDefs: map[string]*diff.LiveExtension{"citext": {Schema: "public"}, "pgcrypto": {Schema: "ext"}},
+		Details:       &diff.LiveDetails{},
+	}
+	res, err := Build(live, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out string
+	for _, f := range res.Files {
+		out += string(f.Content)
+	}
+	for _, want := range []string{"{name: citext, ifNotExists: true, schema: public}", "{name: pgcrypto, ifNotExists: true, schema: ext}"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

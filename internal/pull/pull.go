@@ -1333,7 +1333,7 @@ func (b *builder) database() *node {
 				continue
 			}
 			le := b.live.ExtensionDefs[name]
-			if le == nil || le.Schema == "public" {
+			if le == nil {
 				exts.Content = append(exts.Content, str(name))
 				continue
 			}
