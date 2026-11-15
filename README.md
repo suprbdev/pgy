@@ -131,7 +131,7 @@ buffer: ./.pgy.buffer.sql
 
 | Command | What it does |
 |---------|--------------|
-| `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, and text search parsers and templates. Typed tables (`CREATE TABLE ... OF type`) are written as plain tables, with a warning. |
+| `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, ordered-set aggregates, and text search parsers and templates. Typed tables (`CREATE TABLE ... OF type`) are written as plain tables, with a warning. |
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations. Exits 1 on errors. |
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |

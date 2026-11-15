@@ -80,3 +80,34 @@ schema app:
 		t.Errorf("u: %q %q", tb.PrimaryKeyName, tb.PrimaryKeyComment)
 	}
 }
+
+func TestAggregateOptionsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  aggregate total(int):
+    sfunc: app.add2
+    stype: int
+    sspace: 8
+    msfunc: app."Add2"
+    mfinalfuncExtra: true
+    mfinalfuncModify: SHAREABLE
+    minitcond: " 0"
+    sortop: ">"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ag *Aggregate
+	for _, a := range db.Aggregates {
+		ag = a
+	}
+	want := map[string]string{"sspace": "8", "msfunc": `app."Add2"`, "mfinalfunc_extra": "true", "mfinalfunc_modify": "shareable", "minitcond": " 0", "sortop": ">"}
+	if ag == nil || len(ag.Options) != len(want) {
+		t.Fatalf("options: %+v", ag)
+	}
+	for k, v := range want {
+		if ag.Options[k] != v {
+			t.Errorf("%s = %q, want %q", k, ag.Options[k], v)
+		}
+	}
+}

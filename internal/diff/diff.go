@@ -310,9 +310,12 @@ func newLiveTable() *LiveTable {
 
 // LiveAggregate is an aggregate's definition from pg_aggregate. Function
 // fields are regproc text ("" when unset); Parallel is safe | restricted |
-// unsafe.
+// unsafe. Options holds every schema.AggregateOptions entry by SQL name:
+// functions, types and sortop as text ("" when unset), spaces as integers,
+// *_extra as true/false and *_modify as read_only | shareable | read_write.
 type LiveAggregate struct {
     SFunc, SType, FinalFunc, InitCond, CombineFunc, Parallel string
+    Options map[string]string
 }
 
 // LiveStatistic is an extended statistics object: its kinds (empty = all)
@@ -872,7 +875,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
                a.aggtransfn::text, format_type(a.aggtranstype, null), coalesce(nullif(a.aggfinalfn::text, '-'), ''),
                coalesce(a.agginitval, ''), coalesce(nullif(a.aggcombinefn::text, '-'), ''),
-               case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end
+               case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
+               a.aggtransspace::text, a.aggfinalextra::text,
+               case a.aggfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
+               coalesce(nullif(a.aggserialfn::text, '-'), ''), coalesce(nullif(a.aggdeserialfn::text, '-'), ''),
+               coalesce(nullif(a.aggmtransfn::text, '-'), ''), coalesce(nullif(a.aggminvtransfn::text, '-'), ''),
+               case when a.aggmtranstype = 0 then '' else format_type(a.aggmtranstype, null) end, a.aggmtransspace::text,
+               coalesce(nullif(a.aggmfinalfn::text, '-'), ''), a.aggmfinalextra::text,
+               case a.aggmfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
+               coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -884,7 +895,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for aggRows.Next() {
             var schemaName, name, args string
             la := &LiveAggregate{}
-            if err := aggRows.Scan(&schemaName, &name, &args, &la.SFunc, &la.SType, &la.FinalFunc, &la.InitCond, &la.CombineFunc, &la.Parallel); err != nil { return err }
+            opts := make([]string, len(schema.AggregateOptions))
+            dest := []any{&schemaName, &name, &args, &la.SFunc, &la.SType, &la.FinalFunc, &la.InitCond, &la.CombineFunc, &la.Parallel}
+            for i := range opts { dest = append(dest, &opts[i]) }
+            if err := aggRows.Scan(dest...); err != nil { return err }
+            la.Options = map[string]string{}
+            for i, o := range schema.AggregateOptions { la.Options[o[1]] = opts[i] }
             l.AggregateDefs[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, name, args))] = la
         }
         return nil
@@ -3534,7 +3550,53 @@ func renderAggregate(name string, ag *schema.Aggregate) string {
     if ag.CombineFunc != "" { opts = append(opts, "combinefunc = "+ag.CombineFunc) }
     if ag.InitCond != "" { opts = append(opts, "initcond = "+quoteString(ag.InitCond)) }
     if ag.Parallel != "" { opts = append(opts, "parallel = "+ag.Parallel) }
+    for _, o := range schema.AggregateOptions {
+        v, ok := ag.Options[o[1]]
+        switch {
+        case !ok || v == "":
+        case strings.HasSuffix(o[1], "_extra"):
+            if strings.EqualFold(v, "true") { opts = append(opts, o[1]) }
+        case o[1] == "minitcond":
+            opts = append(opts, "minitcond = "+quoteString(v))
+        case o[1] == "sortop" && strings.Contains(v, ".") && !strings.HasPrefix(strings.ToLower(v), "operator("):
+            opts = append(opts, "sortop = operator("+v+")")
+        default:
+            opts = append(opts, o[1]+" = "+v)
+        }
+    }
     return fmt.Sprintf("create or replace aggregate %s%s (%s);", pqIdent(name), ag.ArgsSig, strings.Join(opts, ", "))
+}
+
+// aggregateOptionsMatch compares the optional aggregate options the YAML
+// sets with live; options it leaves out are unmanaged.
+func aggregateOptionsMatch(ag *schema.Aggregate, la *LiveAggregate, fn func(string) string) bool {
+    for k, want := range ag.Options {
+        have := la.Options[k]
+        switch {
+        case strings.HasSuffix(k, "_extra"):
+            if strings.EqualFold(want, "true") != strings.EqualFold(have, "true") { return false }
+        case strings.HasSuffix(k, "_modify"):
+            if want == "" { want = "read_only" }
+            if want != have { return false }
+        case strings.HasSuffix(k, "space"):
+            if want == "" { want = "0" }
+            if want != have { return false }
+        case k == "mstype":
+            if normalizeColumnType(want) != normalizeColumnType(have) { return false }
+        case k == "minitcond":
+            if want != have { return false }
+        case k == "sortop":
+            op := func(s string) string {
+                s = strings.TrimSpace(s)
+                if l := strings.ToLower(s); strings.HasPrefix(l, "operator(") && strings.HasSuffix(s, ")") { s = s[len("operator(") : len(s)-1] }
+                return strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "pg_catalog."), "public.")
+            }
+            if op(want) != op(have) { return false }
+        default:
+            if fn(want) != fn(have) { return false }
+        }
+    }
+    return true
 }
 
 // aggregateMatchesLive compares an aggregate's functions (ignoring public
@@ -3547,7 +3609,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
     }
     return fn(ag.SFunc) == fn(la.SFunc) && normalizeColumnType(ag.SType) == normalizeColumnType(la.SType) &&
         fn(ag.FinalFunc) == fn(la.FinalFunc) && fn(ag.CombineFunc) == fn(la.CombineFunc) &&
-        ag.InitCond == la.InitCond && (ag.Parallel == "" || ag.Parallel == la.Parallel)
+        ag.InitCond == la.InitCond && (ag.Parallel == "" || ag.Parallel == la.Parallel) && aggregateOptionsMatch(ag, la, fn)
 }
 
 // tsConfigStmts creates a missing text search configuration (as a copy or

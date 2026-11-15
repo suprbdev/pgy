@@ -253,7 +253,20 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         norm := normalizeFunctionSignature(schema.RoutineName(k) + aggregateArgs(ag.ArgsSig))
         parallel := ag.Parallel
         if parallel == "" { parallel = "unsafe" }
-        out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, CombineFunc: ag.CombineFunc, Parallel: parallel}
+        opts := map[string]string{}
+        for _, o := range schema.AggregateOptions {
+            v := ag.Options[o[1]]
+            switch {
+            case strings.HasSuffix(o[1], "_extra"):
+                v = strconv.FormatBool(strings.EqualFold(v, "true"))
+            case strings.HasSuffix(o[1], "_modify") && v == "":
+                v = "read_only"
+            case strings.HasSuffix(o[1], "space") && v == "":
+                v = "0"
+            }
+            opts[o[1]] = v
+        }
+        out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, CombineFunc: ag.CombineFunc, Parallel: parallel, Options: opts}
         out.FunctionDefs[norm] = &LiveFunction{Signature: schema.RoutineName(k) + aggregateArgs(ag.ArgsSig), Kind: "a"}
         if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
     }
@@ -625,7 +638,7 @@ func cloneLive(l *Live) *Live {
             return &c
         }),
         EnumLabels: cloneMap(l.EnumLabels, func(v []string) []string { return append([]string(nil), v...) }),
-        AggregateDefs: cloneMap(l.AggregateDefs, func(a *LiveAggregate) *LiveAggregate { c := *a; return &c }),
+        AggregateDefs: cloneMap(l.AggregateDefs, func(a *LiveAggregate) *LiveAggregate { c := *a; c.Options = cloneMap(a.Options, nil); return &c }),
         CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         CompositeCollations: cloneMap(l.CompositeCollations, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         CompositeComments:   cloneMap(l.CompositeComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),

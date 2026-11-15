@@ -1013,6 +1013,20 @@ schema app:
     comment: sum of ints
 ```
 
+The other `CREATE AGGREGATE` options use the same names, in camelCase where PostgreSQL's have an underscore:
+
+| Property | Description |
+|----------|-------------|
+| `sspace` | Average state size in bytes (planner hint) |
+| `finalfuncExtra` | `true` passes the aggregate's arguments to `finalfunc` as extra null arguments |
+| `finalfuncModify` | `read_only` (default), `shareable` or `read_write`: whether `finalfunc` modifies the state |
+| `serialfunc`, `deserialfunc` | Serialize an `internal` state, so it can be combined in parallel |
+| `msfunc`, `minvfunc`, `mstype` | Moving-aggregate mode for window frames: forward and inverse transition functions and their state type |
+| `msspace`, `mfinalfunc`, `mfinalfuncExtra`, `mfinalfuncModify`, `minitcond` | The moving-aggregate versions of `sspace`, `finalfunc`, `finalfuncExtra`, `finalfuncModify` and `initcond` |
+| `sortop` | Sort operator for `min`/`max`-like aggregates, which can then use an index (`">"`, or `myschema.>`) |
+
+These are compared with `pg_aggregate` only when set; options left out are unmanaged. A replacement redefines the whole aggregate, though, so an option missing from the YAML is lost when another one changes. Ordered-set and hypothetical-set aggregates (`ORDER BY` in the arguments) aren't supported, and `pgy pull` reports them.
+
 ## Procedures
 
 Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted.

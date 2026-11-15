@@ -35,7 +35,7 @@ Features that encapsulate business logic, complex data structures, or procedural
 - [x] **Views** (Standard `CREATE VIEW`; `INSTEAD OF` triggers via `triggers:`; opt-in `replace: true` for `CREATE OR REPLACE` on every diff; `columnComments` → `COMMENT ON COLUMN`; `securityInvoker`/`securityBarrier`/`checkOption` diffed against live reloptions → `ALTER VIEW ... SET/RESET`)
 - [x] **Materialized Views** (`withData: false`; `with` storage parameters → `ALTER MATERIALIZED VIEW ... SET/RESET (...)`; `indexes:` created and diffed like table indexes)
 - [x] **Domains** (`domain <name>:` blocks → `CREATE DOMAIN` with type/collate/default/notNull/check/constraintName and named `checks`; default/not null diffed → `ALTER DOMAIN`, missing checks added, changed checks replaced and undeclared ones dropped under `--unsafe`; comments diffed)
-- [x] **Aggregates** (`aggregate <name>(args):` blocks → `CREATE OR REPLACE AGGREGATE` with sfunc/stype/finalfunc/combinefunc/initcond/parallel, created after their functions; diffed against `pg_aggregate`, comments, owners, prunable, pulled)
+- [x] **Aggregates** (`aggregate <name>(args):` blocks → `CREATE OR REPLACE AGGREGATE` with sfunc/stype/finalfunc/combinefunc/initcond/parallel, the moving-aggregate options, serialfunc/deserialfunc, finalfunc extra/modify, sspace and sortop, created after their functions; diffed against `pg_aggregate`, comments, owners, prunable, pulled)
 - [x] **Procedures** (`procedure <name>(args):` blocks → `CREATE PROCEDURE`; replace-on-change via body/security/`set` diff → `CREATE OR REPLACE`; grants, `revokePublic`, comments)
 
 ## Level 3: Architecture & Security
