@@ -970,7 +970,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 		m := newMap()
 		cols := make([]string, len(li.Keys))
 		opcs := lt.IndexOpclasses[name]
-		var perCol, colls *node
+		var perCol, colls, targets *node
 		for i, k := range li.Keys {
 			col := k
 			if li.Descending[i] {
@@ -994,6 +994,12 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 				}
 				add(colls, col, str(opcs[i].Collation))
 			}
+			if i < len(opcs) && opcs[i].StatisticsTarget >= 0 {
+				if targets == nil {
+					targets = flowMap()
+				}
+				add(targets, col, num(strconv.Itoa(opcs[i].StatisticsTarget)))
+			}
 		}
 		add(m, "columns", list(cols))
 		if li.Unique {
@@ -1007,6 +1013,9 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 		}
 		if colls != nil {
 			add(m, "collations", colls)
+		}
+		if targets != nil {
+			add(m, "statisticsTargets", targets)
 		}
 		if len(li.Include) > 0 {
 			add(m, "include", list(li.Include))

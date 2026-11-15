@@ -555,6 +555,7 @@
           "description": "Operator class applied to every column (e.g. gin_trgm_ops)."
         },
         "collations": { "type": "object", "description": "Per-column COLLATE, keyed by the columns entry (e.g. {name: C}).", "additionalProperties": { "type": "string", "minLength": 1 } },
+        "statisticsTargets": { "type": "object", "description": "Per-expression statistics target (ALTER INDEX ... ALTER COLUMN n SET STATISTICS), keyed by the columns entry (e.g. {lower(email): 500}); -1 restores the default. PostgreSQL only allows expression columns.", "additionalProperties": { "type": "integer", "minimum": -1 } },
         "opclasses": {
           "type": "object",
           "description": "Per-column operator class overrides; keys match entries in columns.",
