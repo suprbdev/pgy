@@ -46,3 +46,16 @@ schema reporting:
 		t.Error("servers block presence must be tracked")
 	}
 }
+
+func TestPublicationGeneratedColumnsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+publications:
+  cdc: {allTables: true, generatedColumns: STORED}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := d.Publications["cdc"].GeneratedColumns; g != "stored" {
+		t.Errorf("generatedColumns = %q", g)
+	}
+}

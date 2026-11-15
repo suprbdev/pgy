@@ -129,6 +129,7 @@
             "description": "Published actions (default all)."
           },
           "viaPartitionRoot": { "type": "boolean", "description": "publish_via_partition_root." },
+          "generatedColumns": { "type": "string", "enum": ["none", "stored"], "description": "publish_generated_columns (PostgreSQL 18+): stored also replicates stored generated columns. Omitted = unmanaged." },
           "comment": { "type": "string" }
         },
         "additionalProperties": false

@@ -1439,6 +1439,9 @@ func (b *builder) database() *node {
 			if lp.ViaRoot {
 				add(p, "viaPartitionRoot", boolean(true))
 			}
+			if lp.GeneratedColumns == "stored" {
+				add(p, "generatedColumns", str("stored"))
+			}
 			addStr(p, "comment", lp.Comment)
 			add(pubs, name, p)
 		}

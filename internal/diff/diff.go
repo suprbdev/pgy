@@ -144,6 +144,7 @@ type LivePublication struct {
     AllTables bool
     Publish   []string // enabled actions in insert, update, delete, truncate order
     ViaRoot   bool
+    GeneratedColumns string // publish_generated_columns: none | stored; "" before PostgreSQL 18
     Tables    map[string]LivePublicationTable
     Schemas   []string
     Comment   string
@@ -1088,7 +1089,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     pubQ := `
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
-               coalesce(d.description, '')
+               coalesce(d.description, ''),
+               case to_jsonb(p) ->> 'pubgencols' when 's' then 'stored' when 'n' then 'none' else '' end
         from pg_publication p
         left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
     `
@@ -1097,7 +1099,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var name string
             var ins, upd, del, trunc bool
             lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
-            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment); err != nil {
+            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns); err != nil {
                 return err
             }
             for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
@@ -2951,6 +2953,12 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
     for _, name := range sortedKeys(desired.Publications) {
         p := desired.Publications[name]
         if p == nil { continue }
+        if p.GeneratedColumns == "stored" && live.ServerVersion > 0 && live.ServerVersion < 180000 {
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("publication %s: generatedColumns: stored needs PostgreSQL 18, and the server is PostgreSQL %d; it is left unset", name, live.ServerVersion/10000)})
+            cp := *p
+            cp.GeneratedColumns = ""
+            p = &cp
+        }
         ident := pqIdent(truncateIdent(name))
         lp := live.Publications[truncateIdent(name)]
         if lp != nil && lp.AllTables != p.AllTables {
@@ -3026,8 +3034,16 @@ func publicationMembersMatch(p *schema.Publication, lp *LivePublication) bool {
     return strings.Join(want, ",") == strings.Join(lp.Schemas, ",")
 }
 
+// publicationGeneratedColumns returns lp's publish_generated_columns, none
+// when the server predates the option.
+func publicationGeneratedColumns(lp *LivePublication) string {
+    if lp.GeneratedColumns == "" { return "none" }
+    return lp.GeneratedColumns
+}
+
 // publicationWith renders the WITH options that differ from live (all set
-// options when live is nil).
+// options when live is nil). A new publication publishes no generated
+// columns by default, so generatedColumns: none needs no option.
 func publicationWith(p *schema.Publication, lp *LivePublication) string {
     out := []string{}
     if p.Publish != nil {
@@ -3040,6 +3056,11 @@ func publicationWith(p *schema.Publication, lp *LivePublication) string {
     }
     if p.ViaPartitionRoot != nil && (lp == nil || *p.ViaPartitionRoot != lp.ViaRoot) {
         out = append(out, fmt.Sprintf("publish_via_partition_root = %t", *p.ViaPartitionRoot))
+    }
+    if g := p.GeneratedColumns; g != "" {
+        if (lp == nil && g != "none") || (lp != nil && publicationGeneratedColumns(lp) != g) {
+            out = append(out, "publish_generated_columns = "+g)
+        }
     }
     return strings.Join(out, ", ")
 }
