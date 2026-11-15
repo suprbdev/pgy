@@ -300,6 +300,9 @@ func (b *builder) types() {
 		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(t, "grants", g)
 		}
+		if b.live.TypePublicRevoked[k] {
+			add(t, "revokePublic", boolean(true))
+		}
 		addStr(t, "comment", b.live.TypeComments[k])
 		b.owner(t, "type:"+k)
 		add(blk, "type "+name, t)
@@ -348,6 +351,9 @@ func (b *builder) domains() {
 		}
 		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(m, "grants", g)
+		}
+		if b.live.TypePublicRevoked[k] {
+			add(m, "revokePublic", boolean(true))
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
 		b.owner(m, "type:"+k)
@@ -804,6 +810,9 @@ func (b *builder) servers() *node {
 		}
 		if b.opts.Owners {
 			addStr(s, "owner", ls.Owner)
+		}
+		if g := grantsNode(ls.Grants); g != nil {
+			add(s, "grants", g)
 		}
 		addStr(s, "comment", ls.Comment)
 		add(out, name, s)
@@ -1700,7 +1709,13 @@ func (b *builder) defaultPrivileges() *node {
 		for _, kind := range sortedKeys(scopes[sc]) {
 			g := flowMap()
 			for _, r := range sortedKeys(scopes[sc][kind]) {
-				add(g, r, list(sortedKeys(scopes[sc][kind][r])))
+				privs := sortedKeys(scopes[sc][kind][r])
+				for i, p := range privs {
+					if base, ok := strings.CutSuffix(p, "*"); ok {
+						privs[i] = base + " with grant option"
+					}
+				}
+				add(g, r, list(privs))
 			}
 			if len(g.Content) > 0 {
 				add(e, kind, g)

@@ -49,6 +49,10 @@ var objectChangeCases = map[string][2]string{
 		`  type e: {type: enum, labels: [a, b]}`,
 		`  type e: {type: enum, labels: [x, a, y, b]}`,
 	},
+	"type_revoke_public": {
+		`  type e: {type: enum, labels: [a]}`,
+		`  type e: {type: enum, labels: [a], revokePublic: true}`,
+	},
 	"composite_add": {
 		`  type c: {type: composite, attributes: {x: {type: int}}}`,
 		`  type c: {type: composite, attributes: {x: {type: int}, y: {type: text}}, comment: pair}`,

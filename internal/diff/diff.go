@@ -81,6 +81,9 @@ type Live struct{
     // Grants: object key -> role -> privilege -> exists. Object owners excluded.
     TableGrants    map[string]map[string]map[string]bool // key "schema.table" (also views and sequences)
     TypeGrants     map[string]map[string]map[string]bool // key "schema.type" (types and domains)
+    // TypePublicRevoked: types and domains whose ACL no longer gives PUBLIC
+    // the default USAGE.
+    TypePublicRevoked map[string]bool
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
     SchemaGrants   map[string]map[string]map[string]bool // key schema name
     // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists (pg_attribute.attacl)
@@ -135,6 +138,7 @@ type LiveServer struct {
     Options map[string]string
     Owner   string
     Comment string
+    Grants  map[string]map[string]bool // srvacl, owner excluded: role -> privilege ("usage", "usage*" with grant option)
     // UserMapping reports whether the connected role, or PUBLIC, has a
     // user mapping for the server.
     UserMapping bool
@@ -492,6 +496,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         TypeGrants: map[string]map[string]map[string]bool{},
+        TypePublicRevoked: map[string]bool{},
         FunctionGrants: map[string]map[string]map[string]bool{},
         SchemaGrants: map[string]map[string]map[string]bool{},
         ColumnGrants: map[string]map[string]map[string]map[string]bool{},
@@ -939,6 +944,24 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
+    typePublicQ := `
+        select n.nspname || '.' || t.typname
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+        and t.typacl is not null
+        and not exists (select from aclexplode(t.typacl) a where a.grantee = 0 and a.privilege_type = 'USAGE')
+    `
+    batch.add(typePublicQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var key string
+            if err := rows.Scan(&key); err != nil { return err }
+            l.TypePublicRevoked[key] = true
+        }
+        return nil
+    })
 
     statQ := `
         select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, ''),
@@ -1162,7 +1185,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select s.srvname, w.fdwname, coalesce(s.srvtype, ''), coalesce(s.srvversion, ''),
                coalesce(s.srvoptions, '{}'::text[]), pg_get_userbyid(s.srvowner),
                coalesce(obj_description(s.oid, 'pg_foreign_server'), ''),
-               exists (select 1 from pg_user_mappings um where um.srvid = s.oid and (um.umuser = 0 or um.usename = current_user))
+               exists (select 1 from pg_user_mappings um where um.srvid = s.oid and (um.umuser = 0 or um.usename = current_user)),
+               coalesce((select array_agg(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end || '=' ||
+                                          lower(a.privilege_type) || case when a.is_grantable then '*' else '' end)
+                         from aclexplode(s.srvacl) a where a.grantee <> s.srvowner), '{}'::text[])
         from pg_foreign_server s
         join pg_foreign_data_wrapper w on w.oid = s.srvfdw
         where not exists (select 1 from pg_depend d where d.classid = 'pg_foreign_server'::regclass and d.objid = s.oid and d.deptype = 'e')
@@ -1170,10 +1196,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(serverQ, func(rows pgx.Rows) error {
         for rows.Next() {
             var name string
-            var options []string
+            var options, acl []string
             ls := &LiveServer{}
-            if err := rows.Scan(&name, &ls.Wrapper, &ls.Type, &ls.Version, &options, &ls.Owner, &ls.Comment, &ls.UserMapping); err != nil { return err }
+            if err := rows.Scan(&name, &ls.Wrapper, &ls.Type, &ls.Version, &options, &ls.Owner, &ls.Comment, &ls.UserMapping, &acl); err != nil { return err }
             ls.Options = parseFDWOptions(options)
+            for _, e := range acl {
+                if role, priv, ok := strings.Cut(e, "="); ok {
+                    if ls.Grants == nil { ls.Grants = map[string]map[string]bool{} }
+                    if ls.Grants[role] == nil { ls.Grants[role] = map[string]bool{} }
+                    ls.Grants[role][priv] = true
+                }
+            }
             l.Servers[name] = ls
         }
         return nil
@@ -1891,7 +1924,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case d.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions'
                     when 'T' then 'types' when 'n' then 'schemas' else d.defaclobjtype::text end,
                coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
-               coalesce(lower(a.privilege_type), ''), coalesce(a.grantee = d.defaclrole, false)
+               coalesce(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, ''), coalesce(a.grantee = d.defaclrole, false)
         from pg_default_acl d
         left join pg_namespace n on n.oid = d.defaclnamespace
         left join lateral aclexplode(d.defaclacl) a on true
@@ -4110,24 +4143,23 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
                 prefix := "alter default privileges"
                 if dp.ForRole != "" { prefix += " for role " + grantRole(dp.ForRole) }
                 if nsp != "" { prefix += " in schema " + pqIdent(nsp) }
+                want, have := map[string][]string{}, map[string]map[string]bool{}
                 for _, grantee := range sortedKeys(dp.Grants[kind]) {
-                    want := map[string]bool{}
-                    for _, p := range dp.Grants[kind][grantee] { want[strings.ToLower(p)] = true }
-                    have := liveG[strings.ToLower(resolveRole(grantee, live.CurrentUser))]
-                    missing, extra := []string{}, []string{}
-                    for _, p := range sortedKeys(want) {
-                        if !have[p] { missing = append(missing, p) }
-                    }
-                    for _, p := range sortedKeys(have) {
-                        if !want[p] { extra = append(extra, p) }
-                    }
-                    if len(extra) > 0 {
-                        revokes = append(revokes, fmt.Sprintf("%s revoke %s on %s from %s;", prefix, strings.Join(extra, ", "), kind, grantRole(grantee)))
-                    }
-                    if len(missing) > 0 {
-                        grants = append(grants, fmt.Sprintf("%s grant %s on %s to %s;", prefix, strings.Join(missing, ", "), kind, grantRole(grantee)))
-                    }
+                    r := strings.ToLower(resolveRole(grantee, live.CurrentUser))
+                    want[r] = dp.Grants[kind][grantee]
+                    if h := liveG[r]; h != nil { have[r] = h }
                 }
+                if w, ok := want["public"]; ok {
+                    keep, extra := map[string]bool{}, []string{}
+                    for _, p := range w { keep[strings.TrimSuffix(strings.ToLower(p), "*")] = true }
+                    for _, p := range sortedKeys(have["public"]) {
+                        if b := strings.TrimSuffix(p, "*"); !keep[b] { extra = append(extra, b) }
+                    }
+                    if len(extra) > 0 { revokes = append(revokes, fmt.Sprintf("%s revoke %s on %s from public;", prefix, strings.Join(extra, ", "), kind)) }
+                }
+                rv, gr := roleGrantStmts(want, have, func(privs []string) string { return strings.Join(privs, ", ") + " on " + kind })
+                for _, s := range rv { revokes = append(revokes, prefix+" "+s) }
+                for _, s := range gr { grants = append(grants, prefix+" "+s) }
             }
         }
     }
@@ -4157,6 +4189,16 @@ func planGrants(live *Live, desired *schema.Database) []string {
     if rows == nil { rows = map[string]bool{} }
     applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
     created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
+
+    for _, name := range sortedKeys(desired.Servers) {
+        s := desired.Servers[name]
+        if s == nil || s.Grants == nil { continue }
+        var liveG map[string]map[string]bool
+        owner := live.CurrentUser
+        if ls := live.Servers[name]; ls != nil { liveG, owner = ls.Grants, ls.Owner }
+        if s.Owner != "" { owner = resolveRole(s.Owner, live.CurrentUser) }
+        add(ownedGrantDiff("foreign server "+quoteIdent(name), resolveGrantRoles(s.Grants, live.CurrentUser), liveG, owner))
+    }
 
     schemaNames := make([]string, 0, len(desired.SchemaGrants))
     for s := range desired.SchemaGrants { schemaNames = append(schemaNames, s) }
@@ -4194,6 +4236,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
         }
     }
     for _, k := range sortedKeys(desired.Types) {
+        if td := desired.Types[k]; td != nil && td.RevokePublic && (!live.Types[k] || !live.TypePublicRevoked[k]) {
+            revokes = append(revokes, fmt.Sprintf("revoke usage on type %s from public;", pqIdent(k)))
+        }
         if td := desired.Types[k]; td != nil && td.Grants != nil {
             liveG := live.TypeGrants[k]
             if !live.Types[k] { liveG = created(k, "types") }
@@ -4201,6 +4246,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
         }
     }
     for _, k := range sortedKeys(desired.Domains) {
+        if dm := desired.Domains[k]; dm != nil && dm.RevokePublic && (!live.Domains[k] || !live.TypePublicRevoked[k]) {
+            revokes = append(revokes, fmt.Sprintf("revoke usage on domain %s from public;", pqIdent(k)))
+        }
         if dm := desired.Domains[k]; dm != nil && dm.Grants != nil {
             liveG := live.TypeGrants[k]
             if !live.Domains[k] { liveG = created(k, "types") }

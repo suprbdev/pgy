@@ -165,3 +165,22 @@ roles:
 		t.Errorf("svc: %q", db.Roles["svc"].ValidUntil)
 	}
 }
+
+func TestRevokePublicAndServerGrantsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+servers:
+  remote: {wrapper: postgres_fdw, grants: {app: [usage]}}
+schema app:
+  type e: {type: enum, labels: [a], revokePublic: true}
+  domain pos: {type: int, revokePublic: true}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.Types["app.e"].RevokePublic || !db.Domains["app.pos"].RevokePublic {
+		t.Error("revokePublic not parsed")
+	}
+	if g := db.Servers["remote"].Grants["app"]; len(g) != 1 || g[0] != "usage" {
+		t.Errorf("server grants: %v", db.Servers["remote"].Grants)
+	}
+}
