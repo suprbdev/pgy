@@ -388,6 +388,7 @@ type Index struct {
     Opclass   string            // operator class applied to every column (e.g. gin_trgm_ops)
     Opclasses map[string]string // per-column operator class overrides; key matches the columns entry
     Collations map[string]string // per-column COLLATE; key matches the columns entry
+    StatisticsTargets map[string]int // per-expression ALTER INDEX ... ALTER COLUMN n SET STATISTICS; key matches the columns entry
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
@@ -1456,6 +1457,12 @@ func parseIndexes(v any) []*Index {
                     }
                 }
                 if cm, ok := dm["collations"].(map[string]any); ok { ix.Collations = stringMap(cm) }
+                if sm, ok := dm["statisticsTargets"].(map[string]any); ok {
+                    ix.StatisticsTargets = map[string]int{}
+                    for col, v := range sm {
+                        if n, ok := v.(int); ok { ix.StatisticsTargets[col] = n }
+                    }
+                }
             }
             out = append(out, ix)
         }

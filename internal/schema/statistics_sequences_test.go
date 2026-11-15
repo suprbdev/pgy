@@ -42,3 +42,20 @@ schema app:
 		t.Errorf("attribute comments: %+v", td)
 	}
 }
+
+func TestIndexStatisticsTargetsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns: {a: {type: text}}
+    indexes:
+      t_lower: {columns: [lower(a)], statisticsTargets: {lower(a): 400}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := db.Tables["app.t"].Indexes[0]
+	if ix.StatisticsTargets["lower(a)"] != 400 || len(ix.StatisticsTargets) != 1 {
+		t.Errorf("statisticsTargets: %v", ix.StatisticsTargets)
+	}
+}

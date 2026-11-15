@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -161,6 +162,14 @@ func Database(d *schema.Database) []Issue {
 			}
 			need("index "+ix.Name, ix.Columns)
 			need("index "+ix.Name+" include", ix.Include)
+			for _, k := range sortedKeys(ix.StatisticsTargets) {
+				switch {
+				case !slices.Contains(ix.Columns, k):
+					add(Error, obj, "index %s statisticsTargets: %q is not one of its columns entries", ix.Name, k)
+				case columnName(k) != "":
+					add(Error, obj, "index %s statisticsTargets: %q is a plain column; PostgreSQL only sets index statistics on expressions, so set statisticsTarget on the column instead", ix.Name, k)
+				}
+			}
 		}
 		for _, ct := range t.Constraints {
 			if ct == nil {

@@ -369,6 +369,8 @@ type LiveIndexOpclass struct {
     // Collation is the key column's COLLATE when it differs from the
     // column's (or, for an expression, its type's) default; "" otherwise.
     Collation string
+    // StatisticsTarget is the index column's attstattarget; -1 = default.
+    StatisticsTarget int
 }
 
 // LivePolicy is a policy as it exists in the live database. Cmd/Roles/Using/
@@ -717,7 +719,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     opcQ := `
         select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault,
                case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, ity.typcollation)
-                    then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end
+                    then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
+               coalesce(ia.attstattarget::int, -1)
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
@@ -737,11 +740,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for opcRows.Next() {
             var schemaName, tableName, idxName, opcName, collation string
             var opcDefault bool
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation); err != nil {
+            var target int
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation, &target); err != nil {
                 return err
             }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, StatisticsTarget: target})
             }
         }
         return nil
@@ -4416,8 +4420,25 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         idxFq := schemaPrefixOf(fq) + name
         indexComment := func(built bool) []string {
-            if ix.Comment == "" || (!built && lt != nil && lt.IndexComments[name] == ix.Comment) { return nil }
-            return []string{fmt.Sprintf("comment on index %s is %s;", pqIdent(idxFq), quoteString(ix.Comment))}
+            out := []string{}
+            if ix.Comment != "" && (built || lt == nil || lt.IndexComments[name] != ix.Comment) {
+                out = append(out, fmt.Sprintf("comment on index %s is %s;", pqIdent(idxFq), quoteString(ix.Comment)))
+            }
+            var liveOCs []LiveIndexOpclass
+            if !built { liveOCs = liveIndexOpclasses(lt)[name] }
+            for i, c := range ix.Columns {
+                want, ok := ix.StatisticsTargets[c]
+                switch {
+                case !ok:
+                    continue
+                case built && want == -1:
+                    continue
+                case !built && (i >= len(liveOCs) || liveOCs[i].StatisticsTarget == want):
+                    continue
+                }
+                out = append(out, fmt.Sprintf("alter index %s alter column %d set statistics %d;", pqIdent(idxFq), i+1, want))
+            }
+            return out
         }
         if foreignParts && liveIndexes[name] && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
             plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt), indexComment(true)...)

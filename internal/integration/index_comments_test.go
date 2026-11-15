@@ -32,3 +32,22 @@ schema SCH:
 		})
 	}
 }
+
+func TestIntegrationIndexStatisticsTargetChanges(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	table := `
+schema SCH:
+  table t:
+    columns: {id: {type: int, primaryKey: true}, b: {type: text, nullable: true}}
+`
+	for _, step := range []struct{ index, want string }{
+		{"    indexes: {t_lb: {columns: [lower(b)], concurrently: true, statisticsTargets: {lower(b): 250}}}\n", "set statistics 250"},
+		{"    indexes: {t_lb: {columns: [lower(b)], concurrently: true, statisticsTargets: {lower(b): -1}}}\n", "set statistics -1"},
+		{"    indexes: {t_lb: {columns: [lower(b) desc], statisticsTargets: {lower(b) desc: 90}}}\n", "set statistics 90"},
+	} {
+		if sql := convergeYAML(t, pool, sch, table+step.index); !contains(sql, step.want) {
+			t.Errorf("want %q, got:\n%s", step.want, sql)
+		}
+	}
+}

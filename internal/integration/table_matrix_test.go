@@ -46,6 +46,7 @@ var tableAttributeCases = map[string]string{
 	"index_partial":    `    indexes: {t_lower_b: {columns: [lower(b)], where: a > 0, unique: true}}`,
 	"index_desc":       `    indexes: {t_ab_idx: {columns: [a desc nulls last, b], include: [p]}}`,
 	"index_with":       `    indexes: {t_b_idx: {columns: [b], method: hash, with: {fillfactor: 70}}}`,
+	"index_statistics": `    indexes: {t_lower_b: {columns: [a, lower(b)], statisticsTargets: {lower(b): 300}}}`,
 	"trigger":          `    triggers: {t_touch: {timing: before, events: [update], level: row, procedure: SCH.touch()}}`,
 	"trigger_when":     `    triggers: {t_touch: {timing: before, events: [insert, update], level: row, when: new.a is not null, procedure: SCH.touch(), enabled: false}}`,
 	"policy":           "    rowLevelSecurity: true\n    policies: {t_sel: {for: select, to: [public], using: a > 0}, t_ins: {for: insert, as: restrictive, withCheck: a < 100}}",
