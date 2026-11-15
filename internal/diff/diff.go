@@ -615,21 +615,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce(pg_get_expr(ad.adbin, ad.adrelid), ''),
                case a.attidentity when 'a' then 'always' when 'd' then 'by default' else '' end,
                a.attgenerated::text,
-               coalesce((select co.collname from pg_collation co join pg_type ty on ty.oid = a.atttypid
-                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
+               coalesce(co.collname, ''),
                case a.attcompression when 'p' then 'pglz' when 'l' then 'lz4' else '' end,
                case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
                nullif(coalesce(a.attstattarget::int, -1), -1),
-               coalesce((select cn.nspname from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
-                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation and cn.nspname <> 'pg_catalog'), ''),
-               (select case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end
-                from pg_type ty where ty.oid = a.atttypid),
+               case when cn.nspname <> 'pg_catalog' then cn.nspname else '' end,
+               case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
                a.attinhcount > 0,
                coalesce(a.attoptions, '{}'::text[]),
                coalesce(a.attfdwoptions, '{}'::text[])
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
+        join pg_type ty on ty.oid = a.atttypid
+        left join pg_collation co on co.oid = a.attcollation and a.attcollation <> ty.typcollation
+        left join pg_namespace cn on cn.oid = co.collnamespace
         left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum
         where a.attnum > 0 and not a.attisdropped
         and c.relkind in ('r', 'p', 'f')
@@ -775,7 +775,9 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query structured index definitions so changed indexes can be detected.
     idefQ := `
         select n.nspname, t.relname, i.relname, x.indisunique, am.amname, x.indnkeyatts,
-               array(select pg_get_indexdef(x.indexrelid, k, true) from generate_series(1, x.indnatts) k order by k),
+               array(select case when x.indkey[k - 1] = 0 then pg_get_indexdef(x.indexrelid, k, true)
+                                 else (select quote_ident(a.attname) from pg_attribute a where a.attrelid = x.indrelid and a.attnum = x.indkey[k - 1]) end
+                     from generate_series(1, x.indnatts) k order by k),
                x.indoption::int2[],
                coalesce(pg_get_expr(x.indpred, x.indrelid, true), ''),
                x.indnullsnotdistinct,

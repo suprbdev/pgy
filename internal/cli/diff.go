@@ -58,6 +58,21 @@ Exit codes:
             if err != nil {
                 return err
             }
+            issues := make(chan []validate.Issue, 1)
+            if noWarnings {
+                issues <- nil
+            } else {
+                go func() { issues <- validate.Files(schemaPaths) }()
+            }
+            type loaded struct {
+                db  *schema.Database
+                err error
+            }
+            load := make(chan loaded, 1)
+            go func() {
+                d, err := schema.LoadAndMerge(schemaPaths)
+                load <- loaded{d, err}
+            }()
             var conn interface{ Close() }
             var pool *pgxpool.Pool
             var live *diff.Live
@@ -86,16 +101,14 @@ Exit codes:
                 }
             }
 
-            if !noWarnings {
-                for _, is := range validate.Files(schemaPaths) {
-                    if is.Severity == validate.Error { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
-                }
+            for _, is := range <-issues {
+                if is.Severity == validate.Error { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
             }
-            // load and merge schemas in order
-            compiled, err := schema.LoadAndMerge(schemaPaths)
-            if err != nil {
-                return err
+            l := <-load
+            if l.err != nil {
+                return l.err
             }
+            compiled := l.db
             // fail loudly on dependsOn cycles: the plan's entity order would
             // not be dependency-correct
             if _, err := schema.TopologicalSort(compiled); err != nil {
