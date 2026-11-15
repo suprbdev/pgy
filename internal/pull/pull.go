@@ -155,7 +155,13 @@ func (b *builder) unsupported() {
 		return
 	}
 	for _, o := range b.live.Details.Unsupported {
-		if b.wantSchema(o.Schema) {
+		switch {
+		case !b.wantSchema(o.Schema):
+		case o.Kind == "typed table":
+			b.warn("table %s.%s is a typed table (OF %s), which pgy doesn't support; it was written as a plain table with the type's columns", o.Schema, o.Name, o.Detail)
+		case o.Kind == "cast":
+			b.warn("cast %s is not supported by pgy and was left out", o.Name)
+		default:
 			b.warn("%s %s.%s is not supported by pgy and was left out", o.Kind, o.Schema, o.Name)
 		}
 	}
