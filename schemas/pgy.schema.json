@@ -19,6 +19,7 @@
               "schema": { "type": "string", "minLength": 1, "description": "Schema to install the extension's objects into (WITH SCHEMA). Created if missing; a relocatable extension living elsewhere is moved with ALTER EXTENSION ... SET SCHEMA." },
               "version": { "type": "string", "minLength": 1, "description": "Extension version (VERSION). A live extension on another version is updated with ALTER EXTENSION ... UPDATE TO." },
               "cascade": { "type": "boolean", "description": "CASCADE: also install extensions this one requires." },
+              "comment": { "type": "string", "description": "COMMENT ON EXTENSION, replacing the one its control file sets. Omitted = unmanaged." },
               "dependsOn": { "$ref": "#/definitions/stringList" }
             },
             "required": ["name"],
