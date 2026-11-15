@@ -738,7 +738,9 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
     // flagged so a desired index without an explicit opclass matches.
     opcQ := `
-        select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault,
+        select n.nspname, t.relname, i.relname,
+               case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
+               op.opcdefault,
                case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, ity.typcollation)
                     then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                coalesce(ia.attstattarget::int, -1)
@@ -748,6 +750,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.relnamespace
         cross join lateral generate_series(0, x.indnkeyatts - 1) k(ord)
         join pg_opclass op on op.oid = x.indclass[k.ord]
+        join pg_namespace opn on opn.oid = op.opcnamespace
         left join pg_attribute ta on ta.attrelid = x.indrelid and ta.attnum = x.indkey[k.ord]
         left join pg_attribute ia on ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1
         left join pg_type ity on ity.oid = ia.atttypid
@@ -5928,12 +5931,19 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
         oc := indexColumnOpclass(ix, c)
         if oc == "" {
             if !live[i].Default { return true }
-        } else if !strings.EqualFold(oc, live[i].Name) {
+        } else if opclassName(oc) != opclassName(live[i].Name) {
             return true
         }
         if collationName(indexColumnCollation(ix, c)) != collationName(live[i].Collation) { return true }
     }
     return false
+}
+
+// opclassName makes operator class names comparable: case and quotes are
+// ignored, and so is a public or pg_catalog qualifier.
+func opclassName(s string) string {
+    s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), `"`, ""))
+    return strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog.")
 }
 
 // indexColumnCollation returns the COLLATE for one index column entry, keyed
