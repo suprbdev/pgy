@@ -21,7 +21,7 @@ dependsOn entries, dependency cycles and likely mistakes.
 
 Exit codes:
   0  No errors (warnings may be printed)
-  1  Errors found`,
+  1  Errors found, or warnings with --strict (unless ci.fail_on leaves out validate)`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             cfg := FromContext(cmd.Context())
@@ -40,6 +40,10 @@ Exit codes:
             if validate.HasErrors(issues) {
                 cmd.SilenceUsage = true
                 return &exitCodeError{code: 1}
+            }
+            if cfg.failsOn("validate") && len(issues) > 0 {
+                cmd.SilenceUsage = true
+                return fmt.Errorf("--strict: %d warning(s), which ci.fail_on fails on (validate)", len(issues))
             }
             return nil
         },

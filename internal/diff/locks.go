@@ -15,6 +15,11 @@ type Warning struct {
     Table     string `json:"table"`
     Statement string `json:"statement,omitempty"`
     Message   string `json:"message"`
+    // Kind classifies the warning for --strict: lock (a statement locks or
+    // rewrites a table), public_revoke (a grants block revokes PUBLIC's
+    // privileges), dependents (a type change is blocked by objects pgy
+    // can't recreate), or "" for the rest.
+    Kind      string `json:"kind,omitempty"`
 }
 
 const quotedName = `"(?:[^"]|"")*"`
@@ -63,7 +68,7 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
     }
     out := []Warning{}
     warn := func(fq, stmt, format string, args ...any) {
-        out = append(out, Warning{Table: fq, Statement: stmt, Message: fmt.Sprintf(format, args...)})
+        out = append(out, Warning{Table: fq, Statement: stmt, Message: fmt.Sprintf(format, args...), Kind: "lock"})
     }
     for _, stmt := range append(append([]string{}, p.Creates...), p.Alters...) {
         if m := lockIndexRe.FindStringSubmatch(stmt); m != nil {

@@ -59,11 +59,15 @@ not.`,
             res, err := pull.Build(live, pull.Options{Schemas: schemas, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == "", Data: data})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
+            strict := &strictFindings{}
+            if cfg.failsOn("unsupported") {
+                for _, w := range res.Warnings { strict.add("unsupported", w) }
+            }
             if out == "" {
                 for _, f := range res.Files {
                     if _, err := os.Stdout.Write(f.Content); err != nil { return err }
                 }
-                return nil
+                return strict.err(nil)
             }
             if err := os.MkdirAll(out, 0o755); err != nil { return err }
             for _, f := range res.Files {
@@ -74,7 +78,7 @@ not.`,
                 if err := os.WriteFile(p, f.Content, 0o644); err != nil { return err }
                 if !cfg.Quiet { fmt.Printf("wrote %s\n", p) }
             }
-            return nil
+            return strict.err(nil)
         },
     }
     c.Flags().StringVar(&out, "out", "", "Directory to write one YAML file per schema into (default: print to stdout)")

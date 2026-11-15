@@ -2855,7 +2855,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Creates = append(plan.Creates, typeChangePre[fq]...)
                 if attachesPartition(dt, lt) {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
-                    plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
+                    plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
                 }
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
@@ -4478,7 +4478,7 @@ func planGrantsWarned(live *Live, desired *schema.Database) ([]string, []Warning
     addCovering := func(rv, gr []string) {
         for _, s := range rv {
             if strings.HasSuffix(s, " from public;") {
-                warns = append(warns, Warning{Message: fmt.Sprintf("%s: the grants block doesn't list public, so this revokes PUBLIC's privileges (grants blocks cover PUBLIC on tables, views, sequences, columns, servers and schemas since v0.43.0; list public to keep them)", strings.TrimSuffix(s, ";"))})
+                warns = append(warns, Warning{Kind: "public_revoke", Message: fmt.Sprintf("%s: the grants block doesn't list public, so this revokes PUBLIC's privileges (grants blocks cover PUBLIC on tables, views, sequences, columns, servers and schemas since v0.43.0; list public to keep them)", strings.TrimSuffix(s, ";"))})
             }
         }
         add(rv, gr)

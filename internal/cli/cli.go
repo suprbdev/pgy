@@ -24,6 +24,16 @@ type GlobalConfig struct {
     Quiet         bool
     Verbose       bool
     JSON          bool
+    // Strict (--strict / PGY_STRICT) makes commands fail on the findings in
+    // FailOn, and refuse --unsafe and --prune when ForbidUnsafe is set.
+    Strict        bool
+    FailOn        map[string]bool
+    ForbidUnsafe  bool
+}
+
+// failsOn reports whether a --strict run fails on a finding of kind.
+func (c *GlobalConfig) failsOn(kind string) bool {
+    return c.Strict && (c.FailOn[kind] || c.FailOn["all"])
 }
 
 func AttachGlobalFlags(root *cobra.Command) {
@@ -46,6 +56,7 @@ func AttachGlobalFlags(root *cobra.Command) {
     root.PersistentFlags().BoolVar(&cfg.Quiet, "quiet", os.Getenv("PGY_QUIET") == "1", "Suppress non-essential output")
     root.PersistentFlags().BoolVar(&cfg.Verbose, "verbose", os.Getenv("PGY_VERBOSE") == "1", "Verbose output")
     root.PersistentFlags().BoolVar(&cfg.JSON, "json", os.Getenv("PGY_JSON") == "1", "JSON output where applicable")
+    root.PersistentFlags().BoolVar(&cfg.Strict, "strict", isTruthy(os.Getenv("PGY_STRICT")), "Fail on the findings listed in the config's ci.fail_on (default: lock, public_revoke, validate) and refuse --unsafe/--prune unless ci.forbid_unsafe is false; for CI")
 
     // store on context for subcommands
     root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -94,6 +105,9 @@ func AttachGlobalFlags(root *cobra.Command) {
         }
         if !f.Changed("json") && os.Getenv("PGY_JSON") == "" && fc.JSON != nil {
             cfg.JSON = *fc.JSON
+        }
+        if cfg.FailOn, cfg.ForbidUnsafe, err = strictSettings(fc.CI); err != nil {
+            return err
         }
 
         if len(cfg.Schemas) == 0 {
@@ -228,3 +242,12 @@ func resolveVersion() string {
 }
 
 
+
+// isTruthy reports whether an environment value means on: 1, true or yes.
+func isTruthy(v string) bool {
+    switch strings.ToLower(strings.TrimSpace(v)) {
+    case "1", "true", "yes", "on":
+        return true
+    }
+    return false
+}
