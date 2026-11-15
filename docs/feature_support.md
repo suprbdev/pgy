@@ -27,7 +27,7 @@ These are the foundational elements required for almost any relational database 
 Features that encapsulate business logic, complex data structures, or procedural code.
 
 - [x] **ENUM Types** (Including `ALTER TYPE ... ADD VALUE` for new labels, order-preserving)
-- [x] **Composite Types** (Attribute order preserved from YAML declaration; missing attributes added with `ALTER TYPE ... ADD ATTRIBUTE`, type changes/drops under `--unsafe`)
+- [x] **Composite Types** (Attribute order preserved from YAML declaration; missing attributes added with `ALTER TYPE ... ADD ATTRIBUTE`, type changes/drops under `--unsafe`; attribute `collate` and `comment`)
 - [x] **Range Types** (`type: range` with subtype/subtypeOpclass/collation/canonical/subtypeDiff/multirangeTypeName; create-only)
 - [x] **Extensions** (`CREATE EXTENSION` with `schema`/`version`/`cascade`; relocatable extensions moved with `ALTER EXTENSION ... SET SCHEMA`, version changes emit `ALTER EXTENSION ... UPDATE TO`)
 - [x] **Functions** (PL/pgSQL, etc.; replace-on-change via body/attribute diff → `CREATE OR REPLACE`; `set` clauses diffed against `proconfig` → `ALTER FUNCTION ... SET / RESET`; `parallel`, `cost` and `rows` diffed → `ALTER FUNCTION`; arg types may be schema-qualified — unqualified and `public.`-qualified are equivalent; overloads with the same name and different arguments are independent declarations)
@@ -49,11 +49,11 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Default Privileges** (top-level `defaultPrivileges:` → `ALTER DEFAULT PRIVILEGES [FOR ROLE] [IN SCHEMA] GRANT/REVOKE` on tables/sequences/functions/types/schemas, per-grantee authoritative, emitted before creates)
 - [x] **Database Settings** (top-level `database: {set: ...}` → `ALTER DATABASE <current> SET/RESET`, and `database: {roles: ...}` → `ALTER ROLE ... IN DATABASE <current> SET/RESET`, compared with `pg_db_role_setting`, pulled)
 - [x] **Roles & Users** (Top-level `roles:` block → `CREATE ROLE` with login/superuser/createdb/createrole/replication/bypassRLS/noinherit/connection limit; `set` → `ALTER ROLE ... SET/RESET`; `inRoles` memberships via `GRANT role TO role`; explicitly set attributes diffed against `pg_roles` → `ALTER ROLE`; never dropped, no passwords)
-- [x] **Sequences** (`sequence <name>:` blocks → `CREATE SEQUENCE IF NOT EXISTS` with as/increment/minValue/maxValue/start/cache/cycle/ownedBy; set options diffed against `pg_sequence` → `ALTER SEQUENCE`; comments diffed)
+- [x] **Sequences** (`sequence <name>:` blocks → `CREATE SEQUENCE IF NOT EXISTS` with as/increment/minValue/maxValue/start/cache/cycle/ownedBy and `unlogged`; set options diffed against `pg_sequence` → `ALTER SEQUENCE`, `unlogged` → `SET LOGGED/UNLOGGED`; comments diffed)
 - [x] **Table & Column Storage** (`unlogged` → `SET LOGGED/UNLOGGED` under `--unsafe`; `with` storage parameters → `SET/RESET (...)`; column `collate` (changes under `--unsafe`), `compression`, `storage`, `statisticsTarget` and `nDistinct`/`nDistinctInherited` (attribute options) diffed against live, and applied to added columns in the same migration)
 - [x] **Replica Identity** (`replicaIdentity: default|full|nothing|index <name>` → `ALTER TABLE ... REPLICA IDENTITY`, diffed against live)
 - [x] **Clustering** (`clusterOn: <index>|none` → `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`, diffed against `indisclustered`)
-- [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, comments, prunable)
+- [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, `statisticsTarget` → `ALTER STATISTICS ... SET STATISTICS`, comments, prunable)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+; a warning on 15/16) and a removed one `DROP EXPRESSION`)
 - [x] **Identity Columns** (Column `identity: always | byDefault`, or a map with sequence options (start/increment/minValue/maxValue/cache/cycle) → `GENERATED ... AS IDENTITY (...)`; kind and options diffed → `SET GENERATED` / `SET <option>`; added to or dropped from existing columns under `--unsafe`; overrides `default`)
 

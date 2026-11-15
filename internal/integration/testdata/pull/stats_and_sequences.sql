@@ -1,0 +1,15 @@
+create schema s5;
+create type s5.pt as (x int, y int);
+comment on column s5.pt.x is 'horizontal';
+create table s5.t (id int primary key, a int);
+create materialized view s5.mv as select id, a from s5.t;
+comment on column s5.mv.a is 'the a';
+create statistics s5.t_stats on id, a from s5.t;
+comment on statistics s5.t_stats is 'correlated';
+alter statistics s5.t_stats set statistics 500;
+create unlogged sequence s5.fast_seq;
+create sequence s5.none_seq as smallint;
+alter sequence s5.none_seq owned by none;
+create schema s6;
+create unlogged table s6.t (id serial primary key, n int generated always as identity);
+create unlogged sequence s6.free;

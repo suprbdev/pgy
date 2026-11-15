@@ -51,6 +51,7 @@ var tableAttributeCases = map[string]string{
 	"policy":           "    rowLevelSecurity: true\n    policies: {t_sel: {for: select, to: [public], using: a > 0}, t_ins: {for: insert, as: restrictive, withCheck: a < 100}}",
 	"rule":             `    rules: {t_no_delete: {event: delete, instead: true, do: nothing}}`,
 	"statistics":       `    statistics: {t_ab_stats: {kinds: [ndistinct, dependencies], columns: [a, b]}}`,
+	"statistics_target": `    statistics: {t_ab_stats: {columns: [a, b], statisticsTarget: 500}}`,
 	"grants":           `    grants: {public: [select, insert]}`,
 	"replica_full":     `    replicaIdentity: full`,
 	"replica_index":    `    replicaIdentity: index t_pkey`,

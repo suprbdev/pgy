@@ -105,6 +105,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 if out.CompositeCollations == nil { out.CompositeCollations = map[string]map[string]string{} }
                 out.CompositeCollations[k] = cloneMap(td.AttributeCollations, nil)
             }
+            if td.AttributeComments != nil {
+                if out.CompositeComments == nil { out.CompositeComments = map[string]map[string]string{} }
+                out.CompositeComments[k] = cloneMap(td.AttributeComments, nil)
+            }
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
         if td.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], td.Grants) }
@@ -207,6 +211,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             if o.v != "" { *o.dst = strings.TrimSpace(o.v) }
         }
         if sq.Cycle != nil { ls.Cycle = *sq.Cycle }
+        if sq.Unlogged != nil { ls.Unlogged = *sq.Unlogged }
         if sq.OwnedBy != "" { ls.Owner = qualifyOwnedBy(k, sq.OwnedBy) }
         out.SequenceDefs[k] = ls
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
@@ -453,7 +458,9 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     }
     for _, st := range dt.Statistics {
         if st == nil || len(st.Columns) == 0 { continue }
-        lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment}
+        target := -1
+        if st.StatisticsTarget != nil { target = *st.StatisticsTarget }
+        lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment, Target: target}
     }
     if dt.ReplicaIdentity != "" { lt.ReplicaIdentity = dt.ReplicaIdentity }
     switch {
@@ -602,6 +609,7 @@ func cloneLive(l *Live) *Live {
         AggregateDefs: cloneMap(l.AggregateDefs, func(a *LiveAggregate) *LiveAggregate { c := *a; return &c }),
         CompositeAttributes: cloneMap(l.CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         CompositeCollations: cloneMap(l.CompositeCollations, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
+        CompositeComments:   cloneMap(l.CompositeComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
         OwnedSequences:     cloneSet(l.OwnedSequences),
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),

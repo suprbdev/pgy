@@ -107,6 +107,8 @@ type Live struct{
     // CompositeCollations: "schema.type" -> attribute -> COLLATE, for
     // attributes whose collation differs from their type's default
     CompositeCollations map[string]map[string]string
+    // CompositeComments: "schema.type" -> attribute -> comment
+    CompositeComments map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name" and
     // "proc:<normalized signature>".
@@ -188,6 +190,7 @@ type LiveSequence struct {
     Cache     string
     Cycle     bool
     Owner     string
+    Unlogged  bool // relpersistence = 'u'
 }
 
 // LiveDomain is a domain's default, NOT NULL flag and CHECK constraints
@@ -318,6 +321,7 @@ type LiveStatistic struct {
     Kinds   []string
     Items   []string
     Comment string
+    Target  int // stxstattarget; -1 = default
 }
 
 var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS ` + catalogName + `(?: \(([^)]*)\))? ON (.+) FROM ` + catalogName + `$`)
@@ -486,6 +490,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         Partitions: map[string][]string{},
         CompositeAttributes: map[string]map[string]string{},
         CompositeCollations: map[string]map[string]string{},
+        CompositeComments: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
         OwnedSequences: map[string]bool{},
     }
@@ -903,7 +908,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     statQ := `
-        select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, '')
+        select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, ''),
+               coalesce(s.stxstattarget::int, -1)
         from pg_statistic_ext s
         join pg_class c on c.oid = s.stxrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -914,10 +920,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(statQ, func(statRows pgx.Rows) error {
         for statRows.Next() {
             var schemaName, tableName, name, def, comment string
-            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment); err != nil { return err }
+            var target int
+            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment, &target); err != nil { return err }
             t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
             if t == nil { continue }
-            ls := &LiveStatistic{Comment: comment}
+            ls := &LiveStatistic{Comment: comment, Target: target}
             if m := statisticsDefRe.FindStringSubmatch(def); m != nil {
                 for _, k := range strings.Split(m[1], ",") {
                     if k = strings.TrimSpace(k); k != "" { ls.Kinds = append(ls.Kinds, k) }
@@ -1298,7 +1305,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod),
                coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
                          from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
-                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation), '')
+                         where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
+               coalesce(col_description(c.oid, a.attnum), '')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         join pg_class c on c.oid = t.typrelid and c.relkind = 'c'
@@ -1308,8 +1316,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(attrQ, func(attrRows pgx.Rows) error {
         for attrRows.Next() {
-            var schemaName, typeName, attName, attType, collation string
-            if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType, &collation); err != nil {
+            var schemaName, typeName, attName, attType, collation, attComment string
+            if err := attrRows.Scan(&schemaName, &typeName, &attName, &attType, &collation, &attComment); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, typeName)
@@ -1318,6 +1326,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if collation != "" {
                 if l.CompositeCollations[key] == nil { l.CompositeCollations[key] = map[string]string{} }
                 l.CompositeCollations[key][attName] = collation
+            }
+            if attComment != "" {
+                if l.CompositeComments[key] == nil { l.CompositeComments[key] = map[string]string{} }
+                l.CompositeComments[key][attName] = attComment
             }
         }
         return nil
@@ -1402,7 +1414,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // which is fine: presence only guards against duplicate CREATE SEQUENCE)
     seqQ := `
         select n.nspname, c.relname, format_type(s.seqtypid, null), s.seqincrement::text, s.seqmin::text,
-               s.seqmax::text, s.seqstart::text, s.seqcache::text, s.seqcycle,
+               s.seqmax::text, s.seqstart::text, s.seqcache::text, s.seqcycle, c.relpersistence = 'u',
                coalesce((select tn.nspname || '.' || t.relname || '.' || a.attname
                          from pg_depend d
                          join pg_class t on t.oid = d.refobjid
@@ -1428,7 +1440,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for seqRows.Next() {
             var schemaName, seqName, idSchema, idTable, idColumn string
             ls := &LiveSequence{}
-            if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Owner, &idSchema, &idTable, &idColumn); err != nil {
+            if err := seqRows.Scan(&schemaName, &seqName, &ls.Type, &ls.Increment, &ls.MinValue, &ls.MaxValue, &ls.Start, &ls.Cache, &ls.Cycle, &ls.Unlogged, &ls.Owner, &idSchema, &idTable, &idColumn); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, seqName)
@@ -2845,6 +2857,7 @@ func viewOptionStmts(key string, opts [][2]string, live map[string]string) []str
 // exist yet — the caller emits a separate ALTER SEQUENCE ... OWNED BY.
 func renderSequence(fq string, sq *schema.Sequence) string {
     parts := []string{"create sequence if not exists", pqIdent(fq)}
+    if sq.Unlogged != nil && *sq.Unlogged { parts[0] = "create unlogged sequence if not exists" }
     if sq.As != "" { parts = append(parts, "as "+sq.As) }
     if sq.Increment != "" { parts = append(parts, "increment by "+sq.Increment) }
     if sq.MinValue != "" { parts = append(parts, "minvalue "+sq.MinValue) }
@@ -2875,6 +2888,11 @@ func sequenceAlterStmts(fq string, sq *schema.Sequence, ls *LiveSequence) []stri
     }
     out := []string{}
     if len(opts) > 0 { out = append(out, fmt.Sprintf("alter sequence %s %s;", pqIdent(fq), strings.Join(opts, " "))) }
+    if sq.Unlogged != nil && *sq.Unlogged != ls.Unlogged {
+        mode := "logged"
+        if *sq.Unlogged { mode = "unlogged" }
+        out = append(out, fmt.Sprintf("alter sequence %s set %s;", pqIdent(fq), mode))
+    }
     if sq.OwnedBy != "" && qualifyOwnedBy(fq, sq.OwnedBy) != ls.Owner {
         out = append(out, fmt.Sprintf("alter sequence %s owned by %s;", pqIdent(fq), ownedByIdent(fq, sq.OwnedBy)))
     }
@@ -3654,6 +3672,9 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         td := desired.Types[k]
         if td == nil { continue }
         comment("type "+pqIdent(k), td.Comment, live.TypeComments[k])
+        for _, a := range sortedKeys(td.AttributeComments) {
+            comment("column "+pqIdent(k)+"."+quoteIdent(a), td.AttributeComments[a], live.CompositeComments[k][a])
+        }
     }
 
     for _, k := range sortedKeys(desired.Collations) {
@@ -4527,13 +4548,22 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         if st == nil || len(st.Columns) == 0 { continue }
         name := truncateIdent(st.Name)
         target := pqIdent(schemaPrefixOf(fq) + name)
+        liveTarget := -1
         if lt != nil {
             if ls := lt.Statistics[name]; ls != nil {
-                if statisticMatchesLive(st, ls) { continue }
+                if statisticMatchesLive(st, ls) {
+                    if st.StatisticsTarget != nil && *st.StatisticsTarget != ls.Target {
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter statistics %s set statistics %d;", target, *st.StatisticsTarget))
+                    }
+                    continue
+                }
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop statistics %s;", target))
             }
         }
         plan.Alters = append(plan.Alters, renderStatistic(fq, st, dt.Columns))
+        if st.StatisticsTarget != nil && *st.StatisticsTarget != liveTarget {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter statistics %s set statistics %d;", target, *st.StatisticsTarget))
+        }
     }
 
     for _, r := range dt.Rules {
