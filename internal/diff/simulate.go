@@ -123,6 +123,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
         if td.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], td.Grants) }
+        if td.RevokePublic {
+            if out.TypePublicRevoked == nil { out.TypePublicRevoked = map[string]bool{} }
+            out.TypePublicRevoked[k] = true
+        }
     }
 
     simulateOwnersAndDefaults(out, desired)
@@ -139,6 +143,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             ls.Owner = out.CurrentUser
         }
         if s.Options != nil { ls.Options = cloneMap(s.Options, nil) }
+        if prev := out.Servers[name]; prev != nil { ls.Grants = prev.Grants }
+        if s.Grants != nil { ls.Grants = simulateGrants(ls.Grants, s.Grants) }
         if out.Servers == nil { out.Servers = map[string]*LiveServer{} }
         out.Servers[name] = ls
     }
@@ -206,6 +212,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         for name, c := range dm.CheckComments { ld.CheckComments[truncateIdent(name)] = c }
         out.DomainDefs[k] = ld
         if dm.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], dm.Grants) }
+        if dm.RevokePublic {
+            if out.TypePublicRevoked == nil { out.TypePublicRevoked = map[string]bool{} }
+            out.TypePublicRevoked[k] = true
+        }
         if dm.Comment != "" { out.TypeComments[k] = dm.Comment }
     }
 
@@ -633,6 +643,7 @@ func cloneLive(l *Live) *Live {
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),
         TypeGrants:         cloneGrantMap(l.TypeGrants),
+        TypePublicRevoked:  cloneSet(l.TypePublicRevoked),
         FunctionGrants:     cloneGrantMap(l.FunctionGrants),
         SchemaGrants:       cloneGrantMap(l.SchemaGrants),
         ColumnGrants:       cloneMap(l.ColumnGrants, cloneGrantMap),

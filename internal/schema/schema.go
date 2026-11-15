@@ -109,6 +109,7 @@ type Server struct {
     Version string            // VERSION; "" = unmanaged
     Options map[string]string // OPTIONS; nil = unmanaged, present = authoritative
     Owner   string            // "" = unmanaged
+    Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
     Comment string
 }
 
@@ -281,6 +282,7 @@ type Domain struct {
     CheckComments  map[string]string // constraint name -> COMMENT ON CONSTRAINT text
     Owner          string // "" = unmanaged
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
+    RevokePublic   bool   // revoke PUBLIC's default USAGE
     DependsOn      []string `yaml:"dependsOn"`
     Comment        string
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -492,6 +494,7 @@ type TypeDef struct {
     Comment string
     Owner   string // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
+    RevokePublic bool // revoke PUBLIC's default USAGE
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
     RenamedLabels map[string]string `yaml:"-"` // enum label -> previous label (ALTER TYPE ... RENAME VALUE)
 }
@@ -1948,6 +1951,7 @@ func parseType(schemaName, key string, body any) *TypeDef {
     if cm, ok := m["comment"].(string); ok { td.Comment = cm }
     if o, ok := m["owner"].(string); ok { td.Owner = strings.TrimSpace(o) }
     if g, ok := m["grants"]; ok { td.Grants = parseGrants(g) }
+    if rp, ok := m["revokePublic"].(bool); ok { td.RevokePublic = rp }
     return td
 }
 
@@ -2529,6 +2533,7 @@ func parseServers(v any) map[string]*Server {
             if ver, ok := b["version"]; ok && ver != nil { s.Version = scalarToString(ver) }
             if o, ok := b["options"].(map[string]any); ok { s.Options = stringMap(o) }
             if o, ok := b["owner"].(string); ok { s.Owner = strings.TrimSpace(o) }
+            if g, ok := b["grants"]; ok { s.Grants = parseGrants(g) }
             if c, ok := b["comment"].(string); ok { s.Comment = c }
         }
         out[name] = s
@@ -2683,6 +2688,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if cm, ok := m["comment"].(string); ok { dm.Comment = cm }
     if o, ok := m["owner"].(string); ok { dm.Owner = strings.TrimSpace(o) }
     if g, ok := m["grants"]; ok { dm.Grants = parseGrants(g) }
+    if rp, ok := m["revokePublic"].(bool); ok { dm.RevokePublic = rp }
     return dm
 }
 

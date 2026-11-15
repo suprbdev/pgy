@@ -709,7 +709,7 @@ schema reporting:
     comment: orders in the warehouse
 ```
 
-Servers are created after extensions and before everything else. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change instead. A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables. Without the block, servers are unmanaged.
+Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change instead. A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables. Without the block, servers are unmanaged.
 
 User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none.
 
@@ -1250,7 +1250,7 @@ Behavior:
 - A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched: an owner holds every privilege implicitly, so grants to it in the YAML are ignored (`pgy validate` warns about them). The owner is the declared `owner`, else the live owner, else the role running the migration. Roles can also be `current_user`, `current_role` or `session_user`, and are compared as the connected role.
 - Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
 - An **empty privilege list** (`some_role: []`) is not the same as omitting the block. It means "this role holds nothing on this object" and revokes whatever the live database still grants. Use it to take a privilege away while keeping the object managed.
-- `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute.
+- `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute. Types and domains take `revokePublic: true` the same way, for PostgreSQL's default `PUBLIC` `USAGE`.
 - Grant/revoke statements are emitted after all object creation and FK alters.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
@@ -1281,7 +1281,7 @@ defaultPrivileges:
     functions: {public: []}   # stop granting EXECUTE to PUBLIC by default
 ```
 
-Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them. An object created by the plan that declares its own `grants` is compared against what those defaults give it, so grants it doesn't list are revoked in the same migration. `grants: {}` therefore keeps a new table free of them. When a database has default privileges that some older objects lack, `pgy pull` writes `grants: {}` on those objects, so a rebuild doesn't hand them grants the original never had.
+Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. `select with grant option` sets up the privilege `WITH GRANT OPTION`, as in grants blocks. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them. An object created by the plan that declares its own `grants` is compared against what those defaults give it, so grants it doesn't list are revoked in the same migration. `grants: {}` therefore keeps a new table free of them. When a database has default privileges that some older objects lack, `pgy pull` writes `grants: {}` on those objects, so a rebuild doesn't hand them grants the original never had.
 
 ### Column-Level Grants
 
@@ -1315,7 +1315,7 @@ grant select ("email"), update ("email") on table "public"."users" to "support";
 | Property | Type | Description |
 |----------|------|-------------|
 | `grants` | map | Role name → list of privileges (e.g. `select`, `insert`, `execute`, `usage`, `create`; on columns: `select`, `insert`, `update`, `references`) |
-| `revokePublic` | boolean | Functions only. Revoke default `PUBLIC` execute |
+| `revokePublic` | boolean | Functions, procedures, types and domains. Revoke `PUBLIC`'s default `EXECUTE` or `USAGE` |
 
 ## Comments
 
