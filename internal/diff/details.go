@@ -27,6 +27,15 @@ type LiveDetails struct {
     TSDictionaries  map[string]*schema.TSDictionary
     ViewDeps        map[string][]string // view or materialized view -> views / materialized views it reads
     Populated       map[string]bool     // materialized view -> has data
+    // Unsupported lists objects pgy cannot express (foreign tables,
+    // operators, operator classes and families, conversions, base types,
+    // text search parsers and templates), excluding extension members.
+    Unsupported []UnsupportedObject
+}
+
+// UnsupportedObject is a database object pgy has no YAML for.
+type UnsupportedObject struct {
+    Kind, Schema, Name string
 }
 
 // LiveRoutine is a function or procedure's declaration as pg_get_function_*
@@ -56,6 +65,29 @@ func IntrospectDetails(ctx context.Context, pool *pgxpool.Pool, l *Live) error {
         ViewDeps: map[string][]string{}, Populated: map[string]bool{},
     }
     l.Details = d
+    const unsupportedQ = `
+        with objs(kind, nsp, name, classid, objid) as (
+            select 'foreign table', c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid from pg_class c where c.relkind = 'f'
+            union all select 'operator', o.oprnamespace, o.oprname || '(' || coalesce(format_type(o.oprleft, null), 'none') || ', ' || coalesce(format_type(o.oprright, null), 'none') || ')', 'pg_operator'::regclass, o.oid from pg_operator o
+            union all select 'operator class', c.opcnamespace, c.opcname::text, 'pg_opclass'::regclass, c.oid from pg_opclass c
+            union all select 'operator family', f.opfnamespace, f.opfname::text, 'pg_opfamily'::regclass, f.oid from pg_opfamily f
+            union all select 'conversion', c.connamespace, c.conname::text, 'pg_conversion'::regclass, c.oid from pg_conversion c
+            union all select 'base type', t.typnamespace, t.typname::text, 'pg_type'::regclass, t.oid from pg_type t where t.typtype = 'b' and t.typcategory <> 'A'
+            union all select 'text search parser', p.prsnamespace, p.prsname::text, 'pg_ts_parser'::regclass, p.oid from pg_ts_parser p
+            union all select 'text search template', t.tmplnamespace, t.tmplname::text, 'pg_ts_template'::regclass, t.oid from pg_ts_template t
+        )
+        select distinct o.kind, n.nspname, o.name
+        from objs o join pg_namespace n on n.oid = o.nsp
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype = 'e')
+        order by 2, 1, 3`
+    if rows, err := pool.Query(ctx, unsupportedQ); err == nil {
+        for rows.Next() {
+            var o UnsupportedObject
+            if rows.Scan(&o.Kind, &o.Schema, &o.Name) == nil { d.Unsupported = append(d.Unsupported, o) }
+        }
+        rows.Close()
+    }
     const nsFilter = `n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'`
     queries := []struct {
         sql  string
