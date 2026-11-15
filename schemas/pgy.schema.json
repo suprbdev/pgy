@@ -31,7 +31,12 @@
       "description": "Settings of the target database.",
       "type": "object",
       "properties": {
-        "set": { "type": "object", "description": "ALTER DATABASE ... SET parameters (for all roles). Authoritative: unlisted settings are reset.", "additionalProperties": { "$ref": "#/definitions/scalar" } }
+        "set": { "type": "object", "description": "ALTER DATABASE ... SET parameters (for all roles). Authoritative: unlisted settings are reset.", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "roles": {
+          "type": "object",
+          "description": "Per-role settings in this database (ALTER ROLE ... IN DATABASE ... SET): role -> {parameter: value}. Authoritative for each listed role.",
+          "additionalProperties": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
+        }
       },
       "additionalProperties": false
     },

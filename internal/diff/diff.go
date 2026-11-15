@@ -63,6 +63,9 @@ type Live struct{
     // DatabaseConfig: ALTER DATABASE ... SET settings of the connected
     // database (for all roles): lower-cased name -> value
     DatabaseConfig map[string]string
+    // DatabaseRoleConfig: role -> ALTER ROLE ... IN DATABASE settings of the
+    // connected database
+    DatabaseRoleConfig map[string]map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
     // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
     Details *LiveDetails
@@ -1722,6 +1725,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
+    dbRoleQ := `
+        select pg_get_userbyid(s.setrole), s.setconfig
+        from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
+        where d.datname = current_database() and s.setrole <> 0
+    `
+    batch.add(dbRoleQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var role string
+            var config []string
+            if err := rows.Scan(&role, &config); err != nil { return err }
+            if l.DatabaseRoleConfig == nil { l.DatabaseRoleConfig = map[string]map[string]string{} }
+            l.DatabaseRoleConfig[role] = parseProconfig(config)
+        }
+        return nil
+    })
     batch.add(`select current_user, current_setting('server_version_num')::int,
                       coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
                                 where d.datname = current_database() and s.setrole = 0), '{}'::text[])`, func(rows pgx.Rows) error {
@@ -2158,7 +2176,13 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
-        plan.Creates = append(plan.Creates, "do "+dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString("alter database %I "+strings.ReplaceAll(c, "%", "%%"))))+";")
+        plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
+    }
+    for _, role := range sortedKeys(desired.DatabaseRoleSettings) {
+        prefix := "alter role " + strings.ReplaceAll(grantRole(role), "%", "%%") + " in database %I "
+        for _, c := range configClauses(desired.DatabaseRoleSettings[role], live.DatabaseRoleConfig[resolveRole(role, live.CurrentUser)]) {
+            plan.Alters = append(plan.Alters, inCurrentDatabase(prefix, c))
+        }
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
@@ -2960,6 +2984,13 @@ func eventTriggerMatches(et *schema.EventTrigger, le *LiveEventTrigger) bool {
     sort.Strings(want)
     sort.Strings(have)
     return strings.Join(want, ",") == strings.Join(have, ",")
+}
+
+// inCurrentDatabase wraps prefix (a format string whose %I names the
+// database) plus clause in a DO block that runs it for current_database(),
+// so committed migrations do not hardcode the database name.
+func inCurrentDatabase(prefix, clause string) string {
+    return "do " + dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString(prefix+strings.ReplaceAll(clause, "%", "%%")))) + ";"
 }
 
 // dollarTag returns a dollar-quote delimiter that does not occur in body:

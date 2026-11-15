@@ -1308,13 +1308,25 @@ func (b *builder) database() *node {
 			add(doc, "roles", roles)
 		}
 	}
-	if len(b.live.DatabaseConfig) > 0 {
-		set := flowMap()
-		for _, k := range sortedKeys(b.live.DatabaseConfig) {
-			add(set, k, str(b.live.DatabaseConfig[k]))
-		}
+	if len(b.live.DatabaseConfig) > 0 || len(b.live.DatabaseRoleConfig) > 0 {
 		db := newMap()
-		add(db, "set", set)
+		settings := func(m map[string]string) *node {
+			set := flowMap()
+			for _, k := range sortedKeys(m) {
+				add(set, k, str(m[k]))
+			}
+			return set
+		}
+		if len(b.live.DatabaseConfig) > 0 {
+			add(db, "set", settings(b.live.DatabaseConfig))
+		}
+		if len(b.live.DatabaseRoleConfig) > 0 {
+			roles := newMap()
+			for _, r := range sortedKeys(b.live.DatabaseRoleConfig) {
+				add(roles, r, settings(b.live.DatabaseRoleConfig[r]))
+			}
+			add(db, "roles", roles)
+		}
 		add(doc, "database", db)
 	}
 	if dp := b.defaultPrivileges(); dp != nil {
