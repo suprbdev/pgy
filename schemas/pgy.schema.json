@@ -952,6 +952,11 @@
           "description": "Views: COMMENT ON COLUMN per view column.",
           "additionalProperties": { "type": "string" }
         },
+        "columnDefaults": {
+          "type": "object",
+          "description": "Plain views: DEFAULT expressions for view columns (ALTER VIEW ... ALTER COLUMN ... SET DEFAULT), used by inserts through the view.",
+          "additionalProperties": { "$ref": "#/definitions/scalar" }
+        },
         "rules": {
           "type": "object",
           "description": "Plain views: rewrite rules.",

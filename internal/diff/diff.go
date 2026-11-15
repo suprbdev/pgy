@@ -33,6 +33,8 @@ type Live struct{
     ViewOptions map[string]map[string]string
     // ViewColumnComments: "schema.view" -> column -> comment
     ViewColumnComments map[string]map[string]string
+    // ViewColumnDefaults: "schema.view" -> column -> DEFAULT expression
+    ViewColumnDefaults map[string]map[string]string
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
     // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)
@@ -489,6 +491,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         ViewOptions: map[string]map[string]string{},
         MatViewTables: map[string]*LiveTable{},
         ViewColumnComments: map[string]map[string]string{},
+        ViewColumnDefaults: map[string]map[string]string{},
         ViewTables: map[string]*LiveTable{},
         Sequences: map[string]bool{},
         Domains: map[string]bool{},
@@ -1782,6 +1785,26 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
 
+    viewDefaultQ := `
+        select n.nspname || '.' || c.relname, a.attname, pg_get_expr(d.adbin, d.adrelid)
+        from pg_attrdef d
+        join pg_class c on c.oid = d.adrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+        where c.relkind = 'v'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(viewDefaultQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var view, col, def string
+            if err := rows.Scan(&view, &col, &def); err != nil { return err }
+            if l.ViewColumnDefaults[view] == nil { l.ViewColumnDefaults[view] = map[string]string{} }
+            l.ViewColumnDefaults[view][col] = def
+        }
+        return nil
+    })
+
     // Query column comments
     ccQ := `
         select n.nspname, c.relname, a.attname, d.description, c.relkind in ('v', 'm')
@@ -2712,6 +2735,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 if len(vw.Triggers)+len(vw.Rules) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Triggers: vw.Triggers, Rules: vw.Rules}, live.ViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
+                }
+                for _, col := range sortedKeys(vw.ColumnDefaults) {
+                    want := vw.ColumnDefaults[col]
+                    if have, ok := live.ViewColumnDefaults[e.Key][col]; live.Views[e.Key] && ok && defaultsEqual(want, have) { continue }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(e.Key), pqIdent(col), want))
                 }
             }
         case "table":

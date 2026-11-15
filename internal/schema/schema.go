@@ -95,6 +95,7 @@ type View struct {
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
+    ColumnDefaults  map[string]string // plain views: column -> DEFAULT expression, used by inserts through the view
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -2434,6 +2435,12 @@ func parseView(schemaName, key string, body any) *View {
         vw.ColumnComments = map[string]string{}
         for col, v := range cc {
             if s, ok := v.(string); ok { vw.ColumnComments[col] = s }
+        }
+    }
+    if cd, ok := m["columnDefaults"].(map[string]any); ok {
+        vw.ColumnDefaults = map[string]string{}
+        for col, v := range cd {
+            if s := defaultToString(v); s != "" { vw.ColumnDefaults[col] = s }
         }
     }
     return vw

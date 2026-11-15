@@ -101,6 +101,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, unsafe bool)
                 delete(out.MatViews, v)
                 delete(out.ViewOptions, v)
                 delete(out.ViewColumnComments, v)
+                delete(out.ViewColumnDefaults, v)
                 delete(out.MatViewTables, v)
                 delete(out.ViewTables, v)
                 delete(out.RelComments, v)
@@ -171,6 +172,11 @@ func restoreViewAttributes(live *Live, vw *schema.View, v, kind string) []string
     for _, col := range sortedKeys(live.ViewColumnComments[v]) {
         if vw.ColumnComments[col] == "" {
             out = append(out, fmt.Sprintf("comment on column %s.%s is %s;", pqIdent(v), quoteIdent(col), quoteString(live.ViewColumnComments[v][col])))
+        }
+    }
+    for _, col := range sortedKeys(live.ViewColumnDefaults[v]) {
+        if _, managed := vw.ColumnDefaults[col]; !managed {
+            out = append(out, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(v), quoteIdent(col), live.ViewColumnDefaults[v][col]))
         }
     }
     if o := live.Owners["rel:"+v]; vw.Owner == "" && o != "" && o != live.CurrentUser {

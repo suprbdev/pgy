@@ -351,6 +351,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             if out.ViewColumnComments[k] == nil { out.ViewColumnComments[k] = map[string]string{} }
             out.ViewColumnComments[k][col] = cm
         }
+        for col, def := range vw.ColumnDefaults {
+            if out.ViewColumnDefaults == nil { out.ViewColumnDefaults = map[string]map[string]string{} }
+            if out.ViewColumnDefaults[k] == nil { out.ViewColumnDefaults[k] = map[string]string{} }
+            out.ViewColumnDefaults[k][col] = def
+        }
     }
 
     for fq, dt := range desired.Tables {
@@ -619,6 +624,7 @@ func cloneLive(l *Live) *Live {
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         MatViewTables:      cloneMap(l.MatViewTables, cloneLiveTable),
         ViewColumnComments: cloneMap(l.ViewColumnComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
+        ViewColumnDefaults: cloneMap(l.ViewColumnDefaults, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ViewTables:         cloneMap(l.ViewTables, cloneLiveTable),
         Sequences:          cloneSet(l.Sequences),
         Collations:         cloneSet(l.Collations),

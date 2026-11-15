@@ -787,6 +787,7 @@ schema public:
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
+| `columnDefaults` | map | Views only. View column → `DEFAULT` expression, used by `INSERT`s through the view (`ALTER VIEW ... ALTER COLUMN ... SET DEFAULT`). Diffed against live; columns not listed are unmanaged |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 
