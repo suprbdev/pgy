@@ -11,6 +11,7 @@ import (
 	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/pull"
 	"github.com/suprbdev/pgy/internal/schema"
+	"github.com/suprbdev/pgy/internal/validate"
 )
 
 // TestIntegrationPullFixtures loads each SQL schema in testdata/pull into a
@@ -48,6 +49,11 @@ func TestIntegrationPullFixtures(t *testing.T) {
 					t.Fatal(err)
 				}
 				paths = append(paths, p)
+			}
+			for _, issue := range validate.Files(paths) {
+				if issue.Severity == validate.Error {
+					t.Errorf("pgy validate rejects pulled YAML: %s", issue)
+				}
 			}
 			pulled, err := schema.LoadAndMerge(paths)
 			if err != nil {

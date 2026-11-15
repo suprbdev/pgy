@@ -12,6 +12,7 @@ import (
 	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/pull"
 	"github.com/suprbdev/pgy/internal/schema"
+	"github.com/suprbdev/pgy/internal/validate"
 )
 
 func TestIntegrationYAMLIdempotent(t *testing.T) {
@@ -297,6 +298,11 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 			t.Fatal(err)
 		}
 		paths = append(paths, p)
+	}
+	for _, issue := range validate.Files(paths) {
+		if issue.Severity == validate.Error {
+			t.Errorf("pgy validate rejects pulled YAML: %s", issue)
+		}
 	}
 	pulled, err := schema.LoadAndMerge(paths)
 	if err != nil {
