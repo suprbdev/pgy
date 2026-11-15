@@ -709,18 +709,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // flagged so a desired index without an explicit opclass matches.
     opcQ := `
         select n.nspname, t.relname, i.relname, op.opcname, op.opcdefault,
-               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(
-                        (select a.attcollation from pg_attribute a where a.attrelid = x.indrelid and a.attnum = x.indkey[k.ord] and x.indkey[k.ord] > 0),
-                        (select ty.typcollation from pg_attribute ia join pg_type ty on ty.oid = ia.atttypid where ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1))
-                    then ''
-                    else (select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
-                          from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace where co.oid = x.indcollation[k.ord]) end
+               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, ity.typcollation)
+                    then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
         join pg_namespace n on n.oid = t.relnamespace
         cross join lateral generate_series(0, x.indnkeyatts - 1) k(ord)
         join pg_opclass op on op.oid = x.indclass[k.ord]
+        left join pg_attribute ta on ta.attrelid = x.indrelid and ta.attnum = x.indkey[k.ord]
+        left join pg_attribute ia on ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1
+        left join pg_type ity on ity.oid = ia.atttypid
+        left join pg_collation co on co.oid = x.indcollation[k.ord]
+        left join pg_namespace cn on cn.oid = co.collnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         order by n.nspname, t.relname, i.relname, k.ord
