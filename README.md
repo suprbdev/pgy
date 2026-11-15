@@ -136,7 +136,7 @@ buffer: ./.pgy.buffer.sql
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations. Exits 1 on errors. |
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
-| `pgy commit NAME` | Turns the buffer into `migrations/NNNN_NAME.sql` with a checksum header (several files for a split buffer). Warns when a schema file changed after `pgy diff` wrote the buffer. |
+| `pgy commit NAME` | Turns the buffer into `migrations/NNNN_NAME.sql` with a checksum header. Some changes add files around it: `NNNN_NAME_enum_values.sql` before it for new enum labels, and `NNNN_NAME_concurrent.sql` after it for statements that must run outside a transaction. A split buffer writes several groups. Warns when a schema file changed after `pgy diff` wrote the buffer. |
 | `pgy migrate [--dry-run] [--until N] [--limit N] [--lock-timeout D] [--statement-timeout D] [--retries N] [--retry-wait D]` | Applies pending migrations in order, each in its own transaction, after verifying checksums. `--retries` retries a migration that failed to get a lock. |
 | `pgy status [--json]` | Shows the current, last and pending migrations, and history warnings. Exits 2 when some are pending. |
 | `pgy init` | Creates the migrations table. `migrate` and `status` also create it when it is missing. |
