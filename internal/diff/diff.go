@@ -2010,13 +2010,13 @@ func normalizeConfigValue(v string) string {
 // live setting. Clauses are sorted for deterministic output.
 var (
     configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
-    configIdentRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
+    configIdentRe  = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
 )
 
 // configValueSQL renders a SET value. Each comma-separated element that is
-// not already quoted, a number or a plain identifier is quoted, so values
-// such as 5s, 64MB or America/New_York (which PostgreSQL stores, and pgy
-// pull emits, unquoted) form valid SQL.
+// not already quoted, a number or a lower-case identifier is quoted, so
+// values such as 5s, 64MB or America/New_York (which PostgreSQL stores, and
+// pgy pull emits, unquoted) form valid SQL, and UTC isn't folded to utc.
 func configValueSQL(v string) string {
     parts := splitTopLevelQuoted(v)
     for i, p := range parts {
