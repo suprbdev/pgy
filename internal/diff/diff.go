@@ -2225,6 +2225,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
     liveFuncs := normalizedLiveFunctions(live)
+    createsRelations := plansNewRelations(live, desired)
     
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
@@ -2320,7 +2321,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace function" }
             if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s as %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, dollarQuote(body))
-            plan.Creates = append(plan.Creates, stmt)
+            plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, stmt, createsRelations)...)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
             if !ok || pr == nil { continue }
@@ -2346,7 +2347,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
             stmt := fmt.Sprintf("%s %s language %s%s as %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, dollarQuote(pr.Body))
-            plan.Creates = append(plan.Creates, stmt)
+            plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, stmt, createsRelations)...)
         case "aggregate":
             ag := desired.Aggregates[e.Key]
             if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
@@ -3018,6 +3019,28 @@ func eventTriggerMatches(et *schema.EventTrigger, le *LiveEventTrigger) bool {
 // so committed migrations do not hardcode the database name.
 func inCurrentDatabase(prefix, clause string) string {
     return "do " + dollarQuoteInline(fmt.Sprintf("begin execute format(%s, current_database()); end", quoteString(prefix+strings.ReplaceAll(clause, "%", "%%")))) + ";"
+}
+
+// plansNewRelations reports whether desired declares a table, view or
+// materialized view that live lacks.
+func plansNewRelations(live *Live, desired *schema.Database) bool {
+    for k, t := range desired.Tables {
+        if t != nil && live.Tables[k] == nil { return true }
+    }
+    for k, v := range desired.Views {
+        if v != nil && !live.Views[k] && !live.MatViews[k] { return true }
+    }
+    return false
+}
+
+// routineCreateStmts returns stmt, the CREATE of a function or procedure
+// written in language. PostgreSQL checks a SQL-language body against the
+// catalog at CREATE time, so when the plan also creates relations the body
+// may read, stmt is wrapped in SET / RESET check_function_bodies, as pg_dump
+// does; the body is then checked when the routine first runs.
+func routineCreateStmts(language, stmt string, createsRelations bool) []string {
+    if !createsRelations || !strings.EqualFold(strings.TrimSpace(language), "sql") { return []string{stmt} }
+    return []string{"set check_function_bodies = off;", stmt, "reset check_function_bodies;"}
 }
 
 // recreateChangedFunctions finds desired functions whose return type differs

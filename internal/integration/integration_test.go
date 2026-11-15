@@ -60,13 +60,31 @@ func freshSchema(t *testing.T, pool *pgxpool.Pool) string {
 // applyPlan executes all SQL statements from a PlanDiff against the pool.
 func applyPlan(t *testing.T, pool *pgxpool.Pool, p *diff.PlanDiff) {
 	t.Helper()
-	ctx := context.Background()
-	all := append(append(append(p.Creates, p.Alters...), p.Drops...), p.Concurrent...)
-	for _, stmt := range all {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
-			t.Fatalf("apply SQL %q: %v", stmt, err)
+	if stmt, err := execOnOneConn(context.Background(), pool, planStatements(p)); err != nil {
+		t.Fatalf("apply SQL %q: %v", stmt, err)
+	}
+}
+
+// planStatements returns p's statements in the order a migration runs them.
+func planStatements(p *diff.PlanDiff) []string {
+	return append(append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), p.Concurrent...)
+}
+
+// execOnOneConn runs stmts in order on one connection, as pgy migrate does,
+// so session settings carry from one statement to the next. It returns the
+// first failing statement and its error.
+func execOnOneConn(ctx context.Context, pool *pgxpool.Pool, stmts []string) (string, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Release()
+	for _, s := range stmts {
+		if _, err := conn.Exec(ctx, s); err != nil {
+			return s, err
 		}
 	}
+	return "", nil
 }
 
 // --- Extensions ---

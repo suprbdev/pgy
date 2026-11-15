@@ -61,3 +61,30 @@ func TestFunctionReturnTypeChangeRecreates(t *testing.T) {
 		t.Error("planning must not modify the caller's live snapshot")
 	}
 }
+
+func TestSQLFunctionBodyUncheckedOnlyWithNewRelations(t *testing.T) {
+	d := &schema.Database{
+		Tables: map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}}},
+		Functions: map[string]*schema.Function{
+			"app.f()": {Name: "f", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select count(*)::int from app.t"},
+			"app.g()": {Name: "g", ArgsSig: "()", Returns: "int", Language: "plpgsql", Body: "begin return 1; end"},
+		},
+	}
+	creates := Plan(emptyLive(), d, false).Creates
+	joined := strings.Join(creates, "\n")
+	if !strings.Contains(joined, "set check_function_bodies = off;\ncreate function \"app\".\"f\"()") || !strings.Contains(joined, "$$;\nreset check_function_bodies;") {
+		t.Errorf("a SQL function created alongside tables must skip body checks:\n%s", joined)
+	}
+	if strings.Count(joined, "check_function_bodies = off") != 1 {
+		t.Errorf("only the SQL-language function is wrapped:\n%s", joined)
+	}
+
+	live := emptyLive()
+	live.Schemas["app"] = true
+	lt := newLiveTable()
+	lt.Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.t"] = lt
+	if sql := Render(Plan(live, d, false)); strings.Contains(sql, "check_function_bodies") {
+		t.Errorf("with every relation already present, bodies are checked as usual:\n%s", sql)
+	}
+}

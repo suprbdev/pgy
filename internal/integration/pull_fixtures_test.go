@@ -65,11 +65,9 @@ func TestIntegrationPullFixtures(t *testing.T) {
 			}
 			dst := freshDatabase(t, admin, "pgytest_pull_"+name+"_copy")
 			plan := diff.PlanWith(introspectAll(t, dst), pulled, diff.Options{})
-			for _, stmt := range append(append(append(plan.Creates, plan.Alters...), plan.Drops...), plan.Concurrent...) {
-				if _, err := dst.Exec(ctx, stmt); err != nil {
-					dump()
-					t.Fatalf("rebuilding from pulled YAML: %q: %v", stmt, err)
-				}
+			if stmt, err := execOnOneConn(ctx, dst, planStatements(plan)); err != nil {
+				dump()
+				t.Fatalf("rebuilding from pulled YAML: %q: %v", stmt, err)
 			}
 			if sql := diff.Render(diff.PlanWith(introspectAll(t, dst), pulled, opts)); sql != "" {
 				dump()

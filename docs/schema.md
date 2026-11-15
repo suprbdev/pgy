@@ -523,7 +523,7 @@ schema public:
         procedure: public.supersede()
   function supersede():
     returns: trigger
-    language: sql          # body validated at CREATE — table must exist first
+    language: sql          # body validated at CREATE unless the plan creates relations (see Functions)
     dependsOn:
       - table public.events
     body: ...
@@ -864,6 +864,8 @@ schema public:
 ## Functions
 
 Functions are defined inside `schema <name>:` blocks. The key format is `function <name>(<args>):`.
+
+PostgreSQL checks a `language: sql` body against the catalog when the function is created, so the tables it reads must already exist. When a plan creates tables or views as well, pgy creates SQL-language functions and procedures between `SET check_function_bodies = off` and `RESET check_function_bodies`, as `pg_dump` does. Their bodies may then read relations created later in the same migration, including a table whose default calls the function, and are checked when first run. Otherwise bodies are checked at `CREATE` as usual. This lets YAML written by `pgy pull` rebuild a database even though PostgreSQL records no dependency between a SQL function and the tables its body reads.
 
 Overloads — functions sharing a name but taking different arguments — are separate declarations: `function area(r float8):` and `function area(w float8, h float8):` are created, compared, granted and commented independently. The same applies to procedures.
 

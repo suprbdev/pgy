@@ -75,7 +75,7 @@ var objectChangeCases = map[string][2]string{
 	},
 	"function_setof": {
 		"  function f():\n    returns: setof int\n    language: sql\n    body: select 1",
-		"  function f():\n    returns: setof int\n    language: sql\n    rows: 50\n    stable: true\n    body: select generate_series(1, 3)",
+		"  function f():\n    returns: setof int\n    language: sql\n    rows: 50\n    stable: true\n    body: select id from SCH.t\n    dependsOn: [table SCH.t]",
 	},
 	"procedure": {
 		"  procedure p(n int):\n    language: plpgsql\n    body: begin perform n; end",

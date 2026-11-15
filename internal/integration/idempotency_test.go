@@ -254,10 +254,8 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 				pool.Exec(context.Background(), "drop table if exists public."+sch+"_t; drop type if exists public."+sch+"_status") //nolint
 			})
 			plan := diff.Plan(introspect(t, pool, d), d, true)
-			for _, s := range append(append(append(plan.Creates, plan.Alters...), plan.Drops...), plan.Concurrent...) {
-				if _, err := pool.Exec(ctx, s); err != nil {
-					t.Fatalf("apply %q: %v", s, err)
-				}
+			if s, err := execOnOneConn(ctx, pool, planStatements(plan)); err != nil {
+				t.Fatalf("apply %q: %v", s, err)
 			}
 			live := introspect(t, pool, d)
 			if sql := diff.Render(diff.Plan(live, d, true)); sql != "" {
@@ -321,13 +319,11 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		t.Fatal(err)
 	}
 	rebuild := diff.PlanWith(empty, pulled, diff.Options{Unsafe: true})
-	for _, s := range append(append(append(rebuild.Creates, rebuild.Alters...), rebuild.Drops...), rebuild.Concurrent...) {
-		if _, err := pool.Exec(ctx, s); err != nil {
-			for _, f := range res.Files {
-				t.Logf("%s:\n%s", f.Name, f.Content)
-			}
-			t.Fatalf("rebuilding from pulled YAML: %q: %v", s, err)
+	if s, err := execOnOneConn(ctx, pool, planStatements(rebuild)); err != nil {
+		for _, f := range res.Files {
+			t.Logf("%s:\n%s", f.Name, f.Content)
 		}
+		t.Fatalf("rebuilding from pulled YAML: %q: %v", s, err)
 	}
 	rebuilt := introspect(t, pool, desired)
 	if sql := diff.Render(diff.Plan(rebuilt, desired, true)); sql != "" {
