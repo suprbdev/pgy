@@ -59,3 +59,24 @@ schema app:
 		t.Errorf("statisticsTargets: %v", ix.StatisticsTargets)
 	}
 }
+
+func TestPrimaryKeyCommentParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns: {id: {type: int}}
+    primaryKey: {t_key: {columns: [id], comment: the key}}
+  table u:
+    columns: {id: {type: int}}
+    primaryKey: [id]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tb := db.Tables["app.t"]; tb.PrimaryKeyName != "t_key" || tb.PrimaryKeyComment != "the key" || len(tb.PrimaryKey) != 1 {
+		t.Errorf("t: %q %q %v", tb.PrimaryKeyName, tb.PrimaryKeyComment, tb.PrimaryKey)
+	}
+	if tb := db.Tables["app.u"]; tb.PrimaryKeyComment != "" || tb.PrimaryKeyName != "" {
+		t.Errorf("u: %q %q", tb.PrimaryKeyName, tb.PrimaryKeyComment)
+	}
+}

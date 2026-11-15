@@ -692,9 +692,11 @@ func (b *builder) tables() {
 			}
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {
-				if name := diff.LivePrimaryKeyName(lt); name != "" && name != diff.DefaultPrimaryKeyName(fq) {
+				name := diff.LivePrimaryKeyName(lt)
+				if note := lt.ConstraintComments[name]; name != "" && (name != diff.DefaultPrimaryKeyName(fq) || note != "") {
 					cols := flowMap()
 					add(cols, "columns", list(pk))
+					addStr(cols, "comment", note)
 					m := newMap()
 					add(m, name, cols)
 					add(t, "primaryKey", m)
