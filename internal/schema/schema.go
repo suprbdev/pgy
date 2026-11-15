@@ -58,12 +58,22 @@ type Role struct {
     NoInherit       bool     // yaml `inherit: false`
     ConnectionLimit int      // -1 = unset (no clause emitted)
     InRoles         []string // memberships: GRANT <parent> TO <role>
+    // MemberOptions holds the options an inRoles entry sets (admin, inherit,
+    // set), keyed by parent role; options left out are unmanaged.
+    MemberOptions   map[string]*MembershipOptions
+    ValidUntil      string   // VALID UNTIL timestamp or infinity; managed when Managed["validUntil"]
     Set             map[string]string // ALTER ROLE ... SET parameters; nil = unmanaged
     Comment         string
     // Managed records which attributes the YAML sets explicitly (login,
     // superuser, createdb, createrole, replication, bypassRLS, inherit,
     // connectionLimit); only those are reconciled on an existing role.
     Managed map[string]bool
+}
+
+// MembershipOptions are the options of one role membership: WITH ADMIN, and
+// from PostgreSQL 16 WITH INHERIT and WITH SET. nil fields are unmanaged.
+type MembershipOptions struct {
+    Admin, Inherit, Set *bool
 }
 
 type View struct {
@@ -1373,7 +1383,7 @@ func parseRoles(v any) map[string]*Role {
     for name, def := range m {
         r := &Role{Name: name, ConnectionLimit: -1, Managed: map[string]bool{}}
         if dm, ok := def.(map[string]any); ok {
-            for _, k := range []string{"login", "superuser", "createdb", "createrole", "replication", "bypassRLS", "inherit", "connectionLimit"} {
+            for _, k := range []string{"login", "superuser", "createdb", "createrole", "replication", "bypassRLS", "inherit", "connectionLimit", "validUntil"} {
                 if _, ok := dm[k]; ok { r.Managed[k] = true }
             }
             if b, ok := dm["login"].(bool); ok { r.Login = b }
@@ -1384,7 +1394,13 @@ func parseRoles(v any) map[string]*Role {
             if b, ok := dm["bypassRLS"].(bool); ok { r.BypassRLS = b }
             if b, ok := dm["inherit"].(bool); ok { r.NoInherit = !b }
             if n, ok := dm["connectionLimit"].(int); ok { r.ConnectionLimit = n }
-            if ir, ok := dm["inRoles"]; ok { r.InRoles = parseStringListFromNode(ir) }
+            if ir, ok := dm["inRoles"].([]any); ok { r.InRoles, r.MemberOptions = parseInRoles(ir) }
+            switch v := dm["validUntil"].(type) {
+            case time.Time:
+                r.ValidUntil = v.UTC().Format(time.RFC3339)
+            case string:
+                r.ValidUntil = strings.TrimSpace(v)
+            }
             if set, ok := dm["set"].(map[string]any); ok {
                 r.Set = map[string]string{}
                 for k, v := range set { r.Set[k] = scalarToString(v) }
@@ -1394,6 +1410,30 @@ func parseRoles(v any) map[string]*Role {
         out[name] = r
     }
     return out
+}
+
+// parseInRoles parses a role's inRoles: parent role names, or maps
+// {role, admin, inherit, set} that also set the membership's options.
+func parseInRoles(items []any) ([]string, map[string]*MembershipOptions) {
+    names := []string{}
+    var opts map[string]*MembershipOptions
+    for _, it := range items {
+        switch x := it.(type) {
+        case string:
+            names = append(names, x)
+        case map[string]any:
+            name, _ := x["role"].(string)
+            if name = strings.TrimSpace(name); name == "" { continue }
+            names = append(names, name)
+            o := &MembershipOptions{}
+            for key, dst := range map[string]**bool{"admin": &o.Admin, "inherit": &o.Inherit, "set": &o.Set} {
+                if b, ok := x[key].(bool); ok { *dst = &b }
+            }
+            if opts == nil { opts = map[string]*MembershipOptions{} }
+            opts[name] = o
+        }
+    }
+    return names, opts
 }
 
 // parseGrants parses { role: [priv, ...], ... }. Privileges are lowercased.

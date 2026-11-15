@@ -1522,8 +1522,31 @@ func (b *builder) database() *node {
 			if lr.ConnectionLimit >= 0 {
 				add(r, "connectionLimit", num(strconv.Itoa(lr.ConnectionLimit)))
 			}
+			if lr.ValidUntil != "" {
+				add(r, "validUntil", str(lr.ValidUntil))
+			}
 			if parents := sortedKeys(b.live.RoleMembers[name]); len(parents) > 0 {
-				add(r, "inRoles", list(parents))
+				items := &node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+				for _, p := range parents {
+					lm := b.live.RoleMemberOptions[name][p]
+					if lm == nil || (!lm.Admin && lm.Inherit == lr.Inherit && lm.Set) {
+						items.Content = append(items.Content, str(p))
+						continue
+					}
+					m := flowMap()
+					add(m, "role", str(p))
+					if lm.Admin {
+						add(m, "admin", boolean(true))
+					}
+					if lm.Inherit != lr.Inherit {
+						add(m, "inherit", boolean(lm.Inherit))
+					}
+					if !lm.Set {
+						add(m, "set", boolean(false))
+					}
+					items.Content = append(items.Content, m)
+				}
+				add(r, "inRoles", items)
 			}
 			if len(lr.Config) > 0 {
 				set := flowMap()

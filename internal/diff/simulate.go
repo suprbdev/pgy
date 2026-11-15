@@ -73,12 +73,23 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             set("inherit", &lr.Inherit, !r.NoInherit)
             if prev == nil || r.Managed["connectionLimit"] { lr.ConnectionLimit = r.ConnectionLimit }
         }
+        if r.ValidUntil != "" && (out.RoleDefs[name] == nil || r.Managed["validUntil"]) { lr.ValidUntil = normalizeValidUntil(r.ValidUntil) }
         if r.Set != nil { lr.Config = simulateConfig(r.Set) }
         out.RoleDefs[name] = lr
         for _, parent := range r.InRoles {
             if parent == "" { continue }
             if out.RoleMembers[name] == nil { out.RoleMembers[name] = map[string]bool{} }
             out.RoleMembers[name][parent] = true
+            if out.RoleMemberOptions == nil { out.RoleMemberOptions = map[string]map[string]*LiveMembership{} }
+            if out.RoleMemberOptions[name] == nil { out.RoleMemberOptions[name] = map[string]*LiveMembership{} }
+            lm := &LiveMembership{Inherit: lr.Inherit, Set: true}
+            if prevM := out.RoleMemberOptions[name][parent]; prevM != nil { *lm = *prevM }
+            if o := r.MemberOptions[parent]; o != nil {
+                if o.Admin != nil { lm.Admin = *o.Admin }
+                if o.Inherit != nil { lm.Inherit = *o.Inherit }
+                if o.Set != nil { lm.Set = *o.Set }
+            }
+            out.RoleMemberOptions[name][parent] = lm
         }
         if r.Comment != "" { out.RoleComments[name] = r.Comment }
     }
@@ -616,6 +627,9 @@ func cloneLive(l *Live) *Live {
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
+        RoleMemberOptions:  cloneMap(l.RoleMemberOptions, func(m map[string]*LiveMembership) map[string]*LiveMembership {
+            return cloneMap(m, func(v *LiveMembership) *LiveMembership { c := *v; return &c })
+        }),
         RoleComments:       cloneMap(l.RoleComments, nil),
         TableGrants:        cloneGrantMap(l.TableGrants),
         TypeGrants:         cloneGrantMap(l.TypeGrants),
