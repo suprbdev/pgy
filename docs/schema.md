@@ -1064,6 +1064,7 @@ roles:
     inherit: false
     connectionLimit: 10
     inRoles: [readonly]
+    set: {search_path: "app, public", statement_timeout: 30s}
     comment: "application login role"
   migrator:
     login: true
@@ -1077,6 +1078,7 @@ Behavior:
 - `inRoles` memberships are reconciled additively: `GRANT <parent> TO <role>` is emitted for each membership missing from live (`pg_auth_members`).
 - Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
 - `comment` is diffed against `pg_shdescription` like other object comments.
+- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you (the same applies to function and procedure `set:`).
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -1089,6 +1091,7 @@ Behavior:
 | `inherit` | boolean | Set `false` to emit `NOINHERIT` (default inherits) |
 | `connectionLimit` | integer | `CONNECTION LIMIT n`; omit for unlimited |
 | `inRoles` | list | Parent roles; each emits `GRANT <parent> TO <role>` when missing |
+| `set` | map | Settings for the role in all databases (`ALTER ROLE ... SET` / `RESET`); omit to leave them unmanaged |
 | `comment` | string | `COMMENT ON ROLE` |
 
 ## Grants
