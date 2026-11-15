@@ -2604,9 +2604,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     if dt.Foreign != nil {
                         plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s partition of %s %s server %s%s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     } else {
-                        sub := ""
+                        sub, unlogged := "", ""
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create table if not exists %s partition of %s %s%s;", pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub))
+                        if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With)))
                     }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
@@ -2694,7 +2695,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })...)
                 }
-                if dt.PartitionOf == "" && dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                if dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
                 // apply any missing constraints, indexes, triggers
