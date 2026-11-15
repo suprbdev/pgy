@@ -301,6 +301,33 @@ func Database(d *schema.Database) []Issue {
 			if !vw.Materialized && vw.With != nil {
 				add(Error, kind+k, "with is for materialized views; use securityInvoker, securityBarrier and checkOption on views")
 			}
+			if !vw.Materialized && len(vw.Indexes) > 0 {
+				add(Error, kind+k, "indexes are for materialized views; PostgreSQL cannot index a view")
+			}
+			if !vw.Materialized && vw.WithData != nil {
+				add(Warning, kind+k, "withData is for materialized views and is ignored")
+			}
+			if vw.Materialized {
+				for _, o := range []struct {
+					key    string
+					set    bool
+					object bool
+				}{
+					{"triggers", len(vw.Triggers) > 0, true},
+					{"rules", len(vw.Rules) > 0, true},
+					{"securityInvoker", vw.SecurityInvoker != nil, false},
+					{"securityBarrier", vw.SecurityBarrier != nil, false},
+					{"checkOption", vw.CheckOption != "", false},
+					{"replace", vw.Replace, false},
+				} {
+					switch {
+					case o.set && o.object:
+						add(Error, kind+k, "%s are for views; PostgreSQL doesn't support them on materialized views", o.key)
+					case o.set:
+						add(Warning, kind+k, "%s is for views and is ignored on materialized views", o.key)
+					}
+				}
+			}
 			for _, tr := range vw.Triggers {
 				if tr != nil {
 					checkTrigger(d, kind+k, tr, add)
