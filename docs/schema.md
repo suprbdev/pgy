@@ -1252,7 +1252,10 @@ Behavior:
 - A present `grants:` block is **authoritative** for that object: missing privileges are granted; live privileges for roles not listed (or privileges removed from a role's list) are revoked. Object owners are never touched: an owner holds every privilege implicitly, so grants to it in the YAML are ignored (`pgy validate` warns about them). The owner is the declared `owner`, else the live owner, else the role running the migration. Roles can also be `current_user`, `current_role` or `session_user`, and are compared as the connected role.
 - Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
 - An **empty privilege list** (`some_role: []`) is not the same as omitting the block. It means "this role holds nothing on this object" and revokes whatever the live database still grants. Use it to take a privilege away while keeping the object managed.
-- `PUBLIC` is never auto-revoked by a `grants:` block. For functions, set `revokePublic: true` to revoke the default `PUBLIC` `EXECUTE` (recommended for `security: definer` functions). It is emitted for new functions and whenever the live database still shows `PUBLIC` execute. Types and domains take `revokePublic: true` the same way, for PostgreSQL's default `PUBLIC` `USAGE`.
+- How a `grants:` block treats `PUBLIC` depends on whether PostgreSQL gives `PUBLIC` anything by default:
+  - **Tables, views, materialized views, sequences, columns, foreign servers and schemas other than `public`** get nothing by default, so a `PUBLIC` grant on them was made on purpose. A grants block covers `PUBLIC` like any other role: `PUBLIC` privileges it doesn't list are revoked, and `pgy diff` warns about each such revoke. List `public` to keep them: `grants: {public: [select]}`.
+  - **Functions, procedures, types, domains and the `public` schema** come with `PUBLIC` privileges (`EXECUTE`, `USAGE`). Their grants block leaves `PUBLIC` alone unless it lists `public`. `public: []` revokes the default, and `public: [execute]` keeps it. `revokePublic: true` does the same as `public: []` (recommended for `security: definer` functions); it is emitted for new objects and whenever the live database still grants the default.
+  - Before v0.43.0 a grants block never revoked `PUBLIC` privileges, so an upgrade can revoke `PUBLIC` grants that were made by hand; the warnings name each one.
 - Grant/revoke statements are emitted after all object creation and FK alters.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
@@ -1310,7 +1313,7 @@ grant select ("email"), update ("email") on table "public"."users" to "support";
 
 - Valid column privileges are `select`, `insert`, `update`, and `references` (PostgreSQL restriction; pgy passes privileges through verbatim).
 - A column **with** a `grants:` block is authoritative for that column: missing privileges are granted, extra live column privileges are revoked. Columns without a block are unmanaged.
-- `PUBLIC` column grants are never auto-revoked.
+- Column grants cover `PUBLIC` like tables do: a `PUBLIC` column privilege the column's block doesn't list is revoked, with a warning.
 - To narrow a table-wide grant to specific columns, empty the table-level list and add per-column grants in the same change: `grants: {role: []}` on the table plus `grants: {role: [select]}` on each column. The table revoke is ordered ahead of the column grants, so the result is select on exactly those columns.
 - Column grants are independent of table-level grants: a table-level `select` already covers every column, so column grants are typically used *instead of* a table-level privilege to restrict access to a subset of columns.
 

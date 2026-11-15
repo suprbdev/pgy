@@ -1016,7 +1016,7 @@ func TestMatViewGrantCreate(t *testing.T) {
 	}
 }
 
-func TestColumnGrantPublicNotAutoRevoked(t *testing.T) {
+func TestColumnGrantCoversPublic(t *testing.T) {
 	live := liveWithTable("public.users", map[string]*LiveColumn{"email": {Type: "text"}})
 	live.ColumnGrants["public.users"] = map[string]map[string]map[string]bool{
 		"email": {"public": {"select": true}},
@@ -1030,8 +1030,11 @@ func TestColumnGrantPublicNotAutoRevoked(t *testing.T) {
 		},
 	}}
 	p := Plan(live, desired, false)
-	if findAlter(p, "revoke") {
-		t.Errorf("PUBLIC column grant must not be auto-revoked; alters: %v", p.Alters)
+	if !findAlter(p, `revoke select ("email") on table "public"."users" from public;`) {
+		t.Errorf("a column grants block covers PUBLIC; alters: %v", p.Alters)
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(p.Warnings[0].Message, "revokes PUBLIC's privileges") {
+		t.Errorf("a PUBLIC revoke must be warned about: %v", p.Warnings)
 	}
 }
 
