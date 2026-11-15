@@ -1294,6 +1294,13 @@ func (b *builder) database() *node {
 			if parents := sortedKeys(b.live.RoleMembers[name]); len(parents) > 0 {
 				add(r, "inRoles", list(parents))
 			}
+			if len(lr.Config) > 0 {
+				set := flowMap()
+				for _, k := range sortedKeys(lr.Config) {
+					add(set, k, str(lr.Config[k]))
+				}
+				add(r, "set", set)
+			}
 			addStr(r, "comment", b.live.RoleComments[name])
 			add(roles, name, r)
 		}

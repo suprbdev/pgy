@@ -67,6 +67,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             set("inherit", &lr.Inherit, !r.NoInherit)
             if prev == nil || r.Managed["connectionLimit"] { lr.ConnectionLimit = r.ConnectionLimit }
         }
+        if r.Set != nil { lr.Config = simulateConfig(r.Set) }
         out.RoleDefs[name] = lr
         for _, parent := range r.InRoles {
             if parent == "" { continue }

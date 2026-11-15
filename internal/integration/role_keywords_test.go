@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -35,4 +36,24 @@ schema SCH:
     columns: {id: {type: int}}
 `, "READER", reader),
 	})
+}
+
+func TestIntegrationRoleSettings(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	role := sch + "_settings"
+	t.Cleanup(func() { pool.Exec(context.Background(), `drop role if exists "`+role+`"`) }) //nolint
+	y := `
+roles:
+  ROLE:
+    set: {statement_timeout: 5s, timezone: America/New_York, search_path: "SCH, public"}
+schema SCH:
+  table t:
+    columns: {id: {type: int}}
+`
+	convergeYAML(t, pool, sch, strings.ReplaceAll(y, "ROLE", role))
+	sql := convergeYAML(t, pool, sch, strings.ReplaceAll(strings.ReplaceAll(y, "ROLE", role), "statement_timeout: 5s, ", ""))
+	if !contains(sql, `alter role "`+role+`" reset statement_timeout;`) {
+		t.Errorf("expected a reset, got:\n%s", sql)
+	}
 }

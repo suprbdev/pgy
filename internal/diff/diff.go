@@ -142,6 +142,7 @@ type LiveEventTrigger struct {
 type LiveRole struct {
     Login, Superuser, CreateDB, CreateRole, Replication, BypassRLS, Inherit bool
     ConnectionLimit int
+    Config map[string]string // ALTER ROLE ... SET settings for all databases: lower-cased name -> value
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -1412,16 +1413,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query existing roles (skip pg_* system roles)
     roleQ := `
-        select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit
-        from pg_roles where rolname not like 'pg\_%'
+        select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit,
+               coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[])
+        from pg_roles r where rolname not like 'pg\_%'
     `
     batch.add(roleQ, func(roleRows pgx.Rows) error {
         for roleRows.Next() {
             var roleName string
             lr := &LiveRole{}
-            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit); err != nil {
+            var config []string
+            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &config); err != nil {
                 return err
             }
+            lr.Config = parseProconfig(config)
             l.Roles[roleName] = true
             l.RoleDefs[roleName] = lr
         }
@@ -2491,6 +2495,11 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
             plan.Creates = append(plan.Creates, renderRole(r))
         } else if opts := roleAlterOptions(r, live.RoleDefs[name]); len(opts) > 0 {
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s with %s;", grantRole(name), strings.Join(opts, " ")))
+        }
+        var liveConfig map[string]string
+        if lr := live.RoleDefs[name]; lr != nil && live.Roles[name] { liveConfig = lr.Config }
+        for _, c := range configClauses(r.Set, liveConfig) {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s %s;", grantRole(name), c))
         }
         for _, parent := range r.InRoles {
             if parent == "" || live.RoleMembers[name][parent] { continue }

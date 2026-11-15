@@ -281,3 +281,17 @@ schema app:
 		t.Errorf("attributes = %v", at)
 	}
 }
+
+func TestRoleSetParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+roles:
+  app:
+    set: {statement_timeout: 30s, work_mem: 64MB, jit: false}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set := d.Roles["app"].Set; set["statement_timeout"] != "30s" || set["work_mem"] != "64MB" || set["jit"] != "false" {
+		t.Errorf("set = %v", set)
+	}
+}

@@ -53,6 +53,7 @@ type Role struct {
     NoInherit       bool     // yaml `inherit: false`
     ConnectionLimit int      // -1 = unset (no clause emitted)
     InRoles         []string // memberships: GRANT <parent> TO <role>
+    Set             map[string]string // ALTER ROLE ... SET parameters; nil = unmanaged
     Comment         string
     // Managed records which attributes the YAML sets explicitly (login,
     // superuser, createdb, createrole, replication, bypassRLS, inherit,
@@ -1260,6 +1261,10 @@ func parseRoles(v any) map[string]*Role {
             if b, ok := dm["inherit"].(bool); ok { r.NoInherit = !b }
             if n, ok := dm["connectionLimit"].(int); ok { r.ConnectionLimit = n }
             if ir, ok := dm["inRoles"]; ok { r.InRoles = parseStringListFromNode(ir) }
+            if set, ok := dm["set"].(map[string]any); ok {
+                r.Set = map[string]string{}
+                for k, v := range set { r.Set[k] = scalarToString(v) }
+            }
             if cm, ok := dm["comment"].(string); ok { r.Comment = cm }
         }
         out[name] = r
