@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/schema"
@@ -29,6 +30,38 @@ func TestSequenceTypeDomainGrants(t *testing.T) {
 	} {
 		if !findAlter(p, want) {
 			t.Errorf("missing %q in %v", want, p.Alters)
+		}
+	}
+}
+
+func TestNewObjectsStartFromDefaultPrivileges(t *testing.T) {
+	live := emptyLive()
+	live.CurrentUser = "deployer"
+	d := &schema.Database{
+		DefaultPrivileges: []*schema.DefaultPrivilege{{ForRole: "deployer", Schemas: []string{"app"}, Grants: map[string]map[string][]string{
+			"tables":    {"reader": {"select"}},
+			"sequences": {"reader": {"usage"}},
+		}}},
+		Tables: map[string]*schema.Table{
+			"app.private": {Name: "app.private", Columns: map[string]*schema.Column{"id": {Type: "int"}}, Grants: map[string][]string{}},
+			"app.shared":  {Name: "app.shared", Columns: map[string]*schema.Column{"id": {Type: "int"}}, Grants: map[string][]string{"reader": {"select"}, "writer": {"insert"}}},
+			"app.loose":   {Name: "app.loose", Columns: map[string]*schema.Column{"id": {Type: "int"}}},
+		},
+		Sequences: map[string]*schema.Sequence{"app.s": {Name: "s", Grants: map[string][]string{}}},
+	}
+	sql := Render(Plan(live, d, false))
+	for _, want := range []string{
+		`revoke select on table "app"."private" from "reader";`,
+		`revoke usage on sequence "app"."s" from "reader";`,
+		`grant insert on table "app"."shared" to "writer";`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in\n%s", want, sql)
+		}
+	}
+	for _, unwanted := range []string{`grant select on table "app"."shared"`, `"app"."loose" from`} {
+		if strings.Contains(sql, unwanted) {
+			t.Errorf("unexpected %q in\n%s", unwanted, sql)
 		}
 	}
 }

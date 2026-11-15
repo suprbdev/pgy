@@ -288,7 +288,7 @@ func (b *builder) types() {
 		default:
 			continue
 		}
-		if g := grantsNode(b.live.TypeGrants[k]); g != nil {
+		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(t, "grants", g)
 		}
 		addStr(t, "comment", b.live.TypeComments[k])
@@ -330,7 +330,7 @@ func (b *builder) domains() {
 				}
 			}
 		}
-		if g := grantsNode(b.live.TypeGrants[k]); g != nil {
+		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
@@ -482,7 +482,7 @@ func (b *builder) sequences() {
 		if ls.Owner != "" {
 			add(m, "ownedBy", str(ls.Owner))
 		}
-		if g := grantsNode(b.live.TableGrants[k]); g != nil {
+		if g := b.grantsFor(b.live.TableGrants[k], k, "sequences"); g != nil {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
@@ -495,7 +495,7 @@ func (b *builder) sequences() {
 // sequence, which the column creates, as a sequence block that depends on
 // the column's table, so a rebuild applies them once the table exists.
 func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
-	g := grantsNode(b.live.TableGrants[k])
+	g := b.grantsFor(b.live.TableGrants[k], k, "sequences")
 	comment := b.live.RelComments[k]
 	if g == nil && comment == "" {
 		return
@@ -587,7 +587,7 @@ func (b *builder) routines() {
 		if !b.live.FunctionPublicExec[norm] {
 			add(m, "revokePublic", boolean(true))
 		}
-		if g := grantsNode(b.live.FunctionGrants[norm]); g != nil {
+		if g := b.grantsFor(b.live.FunctionGrants[norm], r.Schema+"."+r.Name, "functions"); g != nil {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
@@ -707,7 +707,7 @@ func (b *builder) tables() {
 			add(t, "rowLevelSecurity", boolean(true))
 		}
 		b.policies(t, lt)
-		if g := grantsNode(b.live.TableGrants[fq]); g != nil {
+		if g := b.grantsFor(b.live.TableGrants[fq], fq, "tables"); g != nil {
 			add(t, "grants", g)
 		}
 		addStr(t, "comment", b.live.RelComments[fq])
@@ -1334,7 +1334,7 @@ func (b *builder) views() {
 				b.rules(m, vt)
 			}
 		}
-		if g := grantsNode(b.live.TableGrants[k]); g != nil {
+		if g := b.grantsFor(b.live.TableGrants[k], k, "tables"); g != nil {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
@@ -1561,6 +1561,30 @@ func (b *builder) defaultPrivileges() *node {
 		seq.Content = append(seq.Content, e)
 	}
 	return seq
+}
+
+// grantsFor returns grantsNode(g) for object fq of kind (tables,
+// sequences, functions or types). An object with no grants gets an empty
+// mapping when some role's default privileges for its schema would grant
+// objects of that kind something: the object predates them, and without
+// the mapping a rebuild would hand it those grants.
+func (b *builder) grantsFor(g map[string]map[string]bool, fq, kind string) *node {
+	if n := grantsNode(g); n != nil {
+		return n
+	}
+	nsp, _, _ := strings.Cut(fq, ".")
+	for key, grants := range b.live.DefaultACLs {
+		parts := strings.Split(key, "|")
+		if len(parts) != 3 || parts[2] != kind || (parts[1] != "" && parts[1] != nsp) {
+			continue
+		}
+		for grantee, privs := range grants {
+			if grantee != "public" && len(privs) > 0 {
+				return flowMap()
+			}
+		}
+	}
+	return nil
 }
 
 func grantsNode(g map[string]map[string]bool) *node {

@@ -681,24 +681,36 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
         if p != nil { set("proc:"+normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig), p.Owner) }
     }
     for _, dp := range desired.DefaultPrivileges {
+        if dp != nil {
+            for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }
+        }
+    }
+    if out.DefaultACLs == nil { out.DefaultACLs = map[string]map[string]map[string]bool{} }
+    if out.DefaultACLRows == nil { out.DefaultACLRows = map[string]bool{} }
+    applyDefaultPrivileges(out.DefaultACLs, out.DefaultACLRows, out.CurrentUser, desired.DefaultPrivileges)
+}
+
+// applyDefaultPrivileges updates acls and rows (as Live.DefaultACLs and
+// Live.DefaultACLRows) with the grants dps declare.
+func applyDefaultPrivileges(acls map[string]map[string]map[string]bool, rows map[string]bool, currentUser string, dps []*schema.DefaultPrivilege) {
+    for _, dp := range dps {
         if dp == nil { continue }
-        for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }
-        role := resolveRole(dp.ForRole, out.CurrentUser)
-        if role == "" { role = out.CurrentUser }
+        role := resolveRole(dp.ForRole, currentUser)
+        if role == "" { role = currentUser }
         schemas := dp.Schemas
         if len(schemas) == 0 { schemas = []string{""} }
         for kind, grants := range dp.Grants {
             for _, nsp := range schemas {
                 key := role + "|" + nsp + "|" + kind
-                if out.DefaultACLs[key] == nil { out.DefaultACLs[key] = map[string]map[string]bool{} }
-                if _, implicit := defaultACLImplicit[kind]; implicit && nsp == "" && !out.DefaultACLRows[key] {
-                    out.DefaultACLs[key]["public"] = map[string]bool{defaultACLImplicit[kind]: true}
+                if acls[key] == nil { acls[key] = map[string]map[string]bool{} }
+                if _, implicit := defaultACLImplicit[kind]; implicit && nsp == "" && !rows[key] {
+                    acls[key]["public"] = map[string]bool{defaultACLImplicit[kind]: true}
                 }
-                out.DefaultACLRows[key] = true
+                rows[key] = true
                 for grantee, privs := range grants {
                     set := map[string]bool{}
                     for _, p := range privs { set[strings.ToLower(p)] = true }
-                    out.DefaultACLs[key][strings.ToLower(resolveRole(grantee, out.CurrentUser))] = set
+                    acls[key][strings.ToLower(resolveRole(grantee, currentUser))] = set
                 }
             }
         }

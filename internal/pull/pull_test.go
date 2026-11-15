@@ -132,3 +132,28 @@ func TestBuildExtensionsKeepTheirSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildEmptyGrantsWhenDefaultsWouldGrant(t *testing.T) {
+	live := &diff.Live{
+		Schemas: map[string]bool{"app": true},
+		Tables: map[string]*diff.LiveTable{
+			"app.old":    {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+			"app.shared": {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+		},
+		TableGrants: map[string]map[string]map[string]bool{"app.shared": {"reader": {"select": true}}},
+		DefaultACLs: map[string]map[string]map[string]bool{"owner|app|tables": {"reader": {"select": true}}},
+		Details:     &diff.LiveDetails{ColumnOrder: map[string][]string{"app.old": {"id"}, "app.shared": {"id"}}},
+	}
+	res, err := Build(live, Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Files[0].Content)
+	old := out[strings.Index(out, "table old:"):strings.Index(out, "table shared:")]
+	if !strings.Contains(old, "grants: {}") {
+		t.Errorf("a table without the grants its schema's default privileges give needs grants: {}:\n%s", out)
+	}
+	if !strings.Contains(out[strings.Index(out, "table shared:"):], "grants: {reader: [select]}") {
+		t.Errorf("explicit grants must be pulled:\n%s", out)
+	}
+}
