@@ -30,3 +30,19 @@ schema public:
 		t.Errorf("unexpected matview options: %+v", mv)
 	}
 }
+
+func TestMaterializedViewStorageParamsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema public:
+  materialized view mv:
+    query: select 1 as id
+    with: {fillfactor: 70, toast.autovacuum_enabled: false}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := db.Views["public.mv"].With
+	if w["fillfactor"] != "70" || w["toast.autovacuum_enabled"] != "false" {
+		t.Errorf("with = %v", w)
+	}
+}

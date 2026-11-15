@@ -1226,6 +1226,13 @@ func (b *builder) views() {
 				add(m, "withData", boolean(false))
 			}
 			if lt := b.live.MatViewTables[k]; lt != nil {
+				if len(lt.Options) > 0 {
+					w := flowMap()
+					for _, o := range sortedKeys(lt.Options) {
+						add(w, o, str(lt.Options[o]))
+					}
+					add(m, "with", w)
+				}
 				b.indexes(m, k, lt)
 			}
 		} else {

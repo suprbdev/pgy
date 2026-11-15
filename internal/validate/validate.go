@@ -298,6 +298,9 @@ func Database(d *schema.Database) []Issue {
 			if strings.TrimSpace(vw.Query) == "" {
 				add(Error, kind+k, "has no query")
 			}
+			if !vw.Materialized && vw.With != nil {
+				add(Error, kind+k, "with is for materialized views; use securityInvoker, securityBarrier and checkOption on views")
+			}
 			for _, tr := range vw.Triggers {
 				if tr != nil {
 					checkTrigger(d, kind+k, tr, add)

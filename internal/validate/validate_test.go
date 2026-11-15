@@ -367,3 +367,22 @@ schema app:
 		}
 	}
 }
+
+func TestValidateStorageParamsOnPlainView(t *testing.T) {
+	p := write(t, t.TempDir(), "v.yml", `
+schema app:
+  view v:
+    query: select 1
+    with: {fillfactor: 70}
+  materialized view mv:
+    query: select 1
+    with: {fillfactor: 70}
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "view app.v: with is for materialized views") {
+		t.Errorf("missing plain view error in:\n%s", got)
+	}
+	if strings.Contains(got, "app.mv") {
+		t.Errorf("materialized view flagged:\n%s", got)
+	}
+}

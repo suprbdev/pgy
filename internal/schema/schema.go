@@ -77,6 +77,7 @@ type View struct {
     SecurityBarrier *bool  // views: security_barrier option; nil = unmanaged
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
+    With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
@@ -2241,6 +2242,10 @@ func parseView(schemaName, key string, body any) *View {
     if b, ok := m["securityBarrier"].(bool); ok { vw.SecurityBarrier = &b }
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
+    if w, ok := m["with"].(map[string]any); ok {
+        vw.With = map[string]string{}
+        for k, v := range w { vw.With[k] = scalarToString(v) }
+    }
     if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
     if trRaw, ok := m["triggers"]; ok { vw.Triggers = parseTriggers(trRaw) }
     if rRaw, ok := m["rules"]; ok { vw.Rules = parseRules(rRaw) }
