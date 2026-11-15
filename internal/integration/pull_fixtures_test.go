@@ -15,9 +15,9 @@ import (
 )
 
 // TestIntegrationPullFixtures loads each SQL schema in testdata/pull into a
-// fresh database, pulls it, and requires the pulled YAML to diff clean
-// against that database and to rebuild an identical schema in a second
-// fresh database.
+// fresh database, pulls it with owners, and requires the pulled YAML to
+// diff clean against that database and to rebuild an identical schema in a
+// second fresh database.
 func TestIntegrationPullFixtures(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -37,7 +37,7 @@ func TestIntegrationPullFixtures(t *testing.T) {
 				t.Fatalf("loading fixture: %v", err)
 			}
 			live := introspectAll(t, src)
-			res, err := pull.Build(live, pull.Options{})
+			res, err := pull.Build(live, pull.Options{Owners: true})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -884,7 +884,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     typeGrantQ := `
         select n.nspname || '.' || t.typname,
                case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
-               lower(a.privilege_type)
+               lower(a.privilege_type) || case when a.is_grantable then '*' else '' end
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         cross join lateral aclexplode(t.typacl) a
@@ -1447,7 +1447,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     tgQ := `
         select n.nspname, c.relname,
                case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
-               lower(a.privilege_type)
+               lower(a.privilege_type) || case when a.is_grantable then '*' else '' end
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         cross join lateral aclexplode(c.relacl) a
@@ -1472,7 +1472,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     cgQ := `
         select n.nspname, c.relname, att.attname,
                case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
-               lower(a.privilege_type)
+               lower(a.privilege_type) || case when a.is_grantable then '*' else '' end
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         join pg_attribute att on att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
@@ -1500,7 +1500,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     fgQ := `
         select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
                coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
-               coalesce(lower(a.privilege_type), ''),
+               coalesce(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, ''),
                p.proacl is null,
                coalesce(a.grantee = p.proowner, false)
         from pg_proc p
@@ -1530,7 +1530,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     sgQ := `
         select n.nspname,
                case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end,
-               lower(a.privilege_type)
+               lower(a.privilege_type) || case when a.is_grantable then '*' else '' end
         from pg_namespace n
         cross join lateral aclexplode(n.nspacl) a
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -4114,35 +4114,52 @@ func CreatedGrants(acls map[string]map[string]map[string]bool, role, fq, kind st
 // that role's column-level privileges, so a table revoke running after a
 // column grant would silently destroy it.
 func grantDiffStmts(target string, desired map[string][]string, liveG map[string]map[string]bool) (revokes, grants []string) {
-    roles := make([]string, 0, len(desired))
-    for r := range desired { roles = append(roles, r) }
-    sort.Strings(roles)
-    for _, role := range roles {
-        missing := []string{}
-        for _, priv := range desired[role] {
-            p := strings.ToLower(priv)
-            if !liveG[role][p] { missing = append(missing, p) }
+    return roleGrantStmts(desired, liveG, func(privs []string) string { return strings.Join(privs, ", ") + " on " + target })
+}
+
+// roleGrantStmts reconciles desired role->privileges with live
+// role->privilege sets; on renders the "<privileges> on <target>" part of
+// each statement. A privilege ending in * carries WITH GRANT OPTION: one
+// missing from live is granted with it, a live grant option the YAML no
+// longer declares is revoked with REVOKE GRANT OPTION FOR, and the privilege
+// itself is kept. PUBLIC is never revoked (it is managed via revokePublic).
+func roleGrantStmts(desired map[string][]string, liveG map[string]map[string]bool, on func([]string) string) (revokes, grants []string) {
+    parse := func(privs map[string]bool) map[string]bool {
+        out := map[string]bool{}
+        for p := range privs {
+            base := strings.TrimSuffix(p, "*")
+            out[base] = out[base] || base != p
         }
-        if len(missing) > 0 {
-            sort.Strings(missing)
-            grants = append(grants, fmt.Sprintf("grant %s on %s to %s;", strings.Join(missing, ", "), target, grantRole(role)))
-        }
+        return out
     }
-    liveRoles := make([]string, 0, len(liveG))
-    for r := range liveG { liveRoles = append(liveRoles, r) }
-    sort.Strings(liveRoles)
-    for _, role := range liveRoles {
-        if role == "public" { continue } // PUBLIC managed only via revokePublic
-        want := map[string]bool{}
-        for _, priv := range desired[role] { want[strings.ToLower(priv)] = true }
-        extra := []string{}
-        for priv := range liveG[role] {
-            if !want[priv] { extra = append(extra, priv) }
+    roles := map[string]bool{}
+    for r := range desired { roles[r] = true }
+    for r := range liveG { roles[r] = true }
+    for _, role := range sortedKeys(roles) {
+        wantSet := map[string]bool{}
+        for _, p := range desired[role] { wantSet[strings.ToLower(p)] = true }
+        want, have := parse(wantSet), parse(liveG[role])
+        var grant, grantOpt, revoke, revokeOpt []string
+        for _, p := range sortedKeys(want) {
+            opt, ok := have[p]
+            switch {
+            case !ok && want[p]:
+                grantOpt = append(grantOpt, p)
+            case !ok:
+                grant = append(grant, p)
+            case want[p] && !opt:
+                grantOpt = append(grantOpt, p)
+            case !want[p] && opt:
+                revokeOpt = append(revokeOpt, p)
+            }
         }
-        if len(extra) > 0 {
-            sort.Strings(extra)
-            revokes = append(revokes, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(extra, ", "), target, grantRole(role)))
+        for _, p := range sortedKeys(have) {
+            if _, ok := want[p]; !ok && role != "public" { revoke = append(revoke, p) }
         }
+        if len(revoke) > 0 { revokes = append(revokes, fmt.Sprintf("revoke %s from %s;", on(revoke), grantRole(role))) }
+        if len(revokeOpt) > 0 { revokes = append(revokes, fmt.Sprintf("revoke grant option for %s from %s;", on(revokeOpt), grantRole(role))) }
+        if len(grant) > 0 { grants = append(grants, fmt.Sprintf("grant %s to %s;", on(grant), grantRole(role))) }
+        if len(grantOpt) > 0 { grants = append(grants, fmt.Sprintf("grant %s to %s with grant option;", on(grantOpt), grantRole(role))) }
     }
     return revokes, grants
 }
@@ -4155,41 +4172,11 @@ func grantDiffStmts(target string, desired map[string][]string, liveG map[string
 func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool) (revokes, grants []string) {
     target := "table " + pqIdent(tableKey)
     colIdent := pqIdent(col)
-    roles := make([]string, 0, len(desired))
-    for r := range desired { roles = append(roles, r) }
-    sort.Strings(roles)
-    for _, role := range roles {
-        missing := []string{}
-        for _, priv := range desired[role] {
-            p := strings.ToLower(priv)
-            if !liveG[role][p] { missing = append(missing, p) }
-        }
-        if len(missing) > 0 {
-            sort.Strings(missing)
-            parts := make([]string, 0, len(missing))
-            for _, p := range missing { parts = append(parts, p+" ("+colIdent+")") }
-            grants = append(grants, fmt.Sprintf("grant %s on %s to %s;", strings.Join(parts, ", "), target, grantRole(role)))
-        }
-    }
-    liveRoles := make([]string, 0, len(liveG))
-    for r := range liveG { liveRoles = append(liveRoles, r) }
-    sort.Strings(liveRoles)
-    for _, role := range liveRoles {
-        if role == "public" { continue } // PUBLIC managed only via revokePublic
-        want := map[string]bool{}
-        for _, priv := range desired[role] { want[strings.ToLower(priv)] = true }
-        extra := []string{}
-        for priv := range liveG[role] {
-            if !want[priv] { extra = append(extra, priv) }
-        }
-        if len(extra) > 0 {
-            sort.Strings(extra)
-            parts := make([]string, 0, len(extra))
-            for _, p := range extra { parts = append(parts, p+" ("+colIdent+")") }
-            revokes = append(revokes, fmt.Sprintf("revoke %s on %s from %s;", strings.Join(parts, ", "), target, grantRole(role)))
-        }
-    }
-    return revokes, grants
+    return roleGrantStmts(desired, liveG, func(privs []string) string {
+        parts := make([]string, len(privs))
+        for i, p := range privs { parts[i] = p + " (" + colIdent + ")" }
+        return strings.Join(parts, ", ") + " on " + target
+    })
 }
 
 // grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.

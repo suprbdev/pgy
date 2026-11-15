@@ -1621,7 +1621,13 @@ func grantsNode(g map[string]map[string]bool) *node {
 	}
 	m := flowMap()
 	for _, r := range sortedKeys(g) {
-		add(m, r, list(sortedKeys(g[r])))
+		privs := sortedKeys(g[r])
+		for i, p := range privs {
+			if base, ok := strings.CutSuffix(p, "*"); ok {
+				privs[i] = base + " with grant option"
+			}
+		}
+		add(m, r, list(privs))
 	}
 	return m
 }

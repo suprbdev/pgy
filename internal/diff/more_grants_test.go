@@ -65,3 +65,32 @@ func TestNewObjectsStartFromDefaultPrivileges(t *testing.T) {
 		}
 	}
 }
+
+func TestGrantOption(t *testing.T) {
+	target := `table "app"."t"`
+	for _, c := range []struct {
+		desired  []string
+		live     map[string]bool
+		revokes  string
+		grants   string
+	}{
+		{[]string{"select", "insert*"}, nil, "", `grant select on table "app"."t" to "r";|grant insert on table "app"."t" to "r" with grant option;`},
+		{[]string{"insert*"}, map[string]bool{"insert": true}, "", `grant insert on table "app"."t" to "r" with grant option;`},
+		{[]string{"insert"}, map[string]bool{"insert*": true}, `revoke grant option for insert on table "app"."t" from "r";`, ""},
+		{[]string{}, map[string]bool{"insert*": true, "select": true}, `revoke insert, select on table "app"."t" from "r";`, ""},
+		{[]string{"insert*"}, map[string]bool{"insert*": true}, "", ""},
+	} {
+		live := map[string]map[string]bool{}
+		if c.live != nil {
+			live["r"] = c.live
+		}
+		rv, gr := grantDiffStmts(target, map[string][]string{"r": c.desired}, live)
+		if strings.Join(rv, "|") != c.revokes || strings.Join(gr, "|") != c.grants {
+			t.Errorf("desired %v live %v: revokes %q grants %q", c.desired, c.live, rv, gr)
+		}
+	}
+	_, gr := columnGrantDiffStmts("app.t", "a", map[string][]string{"r": {"update*"}}, nil)
+	if strings.Join(gr, "") != `grant update ("a") on table "app"."t" to "r" with grant option;` {
+		t.Errorf("column grant = %q", gr)
+	}
+}
