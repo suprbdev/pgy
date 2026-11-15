@@ -3,6 +3,7 @@ package cli
 import (
     "context"
     "os"
+    "time"
     "path/filepath"
     "strings"
     "testing"
@@ -85,4 +86,19 @@ func TestCommitPlainBuffer(t *testing.T) {
     b, err := os.ReadFile(filepath.Join(dir, "0002_users_auth.sql"))
     if err != nil { t.Fatal(err) }
     if parseChecksumHeader(string(b)) != checksumBody(b) { t.Fatal("checksum mismatch") }
+}
+
+func TestStaleSchemaFiles(t *testing.T) {
+    dir := t.TempDir()
+    writeFile(t, filepath.Join(dir, "a.yml"), "schema app: {}\n")
+    writeFile(t, filepath.Join(dir, "b.yml"), "schema app: {}\n")
+    buffer := filepath.Join(dir, "buffer.sql")
+    writeFile(t, buffer, "select 1;\n")
+    past, future := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+    if err := os.Chtimes(filepath.Join(dir, "a.yml"), past, past); err != nil { t.Fatal(err) }
+    if err := os.Chtimes(filepath.Join(dir, "b.yml"), future, future); err != nil { t.Fatal(err) }
+    got := staleSchemaFiles(&GlobalConfig{SchemaRoot: dir, Schemas: []string{"a.yml", "b.yml"}, BufferPath: buffer})
+    if len(got) != 1 || filepath.Base(got[0]) != "b.yml" {
+        t.Errorf("got %v, want only b.yml", got)
+    }
 }
