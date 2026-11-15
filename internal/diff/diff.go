@@ -4685,10 +4685,14 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s);", pqIdent(fq), pkAdd, joinIdentList(pkCols)))
             }
         }
-    } else if want := truncateIdent(dt.PrimaryKeyName); want != "" {
-        if have := LivePrimaryKeyName(lt); have != "" && have != want {
+    } else {
+        have := LivePrimaryKeyName(lt)
+        name := have
+        if want := truncateIdent(dt.PrimaryKeyName); want != "" && have != "" && have != want {
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(have), quoteIdent(want)))
+            name = want
         }
+        if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, lt.IndexDefs[have])...) }
     }
 
     // Foreign keys
@@ -4846,6 +4850,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
+            default:
+                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, ct.With, lt.IndexDefs[ctName])...)
             }
             continue
         }
@@ -6040,15 +6046,33 @@ func storageOptionsEqual(want, live map[string]string) bool {
 var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\s*=[^)]*\)`)
 
 // constraintMatchesLive compares named constraint ct with its live
-// definition from pg_get_constraintdef. Index storage parameters are left
-// out of the text comparison; when the YAML sets with, it is compared with
-// the backing index's options instead.
+// definition from pg_get_constraintdef, leaving out index storage
+// parameters, which keyIndexStorageStmts changes in place.
 func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bool {
     strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
-    if !constraintDefsEqual(strip(renderConstraintDef(ct)), strip(lt.ConstraintDefs[name])) { return false }
-    if ct.With == nil { return true }
-    li := lt.IndexDefs[name]
-    return li != nil && storageOptionsEqual(ct.With, li.Options)
+    return constraintDefsEqual(strip(renderConstraintDef(ct)), strip(lt.ConstraintDefs[name]))
+}
+
+// keyIndexStorageStmts changes the storage parameters of index idxFq, which
+// backs a primary key or unique constraint, from live to want with ALTER
+// INDEX ... SET / RESET. A nil want leaves them unmanaged.
+func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) []string {
+    if want == nil || li == nil || storageOptionsEqual(want, li.Options) { return nil }
+    set, reset := []string{}, []string{}
+    keys := map[string]bool{}
+    for _, k := range sortedKeys(want) {
+        keys[strings.ToLower(k)] = true
+        if lv, ok := li.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(want[k])) {
+            set = append(set, k+" = "+want[k])
+        }
+    }
+    for _, k := range sortedKeys(li.Options) {
+        if !keys[k] { reset = append(reset, k) }
+    }
+    out := []string{}
+    if len(set) > 0 { out = append(out, fmt.Sprintf("alter index %s set (%s);", pqIdent(idxFq), strings.Join(set, ", "))) }
+    if len(reset) > 0 { out = append(out, fmt.Sprintf("alter index %s reset (%s);", pqIdent(idxFq), strings.Join(reset, ", "))) }
+    return out
 }
 
 func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {

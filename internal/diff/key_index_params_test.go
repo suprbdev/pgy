@@ -38,8 +38,15 @@ func TestUniqueConstraintParametersMatchLive(t *testing.T) {
 		t.Error("parameters left out are unmanaged")
 	}
 	ct.With = map[string]string{"fillfactor": "90"}
-	if constraintMatchesLive(lt, "t_uq", ct) {
-		t.Error("changed parameters must not match")
+	if !constraintMatchesLive(lt, "t_uq", ct) {
+		t.Error("changed parameters are changed in place, not by recreating the constraint")
+	}
+	got := strings.Join(keyIndexStorageStmts("app.t_uq", ct.With, lt.IndexDefs["t_uq"]), "\n")
+	if got != "alter index \"app\".\"t_uq\" set (fillfactor = 90);\nalter index \"app\".\"t_uq\" reset (deduplicate_items);" {
+		t.Errorf("in-place change: %s", got)
+	}
+	if got := keyIndexStorageStmts("app.t_uq", nil, lt.IndexDefs["t_uq"]); len(got) != 0 {
+		t.Errorf("unmanaged parameters must not change: %v", got)
 	}
 	ct.With, ct.Include = nil, nil
 	if constraintMatchesLive(lt, "t_uq", ct) {

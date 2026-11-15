@@ -28,4 +28,9 @@ schema SCH:
 	if sql := step("renamed_id_seq"); !contains(sql, `rename to "renamed_id_seq"`) || contains(sql, "drop constraint") {
 		t.Errorf("want only a sequence rename, got:\n%s", sql)
 	}
+	table = strings.NewReplacer("fillfactor: 80", "fillfactor: 60", "fillfactor: 70, deduplicate_items: false", "fillfactor: 90").Replace(table)
+	sql := step("renamed_id_seq")
+	if !contains(sql, `alter index`) || !contains(sql, "reset (deduplicate_items)") || contains(sql, "drop constraint") {
+		t.Errorf("want in-place index parameter changes, got:\n%s", sql)
+	}
 }
