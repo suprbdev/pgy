@@ -59,3 +59,30 @@ publications:
 		t.Errorf("generatedColumns = %q", g)
 	}
 }
+
+func TestPrimaryKeyNameForceRLSAndDomainCheckCommentsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  domain pct:
+    type: int
+    checks:
+      pct_min: {check: VALUE >= 0, comment: not negative}
+      pct_max: VALUE <= 100
+  table t:
+    columns: {id: {type: int}}
+    primaryKey:
+      t_pk: {columns: [id]}
+    forceRowLevelSecurity: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := d.Tables["app.t"]
+	if tb.PrimaryKeyName != "t_pk" || len(tb.PrimaryKey) != 1 || tb.ForceRowLevelSecurity == nil || !*tb.ForceRowLevelSecurity {
+		t.Errorf("table = %+v", tb)
+	}
+	dm := d.Domains["app.pct"]
+	if dm.Checks["pct_min"] != "VALUE >= 0" || dm.Checks["pct_max"] != "VALUE <= 100" || dm.CheckComments["pct_min"] != "not negative" {
+		t.Errorf("domain = %+v", dm)
+	}
+}

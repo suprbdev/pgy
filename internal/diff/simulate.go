@@ -187,6 +187,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         out.Domains[k] = true
         ld := &LiveDomain{Default: dm.Default, NotNull: dm.NotNull, Checks: map[string]string{}}
         for name, e := range desiredDomainChecks(k, dm) { ld.Checks[name] = "CHECK (" + e + ")" }
+        ld.CheckComments = map[string]string{}
+        for name, c := range dm.CheckComments { ld.CheckComments[truncateIdent(name)] = c }
         out.DomainDefs[k] = ld
         if dm.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], dm.Grants) }
         if dm.Comment != "" { out.TypeComments[k] = dm.Comment }
@@ -483,6 +485,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         }
     }
     if dt.RowLevelSecurity != nil { lt.RLSEnabled = *dt.RowLevelSecurity }
+    if dt.ForceRowLevelSecurity != nil { lt.RLSForced = *dt.ForceRowLevelSecurity }
     if dt.Unlogged != nil { lt.Unlogged = *dt.Unlogged }
     if dt.Foreign != nil {
         lf := &LiveForeignTable{Server: dt.Foreign.Server}

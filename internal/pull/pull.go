@@ -318,9 +318,16 @@ func (b *builder) domains() {
 				add(m, "notNull", boolean(true))
 			}
 			names := sortedKeys(ld.Checks)
-			if len(names) > 1 {
+			if len(names) > 1 || len(ld.CheckComments) > 0 {
 				cs := newMap()
 				for _, n := range names {
+					if c := ld.CheckComments[n]; c != "" {
+						e := flowMap()
+						add(e, "check", str(stripCheck(ld.Checks[n])))
+						add(e, "comment", str(c))
+						add(cs, n, e)
+						continue
+					}
 					add(cs, n, str(stripCheck(ld.Checks[n])))
 				}
 				add(m, "checks", cs)
@@ -675,7 +682,15 @@ func (b *builder) tables() {
 			}
 			add(t, "columns", b.columns(fq, lt))
 			if pk := pkColumns(lt); len(pk) > 0 {
-				add(t, "primaryKey", list(pk))
+				if name := diff.LivePrimaryKeyName(lt); name != "" && name != diff.DefaultPrimaryKeyName(fq) {
+					cols := flowMap()
+					add(cols, "columns", list(pk))
+					m := newMap()
+					add(m, name, cols)
+					add(t, "primaryKey", m)
+				} else {
+					add(t, "primaryKey", list(pk))
+				}
 			}
 		} else {
 			add(t, "partitionOf", str(parent))
@@ -706,6 +721,9 @@ func (b *builder) tables() {
 		addStr(t, "clusterOn", lt.ClusteredOn)
 		if lt.RLSEnabled {
 			add(t, "rowLevelSecurity", boolean(true))
+		}
+		if lt.RLSForced {
+			add(t, "forceRowLevelSecurity", boolean(true))
 		}
 		b.policies(t, lt)
 		if g := b.grantsFor(b.live.TableGrants[fq], fq, "tables"); g != nil {

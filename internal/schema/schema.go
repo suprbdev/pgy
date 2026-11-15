@@ -267,6 +267,7 @@ type Domain struct {
     Check          string // CHECK expression (without surrounding parens)
     ConstraintName string // optional name for the CHECK constraint
     Checks         map[string]string // constraint name -> CHECK expression; nil = only Check is managed
+    CheckComments  map[string]string // constraint name -> COMMENT ON CONSTRAINT text
     Owner          string // "" = unmanaged
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
     DependsOn      []string `yaml:"dependsOn"`
@@ -279,6 +280,8 @@ type Table struct {
     Columns map[string]*Column `yaml:"columns"`
     Foreign *ForeignTable      `yaml:"-"` // set for `foreign table <name>:` declarations
     PrimaryKey []string        `yaml:"-"`
+    PrimaryKeyName string      `yaml:"-"` // constraint name; "" = PostgreSQL's default <table>_pkey
+    ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
     Triggers   []*Trigger      `yaml:"-"`
@@ -639,7 +642,10 @@ func Merge(dbs []*Database) *Database {
                     existing.Foreign = t.Foreign
                 }
                 if len(existing.PrimaryKey) == 0 {
-                    existing.PrimaryKey = t.PrimaryKey
+                    existing.PrimaryKey, existing.PrimaryKeyName = t.PrimaryKey, t.PrimaryKeyName
+                }
+                if t.ForceRowLevelSecurity != nil {
+                    existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
                 }
                 existing.Indexes = mergeNamed(existing.Indexes, t.Indexes, func(x *Index) string { return x.Name })
                 existing.ForeignKeys = mergeNamed(existing.ForeignKeys, t.ForeignKeys, func(x *ForeignKey) string { return x.Name })
@@ -971,7 +977,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := m["primaryKey"]; ok {
-                    t.PrimaryKey = parseStringListFromNode(pkRaw)
+                    t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := m["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -1029,7 +1035,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             fq := qualify(schemaName, name)
             t := &Table{Name: fq, Columns: parseColumns(m["columns"]) }
             if pkRaw, ok := m["primaryKey"]; ok {
-                t.PrimaryKey = parseStringListFromNode(pkRaw)
+                t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
             }
             if idxRaw, ok := m["indexes"]; ok {
                 t.Indexes = parseIndexes(idxRaw)
@@ -1099,7 +1105,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     t.Columns = parseColumns(cRaw)
                 }
                 if pkRaw, ok := inner["primaryKey"]; ok {
-                    t.PrimaryKey = parseStringListFromNode(pkRaw)
+                    t.PrimaryKey, t.PrimaryKeyName = parsePrimaryKey(pkRaw)
                 }
                 if idxRaw, ok := inner["indexes"]; ok {
                     t.Indexes = parseIndexes(idxRaw)
@@ -1132,6 +1138,9 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 }
                 if rls, ok := inner["rowLevelSecurity"].(bool); ok {
                     t.RowLevelSecurity = &rls
+                }
+                if f, ok := inner["forceRowLevelSecurity"].(bool); ok {
+                    t.ForceRowLevelSecurity = &f
                 }
                 if polRaw, ok := inner["policies"]; ok {
                     t.Policies = parsePolicies(polRaw)
@@ -2377,6 +2386,16 @@ func parseDefaultPrivileges(v any) []*DefaultPrivilege {
     return out
 }
 
+// parsePrimaryKey parses a table's primaryKey: a column list, or a named
+// block {<constraint name>: {columns: [...]}} that also names the
+// constraint.
+func parsePrimaryKey(v any) ([]string, string) {
+    if m, ok := v.(map[string]any); ok && len(m) == 1 {
+        for name := range m { return parseStringListFromNode(v), strings.TrimSpace(name) }
+    }
+    return parseStringListFromNode(v), ""
+}
+
 // tableKey returns the table name a schema block key declares, and whether
 // it is a `foreign table`, or "" for keys of other kinds.
 func tableKey(key string) (string, bool) {
@@ -2542,7 +2561,16 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if cs, ok := m["checks"].(map[string]any); ok {
         dm.Checks = map[string]string{}
         for n, v := range cs {
-            if e, ok := v.(string); ok { dm.Checks[n] = strings.TrimSpace(e) }
+            switch e := v.(type) {
+            case string:
+                dm.Checks[n] = strings.TrimSpace(e)
+            case map[string]any:
+                if c, ok := e["check"].(string); ok { dm.Checks[n] = strings.TrimSpace(c) }
+                if c, ok := e["comment"].(string); ok {
+                    if dm.CheckComments == nil { dm.CheckComments = map[string]string{} }
+                    dm.CheckComments[n] = c
+                }
+            }
         }
     }
     if dep, ok := m["dependsOn"]; ok {
