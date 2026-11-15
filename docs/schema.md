@@ -437,7 +437,9 @@ If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from
 
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
 
-Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with` and operator classes. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
+`collations` gives index columns a `COLLATE`, keyed like `opclasses`: `collations: {name: C}` emits `("name" collate "C")`, the usual way to let `LIKE 'abc%'` use an index on a column whose collation isn't `C`. It is compared with the live index, so a changed collation rebuilds the index under `--unsafe`.
+
+Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with`, operator classes and collations. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
 
 `concurrently: true` makes an index added to (or, under `--unsafe`, rebuilt on) an existing table use `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`, which do not block writes but cannot run inside a transaction. `pgy diff` puts these statements in a separate `concurrent` buffer section that starts with `-- pgy:no-transaction`, and `pgy commit` writes it as its own migration after the main one. Indexes on tables created by the same plan are built normally. PostgreSQL cannot build an index concurrently on a partitioned table, so for an existing one pgy creates the index `ON ONLY` the parent, builds it `CONCURRENTLY` on each partition (recursing into sub-partitioned ones), and attaches the partition indexes, which makes the parent index valid. All of that goes in the no-transaction section. Every statement can be rerun. If a build is interrupted and leaves an index invalid, the next `pgy diff` finishes the partitioned sequence, or drops and rebuilds a plain concurrent index.
 
@@ -810,7 +812,7 @@ schema public:
       - type public.auth_role
 ```
 
-Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts). An attribute can also be written as just its type: `attributes: {role: public.auth_role, exp: bigint}`.
+Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts). An attribute can also be written as just its type: `attributes: {role: public.auth_role, exp: bigint}`. `collate` gives an attribute a collation: `label: {type: text, collate: C}`. Changing it on an existing type emits `ALTER ATTRIBUTE ... TYPE ... COLLATE`, under `--unsafe` like other attribute type changes.
 
 For an existing composite type, attributes the live type lacks are added with `ALTER TYPE ... ADD ATTRIBUTE` (appended, since PostgreSQL cannot insert an attribute in the middle). Under `--unsafe`, a changed attribute type emits `ALTER ATTRIBUTE ... TYPE` and attributes removed from YAML emit `DROP ATTRIBUTE`. PostgreSQL rejects both while a table column uses the type.
 
