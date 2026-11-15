@@ -3730,18 +3730,6 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(cn)), c.Comment, have)
         }
         lt := live.Tables[k]
-        // COMMENT ON INDEX takes the schema-qualified index name, not the table
-        schemaPrefix := ""
-        if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
-        for _, ix := range dt.Indexes {
-            if ix == nil || ix.Comment == "" || len(ix.Columns) == 0 { continue }
-            var liveIdx map[string]bool
-            if lt != nil { liveIdx = lt.Indexes }
-            name := LiveIndexName(k, ix, liveIdx)
-            have := ""
-            if lt != nil { have = lt.IndexComments[name] }
-            comment("index "+pqIdent(schemaPrefix+name), ix.Comment, have)
-        }
         for _, fk := range dt.ForeignKeys {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
@@ -3827,18 +3815,6 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
                 }
                 comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
             }
-        }
-        lt := live.MatViewTables[k]
-        schemaPrefix := ""
-        if i := strings.IndexByte(k, '.'); i >= 0 { schemaPrefix = k[:i+1] }
-        for _, ix := range vw.Indexes {
-            if ix == nil || ix.Comment == "" || len(ix.Columns) == 0 { continue }
-            var liveIdx map[string]bool
-            if lt != nil { liveIdx = lt.Indexes }
-            name := LiveIndexName(k, ix, liveIdx)
-            have := ""
-            if lt != nil { have = lt.IndexComments[name] }
-            comment("index "+pqIdent(schemaPrefix+name), ix.Comment, have)
         }
     }
 
@@ -4439,8 +4415,12 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             return fmt.Sprintf("create%s%s if not exists %s on %s%s%s(%s)%s;", uniq, h, pqIdent(bare), o, pqIdent(table), using, elems, tail)
         }
         idxFq := schemaPrefixOf(fq) + name
+        indexComment := func(built bool) []string {
+            if ix.Comment == "" || (!built && lt != nil && lt.IndexComments[name] == ix.Comment) { return nil }
+            return []string{fmt.Sprintf("comment on index %s is %s;", pqIdent(idxFq), quoteString(ix.Comment))}
+        }
         if foreignParts && liveIndexes[name] && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt)
+            plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
             continue
         }
         if liveIndexes[name] && (concurrent || partitioned) && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
@@ -4449,6 +4429,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             } else {
                 plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
             }
+            plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
             continue
         }
         if liveIndexes[name] {
@@ -4458,24 +4439,28 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             changed := false
             if lt != nil && lt.IndexDefs[name] != nil { changed = indexDefinitionDiffers(ix, lt.IndexDefs[name]) }
             if liveOCs, ok := liveIndexOpclasses(lt)[name]; ok && indexOpclassesDiffer(ix, liveOCs) { changed = true }
-            if unsafe && changed {
-                if partitioned {
-                    plan.Concurrent = append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, fq, idxFq, build)...)
-                } else if concurrent {
-                    plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
-                } else {
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt)
-                }
+            switch {
+            case !unsafe || !changed:
+                plan.Alters = append(plan.Alters, indexComment(false)...)
+            case partitioned:
+                plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
+            case concurrent:
+                plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
+                plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
+            default:
+                plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
             }
             continue
         }
         switch {
         case partitioned:
-            plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...)
+            plan.Concurrent = append(append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
         case concurrent:
             plan.Concurrent = append(plan.Concurrent, stmt)
+            plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
         default:
             plan.Creates = append(plan.Creates, stmt)
+            plan.Alters = append(plan.Alters, indexComment(true)...)
         }
     }
 
