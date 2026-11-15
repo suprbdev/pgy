@@ -26,7 +26,8 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		create function x.amount_num(x.amount) returns numeric language sql immutable as 'select ($1).v';
 		create cast (x.amount as numeric) with function x.amount_num(x.amount) as assignment;
 		create type x.addr as (street text, city text);
-		create table x.addresses of x.addr (primary key (street));`); err != nil {
+		create table x.addresses of x.addr (primary key (street));
+		create function x.rn() returns bigint language internal window as 'window_row_number';`); err != nil {
 		t.Fatal(err)
 	}
 	res, err := pull.Build(introspectAll(t, db), pull.Options{})
@@ -38,6 +39,7 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		"operator x.===(integer, integer) is not supported by pgy and was left out",
 		"cast (x.amount as numeric) is not supported by pgy and was left out",
 		"table x.addresses is a typed table (OF x.addr)",
+		"function x.rn is written in internal and cannot be pulled",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
