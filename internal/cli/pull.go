@@ -46,8 +46,9 @@ not.`,
             if err != nil { return err }
             if err := diff.IntrospectDetails(ctx, pool, live); err != nil { return err }
             migSchema, migTable := cfg.migrationsTable()
+            schemas := nameList(schemas)
             data := map[string][]map[string]any{}
-            for _, t := range dataTables {
+            for _, t := range nameList(dataTables) {
                 fq := t
                 if !strings.Contains(fq, ".") { fq = "public." + fq }
                 if live.Tables[fq] == nil { return fmt.Errorf("--data %s: no such table", t) }
@@ -77,10 +78,40 @@ not.`,
         },
     }
     c.Flags().StringVar(&out, "out", "", "Directory to write one YAML file per schema into (default: print to stdout)")
-    c.Flags().StringSliceVar(&schemas, "schema", nil, "Only pull these schemas (repeatable; default: all)")
+    c.Flags().StringArrayVar(&schemas, "schema", nil, "Only pull these schemas (repeatable or comma-separated; default: all)")
     c.Flags().BoolVar(&owners, "owners", false, "Emit owner: for objects not owned by the connecting role")
     c.Flags().BoolVar(&roles, "roles", false, "Emit the cluster's roles")
     c.Flags().BoolVar(&force, "force", false, "Overwrite existing files in --out")
-    c.Flags().StringSliceVar(&dataTables, "data", nil, "Also pull the rows of these tables (schema.table, repeatable) as data: blocks")
+    c.Flags().StringArrayVar(&dataTables, "data", nil, "Also pull the rows of these tables (schema.table, repeatable or comma-separated; quote mixed-case names as \"Schema\".\"Table\" or write them as is) as data: blocks")
     return c
+}
+
+// nameList splits flag values on commas outside double quotes and removes
+// the quotes of "Quoted"."Name" parts, so a mixed-case name can be given
+// either quoted or as is.
+func nameList(values []string) []string {
+    out := []string{}
+    for _, v := range values {
+        var part strings.Builder
+        quoted := false
+        flush := func() {
+            if s := strings.TrimSpace(part.String()); s != "" { out = append(out, s) }
+            part.Reset()
+        }
+        for i := 0; i < len(v); i++ {
+            switch c := v[i]; {
+            case c == '"' && quoted && i+1 < len(v) && v[i+1] == '"':
+                part.WriteByte('"')
+                i++
+            case c == '"':
+                quoted = !quoted
+            case c == ',' && !quoted:
+                flush()
+            default:
+                part.WriteByte(c)
+            }
+        }
+        flush()
+    }
+    return out
 }
