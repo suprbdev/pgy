@@ -1821,6 +1821,47 @@ func normalizeConfigValue(v string) string {
 // function's or procedure's configuration in line with a YAML set block. A
 // nil block leaves configuration unmanaged; an empty block resets every
 // live setting. Clauses are sorted for deterministic output.
+var (
+    configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
+    configIdentRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
+)
+
+// configValueSQL renders a SET value. Each comma-separated element that is
+// not already quoted, a number or a plain identifier is quoted, so values
+// such as 5s, 64MB or America/New_York (which PostgreSQL stores, and pgy
+// pull emits, unquoted) form valid SQL.
+func configValueSQL(v string) string {
+    parts := splitTopLevelQuoted(v)
+    for i, p := range parts {
+        p = strings.TrimSpace(p)
+        switch {
+        case p == "", strings.HasPrefix(p, "'"), strings.HasPrefix(p, `"`), configNumberRe.MatchString(p), configIdentRe.MatchString(p):
+        default:
+            p = quoteString(p)
+        }
+        parts[i] = p
+    }
+    return strings.Join(parts, ", ")
+}
+
+// splitTopLevelQuoted splits on commas outside single and double quotes.
+func splitTopLevelQuoted(s string) []string {
+    out, start := []string{}, 0
+    var q byte
+    for i := 0; i < len(s); i++ {
+        switch c := s[i]; {
+        case q != 0:
+            if c == q { q = 0 }
+        case c == '\'' || c == '"':
+            q = c
+        case c == ',':
+            out = append(out, s[start:i])
+            start = i + 1
+        }
+    }
+    return append(out, s[start:])
+}
+
 func configClauses(desired map[string]string, live map[string]string) []string {
     if desired == nil { return nil }
     out := []string{}
@@ -1834,7 +1875,7 @@ func configClauses(desired map[string]string, live map[string]string) []string {
     for _, k := range keys {
         lv, ok := live[strings.ToLower(k)]
         if !ok || normalizeConfigValue(lv) != normalizeConfigValue(desired[k]) {
-            out = append(out, fmt.Sprintf("set %s = %s", k, desired[k]))
+            out = append(out, fmt.Sprintf("set %s = %s", k, configValueSQL(desired[k])))
         }
     }
     extra := []string{}
@@ -2205,7 +2246,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range f.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, f.Set[k])
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(f.Set[k]))
                 }
             }
             attrs := []string{}
@@ -2240,7 +2281,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range pr.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, pr.Set[k])
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(pr.Set[k]))
                 }
             }
             attrsStr := ""

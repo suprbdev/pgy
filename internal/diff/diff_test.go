@@ -2337,7 +2337,7 @@ func TestFunctionSetCombinedWithAttributeAlter(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) stable set work_mem = 64MB;`) {
+	if !findAlter(p, `alter function "public"."login"(email text) stable set work_mem = '64MB';`) {
 		t.Errorf("expected one ALTER FUNCTION with both actions; alters: %v", p.Alters)
 	}
 }
