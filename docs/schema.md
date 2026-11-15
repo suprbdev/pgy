@@ -739,7 +739,7 @@ schema public:
       - <dependency>
 ```
 
-For an existing enum, new labels are added with `ALTER TYPE ... ADD VALUE`, positioned `BEFORE` the next label that already exists so the declared order is preserved. Removing or reordering existing labels is not supported (PostgreSQL cannot drop enum values) and is silently ignored. To rename a label, use [`renamedLabels`](#renames). Note: an added enum value cannot be used in the same transaction that adds it.
+For an existing enum, new labels are added with `ALTER TYPE ... ADD VALUE`, positioned `BEFORE` the next label that already exists so the declared order is preserved. Removing or reordering existing labels is not supported (PostgreSQL cannot drop enum values) and is silently ignored. To rename a label, use [`renamedLabels`](#renames). PostgreSQL rejects a new label until the transaction that added it commits, so `pgy diff` puts the `ADD VALUE` statements in a buffer section of their own, and `pgy commit` writes them to a `NNNN_<name>_enum_values.sql` migration numbered before the rest. Defaults, checks, indexes, views, partitions and `data:` rows in the main migration can then use the new labels.
 
 ### Composite
 

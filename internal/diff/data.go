@@ -3,12 +3,14 @@ package diff
 import (
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "sort"
     "strconv"
     "strings"
     "time"
 
+    "github.com/jackc/pgx/v5/pgconn"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/suprbdev/pgy/internal/schema"
 )
@@ -61,10 +63,12 @@ func dataRowsJSON(rows []map[string]any) ([]byte, error) {
 // are compared as the column types see them (10 matches a numeric 10.00,
 // enum labels, arrays and jsonb compare by value). Only the columns a row
 // lists are compared. Tables that do not exist yet, or whose key columns do
-// not (they are renamed or added by the plan), are skipped and get upserts.
+// not (they are renamed or added by the plan), are skipped and get upserts,
+// as are tables whose rows use enum labels the plan has yet to add.
 func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
+    newLabels := addsEnumLabels(l, desired)
     for _, fq := range sortedKeys(desired.Tables) {
         dt := desired.Tables[fq]
         lt := l.Tables[fq]
@@ -97,7 +101,11 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         ld := &LiveTableData{Changed: map[int][]string{}}
         missing := map[int]bool{}
         qr, err := pool.Query(ctx, diffQ, string(rows))
-        if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
+        if err != nil {
+            if newLabels && isInvalidInput(err) { continue }
+            return fmt.Errorf("data for %s: %w", fq, err)
+        }
+        skip := false
         for qr.Next() {
             var i int
             var isMissing bool
@@ -114,7 +122,11 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
             }
         }
         qr.Close()
-        if err := qr.Err(); err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
+        if err := qr.Err(); err != nil {
+            if !newLabels || !isInvalidInput(err) { return fmt.Errorf("data for %s: %w", fq, err) }
+            skip = true
+        }
+        if skip { continue }
         for i, row := range dt.Data.Rows {
             if missing[i] { continue }
             for col := range row {
@@ -377,4 +389,25 @@ func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned b
         out = append(out, m)
     }
     return out, rows.Err()
+}
+
+// addsEnumLabels reports whether desired declares enum labels that live
+// lacks, which the plan adds in its prelude.
+func addsEnumLabels(l *Live, desired *schema.Database) bool {
+    for k, td := range desired.Types {
+        if td == nil || td.Kind != "enum" || !l.Types[k] { continue }
+        have := map[string]bool{}
+        for _, lbl := range l.EnumLabels[k] { have[lbl] = true }
+        for _, lbl := range td.Labels {
+            if !have[lbl] { return true }
+        }
+    }
+    return false
+}
+
+// isInvalidInput reports whether err is PostgreSQL's invalid input syntax
+// error (22P02), raised for example by an unknown enum label.
+func isInvalidInput(err error) bool {
+    var pgErr *pgconn.PgError
+    return errors.As(err, &pgErr) && pgErr.Code == "22P02"
 }

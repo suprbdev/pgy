@@ -13,10 +13,12 @@ type Section struct {
     SQL  string
 }
 
-// Render renders steps as buffer sections, one per step. A step with
-// statements that cannot run in a transaction gets a second
-// "<name>_concurrent" section holding them behind the no-transaction
-// directive, so commit writes them to their own migration file.
+// Render renders steps as buffer sections, one per step. A step that adds
+// enum labels gets a "<name>_enum_values" section before it holding the
+// ADD VALUE statements, and a step with statements that cannot run in a
+// transaction gets a "<name>_concurrent" section after it holding them
+// behind the no-transaction directive, so commit writes each to its own
+// migration file.
 func Render(steps []Step) string {
     var b strings.Builder
     section := func(name, sql string) {
@@ -24,8 +26,13 @@ func Render(steps []Step) string {
         b.WriteString(strings.TrimRight(marker+" "+name, " ") + "\n")
         b.WriteString(sql)
     }
+    suffixed := func(name, suffix string) string {
+        if name == "" { return suffix }
+        return name + "_" + suffix
+    }
     for _, s := range steps {
-        if sql := diff.Render(s.Plan); sql != "" || len(s.Plan.Concurrent) == 0 { section(s.Name, sql) }
+        if p := diff.RenderPrelude(s.Plan); p != "" { section(suffixed(s.Name, "enum_values"), p) }
+        if sql := diff.RenderMain(s.Plan); sql != "" || len(s.Plan.Concurrent)+len(s.Plan.Prelude) == 0 { section(s.Name, sql) }
         if c := diff.RenderConcurrent(s.Plan); c != "" {
             name := "concurrent"
             if s.Name != "" { name = s.Name + "_concurrent" }

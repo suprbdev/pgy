@@ -254,7 +254,7 @@ func assertYAMLIdempotent(t *testing.T, cases map[string]string) {
 				pool.Exec(context.Background(), "drop table if exists public."+sch+"_t; drop type if exists public."+sch+"_status") //nolint
 			})
 			plan := diff.Plan(introspect(t, pool, d), d, true)
-			if s, err := execOnOneConn(ctx, pool, planStatements(plan)); err != nil {
+			if s, err := applyAsMigrations(ctx, pool, plan); err != nil {
 				t.Fatalf("apply %q: %v", s, err)
 			}
 			live := introspect(t, pool, d)
@@ -319,7 +319,7 @@ func assertPullRoundTrip(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		t.Fatal(err)
 	}
 	rebuild := diff.PlanWith(empty, pulled, diff.Options{Unsafe: true})
-	if s, err := execOnOneConn(ctx, pool, planStatements(rebuild)); err != nil {
+	if s, err := applyAsMigrations(ctx, pool, rebuild); err != nil {
 		for _, f := range res.Files {
 			t.Logf("%s:\n%s", f.Name, f.Content)
 		}

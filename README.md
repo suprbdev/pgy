@@ -184,6 +184,8 @@ Even a quick `ALTER TABLE` waits for its lock behind long-running queries, and e
 
 Each migration normally runs in its own transaction. A migration whose leading comment lines include `-- pgy:no-transaction` runs statement by statement instead, as `CREATE INDEX CONCURRENTLY` and some other statements require. It is recorded only after every statement succeeds, but a failure leaves the earlier statements applied, so keep such files idempotent (`IF NOT EXISTS`). `pgy diff` puts indexes declared with `concurrently: true` into such a migration itself. On a partitioned table it builds the index on each partition concurrently and attaches the partition indexes.
 
+A plan that adds enum labels likewise puts the `ALTER TYPE ... ADD VALUE` statements in a migration of their own, numbered before the rest. PostgreSQL rejects a new label until the transaction that added it commits, and this lets the main migration use it in defaults, checks, indexes, views, partitions and `data:` rows.
+
 ## Grouped migrations
 
 When prototyping you often wipe `migrations/` and regenerate everything, which normally gives one huge initial migration. `pgy diff --split` writes the buffer as a series of groups instead, one per schema file (`--split=file`, the default) or per directory (`--split=dir`). `pgy commit` then turns each group into its own migration. Group names come from the file paths relative to their common directory, so `schemas/modules/core/user.yml` becomes `0001_modules_core_user.sql`, or `0001_init_modules_core_user.sql` with `pgy commit init`.

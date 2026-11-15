@@ -60,26 +60,37 @@ func freshSchema(t *testing.T, pool *pgxpool.Pool) string {
 // applyPlan executes all SQL statements from a PlanDiff against the pool.
 func applyPlan(t *testing.T, pool *pgxpool.Pool, p *diff.PlanDiff) {
 	t.Helper()
-	if stmt, err := execOnOneConn(context.Background(), pool, planStatements(p)); err != nil {
+	if stmt, err := applyAsMigrations(context.Background(), pool, p); err != nil {
 		t.Fatalf("apply SQL %q: %v", stmt, err)
 	}
 }
 
-// planStatements returns p's statements in the order a migration runs them.
-func planStatements(p *diff.PlanDiff) []string {
-	return append(append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), p.Concurrent...)
-}
-
-// execOnOneConn runs stmts in order on one connection, as pgy migrate does,
-// so session settings carry from one statement to the next. It returns the
-// first failing statement and its error.
-func execOnOneConn(ctx context.Context, pool *pgxpool.Pool, stmts []string) (string, error) {
+// applyAsMigrations applies p the way pgy migrate applies the migrations
+// pgy commit writes for it: the prelude in one transaction, the creates,
+// alters and drops in another, then each concurrent statement on its own.
+// It returns the first failing statement and its error.
+func applyAsMigrations(ctx context.Context, pool *pgxpool.Pool, p *diff.PlanDiff) (string, error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Release()
-	for _, s := range stmts {
+	for _, stmts := range [][]string{p.Prelude, append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...)} {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, s := range stmts {
+			if _, err := tx.Exec(ctx, s); err != nil {
+				tx.Rollback(ctx) //nolint:errcheck
+				return s, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "commit", err
+		}
+	}
+	for _, s := range p.Concurrent {
 		if _, err := conn.Exec(ctx, s); err != nil {
 			return s, err
 		}

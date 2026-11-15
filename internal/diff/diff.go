@@ -2064,6 +2064,10 @@ func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv strin
 }
 
 type PlanDiff struct{
+    // Prelude holds ALTER TYPE ... ADD VALUE statements. PostgreSQL rejects
+    // a new enum label until the transaction that added it commits, so they
+    // belong in a migration of their own that runs before the rest.
+    Prelude []string
     Creates []string
     Alters  []string
     Drops   []string
@@ -2081,6 +2085,7 @@ func (p *PlanDiff) Summary() map[string]int {
         "alters": len(p.Alters),
         "drops": len(p.Drops),
         "concurrent": len(p.Concurrent),
+        "prelude": len(p.Prelude),
     }
 }
 
@@ -2240,7 +2245,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if live.Types[e.Key] {
                 switch td.Kind {
                 case "enum":
-                    plan.Alters = append(plan.Alters, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
+                    plan.Prelude = append(plan.Prelude, enumAddValueStmts(e.Key, td.Labels, live.EnumLabels[e.Key])...)
                 case "composite":
                     plan.Alters = append(plan.Alters, compositeAlterStmts(e.Key, td, live.CompositeAttributes[e.Key], unsafe)...)
                 }
@@ -4367,9 +4372,20 @@ func RenderConcurrent(p *PlanDiff) string {
     return db.NoTransactionDirective + "\n" + strings.Join(p.Concurrent, "\n") + "\n"
 }
 
-// Render renders the plan's transactional statements: Creates, then Alters,
-// then Drops. Concurrent statements are rendered by RenderConcurrent.
-func Render(p *PlanDiff) string {
+// Render renders the plan's transactional statements: the Prelude, then
+// Creates, Alters and Drops. Concurrent statements are rendered by
+// RenderConcurrent. RenderPrelude and RenderMain render the two parts on
+// their own, for migrations that commit the Prelude first.
+func Render(p *PlanDiff) string { return RenderPrelude(p) + RenderMain(p) }
+
+// RenderPrelude renders the plan's Prelude, or "" when it has none.
+func RenderPrelude(p *PlanDiff) string {
+    if len(p.Prelude) == 0 { return "" }
+    return strings.Join(p.Prelude, "\n") + "\n"
+}
+
+// RenderMain renders the plan's Creates, then Alters, then Drops.
+func RenderMain(p *PlanDiff) string {
     statements := make([]string, 0, len(p.Creates)+len(p.Alters)+len(p.Drops))
     statements = append(statements, p.Creates...)
     statements = append(statements, p.Alters...)

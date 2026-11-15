@@ -67,3 +67,25 @@ func TestMigrateNoTransactionFile(t *testing.T) {
         t.Errorf("CONCURRENTLY without the directive should fail inside the migration transaction, got %v", err)
     }
 }
+
+func TestCommitWritesEnumValuesFirst(t *testing.T) {
+    plan := &diff.PlanDiff{
+        Prelude: []string{`alter type "app"."st" add value 'c';`},
+        Alters:  []string{`alter table "app"."t" alter column "s" set default 'c';`},
+    }
+    dir, err := runCommit(t, group.Render([]group.Step{{Plan: plan}}), "add_c")
+    if err != nil { t.Fatal(err) }
+    entries, err := os.ReadDir(dir)
+    if err != nil { t.Fatal(err) }
+    names := []string{}
+    for _, e := range entries { names = append(names, e.Name()) }
+    sort.Strings(names)
+    if len(names) != 3 || names[1] != "0002_add_c_enum_values.sql" || names[2] != "0003_add_c.sql" {
+        t.Fatalf("unexpected files: %v", names)
+    }
+    first, err := os.ReadFile(filepath.Join(dir, names[1]))
+    if err != nil { t.Fatal(err) }
+    if !strings.Contains(string(first), "add value 'c'") || strings.Contains(string(first), "set default") {
+        t.Errorf("the enum values migration holds only ADD VALUE:\n%s", first)
+    }
+}

@@ -1595,11 +1595,12 @@ func TestEnumAddValue(t *testing.T) {
 		},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter type "public"."status" add value 'pending' before 'closed';`) {
-		t.Errorf("expected positioned add value; alters: %v", p.Alters)
+	want := []string{
+		`alter type "public"."status" add value 'pending' before 'closed';`,
+		`alter type "public"."status" add value 'archived';`,
 	}
-	if !findAlter(p, `alter type "public"."status" add value 'archived';`) {
-		t.Errorf("expected appended add value; alters: %v", p.Alters)
+	if strings.Join(p.Prelude, "\n") != strings.Join(want, "\n") {
+		t.Errorf("ADD VALUE belongs in the prelude, committed before anything uses the labels; want %v, got prelude %v, alters %v", want, p.Prelude, p.Alters)
 	}
 	if findCreate(p, "create type") {
 		t.Errorf("type exists, should not re-create; creates: %v", p.Creates)
