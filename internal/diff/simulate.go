@@ -127,7 +127,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if p == nil { continue }
         lp := &LivePublication{AllTables: p.AllTables, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
         if prev := out.Publications[truncateIdent(name)]; prev != nil && prev.AllTables == p.AllTables {
-            lp.Publish, lp.ViaRoot = prev.Publish, prev.ViaRoot
+            lp.Publish, lp.ViaRoot, lp.GeneratedColumns = prev.Publish, prev.ViaRoot, prev.GeneratedColumns
             if p.Comment == "" { lp.Comment = prev.Comment }
         }
         for _, t := range p.Tables {
@@ -144,6 +144,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             sort.Slice(lp.Publish, func(i, j int) bool { return order[lp.Publish[i]] < order[lp.Publish[j]] })
         }
         if p.ViaPartitionRoot != nil { lp.ViaRoot = *p.ViaPartitionRoot }
+        if p.GeneratedColumns != "" { lp.GeneratedColumns = p.GeneratedColumns }
         out.Publications[truncateIdent(name)] = lp
     }
 

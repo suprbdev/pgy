@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/diff"
@@ -44,4 +45,40 @@ func TestIntegrationPublications(t *testing.T) {
 			t.Fatalf("step %d: expected no changes after apply, got:\n%s", i, sql)
 		}
 	}
+}
+
+func TestIntegrationPublicationGeneratedColumns(t *testing.T) {
+	pool := connect(t)
+	var version int
+	if err := pool.QueryRow(context.Background(), "select current_setting('server_version_num')::int").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	y := `
+schema SCH:
+  table t:
+    columns:
+      id: {type: int, primaryKey: true}
+      doubled: {type: int, nullable: true, generated: id * 2}
+publications:
+  SCH_gc:
+    tables: [SCH.t]
+    generatedColumns: stored
+`
+	if version < 180000 {
+		sch := freshSchema(t, pool)
+		pub := sch + "_gc"
+		t.Cleanup(func() { pool.Exec(context.Background(), fmt.Sprintf("drop publication if exists %q", pub)) }) //nolint
+		sql := convergeYAMLWith(t, pool, sch, y, diff.Options{})
+		if strings.Contains(sql, "publish_generated_columns") {
+			t.Errorf("before PostgreSQL 18 the option must not be emitted:\n%s", sql)
+		}
+		return
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `do $$ declare r record; begin
+			for r in select pubname from pg_publication where pubname like 'pgytest_testintegrationpublicationgenerated%' loop
+				execute format('drop publication %I', r.pubname);
+			end loop; end $$`)
+	})
+	assertYAMLIdempotent(t, map[string]string{"stored": y})
 }
