@@ -46,6 +46,8 @@ type Live struct{
     // TSConfigs: "schema.config" -> token type alias -> dictionaries (unqualified, in order)
     TSConfigs        map[string]map[string][]string
     TSDictionaries   map[string]bool
+    // TSDictionaryDefs: "schema.dict" -> its template and options
+    TSDictionaryDefs map[string]*schema.TSDictionary
     TSComments       map[string]string // "config:schema.name" / "dict:schema.name" -> comment
     EventTriggers map[string]*LiveEventTrigger
     Publications  map[string]*LivePublication
@@ -500,6 +502,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         CollationComments: map[string]string{},
         TSConfigs: map[string]map[string][]string{},
         TSDictionaries: map[string]bool{},
+        TSDictionaryDefs: map[string]*schema.TSDictionary{},
         TSComments: map[string]string{},
         EventTriggers: map[string]*LiveEventTrigger{},
         Publications: map[string]*LivePublication{},
@@ -1343,6 +1346,23 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             }
             if kind == "config" { l.TSConfigs[key] = map[string][]string{} } else { l.TSDictionaries[key] = true }
             if comment != "" { l.TSComments[kind+":"+key] = comment }
+        }
+        return nil
+    })
+
+    dictQ := `
+        select n.nspname || '.' || t.dictname, tn.nspname || '.' || tp.tmplname, coalesce(t.dictinitoption, '')
+        from pg_ts_dict t
+        join pg_namespace n on n.oid = t.dictnamespace
+        join pg_ts_template tp on tp.oid = t.dicttemplate
+        join pg_namespace tn on tn.oid = tp.tmplnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+    `
+    batch.add(dictQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var key, tmpl, opts string
+            if err := rows.Scan(&key, &tmpl, &opts); err != nil { return err }
+            l.TSDictionaryDefs[key] = &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: parseDictOptions(opts)}
         }
         return nil
     })
@@ -2674,7 +2694,13 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
-            if td == nil || td.Template == "" || live.TSDictionaries[e.Key] { continue }
+            if td == nil || td.Template == "" { continue }
+            if live.TSDictionaries[e.Key] {
+                stmts, warn := tsDictionaryAlterStmts(e.Key, td, live.TSDictionaryDefs[e.Key])
+                plan.Alters = append(plan.Alters, stmts...)
+                if warn != "" { plan.Warnings = append(plan.Warnings, Warning{Message: warn}) }
+                continue
+            }
             opts := []string{"template = " + td.Template}
             for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
             plan.Creates = append(plan.Creates, fmt.Sprintf("create text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
@@ -3861,6 +3887,32 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
         ag.InitCond == la.InitCond && (ag.Parallel == "" || ag.Parallel == la.Parallel) && aggregateOptionsMatch(ag, la, fn)
 }
 
+// tsDictionaryAlterStmts brings live dictionary ld's options in line with
+// td's: ALTER TEXT SEARCH DICTIONARY sets changed options and drops those td
+// doesn't list. Options are unmanaged when td has none. A changed template
+// can't be altered, so it is reported instead.
+func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
+    if ld == nil { return nil, "" }
+    warn := ""
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !strings.EqualFold(t, ld.Template) {
+        warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
+    }
+    if td.Options == nil { return nil, warn }
+    opts := []string{}
+    for _, k := range sortedKeys(td.Options) {
+        if v, ok := ld.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(td.Options[k])) {
+            opts = append(opts, k+" = "+td.Options[k])
+        }
+    }
+    for _, k := range sortedKeys(ld.Options) {
+        found := false
+        for w := range td.Options { found = found || strings.EqualFold(w, k) }
+        if !found { opts = append(opts, k) }
+    }
+    if len(opts) == 0 { return nil, warn }
+    return []string{fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(fq), strings.Join(opts, ", "))}, warn
+}
+
 // tsConfigStmts creates a missing text search configuration (as a copy or
 // from a parser) and reconciles the token type mappings the YAML manages.
 // For a new configuration the copied mappings are unknown, so each managed
@@ -4339,10 +4391,13 @@ func planGrants(live *Live, desired *schema.Database) []string {
     for _, k := range tableNames {
         dt := desired.Tables[k]
         if dt == nil { continue }
+        var revoked map[string]map[string]bool
         if dt.Grants != nil {
             liveG := live.TableGrants[k]
             if live.Tables[k] == nil { liveG = created(k, "tables") }
-            add(ownedGrantDiff("table "+pqIdent(k), resolveGrantRoles(dt.Grants, live.CurrentUser), liveG, objectOwner(live, "rel:"+k, dt.Owner)))
+            desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
+            add(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner))
+            revoked = revokedPrivileges(desiredG, liveG, owner)
         }
         colNames := make([]string, 0, len(dt.Columns))
         for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -4350,7 +4405,7 @@ func planGrants(live *Live, desired *schema.Database) []string {
         for _, cn := range colNames {
             c := dt.Columns[cn]
             if c == nil || c.Grants == nil { continue }
-            add(columnGrantDiffStmts(k, cn, resolveGrantRoles(c.Grants, live.CurrentUser), live.ColumnGrants[k][cn]))
+            add(columnGrantDiffStmts(k, cn, resolveGrantRoles(c.Grants, live.CurrentUser), withoutPrivileges(live.ColumnGrants[k][cn], revoked)))
         }
     }
 
@@ -4516,6 +4571,41 @@ func roleGrantStmts(desired map[string][]string, liveG map[string]map[string]boo
         if len(grantOpt) > 0 { grants = append(grants, fmt.Sprintf("grant %s to %s with grant option;", on(grantOpt), grantRole(role))) }
     }
     return revokes, grants
+}
+
+// revokedPrivileges returns the role -> privileges a grants block revokes
+// from live: privileges a role holds that the block doesn't list for it.
+// The owner and PUBLIC are left out, as ownedGrantDiff leaves them.
+func revokedPrivileges(desired map[string][]string, liveG map[string]map[string]bool, owner string) map[string]map[string]bool {
+    out := map[string]map[string]bool{}
+    for role, privs := range liveG {
+        if role == owner || role == "public" { continue }
+        want := map[string]bool{}
+        for _, p := range desired[role] { want[strings.TrimSuffix(strings.ToLower(p), "*")] = true }
+        for p := range privs {
+            if base := strings.TrimSuffix(p, "*"); !want[base] {
+                if out[role] == nil { out[role] = map[string]bool{} }
+                out[role][base] = true
+            }
+        }
+    }
+    return out
+}
+
+// withoutPrivileges returns liveG minus the role privileges in revoked: a
+// table-wide REVOKE also takes the role's column privileges of that kind,
+// so they have to be granted again.
+func withoutPrivileges(liveG map[string]map[string]bool, revoked map[string]map[string]bool) map[string]map[string]bool {
+    if len(revoked) == 0 { return liveG }
+    out := map[string]map[string]bool{}
+    for role, privs := range liveG {
+        for p := range privs {
+            if revoked[role][strings.TrimSuffix(p, "*")] { continue }
+            if out[role] == nil { out[role] = map[string]bool{} }
+            out[role][p] = true
+        }
+    }
+    return out
 }
 
 // columnGrantDiffStmts reconciles desired role->privs for one column against

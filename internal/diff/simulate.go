@@ -189,6 +189,14 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if td == nil || td.Template == "" { continue }
         out.TSDictionaries[k] = true
         if td.Comment != "" { out.TSComments["dict:"+k] = td.Comment }
+        ld := &schema.TSDictionary{Template: strings.TrimPrefix(td.Template, "pg_catalog.")}
+        if prev := out.TSDictionaryDefs[k]; prev != nil { ld.Options = prev.Options }
+        if td.Options != nil {
+            ld.Options = map[string]string{}
+            for o, v := range td.Options { ld.Options[strings.ToLower(o)] = v }
+        }
+        if out.TSDictionaryDefs == nil { out.TSDictionaryDefs = map[string]*schema.TSDictionary{} }
+        out.TSDictionaryDefs[k] = ld
     }
     for k, tc := range desired.TSConfigs {
         if tc == nil || (tc.Copy == "" && tc.Parser == "" && out.TSConfigs[k] == nil) { continue }
@@ -630,6 +638,7 @@ func cloneLive(l *Live) *Live {
         Collations:         cloneSet(l.Collations),
         TSConfigs:          cloneMap(l.TSConfigs, func(m map[string][]string) map[string][]string { return cloneMap(m, func(v []string) []string { return append([]string(nil), v...) }) }),
         TSDictionaries:     cloneSet(l.TSDictionaries),
+        TSDictionaryDefs:   cloneMap(l.TSDictionaryDefs, func(d *schema.TSDictionary) *schema.TSDictionary { c := *d; c.Options = cloneMap(d.Options, nil); return &c }),
         TSComments:         cloneMap(l.TSComments, nil),
         Servers:            cloneMap(l.Servers, func(s *LiveServer) *LiveServer { c := *s; c.Options = cloneMap(s.Options, nil); return &c }),
         Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),

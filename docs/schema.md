@@ -1128,7 +1128,7 @@ schema app:
         generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
 ```
 
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. Dictionaries are create-only. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged); its template can't be changed in place, so a changed one is reported. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
 
 ## Row Level Security
 

@@ -80,3 +80,19 @@ func TestDefaultPrivilegesKeepRoleCase(t *testing.T) {
 		t.Errorf("created grants: %v", created)
 	}
 }
+
+func TestTableRevokeRegrantsColumnPrivileges(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {
+		Name: "t", Grants: map[string][]string{},
+		Columns: map[string]*schema.Column{"a": {Type: "int", Grants: map[string][]string{"reader": {"select"}}}, "b": {Type: "int"}},
+	}}}
+	live := liveWithTable("app.t", map[string]*LiveColumn{"a": {Type: "integer"}, "b": {Type: "integer"}})
+	live.CurrentUser = "owner"
+	live.TableGrants = map[string]map[string]map[string]bool{"app.t": {"reader": {"select": true}}}
+	live.ColumnGrants = map[string]map[string]map[string]map[string]bool{"app.t": {"a": {"reader": {"select": true}}}}
+	sql := strings.Join(planGrants(live, d), "\n")
+	want := "revoke select on table \"app\".\"t\" from \"reader\";\ngrant select (\"a\") on table \"app\".\"t\" to \"reader\";"
+	if sql != want {
+		t.Errorf("got:\n%s\nwant:\n%s", sql, want)
+	}
+}
