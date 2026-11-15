@@ -4232,6 +4232,7 @@ func TestPartitionInheritedColumnsNotDroppedUnsafe(t *testing.T) {
 		"id":      {Type: "integer"},
 		"created": {Type: "date"},
 	})
+	live.Tables["public.measurement_y2024"].IsPartition = true
 	p := Plan(live, desired, true)
 	if sql := Render(p); sql != "" {
 		t.Errorf("partition child inherits its columns; expected no SQL under --unsafe, got:\n%s", sql)

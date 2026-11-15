@@ -660,7 +660,7 @@ schema public:
 
 Notes:
 
-- Both parents and partitions are create-only and skipped when already live; partition bounds of existing partitions are never altered, and `pgy` never emits `ATTACH`/`DETACH PARTITION`.
+- Both parents and partitions are created when missing, and the bounds of existing partitions are never altered. A declared partition that exists as an ordinary table (for example one that was detached) is attached with `ALTER TABLE ... ATTACH PARTITION`, which scans it to check its rows fit the bound. pgy never emits `DETACH PARTITION`.
 - Indexes, foreign keys, constraints, and triggers declared on a partition child apply to that child as usual.
 - PostgreSQL requires a partitioned table's primary key to include the partition key columns.
 

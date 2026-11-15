@@ -44,7 +44,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil { continue }
+        if dt == nil || lt == nil || attachesPartition(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {

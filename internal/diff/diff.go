@@ -2784,6 +2784,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 pkCols := map[string]bool{}
                 for _, pc := range dt.PrimaryKey { pkCols[constraintColumnName(pc)] = true }
                 plan.Creates = append(plan.Creates, typeChangePre[fq]...)
+                if attachesPartition(dt, lt) {
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
+                    plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
+                }
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -3209,6 +3213,14 @@ func partitionKeyExpr(s string) string {
         return "(" + s + ")"
     }
     return pqIdent(s)
+}
+
+// attachesPartition reports whether the plan attaches existing table lt to
+// the parent dt declares: dt is a partition, lt a table that isn't one yet.
+// Its indexes, keys and foreign keys become the partition's copies of the
+// parent's when it is attached, so they are not pruned.
+func attachesPartition(dt *schema.Table, lt *LiveTable) bool {
+    return dt.PartitionOf != "" && lt != nil && !lt.IsPartition && !lt.Partitioned
 }
 
 // renderPartitionBound renders a partition child's bound clause:
