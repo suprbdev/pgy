@@ -216,4 +216,4 @@ References inside SQL text are found by name. A name that only looks like a refe
 - Forward-only: there are no down migrations. To undo a change, write the reverse change as a new migration.
 - `pgy init` and `pgy migrate` take an advisory lock, so concurrent runs wait for each other.
 - Committed migrations carry a checksum, which `pgy migrate` verifies before applying them.
-- SQL is split into statements with single and double quotes, dollar quotes and comments respected. `E'...'` backslash-escape strings are not handled.
+- SQL is split into statements with single and double quotes, `E'...'` strings, dollar quotes and comments respected.
