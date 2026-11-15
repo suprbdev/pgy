@@ -3371,6 +3371,24 @@ func DefaultPrimaryKeyName(fq string) string {
     return makeObjectName(table, "pkey")
 }
 
+// serialConversionStmts turns an existing plain column into the serial
+// column c declares: it creates the column's <table>_<column>_seq owned by
+// it, starts it past the column's largest value, and makes it the default.
+func serialConversionStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []string {
+    if !isSerialType(c.Type) || lc.Identity != "" || lc.Generated != "" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval(") {
+        return nil
+    }
+    seqType := map[string]string{"smallserial": "smallint", "serial2": "smallint", "bigserial": "bigint", "serial8": "bigint"}[strings.ToLower(strings.TrimSpace(c.Type))]
+    if seqType == "" { seqType = "integer" }
+    nsp, table := splitQualified(fq)
+    seq := nsp + "." + makeObjectName(table+"_"+cn, "seq")
+    return []string{
+        fmt.Sprintf("create sequence if not exists %s as %s owned by %s.%s;", pqIdent(seq), seqType, pqIdent(fq), pqIdent(cn)),
+        fmt.Sprintf("select setval(%s, (select coalesce(max(%s), 0) + 1 from %s), false);", quoteString(pqIdent(seq)), pqIdent(cn), pqIdent(fq)),
+        fmt.Sprintf("alter table %s alter column %s set default nextval(%s::regclass);", pqIdent(fq), pqIdent(cn), quoteString(pqIdent(seq))),
+    }
+}
+
 // plansNewRelations reports whether desired declares a table, view or
 // materialized view that live lacks.
 func plansNewRelations(live *Live, desired *schema.Database) bool {
@@ -4862,8 +4880,11 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
             }
         case c.Generated == "" && lc.Generated != "":
             if unsafe { out = append(out, target+" drop expression;") }
+        case c.Generated != "" && lc.Generated == "":
+            warn(fmt.Sprintf("column %s.%s is declared generated but is a plain column, and PostgreSQL cannot add a generation expression to an existing column; drop and re-add it, along with the indexes and constraints that use it, in a hand-written migration", fq, cn))
         }
     }
+    out = append(out, serialConversionStmts(fq, cn, c, lc)...)
 
     generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
     if !generated {
