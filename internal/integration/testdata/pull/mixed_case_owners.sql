@@ -1,0 +1,20 @@
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'Pgy_Owner') then create role "Pgy_Owner"; end if;
+  if not exists (select from pg_roles where rolname = 'Pgy_Reader') then create role "Pgy_Reader"; end if;
+end $$;
+grant "Pgy_Owner" to current_user;
+create extension if not exists postgres_fdw;
+create schema "Ow" authorization "Pgy_Owner";
+create table "Ow"."T" ("Id" int primary key);
+alter table "Ow"."T" owner to "Pgy_Owner";
+alter table "Ow"."T" enable row level security;
+create policy "ReaderOnly" on "Ow"."T" for select to "Pgy_Reader" using (true);
+create function "Ow"."F"() returns int language sql as 'select 1';
+alter function "Ow"."F"() owner to "Pgy_Owner";
+create server "Remote" foreign data wrapper postgres_fdw options (host 'localhost');
+alter server "Remote" owner to "Pgy_Owner";
+create foreign table "Ow"."Ft" ("Col" int options (column_name 'RemoteCol')) server "Remote" options (schema_name 'Public', table_name 'Far');
+create text search configuration "Ow"."Cfg" (copy = pg_catalog.simple);
+create publication "OwPub" for tables in schema "Ow";
+alter publication "OwPub" owner to "Pgy_Owner";
+alter default privileges for role "Pgy_Owner" in schema "Ow" grant select on tables to "Pgy_Reader";

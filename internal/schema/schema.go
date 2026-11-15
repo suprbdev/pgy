@@ -129,6 +129,7 @@ type Publication struct {
     Publish          []string // insert | update | delete | truncate; nil = all
     ViaPartitionRoot *bool    // publish_via_partition_root; nil = unmanaged
     GeneratedColumns string   // publish_generated_columns (PostgreSQL 18+): none | stored; "" = unmanaged
+    Owner            string   // "" = unmanaged
     Comment          string
 }
 
@@ -2577,6 +2578,7 @@ func parsePublications(v any) map[string]*Publication {
             if b, ok := dm["viaPartitionRoot"].(bool); ok { p.ViaPartitionRoot = &b }
             if g, ok := dm["generatedColumns"].(string); ok { p.GeneratedColumns = strings.ToLower(strings.TrimSpace(g)) }
             if s, ok := dm["comment"].(string); ok { p.Comment = s }
+            if s, ok := dm["owner"].(string); ok { p.Owner = strings.TrimSpace(s) }
         }
         out[name] = p
     }
