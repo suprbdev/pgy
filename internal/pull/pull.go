@@ -1390,17 +1390,34 @@ func (b *builder) partitionBound(t *node, fq string) {
 	add(t, "forValues", fv)
 }
 
+// boundValues splits a partition bound list from pg_get_expr. Keywords and
+// numbers are lower-cased; string literals keep their text, and stay
+// written as SQL literals ('null', '42') when the bare text would read as
+// a keyword or number, or has surrounding spaces.
 func boundValues(s string) []string {
 	out := []string{}
 	for _, v := range splitTop(s) {
 		v = strings.TrimSpace(v)
-		if strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
-			v = strings.ReplaceAll(v[1:len(v)-1], "''", "'")
+		if len(v) < 2 || !strings.HasPrefix(v, "'") || !strings.HasSuffix(v, "'") {
+			out = append(out, strings.ToLower(v))
+			continue
 		}
-		out = append(out, strings.ToLower(v))
+		text := strings.ReplaceAll(v[1:len(v)-1], "''", "'")
+		switch strings.ToLower(text) {
+		case "minvalue", "maxvalue", "true", "false", "null":
+			out = append(out, v)
+			continue
+		}
+		if text == "" || text != strings.TrimSpace(text) || numericRe.MatchString(text) || strings.HasPrefix(text, "'") {
+			out = append(out, v)
+			continue
+		}
+		out = append(out, text)
 	}
 	return out
 }
+
+var numericRe = regexp.MustCompile(`^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$`)
 
 func partitionBy(key string) *node {
 	m := flowMap()
