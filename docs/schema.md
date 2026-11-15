@@ -1186,7 +1186,8 @@ roles:
     login: true
     inherit: false
     connectionLimit: 10
-    inRoles: [readonly]
+    validUntil: "2030-01-01T00:00:00Z"
+    inRoles: [readonly, {role: migrator, admin: true, inherit: false}]
     set: {search_path: "app, public", statement_timeout: 30s}
     comment: "application login role"
   migrator:
@@ -1198,7 +1199,8 @@ roles:
 Behavior:
 
 - Role creates are emitted **first** in the plan, before schemas and all other objects, so grants, policies (`to:`), and memberships can reference them.
-- `inRoles` memberships are reconciled additively: `GRANT <parent> TO <role>` is emitted for each membership missing from live (`pg_auth_members`).
+- `inRoles` memberships are reconciled additively: `GRANT <parent> TO <role>` is emitted for each membership missing from live (`pg_auth_members`). An entry can be a map that also sets the membership's options: `admin` (`WITH ADMIN OPTION`), and on PostgreSQL 16+ `inherit` and `set`. Options it sets are diffed against live (`REVOKE ADMIN OPTION FOR`, or `GRANT ... WITH INHERIT/SET`), and options left out are unmanaged. On PostgreSQL 15, `inherit` and `set` are skipped with a warning.
+- `validUntil` is compared with `rolvaliduntil`. Give it a zone (`2030-01-01T00:00:00Z`), since a value without one is read in the server's time zone when it's set but compared as UTC. `infinity` removes the expiry.
 - Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
 - `comment` is diffed against `pg_shdescription` like other object comments.
 - `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you (the same applies to function and procedure `set:`).
@@ -1213,7 +1215,8 @@ Behavior:
 | `bypassRLS` | boolean | `BYPASSRLS` |
 | `inherit` | boolean | Set `false` to emit `NOINHERIT` (default inherits) |
 | `connectionLimit` | integer | `CONNECTION LIMIT n`; omit for unlimited |
-| `inRoles` | list | Parent roles; each emits `GRANT <parent> TO <role>` when missing |
+| `validUntil` | string | `VALID UNTIL`: when the role's password stops being accepted, or `infinity` |
+| `inRoles` | list | Parent roles; each emits `GRANT <parent> TO <role>` when missing. An entry `{role, admin, inherit, set}` also sets the membership's options |
 | `set` | map | Settings for the role in all databases (`ALTER ROLE ... SET` / `RESET`); omit to leave them unmanaged |
 | `comment` | string | `COMMENT ON ROLE` |
 

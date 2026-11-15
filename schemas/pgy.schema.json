@@ -250,10 +250,27 @@
         "bypassRLS": { "type": "boolean" },
         "inherit": { "type": "boolean", "description": "false emits NOINHERIT" },
         "connectionLimit": { "type": "integer" },
+        "validUntil": { "type": "string", "minLength": 1, "description": "VALID UNTIL: when the role's password expires, as a timestamp with a zone (2030-01-01T00:00:00Z), or infinity." },
         "set": { "type": "object", "description": "ALTER ROLE ... SET parameters for all databases. Authoritative: unlisted settings are reset.", "additionalProperties": { "$ref": "#/definitions/scalar" } },
         "inRoles": {
-          "$ref": "#/definitions/stringList",
-          "description": "Role memberships: GRANT <parent> TO <role>"
+          "type": "array",
+          "description": "Role memberships: GRANT <parent> TO <role>. An entry is a role name, or a map that also sets the membership's options.",
+          "items": {
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              {
+                "type": "object",
+                "properties": {
+                  "role": { "type": "string", "minLength": 1 },
+                  "admin": { "type": "boolean", "description": "WITH ADMIN OPTION: the member can grant the role to others." },
+                  "inherit": { "type": "boolean", "description": "WITH INHERIT (PostgreSQL 16+): the member has the role's privileges without SET ROLE. Defaults to the member's inherit attribute." },
+                  "set": { "type": "boolean", "description": "WITH SET (PostgreSQL 16+): the member can SET ROLE to the role." }
+                },
+                "required": ["role"],
+                "additionalProperties": false
+              }
+            ]
+          }
         },
         "comment": { "type": "string" }
       },

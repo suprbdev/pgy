@@ -10,6 +10,7 @@ import (
     "strconv"
     "strings"
     "sync"
+    "time"
 
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgconn"
@@ -73,6 +74,9 @@ type Live struct{
     Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
+    // RoleMemberOptions: member role -> parent role -> the membership's
+    // options, combined over grantors.
+    RoleMemberOptions map[string]map[string]*LiveMembership
     RoleComments map[string]string // role name -> comment (pg_shdescription)
     // Grants: object key -> role -> privilege -> exists. Object owners excluded.
     TableGrants    map[string]map[string]map[string]bool // key "schema.table" (also views and sequences)
@@ -175,7 +179,14 @@ type LiveEventTrigger struct {
 type LiveRole struct {
     Login, Superuser, CreateDB, CreateRole, Replication, BypassRLS, Inherit bool
     ConnectionLimit int
+    ValidUntil string // UTC RFC 3339, "infinity", or "" when unset
     Config map[string]string // ALTER ROLE ... SET settings for all databases: lower-cased name -> value
+}
+
+// LiveMembership is a role membership's options. Before PostgreSQL 16,
+// Inherit is the member's INHERIT attribute and Set is always true.
+type LiveMembership struct {
+    Admin, Inherit, Set bool
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -477,6 +488,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         DefaultACLs: map[string]map[string]map[string]bool{},
         DefaultACLRows: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
+        RoleMemberOptions: map[string]map[string]*LiveMembership{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         TypeGrants: map[string]map[string]map[string]bool{},
@@ -1585,6 +1597,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // Query existing roles (skip pg_* system roles)
     roleQ := `
         select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit,
+               case when rolvaliduntil is null then '' when rolvaliduntil = 'infinity' then 'infinity'
+                    else to_char(rolvaliduntil at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') end,
                coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[])
         from pg_roles r where rolname not like 'pg\_%'
     `
@@ -1593,7 +1607,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var roleName string
             lr := &LiveRole{}
             var config []string
-            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &config); err != nil {
+            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &lr.ValidUntil, &config); err != nil {
                 return err
             }
             lr.Config = parseProconfig(config)
@@ -1605,20 +1619,26 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query role memberships
     memQ := `
-        select m.rolname, r.rolname
+        select m.rolname, r.rolname, bool_or(am.admin_option),
+               bool_or(coalesce((to_jsonb(am) ->> 'inherit_option')::boolean, m.rolinherit)),
+               bool_or(coalesce((to_jsonb(am) ->> 'set_option')::boolean, true))
         from pg_auth_members am
         join pg_roles m on m.oid = am.member
         join pg_roles r on r.oid = am.roleid
         where m.rolname not like 'pg\_%'
+        group by 1, 2
     `
     batch.add(memQ, func(memRows pgx.Rows) error {
         for memRows.Next() {
             var member, parent string
-            if err := memRows.Scan(&member, &parent); err != nil {
+            lm := &LiveMembership{}
+            if err := memRows.Scan(&member, &parent, &lm.Admin, &lm.Inherit, &lm.Set); err != nil {
                 return err
             }
             if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
             l.RoleMembers[member][parent] = true
+            if l.RoleMemberOptions[member] == nil { l.RoleMemberOptions[member] = map[string]*LiveMembership{} }
+            l.RoleMemberOptions[member][parent] = lm
         }
         return nil
     })
@@ -2761,10 +2781,73 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s %s;", grantRole(name), c))
         }
         for _, parent := range r.InRoles {
-            if parent == "" || live.RoleMembers[name][parent] { continue }
-            plan.Alters = append(plan.Alters, fmt.Sprintf("grant %s to %s;", grantRole(parent), grantRole(name)))
+            if parent == "" { continue }
+            plan.Alters = append(plan.Alters, membershipStmts(plan, live, name, parent, r.MemberOptions[parent])...)
         }
     }
+}
+
+// membershipStmts grants parent to member with the options o sets, or, for
+// an existing membership, changes the options that differ. WITH INHERIT and
+// WITH SET need PostgreSQL 16; on an older server they are skipped with a
+// warning.
+func membershipStmts(plan *PlanDiff, live *Live, member, parent string, o *schema.MembershipOptions) []string {
+    target := grantRole(parent) + " to " + grantRole(member)
+    if o == nil { o = &schema.MembershipOptions{} }
+    if (o.Inherit != nil || o.Set != nil) && live.ServerVersion > 0 && live.ServerVersion < 160000 {
+        plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s: the inherit and set options of its membership in %s need PostgreSQL 16; they were left out", member, parent)})
+        c := *o
+        c.Inherit, c.Set = nil, nil
+        o = &c
+    }
+    if !live.RoleMembers[member][parent] {
+        opts := []string{}
+        for _, f := range []struct {
+            name string
+            v    *bool
+        }{{"admin", o.Admin}, {"inherit", o.Inherit}, {"set", o.Set}} {
+            if f.v != nil { opts = append(opts, fmt.Sprintf("%s %t", f.name, *f.v)) }
+        }
+        switch {
+        case len(opts) == 0:
+            return []string{"grant " + target + ";"}
+        case len(opts) == 1 && o.Admin != nil:
+            if *o.Admin { return []string{"grant " + target + " with admin option;"} }
+            return []string{"grant " + target + ";"}
+        }
+        return []string{"grant " + target + " with " + strings.Join(opts, ", ") + ";"}
+    }
+    lm := live.RoleMemberOptions[member][parent]
+    if lm == nil { return nil }
+    out := []string{}
+    if o.Admin != nil && *o.Admin != lm.Admin {
+        if *o.Admin {
+            out = append(out, "grant "+target+" with admin option;")
+        } else {
+            out = append(out, fmt.Sprintf("revoke admin option for %s from %s;", grantRole(parent), grantRole(member)))
+        }
+    }
+    for _, f := range []struct {
+        name       string
+        want       *bool
+        have       bool
+    }{{"inherit", o.Inherit, lm.Inherit}, {"set", o.Set, lm.Set}} {
+        if f.want != nil && *f.want != f.have {
+            out = append(out, fmt.Sprintf("grant %s with %s %t;", target, f.name, *f.want))
+        }
+    }
+    return out
+}
+
+// normalizeValidUntil puts a VALID UNTIL value in the form introspection
+// reads: UTC RFC 3339, or infinity. A value without a zone is taken as UTC.
+func normalizeValidUntil(s string) string {
+    s = strings.TrimSpace(s)
+    if strings.EqualFold(s, "infinity") { return "infinity" }
+    for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05Z07:00", "2006-01-02 15:04:05Z07", "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
+        if t, err := time.Parse(layout, s); err == nil { return t.UTC().Format(time.RFC3339) }
+    }
+    return s
 }
 
 // roleAlterOptions returns ALTER ROLE options for attributes the YAML sets
@@ -2786,6 +2869,9 @@ func roleAlterOptions(r *schema.Role, lr *LiveRole) []string {
     if r.Managed["connectionLimit"] && r.ConnectionLimit != lr.ConnectionLimit {
         out = append(out, fmt.Sprintf("connection limit %d", r.ConnectionLimit))
     }
+    if r.Managed["validUntil"] && r.ValidUntil != "" && normalizeValidUntil(r.ValidUntil) != lr.ValidUntil {
+        out = append(out, "valid until "+quoteString(r.ValidUntil))
+    }
     return out
 }
 
@@ -2799,6 +2885,7 @@ func renderRole(r *schema.Role) string {
     if r.BypassRLS { opts = append(opts, "bypassrls") }
     if r.NoInherit { opts = append(opts, "noinherit") }
     if r.ConnectionLimit >= 0 { opts = append(opts, fmt.Sprintf("connection limit %d", r.ConnectionLimit)) }
+    if r.ValidUntil != "" { opts = append(opts, "valid until "+quoteString(r.ValidUntil)) }
     stmt := "create role " + grantRole(r.Name)
     if len(opts) > 0 { stmt += " with " + strings.Join(opts, " ") }
     // Roles are cluster-level and may pre-exist even when the target database

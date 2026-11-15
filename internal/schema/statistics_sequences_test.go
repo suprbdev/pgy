@@ -137,3 +137,31 @@ schema app:
 		t.Errorf("identity: %+v", o)
 	}
 }
+
+func TestRoleValidUntilAndMembershipOptionsParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+roles:
+  app:
+    validUntil: 2030-01-01T00:00:00Z
+    inRoles: [readers, {role: admins, admin: true, inherit: false}]
+  svc:
+    validUntil: infinity
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := db.Roles["app"]
+	if app.ValidUntil != "2030-01-01T00:00:00Z" || !app.Managed["validUntil"] {
+		t.Errorf("validUntil: %q", app.ValidUntil)
+	}
+	if len(app.InRoles) != 2 || app.InRoles[0] != "readers" || app.InRoles[1] != "admins" {
+		t.Errorf("inRoles: %v", app.InRoles)
+	}
+	o := app.MemberOptions["admins"]
+	if o == nil || o.Admin == nil || !*o.Admin || o.Inherit == nil || *o.Inherit || o.Set != nil || app.MemberOptions["readers"] != nil {
+		t.Errorf("options: %+v", app.MemberOptions)
+	}
+	if db.Roles["svc"].ValidUntil != "infinity" {
+		t.Errorf("svc: %q", db.Roles["svc"].ValidUntil)
+	}
+}
