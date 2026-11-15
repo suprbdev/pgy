@@ -576,6 +576,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     }
     if dt.PartitionBy != nil { lt.Partitioned = true }
     if dt.PartitionOf != "" { lt.IsPartition = true }
+    lt.OfType = dt.Of
     if dt.Inherits != nil { lt.Inherits = append([]string(nil), dt.Inherits...) }
     if dt.With != nil {
         lt.Options = map[string]string{}

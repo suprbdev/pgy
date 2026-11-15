@@ -204,3 +204,13 @@ func TestViewColumnDefaultsParse(t *testing.T) {
 		t.Errorf("columnDefaults: %v", cd)
 	}
 }
+
+func TestTypedTableParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte("schema app:\n  table addresses:\n    of: addr\n    columns: {city: {default: x}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tb := db.Tables["app.addresses"]; tb.Of != "app.addr" || tb.Columns["city"].Type != "" {
+		t.Errorf("of: %q", tb.Of)
+	}
+}

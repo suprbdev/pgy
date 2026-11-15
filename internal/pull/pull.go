@@ -158,8 +158,6 @@ func (b *builder) unsupported() {
 	for _, o := range b.live.Details.Unsupported {
 		switch {
 		case !b.wantSchema(o.Schema):
-		case o.Kind == "typed table":
-			b.warn("table %s.%s is a typed table (OF %s), which pgy doesn't support; it was written as a plain table with the type's columns", o.Schema, o.Name, o.Detail)
 		case o.Kind == "cast":
 			b.warn("cast %s is not supported by pgy and was left out", o.Name)
 		default:
@@ -736,7 +734,14 @@ func (b *builder) tables() {
 			if len(lt.Inherits) > 0 {
 				add(t, "inherits", list(lt.Inherits))
 			}
-			add(t, "columns", b.columns(fq, lt))
+			if lt.OfType != "" {
+				add(t, "of", str(lt.OfType))
+				if cols := b.columns(fq, lt); len(cols.Content) > 0 {
+					add(t, "columns", cols)
+				}
+			} else {
+				add(t, "columns", b.columns(fq, lt))
+			}
 			if pk := pkColumns(lt); len(pk) > 0 {
 				name := diff.LivePrimaryKeyName(lt)
 				li := lt.IndexDefs[name]
@@ -846,8 +851,12 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		if lc == nil {
 			continue
 		}
-		if lc.Inherited {
-			if c := inheritedColumnNode(lc, b.parentColumn(fq, lt, cn)); c != nil {
+		if lc.Inherited || lt.OfType != "" {
+			parent := b.parentColumn(fq, lt, cn)
+			if lt.OfType != "" {
+				parent = &diff.LiveColumn{Nullable: true, Storage: lc.TypeStorage}
+			}
+			if c := inheritedColumnNode(lc, parent); c != nil {
 				add(cols, cn, c)
 			}
 			continue

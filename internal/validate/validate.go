@@ -150,7 +150,7 @@ func Database(d *schema.Database) []Issue {
 		}
 		obj := "table " + fq
 		checkDeps(d, obj, t.DependsOn, add)
-		hasCols := t.PartitionOf == "" && len(t.Columns) > 0
+		hasCols := t.PartitionOf == "" && (len(t.Columns) > 0 || d.Types[t.Of] != nil)
 		colExists := func(c string) bool { return tableHasColumn(d, fq, c, 0) }
 		need := func(what string, cols []string) {
 			if !hasCols {
@@ -235,8 +235,21 @@ func Database(d *schema.Database) []Issue {
 				add(Error, obj, "trigger %s: a BEFORE trigger's WHEN cannot reference new.* on a table with generated columns", tr.Name)
 			}
 		}
+		if t.Of != "" && (t.PartitionOf != "" || len(t.Inherits) > 0) {
+			add(Error, obj, "of cannot be combined with partitionOf or inherits")
+		}
+		ofType := d.Types[t.Of]
 		for cn, c := range t.Columns {
 			if c == nil {
+				continue
+			}
+			if t.Of != "" {
+				switch {
+				case strings.TrimSpace(c.Type) != "":
+					add(Error, obj, "column %s: a typed table's columns get their types from %s, so declare it without a type", cn, t.Of)
+				case ofType != nil && ofType.Kind == "composite" && ofType.Attributes[cn] == "":
+					add(Error, obj, "column %s is not an attribute of %s", cn, t.Of)
+				}
 				continue
 			}
 			if strings.TrimSpace(c.Type) == "" {
@@ -523,7 +536,7 @@ func checkDeps(d *schema.Database, obj string, deps []string, add func(Severity,
 // partition, or one of its INHERITS parents declares the column (or isn't
 // declared, so pgy can't tell).
 func inheritsColumn(d *schema.Database, t *schema.Table, cn string) bool {
-	if t.PartitionOf != "" {
+	if t.PartitionOf != "" || t.Of != "" {
 		return true
 	}
 	for _, p := range t.Inherits {
@@ -837,6 +850,10 @@ func tableHasColumn(d *schema.Database, fq, c string, depth int) bool {
 	}
 	if _, ok := t.Columns[c]; ok {
 		return true
+	}
+	if t.Of != "" {
+		ty := d.Types[t.Of]
+		return ty == nil || ty.Kind != "composite" || ty.Attributes[c] != ""
 	}
 	for _, p := range t.Inherits {
 		if d.Tables[p] == nil || tableHasColumn(d, p, c, depth+1) {

@@ -79,3 +79,52 @@ schema app:
 		t.Errorf("the JSON Schema must require types except on partitions and children:\n%s", got)
 	}
 }
+
+func TestValidateTypedTables(t *testing.T) {
+	p := write(t, t.TempDir(), "tt.yml", `
+schema app:
+  type addr: {type: composite, attributes: {street: text, city: text}}
+  table ok:
+    of: app.addr
+    columns: {city: {default: x}}
+  table typed_column:
+    of: app.addr
+    columns: {city: {type: text}}
+  table unknown:
+    of: app.addr
+    columns: {zip: {default: 1}}
+  table base:
+    columns: {a: {type: int}}
+  table both:
+    of: app.addr
+    inherits: [app.base]
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"app.typed_column: column city: a typed table's columns get their types from app.addr",
+		"app.unknown: column zip is not an attribute of app.addr",
+		"app.both: of cannot be combined with partitionOf or inherits",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "app.ok") || strings.Contains(got, "table ok > columns") {
+		t.Errorf("valid typed table flagged:\n%s", got)
+	}
+}
+
+func TestValidateTypedTableKeysUseTypeAttributes(t *testing.T) {
+	p := write(t, t.TempDir(), "tk.yml", `
+schema app:
+  type addr: {type: composite, attributes: {street: text, city: text}}
+  table a:
+    of: app.addr
+    primaryKey: [street]
+    indexes: {a_city: {columns: [city]}, a_bad: {columns: [zip]}}
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, `index a_bad references unknown column "zip"`) || strings.Contains(got, `"street"`) || strings.Contains(got, `"city"`) {
+		t.Errorf("typed table key and index columns must come from the type:\n%s", got)
+	}
+}

@@ -33,14 +33,13 @@ type LiveDetails struct {
     RoutineDeps map[string][]string
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, ordered-set and
-    // hypothetical-set aggregates, text search parsers and templates, and
-    // typed tables), excluding extension members.
+    // hypothetical-set aggregates, and text search parsers and templates),
+    // excluding extension members.
     Unsupported []UnsupportedObject
 }
 
-// UnsupportedObject is a database object pgy has no YAML for. Detail is
-// the type of a typed table, which pgy pulls as a plain table; it is
-// empty for other kinds.
+// UnsupportedObject is a database object pgy has no YAML for. Detail holds
+// extra information for some kinds; it is empty for the others.
 type UnsupportedObject struct {
     Kind, Schema, Name, Detail string
 }
@@ -95,8 +94,6 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'cast', case when st.typnamespace = 'pg_catalog'::regnamespace then tt.typnamespace else st.typnamespace end,
                    '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, ''
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
-            union all select 'typed table', c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid, format_type(c.reloftype, null)
-              from pg_class c where c.reloftype <> 0 and c.relkind in ('r', 'p')
             union all select case a.aggkind when 'o' then 'ordered-set aggregate' else 'hypothetical-set aggregate' end, p.pronamespace,
                    p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', 'pg_proc'::regclass, p.oid, ''
               from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where a.aggkind <> 'n' 

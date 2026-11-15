@@ -16,7 +16,7 @@ func typeChangingColumns(live *Live, desired *schema.Database, unsafe bool) map[
     if !unsafe { return out }
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || dt.PartitionOf != "" { continue }
+        if dt == nil || lt == nil || dt.PartitionOf != "" || dt.Of != "" { continue }
         for _, cn := range sortedKeys(dt.Columns) {
             c, lc := dt.Columns[cn], lt.Columns[cn]
             if c == nil || lc == nil || lc.Inherited || c.Type == "" { continue }

@@ -23,6 +23,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Constraints](#constraints)
   - [Partitioning](#partitioning)
   - [Inheritance](#inheritance)
+  - [Typed tables](#typed-tables)
 - [Foreign Tables](#foreign-tables)
 - [Views](#views)
   - [Materialized Views](#materialized-views)
@@ -687,6 +688,26 @@ schema app:
 - An inherited column can be listed on the child without a type to set the child's own options for it, as for [partitions](#partitioning): `columns: {created_at: {default: "now()", comment: child timestamp}}`. `pgy validate` accepts a column without a type only on a partition, or on a child one of whose parents declares it.
 - `pgy pull` emits `inherits` and leaves inherited columns out of the child, apart from the options the child sets for them. `pgy validate` checks a child's index and key columns against its parents' too. Use `partitionOf` for declarative partitioning. `inherits` cannot be combined with it.
 
+
+### Typed tables
+
+A typed table takes its columns from a composite type (`CREATE TABLE ... OF type`). Declare the type, and `of` on the table. List a column only to set its options, without a type, as for [partitions](#partitioning): `default`, `nullable: false`, `storage`, `compression`, `statisticsTarget`, `nDistinct` and `comment`.
+
+```yaml
+schema app:
+  type addr:
+    type: composite
+    attributes: {street: {type: text}, city: {type: text}}
+  table addresses:
+    of: app.addr
+    columns:
+      city: {default: "'Paris'", nullable: false, comment: city name}
+    primaryKey: [street]
+```
+
+- The table is created after its type with `CREATE TABLE ... OF`. An existing ordinary table declared with `of` is linked with `ALTER TABLE ... OF`, which PostgreSQL allows only when its columns match the type exactly. A live typed table whose YAML has no `of`, or a different one, is unlinked with `NOT OF` under `--unsafe` and reported otherwise.
+- Its columns change with the type. Attributes added, changed or dropped on a type that a typed table uses are altered with `CASCADE`, and `--unsafe` never drops a typed table's columns.
+- `pgy validate` rejects a typed table's column that has a type or isn't one of the type's attributes, and `of` together with `partitionOf` or `inherits`. `pgy pull` writes `of` and only the options a column sets.
 ## Foreign Tables
 
 Foreign tables read through a foreign server, which a foreign-data wrapper such as `postgres_fdw` or `file_fdw` provides. Declare the wrapper's extension under `extensions:`, the servers under a top-level `servers:` block, and each table as a `foreign table <name>:` key in a `schema <name>:` block.
