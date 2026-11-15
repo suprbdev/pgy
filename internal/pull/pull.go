@@ -1692,6 +1692,9 @@ func (b *builder) database() *node {
 			if lp.GeneratedColumns == "stored" {
 				add(p, "generatedColumns", str("stored"))
 			}
+			if b.opts.Owners && lp.Owner != b.live.CurrentUser {
+				addStr(p, "owner", lp.Owner)
+			}
 			addStr(p, "comment", lp.Comment)
 			add(pubs, name, p)
 		}

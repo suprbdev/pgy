@@ -1375,6 +1375,7 @@ publications:
         where: "status <> 'draft'"        # row filter
     publish: [insert, update, delete]     # default: all actions
     viaPartitionRoot: true
+    owner: replication_admin   # optional: ALTER PUBLICATION ... OWNER TO
     generatedColumns: stored              # PostgreSQL 18+: also replicate stored generated columns
     comment: change data capture
   billing_cdc:
@@ -1383,7 +1384,7 @@ publications:
     allTables: true
 ```
 
-Publications are created after every table, so their tables and columns exist. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list. PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
+Publications are created after every table, so their tables and columns exist. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments and `owner` are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list. PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
 
 ## Event Triggers
 

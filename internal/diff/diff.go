@@ -161,6 +161,7 @@ type LivePublication struct {
     Tables    map[string]LivePublicationTable
     Schemas   []string
     Comment   string
+    Owner     string
 }
 
 type LivePublicationTable struct {
@@ -1224,7 +1225,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     pubQ := `
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
                coalesce(d.description, ''),
-               case to_jsonb(p) ->> 'pubgencols' when 's' then 'stored' when 'n' then 'none' else '' end
+               case to_jsonb(p) ->> 'pubgencols' when 's' then 'stored' when 'n' then 'none' else '' end,
+               pg_get_userbyid(p.pubowner)
         from pg_publication p
         left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
     `
@@ -1233,7 +1235,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var name string
             var ins, upd, del, trunc bool
             lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
-            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns); err != nil {
+            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns, &lp.Owner); err != nil {
                 return err
             }
             for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
@@ -3233,6 +3235,9 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
             if with := publicationWith(p, nil); with != "" { stmt += " with (" + with + ")" }
             plan.Alters = append(plan.Alters, stmt+";")
             if p.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on publication %s is %s;", ident, quoteString(p.Comment))) }
+            if p.Owner != "" && resolveRole(p.Owner, live.CurrentUser) != live.CurrentUser {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s owner to %s;", ident, grantRole(p.Owner)))
+            }
             continue
         }
         if !p.AllTables && !publicationMembersMatch(p, lp) {
@@ -3256,6 +3261,9 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
         }
         if p.Comment != "" && p.Comment != lp.Comment {
             plan.Alters = append(plan.Alters, fmt.Sprintf("comment on publication %s is %s;", ident, quoteString(p.Comment)))
+        }
+        if p.Owner != "" && resolveRole(p.Owner, live.CurrentUser) != lp.Owner {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s owner to %s;", ident, grantRole(p.Owner)))
         }
     }
     if !opts.Unsafe || !opts.Prune { return }

@@ -156,6 +156,9 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             lp.Publish, lp.ViaRoot, lp.GeneratedColumns = prev.Publish, prev.ViaRoot, prev.GeneratedColumns
             if p.Comment == "" { lp.Comment = prev.Comment }
         }
+        lp.Owner = out.CurrentUser
+        if prev := out.Publications[truncateIdent(name)]; prev != nil { lp.Owner = prev.Owner }
+        if p.Owner != "" { lp.Owner = resolveRole(p.Owner, out.CurrentUser) }
         for _, t := range p.Tables {
             cols := append([]string(nil), t.Columns...)
             sort.Strings(cols)
