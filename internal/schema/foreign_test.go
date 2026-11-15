@@ -1,6 +1,9 @@
 package schema
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestForeignTableAndServerParse(t *testing.T) {
 	d, err := parseFlexibleDatabase([]byte(`
@@ -84,5 +87,12 @@ schema app:
 	dm := d.Domains["app.pct"]
 	if dm.Checks["pct_min"] != "VALUE >= 0" || dm.Checks["pct_max"] != "VALUE <= 100" || dm.CheckComments["pct_min"] != "not negative" {
 		t.Errorf("domain = %+v", dm)
+	}
+}
+
+func TestGrantOptionParse(t *testing.T) {
+	g := parseGrants(map[string]any{"r": []any{"SELECT", "insert  WITH grant option"}})
+	if strings.Join(g["r"], ",") != "insert*,select" {
+		t.Errorf("grants = %v", g)
 	}
 }

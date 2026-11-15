@@ -1384,7 +1384,11 @@ func parseGrants(v any) map[string][]string {
     out := map[string][]string{}
     for role, privs := range m {
         list := parseStringListFromNode(privs)
-        for i := range list { list[i] = strings.ToLower(strings.TrimSpace(list[i])) }
+        for i := range list {
+            p := strings.Join(strings.Fields(strings.ToLower(list[i])), " ")
+            if base, ok := strings.CutSuffix(p, " with grant option"); ok { p = base + "*" }
+            list[i] = p
+        }
         sort.Strings(list)
         out[role] = list
     }

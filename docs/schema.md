@@ -1193,7 +1193,7 @@ Behavior:
 
 ## Grants
 
-Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump).
+Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump). A privilege written as `insert with grant option` is granted `WITH GRANT OPTION`, which lets the role grant it on. Removing the suffix later emits `REVOKE GRANT OPTION FOR insert ...` and keeps the privilege itself.
 
 ```yaml
 schema app:
