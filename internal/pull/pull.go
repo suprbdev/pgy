@@ -283,6 +283,7 @@ func (b *builder) types() {
 				spec := flowMap()
 				add(spec, "type", str(b.live.CompositeAttributes[k][a]))
 				addStr(spec, "collate", b.live.CompositeCollations[k][a])
+				addStr(spec, "comment", b.live.CompositeComments[k][a])
 				add(attrs, a, spec)
 			}
 			add(t, "attributes", attrs)
@@ -486,6 +487,9 @@ func (b *builder) sequences() {
 		}
 		if ls.Cycle {
 			add(m, "cycle", boolean(true))
+		}
+		if ls.Unlogged {
+			add(m, "unlogged", boolean(true))
 		}
 		if ls.Owner != "" {
 			add(m, "ownedBy", str(ls.Owner))
@@ -1203,6 +1207,9 @@ func (b *builder) statistics(t *node, lt *diff.LiveTable) {
 			cols[i] = unquoteIdent(stripParens(it))
 		}
 		add(m, "columns", list(cols))
+		if ls.Target >= 0 {
+			add(m, "statisticsTarget", num(strconv.Itoa(ls.Target)))
+		}
 		addStr(m, "comment", ls.Comment)
 		add(sts, name, m)
 	}

@@ -247,6 +247,7 @@ type Sequence struct {
     Start     string
     Cache     string
     Cycle     *bool  // nil = unmanaged
+    Unlogged  *bool  // UNLOGGED (PostgreSQL 15+); nil = unmanaged
     OwnedBy   string // table.column (or schema.table.column)
     Owner     string // "" = unmanaged
     Grants    map[string][]string // role -> privileges (usage, select, update); nil = unmanaged
@@ -435,6 +436,7 @@ type Statistic struct {
     Kinds   []string
     Columns []string
     Comment string
+    StatisticsTarget *int // ALTER STATISTICS ... SET STATISTICS; -1 = default; nil = unmanaged
 }
 
 // Rule is a CREATE RULE on a table or view. PostgreSQL rewrites the action
@@ -468,6 +470,7 @@ type TypeDef struct {
     Range  *RangeDef // range
     Attributes map[string]string // composite: name->type
     AttributeCollations map[string]string // composite: name -> COLLATE; unset = the type's default
+    AttributeComments map[string]string // composite: name -> COMMENT ON COLUMN text
     AttributeOrder []string      // composite: YAML declaration order (filled from node tree)
     DependsOn []string `yaml:"dependsOn"`
     Comment string
@@ -1535,6 +1538,7 @@ func parseStatistics(v any) []*Statistic {
             }
             if c, ok := dm["columns"]; ok { st.Columns = parseStringListFromNode(c) }
             if s, ok := dm["comment"].(string); ok { st.Comment = s }
+            if n, ok := dm["statisticsTarget"].(int); ok { st.StatisticsTarget = &n }
         }
         out = append(out, st)
     }
@@ -1837,6 +1841,10 @@ func parseType(schemaName, key string, body any) *TypeDef {
                 if c, ok := mm["collate"].(string); ok && strings.TrimSpace(c) != "" {
                     if td.AttributeCollations == nil { td.AttributeCollations = map[string]string{} }
                     td.AttributeCollations[k] = strings.TrimSpace(c)
+                }
+                if c, ok := mm["comment"].(string); ok && c != "" {
+                    if td.AttributeComments == nil { td.AttributeComments = map[string]string{} }
+                    td.AttributeComments[k] = c
                 }
             } else if t, ok := v.(string); ok && strings.TrimSpace(t) != "" {
                 td.Attributes[k] = strings.TrimSpace(t)
@@ -2354,6 +2362,7 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     if v, ok := m["cache"]; ok { sq.Cache = defaultToString(v) }
     if b, ok := m["cycle"].(bool); ok { sq.Cycle = &b }
     if ob, ok := m["ownedBy"].(string); ok { sq.OwnedBy = ob }
+    if u, ok := m["unlogged"].(bool); ok { sq.Unlogged = &u }
     if dep, ok := m["dependsOn"]; ok {
         sq.DependsOn = parseStringListFromNode(dep)
     }

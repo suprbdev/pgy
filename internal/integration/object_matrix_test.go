@@ -25,6 +25,10 @@ var objectChangeCases = map[string][2]string{
 		`  sequence s: {start: 1}`,
 		`  sequence s: {as: bigint, increment: 5, minValue: 1, maxValue: 99999, start: 1, cache: 20, cycle: true, comment: counter}`,
 	},
+	"sequence_unlogged": {
+		`  sequence s: {start: 1}`,
+		`  sequence s: {start: 1, unlogged: true}`,
+	},
 	"sequence_owned": {
 		`  sequence s: {start: 1}`,
 		"  sequence s: {start: 1, ownedBy: t.a, dependsOn: [table SCH.t]}",
@@ -48,6 +52,10 @@ var objectChangeCases = map[string][2]string{
 	"composite_add": {
 		`  type c: {type: composite, attributes: {x: {type: int}}}`,
 		`  type c: {type: composite, attributes: {x: {type: int}, y: {type: text}}, comment: pair}`,
+	},
+	"composite_comments": {
+		`  type c: {type: composite, attributes: {x: {type: int}, y: {type: text, comment: old}}}`,
+		`  type c: {type: composite, attributes: {x: {type: int, comment: "it's x"}, y: {type: text, comment: new}}}`,
 	},
 	"composite_retype": {
 		`  type c: {type: composite, attributes: {x: {type: int}}}`,

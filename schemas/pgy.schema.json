@@ -626,6 +626,7 @@
       "properties": {
         "kinds": { "type": "array", "items": { "type": "string", "enum": ["ndistinct", "dependencies", "mcv"] }, "description": "Default: all kinds." },
         "columns": { "$ref": "#/definitions/stringList" },
+        "statisticsTarget": { "type": "integer", "minimum": -1, "description": "ALTER STATISTICS ... SET STATISTICS; -1 restores the default." },
         "comment": { "type": "string" }
       },
       "required": ["columns"],
@@ -855,7 +856,8 @@
                 "type": "object",
                 "properties": {
                   "type": { "type": "string", "minLength": 1 },
-                  "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the attribute; changing it on a live type requires --unsafe." }
+                  "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the attribute; changing it on a live type requires --unsafe." },
+                  "comment": { "type": "string", "description": "COMMENT ON COLUMN for the attribute." }
                 },
                 "required": ["type"],
                 "additionalProperties": false
@@ -930,6 +932,7 @@
         "start": { "type": ["integer", "string"] },
         "cache": { "type": ["integer", "string"] },
         "cycle": { "type": "boolean" },
+        "unlogged": { "type": "boolean", "description": "UNLOGGED sequence (PostgreSQL 15+): ALTER SEQUENCE ... SET LOGGED / UNLOGGED when it changes." },
         "ownedBy": {
           "type": "string",
           "description": "table.column (or schema.table.column) owning the sequence."

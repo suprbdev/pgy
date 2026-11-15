@@ -365,6 +365,7 @@ schema app:
       events_tenant_kind:
         kinds: [ndistinct, dependencies]   # ndistinct | dependencies | mcv; omit for all
         columns: [tenant_id, kind]         # columns and/or expressions such as lower(name)
+        statisticsTarget: 500              # ALTER STATISTICS ... SET STATISTICS; -1 = default
         comment: correlated columns
 ```
 
@@ -378,7 +379,7 @@ schema app:
 
 `clusterOn` marks the index a bare `CLUSTER` uses (`ALTER TABLE ... CLUSTER ON`, or `SET WITHOUT CLUSTER` for `none`), diffed against live. pgy only sets the mark; run `CLUSTER` yourself, since it rewrites the table under an exclusive lock. Partitioned tables can't be marked (mark each partition), and `pgy validate` rejects partial indexes.
 
-`replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects in the table's schema. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
+`replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects in the table's schema. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). `statisticsTarget` is diffed against live and changed in place with `ALTER STATISTICS ... SET STATISTICS` (`-1` restores the default); left out, it is unmanaged. Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
 
 #### Column alterations
 
@@ -812,11 +813,12 @@ schema public:
         type: public.auth_role
       exp:
         type: bigint
+        comment: expiry, in seconds since the epoch
     dependsOn:
       - type public.auth_role
 ```
 
-Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts). An attribute can also be written as just its type: `attributes: {role: public.auth_role, exp: bigint}`. `collate` gives an attribute a collation: `label: {type: text, collate: C}`. Changing it on an existing type emits `ALTER ATTRIBUTE ... TYPE ... COLLATE`, under `--unsafe` like other attribute type changes.
+Attribute order in `CREATE TYPE ... AS (...)` follows YAML declaration order (relevant for positional `ROW(...)::type` casts). An attribute can also be written as just its type: `attributes: {role: public.auth_role, exp: bigint}`. `collate` gives an attribute a collation: `label: {type: text, collate: C}`, and `comment` sets `COMMENT ON COLUMN` for it (diffed against live, like column comments). Changing it on an existing type emits `ALTER ATTRIBUTE ... TYPE ... COLLATE`, under `--unsafe` like other attribute type changes.
 
 For an existing composite type, attributes the live type lacks are added with `ALTER TYPE ... ADD ATTRIBUTE` (appended, since PostgreSQL cannot insert an attribute in the middle). Under `--unsafe`, a changed attribute type emits `ALTER ATTRIBUTE ... TYPE` and attributes removed from YAML emit `DROP ATTRIBUTE`. PostgreSQL rejects both while a table column uses the type.
 
@@ -875,7 +877,7 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ## Sequences
 
-Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `unlogged` emits `ALTER SEQUENCE ... SET UNLOGGED` or `SET LOGGED`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
 
 ```yaml
 schema public:
@@ -902,6 +904,7 @@ schema public:
 | `start` | integer | `START WITH` value |
 | `cache` | integer | Number of values preallocated per session |
 | `cycle` | boolean | Wrap around when the limit is reached |
+| `unlogged` | boolean | `CREATE UNLOGGED SEQUENCE`: changes aren't WAL-logged, so the sequence resets after a crash and isn't replicated. Sequences of identity and serial columns follow their table's `unlogged` setting instead |
 | `ownedBy` | string | `table.column` (or `schema.table.column`; the table must be in the sequence's schema) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
 | `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
