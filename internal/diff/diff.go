@@ -74,6 +74,10 @@ type Live struct{
     Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
+    // ColumnDependents: "schema.relation.column" -> the views, materialized
+    // views, triggers, policies and rules whose definitions use the column,
+    // which PostgreSQL won't let ALTER COLUMN ... TYPE change under them.
+    ColumnDependents map[string][]ColumnDependent
     // RoleMemberOptions: member role -> parent role -> the membership's
     // options, combined over grantors.
     RoleMemberOptions map[string]map[string]*LiveMembership
@@ -186,6 +190,13 @@ type LiveRole struct {
     ConnectionLimit int
     ValidUntil string // UTC RFC 3339, "infinity", or "" when unset
     Config map[string]string // ALTER ROLE ... SET settings for all databases: lower-cased name -> value
+}
+
+// ColumnDependent is an object whose definition uses a column: a view or
+// materialized view (Name is "schema.view"), or a trigger, policy or rule
+// (Name is its name, Table the relation it is on).
+type ColumnDependent struct {
+    Kind, Name, Table string
 }
 
 // LiveMembership is a role membership's options. Before PostgreSQL 16,
@@ -498,6 +509,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         DefaultACLRows: map[string]bool{},
         RoleMembers: map[string]map[string]bool{},
         RoleMemberOptions: map[string]map[string]*LiveMembership{},
+        ColumnDependents: map[string][]ColumnDependent{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         TypeGrants: map[string]map[string]map[string]bool{},
@@ -1674,6 +1686,47 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         where m.rolname not like 'pg\_%'
         group by 1, 2
     `
+    colDepQ := `
+        select distinct n.nspname || '.' || c.relname || '.' || a.attname,
+               case when d.classid = 'pg_trigger'::regclass then 'trigger'
+                    when d.classid = 'pg_policy'::regclass then 'policy'
+                    when ev.relkind = 'v' then 'view' when ev.relkind = 'm' then 'matview' else 'rule' end,
+               case when d.classid = 'pg_trigger'::regclass then tg.tgname::text
+                    when d.classid = 'pg_policy'::regclass then po.polname::text
+                    when ev.relkind in ('v', 'm') then evn.nspname || '.' || ev.relname
+                    else rw.rulename::text end,
+               case when d.classid = 'pg_trigger'::regclass then tgn.nspname || '.' || tgc.relname
+                    when d.classid = 'pg_policy'::regclass then pon.nspname || '.' || poc.relname
+                    else evn.nspname || '.' || ev.relname end
+        from pg_depend d
+        join pg_class c on c.oid = d.refobjid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = c.oid and a.attnum = d.refobjsubid
+        left join pg_rewrite rw on d.classid = 'pg_rewrite'::regclass and rw.oid = d.objid
+        left join pg_class ev on ev.oid = rw.ev_class
+        left join pg_namespace evn on evn.oid = ev.relnamespace
+        left join pg_trigger tg on d.classid = 'pg_trigger'::regclass and tg.oid = d.objid
+        left join pg_class tgc on tgc.oid = tg.tgrelid
+        left join pg_namespace tgn on tgn.oid = tgc.relnamespace
+        left join pg_policy po on d.classid = 'pg_policy'::regclass and po.oid = d.objid
+        left join pg_class poc on poc.oid = po.polrelid
+        left join pg_namespace pon on pon.oid = poc.relnamespace
+        where d.refclassid = 'pg_class'::regclass and d.refobjsubid > 0 and d.deptype = 'n'
+        and d.classid in ('pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass)
+        and not (d.classid = 'pg_rewrite'::regclass and ev.oid = c.oid and ev.relkind in ('v', 'm'))
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(colDepQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var col string
+            var dep ColumnDependent
+            if err := rows.Scan(&col, &dep.Kind, &dep.Name, &dep.Table); err != nil { return err }
+            l.ColumnDependents[col] = append(l.ColumnDependents[col], dep)
+        }
+        return nil
+    })
+
     batch.add(memQ, func(memRows pgx.Rows) error {
         for memRows.Next() {
             var member, parent string
@@ -2334,6 +2387,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
+    live, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, unsafe)
+    recreateWarnings = append(recreateWarnings, dependentWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -2728,6 +2783,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 // of columns present in both
                 pkCols := map[string]bool{}
                 for _, pc := range dt.PrimaryKey { pkCols[constraintColumnName(pc)] = true }
+                plan.Creates = append(plan.Creates, typeChangePre[fq]...)
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
@@ -2758,9 +2814,14 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     } else if lc.NotNullNotValid != "" && !c.Nullable {
                         plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
                     }
-                    plan.Alters = append(plan.Alters, alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
+                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
-                    })...)
+                    })
+                    if len(typeChangePre[fq]) > 0 {
+                        plan.Creates = append(plan.Creates, stmts...)
+                    } else {
+                        plan.Alters = append(plan.Alters, stmts...)
+                    }
                 }
                 if dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
@@ -2793,6 +2854,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
     plan.Alters = append(plan.Alters, planGrants(live, desired)...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)

@@ -653,6 +653,7 @@ func cloneLive(l *Live) *Live {
         ColumnGrants:       cloneMap(l.ColumnGrants, cloneGrantMap),
         FunctionPublicExec: cloneSet(l.FunctionPublicExec),
         RelComments:        cloneMap(l.RelComments, nil),
+        ColumnDependents:   l.ColumnDependents,
         FunctionComments:   cloneMap(l.FunctionComments, nil),
         TypeComments:       cloneMap(l.TypeComments, nil),
         SchemaComments:     cloneMap(l.SchemaComments, nil),
