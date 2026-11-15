@@ -137,7 +137,7 @@ buffer: ./.pgy.buffer.sql
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
 | `pgy commit NAME` | Turns the buffer into `migrations/NNNN_NAME.sql` with a checksum header (several files for a split buffer). Warns when a schema file changed after `pgy diff` wrote the buffer. |
-| `pgy migrate [--dry-run] [--until N] [--limit N] [--lock-timeout D] [--statement-timeout D]` | Applies pending migrations in order, each in its own transaction, after verifying checksums. |
+| `pgy migrate [--dry-run] [--until N] [--limit N] [--lock-timeout D] [--statement-timeout D] [--retries N] [--retry-wait D]` | Applies pending migrations in order, each in its own transaction, after verifying checksums. `--retries` retries a migration that failed to get a lock. |
 | `pgy status [--json]` | Shows the current, last and pending migrations, and history warnings. Exits 2 when some are pending. |
 | `pgy init` | Creates the migrations table. `migrate` and `status` also create it when it is missing. |
 | `pgy mark-applied --force NAME` | Records migrations up to NAME as applied without running them, and removes later records. |
@@ -177,6 +177,8 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 | `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
 | `SET LOGGED` / `SET UNLOGGED` | rewrites the table | — |
 | `ADD COLUMN` with a volatile default, a stored generated expression, identity or serial | writes every row | add the column bare, then backfill |
+
+Even a quick `ALTER TABLE` waits for its lock behind long-running queries, and every query that arrives meanwhile waits behind it. `pgy migrate --lock-timeout 2s --retries 5` gives up on a lock after two seconds instead, rolls the migration back and tries again, waiting `--retry-wait` (2s by default) before the first retry and twice as long before each later one, up to 30s. Deadlocks are retried the same way. Migrations without a transaction are never retried, because a failure can leave part of them applied.
 
 ### Migrations without a transaction
 

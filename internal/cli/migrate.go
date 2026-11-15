@@ -5,12 +5,15 @@ import (
     "context"
     "crypto/sha256"
     "encoding/hex"
+    "errors"
     "fmt"
     "os"
     "path/filepath"
     "sort"
     "strings"
+    "time"
 
+    "github.com/jackc/pgx/v5/pgconn"
     "github.com/spf13/cobra"
 
     "github.com/suprbdev/pgy/internal/db"
@@ -22,6 +25,8 @@ func cmdMigrate() *cobra.Command {
     var dryRun bool
     var lockTimeout string
     var statementTimeout string
+    var retries int
+    var retryWait time.Duration
     c := &cobra.Command{
         Use:   "migrate",
         Short: "Apply pending migrations",
@@ -86,12 +91,24 @@ Exit codes:
                         return fmt.Errorf("checksum mismatch for %s", f)
                     }
                     base := filepath.Base(f)
-                    err = db.ApplyMigration(ctx, pool, db.Migration{
+                    m := db.Migration{
                         SQL: string(b), Name: base, Checksum: sum,
                         LockTimeout: lockTimeout, StatementTimeout: statementTimeout,
                         RecordIn: schemaName + "." + tableName,
                         NoTransaction: db.HasNoTransactionDirective(string(b)),
-                    })
+                    }
+                    wait := retryWait
+                    for attempt := 0; ; attempt++ {
+                        err = db.ApplyMigration(ctx, pool, m)
+                        if err == nil || m.NoTransaction || attempt >= retries || !isLockFailure(err) { break }
+                        fmt.Fprintf(os.Stderr, "%s: %v; retrying in %s (%d/%d)\n", base, err, wait, attempt+1, retries)
+                        select {
+                        case <-ctx.Done():
+                            return ctx.Err()
+                        case <-time.After(wait):
+                        }
+                        if wait *= 2; wait > 30*time.Second { wait = 30 * time.Second }
+                    }
                     if err != nil { return fmt.Errorf("%s: %w", f, err) }
                     if !cfg.Quiet { fmt.Printf("applied %s\n", base) }
                 }
@@ -104,6 +121,8 @@ Exit codes:
     c.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be applied")
     c.Flags().StringVar(&lockTimeout, "lock-timeout", "", "SET lock_timeout (e.g. 5s)")
     c.Flags().StringVar(&statementTimeout, "statement-timeout", "", "SET statement_timeout (e.g. 30s)")
+    c.Flags().IntVar(&retries, "retries", 0, "Retry a migration up to N times when it fails to get a lock (lock_timeout or deadlock); migrations without a transaction are not retried")
+    c.Flags().DurationVar(&retryWait, "retry-wait", 2*time.Second, "Wait before the first retry; doubled after each retry, up to 30s")
     return c
 }
 
@@ -181,4 +200,9 @@ func parseChecksumHeader(s string) string {
     return ""
 }
 
-
+// isLockFailure reports whether err is a lock_timeout or deadlock failure,
+// after which a transactional migration has rolled back and can be retried.
+func isLockFailure(err error) bool {
+    var pgErr *pgconn.PgError
+    return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
+}
