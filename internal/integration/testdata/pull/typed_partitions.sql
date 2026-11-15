@@ -1,0 +1,13 @@
+create schema cmb;
+create type cmb.ev as (id int, at date, kind text, note text);
+create table cmb.events of cmb.ev (at with options not null, kind with options default 'misc') partition by range (at);
+create table cmb.events_2025 partition of cmb.events for values from ('2025-01-01') to ('2026-01-01') partition by list (kind);
+create table cmb.events_2025_a partition of cmb.events_2025 for values in ('a');
+alter table cmb.events_2025_a alter column note set statistics 150;
+comment on column cmb.events_2025_a.note is 'sub-partition note';
+alter table cmb.events_2025 alter column kind set default 'sub';
+create table cmb.base (a int default 1, b text);
+create table cmb.mid (c int) inherits (cmb.base);
+create table cmb.leaf (d int) inherits (cmb.mid);
+alter table cmb.leaf alter column a set default 3;
+comment on column cmb.mid.b is 'mid b';
