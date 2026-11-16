@@ -143,11 +143,12 @@ Exit codes:
                     return err
                 }
                 sql = group.Render(steps)
-                groups = len(steps)
                 summary = splitSummary(steps)
-                if !noWarnings {
-                    for _, s := range steps {
-                        for _, w := range s.Plan.Warnings { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
+                for _, s := range steps {
+                    if s.Name != "" || len(s.Plan.Creates)+len(s.Plan.Alters)+len(s.Plan.Drops)+len(s.Plan.Concurrent)+len(s.Plan.Prelude) > 0 { groups++ }
+                    if noWarnings { continue }
+                    for _, w := range s.Plan.Warnings {
+                        if s.Name == "" { fmt.Fprintln(os.Stderr, "warning:", w.Message) } else { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
                     }
                 }
                 for _, s := range steps {

@@ -699,3 +699,32 @@ schema public:
     steps := planFiles(t, nil, p("uses.yml", "fns.yml"), ModeFile, false)
     if got := stepNames(steps); !reflect.DeepEqual(got, []string{"fns", "uses"}) { t.Fatalf("got %v", got) }
 }
+
+func TestPlanKeepsWarningsOfStepsWithoutStatements(t *testing.T) {
+    sig := "app.f()"
+    live := &diff.Live{
+        Schemas:      map[string]bool{"app": true},
+        Functions:    map[string]bool{sig: true},
+        FunctionDefs: map[string]*diff.LiveFunction{sig: {Signature: sig, Kind: "f", Body: "select 1", Returns: "integer", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100}},
+    }
+    _, paths := writeSchemas(t, map[string]string{
+        "a.yml": "schema app:\n  function f():\n    returns: bigint\n    language: sql\n    body: select 1::bigint\n",
+        "b.yml": "schema app:\n  table t:\n    columns: {id: {type: int, primaryKey: true}}\n",
+    })
+    hasWarning := func(steps []Step) bool {
+        for _, s := range steps {
+            for _, w := range s.Plan.Warnings {
+                if strings.Contains(w.Message, "return type changed") { return true }
+            }
+        }
+        return false
+    }
+    steps := planFiles(t, live, paths("a.yml", "b.yml"), ModeFile, false)
+    if names := stepNames(steps); len(names) != 1 || !hasWarning(steps) {
+        t.Errorf("want one step carrying the first file's warning, got %v", steps)
+    }
+    steps = planFiles(t, live, paths("a.yml"), ModeFile, false)
+    if !hasWarning(steps) || Render(steps) != "" {
+        t.Errorf("a plan with only warnings must keep them and render nothing, got %q", Render(steps))
+    }
+}

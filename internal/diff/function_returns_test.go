@@ -141,3 +141,20 @@ func TestRangeCollationAndSubPartitionRendered(t *testing.T) {
 		t.Errorf("a partition that is itself partitioned needs PARTITION BY:\n%s", sql)
 	}
 }
+
+func TestKeepExistingOnlyFiltersLockWarnings(t *testing.T) {
+	live := liveWithTable("app.t", map[string]*LiveColumn{"a": {Type: "integer"}})
+	ws := []Warning{
+		{Kind: "lock", Table: "app.t", Message: "existing"},
+		{Kind: "lock", Table: "app.new", Message: "created earlier in the plan"},
+		{Kind: "public_revoke", Message: "revoke"},
+		{Message: "return type changed"},
+	}
+	got := []string{}
+	for _, w := range KeepExisting(ws, live, &schema.Database{}) {
+		got = append(got, w.Message)
+	}
+	if strings.Join(got, "|") != "existing|revoke|return type changed" {
+		t.Errorf("KeepExisting kept %q", got)
+	}
+}

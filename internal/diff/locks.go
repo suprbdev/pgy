@@ -142,15 +142,16 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
     return out
 }
 
-// KeepExisting returns the warnings about tables that exist in live once
-// the renames declared in desired are applied. Split plans use it so a
-// table created by an earlier step of the same plan is not reported.
+// KeepExisting drops the lock warnings about tables that don't exist in
+// live once the renames declared in desired are applied, keeping every other
+// warning. Split plans use it so a table created by an earlier step of the
+// same plan is not reported.
 func KeepExisting(ws []Warning, live *Live, desired *schema.Database) []Warning {
     if len(ws) == 0 { return ws }
     renamed, _ := applyRenames(live, desired)
     out := []Warning{}
     for _, w := range ws {
-        if renamed != nil && (renamed.Tables[w.Table] != nil || renamed.MatViewTables[w.Table] != nil) { out = append(out, w) }
+        if w.Kind != "lock" || renamed != nil && (renamed.Tables[w.Table] != nil || renamed.MatViewTables[w.Table] != nil) { out = append(out, w) }
     }
     return out
 }

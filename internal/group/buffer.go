@@ -31,6 +31,7 @@ func Render(steps []Step) string {
         return name + "_" + suffix
     }
     for _, s := range steps {
+        if !hasStatements(s.Plan) { continue }
         if p := diff.RenderPrelude(s.Plan); p != "" { section(suffixed(s.Name, "enum_values"), p) }
         if sql := diff.RenderMain(s.Plan); sql != "" || len(s.Plan.Concurrent)+len(s.Plan.Prelude) == 0 { section(s.Name, sql) }
         if c := diff.RenderConcurrent(s.Plan); c != "" {

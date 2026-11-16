@@ -101,6 +101,7 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
     steps := []Step{}
     included := map[string]bool{}
     var prev *schema.Database
+    var pending []diff.Warning
     for i, g := range ordered {
         for _, f := range g.Files { included[f] = true }
         cur := merge(func(p string) bool { return included[p] })
@@ -124,12 +125,22 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
         stepOpts := opts
         stepOpts.Prune = opts.Prune && last
         p := diff.PlanWith(diff.Simulate(live, prev), cur, stepOpts)
-        p.Warnings = diff.KeepExisting(p.Warnings, live, full)
+        p.Warnings = append(pending, diff.KeepExisting(p.Warnings, live, full)...)
+        pending = nil
         if !last { p.Drops = nil }
-        if len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0 {
+        if hasStatements(p) {
             steps = append(steps, Step{Name: g.Name, Plan: p})
+        } else {
+            pending = p.Warnings
         }
         prev = cur
+    }
+    if len(pending) > 0 {
+        if len(steps) > 0 {
+            steps[len(steps)-1].Plan.Warnings = append(steps[len(steps)-1].Plan.Warnings, pending...)
+        } else {
+            steps = append(steps, Step{Plan: &diff.PlanDiff{Warnings: pending}})
+        }
     }
     return steps, nil
 }
@@ -386,4 +397,10 @@ func mergeGroups(groups []Group, members []int) Group {
         files = append(files, groups[m].Files...)
     }
     return Group{Name: strings.Join(names, "+"), Files: files}
+}
+
+// hasStatements reports whether p has any SQL to run. A step without any
+// only carries warnings, and Render leaves it out.
+func hasStatements(p *diff.PlanDiff) bool {
+    return len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0
 }
