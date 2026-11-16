@@ -129,6 +129,9 @@ Exit codes:
                 if err := diff.IntrospectData(ctx, pool, live, compiled); err != nil {
                     return err
                 }
+                if err := diff.ProbeViews(ctx, pool, live, compiled); err != nil && !noWarnings {
+                    fmt.Fprintf(os.Stderr, "warning: views and materialized views were not compared with the YAML, so their queries are left as they are: %v\n", err)
+                }
             }
             var sql string
             var summary any

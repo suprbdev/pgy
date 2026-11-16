@@ -772,7 +772,17 @@ Foreign table properties:
 
 ## Views
 
-Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW` and skipped if already present in the live database. Set `replace: true` to always emit `CREATE OR REPLACE VIEW` (live view definitions cannot be reliably text-compared because postgres rewrites the stored query, so replacement is opt-in).
+Views are defined inside `schema <name>:` blocks using `view <name>:` keys. They are created with `CREATE OR REPLACE VIEW`.
+
+For views and materialized views that already exist, `pgy diff` compares the declared `query` with the live definition. PostgreSQL rewrites a stored query (qualifying names, adding casts and aliases, expanding `*`), so pgy has PostgreSQL rewrite the declared one too: it creates it as a temporary view, inside a transaction it always rolls back, and compares the two `pg_get_viewdef` outputs.
+
+- **Same definition:** the view is left alone.
+- **Changed query, same columns** (or new columns added at the end): `CREATE OR REPLACE VIEW`.
+- **A column dropped, renamed or retyped:** `CREATE OR REPLACE VIEW` can't do that, so with `--unsafe` the view is dropped and recreated together with the declared views that select from it, and their comments, grants, owner, options, triggers and rules are restored. Without `--unsafe`, `pgy diff` warns. A view that an undeclared view depends on is left alone with a warning.
+- **A materialized view whose query changed:** dropped and recreated with its indexes under `--unsafe`, with a lock warning, since it is refilled and unreadable meanwhile.
+- **A declared query that can't be compared,** because it uses something the plan creates: a plain view is replaced, and a materialized view is left alone, each with a warning.
+
+The comparison needs the TEMP privilege (PUBLIC has it by default) and a writable session. On a read-only standby, `pgy diff` warns and leaves existing views as they are. `replace: true` still forces `CREATE OR REPLACE VIEW` on every diff.
 
 ```yaml
 schema public:
@@ -791,7 +801,7 @@ schema public:
 
 ### Materialized Views
 
-Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`. Skipped on subsequent runs (no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
+Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`; a changed query is handled as described under [Views](#views) (there is no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
 
 ```yaml
 schema public:
@@ -811,7 +821,7 @@ schema public:
 | Property | Type | Description |
 |----------|------|-------------|
 | `query` | string | The `SELECT` statement defining the view |
-| `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW` |
+| `replace` | boolean | Plain views only. Always emit `CREATE OR REPLACE VIEW`, even when the query matches the live one |
 | `securityInvoker` | boolean | Plain views only. `security_invoker` option (PostgreSQL 15+). Omitted = unmanaged |
 | `securityBarrier` | boolean | Plain views only. `security_barrier` option. Omitted = unmanaged |
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
