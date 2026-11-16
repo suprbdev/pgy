@@ -7,6 +7,7 @@ import (
 
     "github.com/spf13/cobra"
 
+    "github.com/suprbdev/pgy/internal/schema"
     "github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -29,21 +30,35 @@ Exit codes:
             if err != nil { return err }
             if len(paths) == 0 { return fmt.Errorf("no schema files found under %s", cfg.SchemaRoot) }
             issues := validate.Files(paths)
+            var policyIssues []validate.Issue
+            if !cfg.Policy.Empty() && !validate.HasErrors(issues) {
+                if d, err := schema.LoadAndMerge(paths); err == nil {
+                    policyIssues = validate.CheckPolicy(d, cfg.Policy)
+                }
+            }
+            all := append(append([]validate.Issue{}, issues...), policyIssues...)
             if jsonOut || cfg.JSON {
                 enc := json.NewEncoder(os.Stdout)
                 enc.SetIndent("", "  ")
-                if err := enc.Encode(issues); err != nil { return err }
+                if err := enc.Encode(all); err != nil { return err }
             } else {
-                for _, i := range issues { fmt.Println(i) }
-                if !cfg.Quiet && len(issues) == 0 { fmt.Printf("%d schema files OK\n", len(paths)) }
+                for _, i := range all { fmt.Println(i) }
+                if !cfg.Quiet && len(all) == 0 { fmt.Printf("%d schema files OK\n", len(paths)) }
             }
             if validate.HasErrors(issues) {
                 cmd.SilenceUsage = true
                 return &exitCodeError{code: 1}
             }
-            if cfg.failsOn("validate") && len(issues) > 0 {
+            strict := &strictFindings{}
+            if cfg.failsOn("validate") {
+                for _, i := range issues { strict.add("validate", i.String()) }
+            }
+            if cfg.failsOn("policy") {
+                for _, i := range policyIssues { strict.add("policy", i.String()) }
+            }
+            if err := strict.err(nil); err != nil {
                 cmd.SilenceUsage = true
-                return fmt.Errorf("--strict: %d warning(s), which ci.fail_on fails on (validate)", len(issues))
+                return err
             }
             return nil
         },

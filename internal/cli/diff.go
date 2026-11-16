@@ -114,6 +114,12 @@ Exit codes:
                 return l.err
             }
             compiled := l.db
+            if !cfg.Policy.Empty() {
+                for _, is := range validate.CheckPolicy(compiled, cfg.Policy) {
+                    if !noWarnings { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
+                    if cfg.failsOn("policy") { strict.add("policy", is.String()) }
+                }
+            }
             // fail loudly on dependsOn cycles: the plan's entity order would
             // not be dependency-correct
             if _, err := schema.TopologicalSort(compiled); err != nil {

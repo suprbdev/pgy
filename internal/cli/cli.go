@@ -9,6 +9,8 @@ import (
     "strings"
 
     "github.com/spf13/cobra"
+
+    "github.com/suprbdev/pgy/internal/validate"
 )
 
 type GlobalConfig struct {
@@ -29,6 +31,8 @@ type GlobalConfig struct {
     Strict        bool
     FailOn        map[string]bool
     ForbidUnsafe  bool
+    // Policy holds the rules of the config's policy: block.
+    Policy        validate.Policy
 }
 
 // failsOn reports whether a --strict run fails on a finding of kind.
@@ -107,6 +111,9 @@ func AttachGlobalFlags(root *cobra.Command) {
             cfg.JSON = *fc.JSON
         }
         if cfg.FailOn, cfg.ForbidUnsafe, err = strictSettings(fc.CI); err != nil {
+            return err
+        }
+        if cfg.Policy, err = resolvePolicy(fc.Policy); err != nil {
             return err
         }
 

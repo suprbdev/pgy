@@ -134,8 +134,8 @@ buffer: ./.pgy.buffer.sql
 
 ```yaml
 ci:
-  fail_on: [lock, public_revoke, validate]   # the default
-  forbid_unsafe: true                        # the default
+  fail_on: [lock, public_revoke, policy, validate]   # the default
+  forbid_unsafe: true                                # the default
 ```
 
 | Kind | Finding |
@@ -143,11 +143,24 @@ ci:
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
 | `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare |
+| `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
 | `unsupported` | `pgy pull`: objects it can't express |
 | `all` | every warning |
 
 Without a `ci:` block, `--strict` uses the defaults shown above; a key in `ci:` replaces just that default.
+
+A `policy:` block sets rules for the schema itself. `pgy validate` and `pgy diff` report each object that breaks one as a warning, and `--strict` fails on them while `ci.fail_on` includes `policy`:
+
+```yaml
+policy:
+  security_definer: hardened            # SECURITY DEFINER routines must set search_path and revoke PUBLIC's EXECUTE
+  require_grants: [tables, views, functions]   # these must declare a grants block
+  require_owners: true                  # every object must declare an owner (or a list of kinds)
+  row_level_security: [app]             # tables in these schemas must enable RLS and declare a policy
+```
+
+The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked.
 
 ## Commands
 
