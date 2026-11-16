@@ -3009,6 +3009,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(partitionDetaches, plan.Creates...)
+    plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
     return plan
 }
@@ -6931,3 +6932,44 @@ func isMultiWordTypeStart(first, second string) bool {
 }
 
 
+
+// versionWarnings reports YAML that uses a feature the server's PostgreSQL
+// version lacks, whose statements would fail when the migration runs. Only
+// objects live doesn't have yet are checked, so a split plan reports each
+// once.
+func versionWarnings(live *Live, desired *schema.Database) []Warning {
+    v := live.ServerVersion
+    if v <= 0 || v >= 180000 || desired == nil { return nil }
+    out := []Warning{}
+    need := func(what string, version int) {
+        if v < version*10000 {
+            out = append(out, Warning{Message: fmt.Sprintf("%s needs PostgreSQL %d, and the server runs PostgreSQL %d, so the migration would fail", what, version, v/10000)})
+        }
+    }
+    for _, fq := range sortedKeys(desired.Tables) {
+        t := desired.Tables[fq]
+        if t == nil { continue }
+        lt := live.Tables[fq]
+        for _, cn := range sortedKeys(t.Columns) {
+            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil) {
+                need(fmt.Sprintf("virtual generated column %s.%s", fq, cn), 18)
+            }
+        }
+        for _, ct := range t.Constraints {
+            if ct != nil && ct.NotEnforced && (lt == nil || !lt.Constraints[ct.Name]) {
+                need(fmt.Sprintf("constraint %s on %s (enforced: false)", ct.Name, fq), 18)
+            }
+        }
+        for _, fk := range t.ForeignKeys {
+            if fk != nil && fk.NotEnforced && (lt == nil || !lt.Constraints[fk.Name]) {
+                need(fmt.Sprintf("foreign key %s on %s (enforced: false)", fk.Name, fq), 18)
+            }
+        }
+    }
+    for _, k := range sortedKeys(desired.Collations) {
+        if co := desired.Collations[k]; co != nil && co.Rules != "" && !live.Collations[k] {
+            need(fmt.Sprintf("collation %s's rules", k), 16)
+        }
+    }
+    return out
+}
