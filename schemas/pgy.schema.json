@@ -1246,6 +1246,7 @@
           "type": "string",
           "description": "CHECK expression; the value is referenced as VALUE."
         },
+        "notNullName": { "type": "string", "minLength": 1, "description": "Name of the NOT NULL constraint (PostgreSQL 17+); default <domain>_not_null." },
         "constraintName": {
           "type": "string",
           "description": "Optional name for the CHECK constraint."

@@ -279,6 +279,7 @@ type Domain struct {
     Collate        string
     Default        string
     NotNull        bool
+    NotNullName    string // name of the NOT NULL constraint (PostgreSQL 17+); "" = PostgreSQL's <domain>_not_null
     Check          string // CHECK expression (without surrounding parens)
     ConstraintName string // optional name for the CHECK constraint
     Checks         map[string]string // constraint name -> CHECK expression; nil = only Check is managed
@@ -2721,6 +2722,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if v, ok := m["default"]; ok { dm.Default = defaultToString(v) }
     if b, ok := m["notNull"].(bool); ok { dm.NotNull = b }
     if b, ok := m["nullable"].(bool); ok { dm.NotNull = !b }
+    if n, ok := m["notNullName"].(string); ok { dm.NotNullName = strings.TrimSpace(n) }
     if c, ok := m["check"].(string); ok { dm.Check = c }
     if cn, ok := m["constraintName"].(string); ok { dm.ConstraintName = cn }
     if cs, ok := m["checks"].(map[string]any); ok {

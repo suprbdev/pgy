@@ -234,6 +234,7 @@ type LiveSequence struct {
 // (constraint name -> pg_get_constraintdef output).
 type LiveDomain struct {
     Type    string // format_type of the base type, with its modifier
+    NotNullName string // the NOT NULL constraint's name (PostgreSQL 17+ records one)
     Default string
     NotNull bool
     Checks  map[string]string
@@ -1486,7 +1487,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce((select array_agg(c.conname order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
                coalesce((select array_agg(pg_get_constraintdef(c.oid) order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
                coalesce((select array_agg(coalesce(obj_description(c.oid, 'pg_constraint'), '') order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
-               format_type(t.typbasetype, t.typtypmod)
+               format_type(t.typbasetype, t.typtypmod),
+               coalesce((select c.conname::text from pg_constraint c where c.contypid = t.oid and c.contype = 'n' limit 1), '')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -1495,15 +1497,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(domQ, func(domRows pgx.Rows) error {
         for domRows.Next() {
-            var schemaName, domName, def, baseType string
+            var schemaName, domName, def, baseType, notNullName string
             var notNull bool
             var conNames, conDefs, conComments []string
-            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs, &conComments, &baseType); err != nil {
+            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs, &conComments, &baseType, &notNullName); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, domName)
             l.Domains[key] = true
-            ld := &LiveDomain{Type: baseType, Default: def, NotNull: notNull, Checks: map[string]string{}, CheckComments: map[string]string{}}
+            ld := &LiveDomain{Type: baseType, NotNullName: notNullName, Default: def, NotNull: notNull, Checks: map[string]string{}, CheckComments: map[string]string{}}
             for i := range conNames {
                 if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
                 if i < len(conComments) && conComments[i] != "" { ld.CheckComments[conNames[i]] = conComments[i] }
@@ -3359,6 +3361,8 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
     }
     if dm.NotNull != ld.NotNull {
         if dm.NotNull { out = append(out, target+" set not null;") } else { out = append(out, target+" drop not null;") }
+    } else if dm.NotNull && dm.NotNullName != "" && ld.NotNullName != "" && dm.NotNullName != ld.NotNullName {
+        out = append(out, fmt.Sprintf("%s rename constraint %s to %s;", target, pqIdent(ld.NotNullName), pqIdent(dm.NotNullName)))
     }
     want := desiredDomainChecks(fq, dm)
     drop := func(name string) string { return fmt.Sprintf("%s drop constraint %s;", target, pqIdent(name)) }
@@ -4480,6 +4484,7 @@ func renderDomain(fq string, dm *schema.Domain) string {
     parts := []string{"create domain", pqIdent(fq), "as", dm.Type}
     if dm.Collate != "" { parts = append(parts, "collate "+collationIdent(dm.Collate)) }
     if dm.Default != "" { parts = append(parts, "default "+dm.Default) }
+    if dm.NotNull && dm.NotNullName != "" { parts = append(parts, "constraint "+pqIdent(dm.NotNullName)) }
     if dm.NotNull { parts = append(parts, "not null") }
     if dm.Check != "" {
         if dm.ConstraintName != "" { parts = append(parts, "constraint "+pqIdent(dm.ConstraintName)) }

@@ -352,6 +352,9 @@ func (b *builder) domains() {
 			addStr(m, "default", ld.Default)
 			if ld.NotNull {
 				add(m, "notNull", boolean(true))
+				if ld.NotNullName != "" && ld.NotNullName != name+"_not_null" {
+					add(m, "notNullName", str(ld.NotNullName))
+				}
 			}
 			names := sortedKeys(ld.Checks)
 			if len(names) > 1 || len(ld.CheckComments) > 0 {

@@ -105,3 +105,19 @@ func TestNotNullNotValidColumn(t *testing.T) {
 		t.Errorf("expected no changes after simulate, got:\n%s", sql)
 	}
 }
+
+func TestDomainNotNullName(t *testing.T) {
+	dm := &schema.Domain{Name: "d", Type: "int", NotNull: true, NotNullName: "d_nn"}
+	if got := renderDomain("app.d", dm); !strings.Contains(got, `constraint "d_nn" not null`) {
+		t.Errorf("want a named NOT NULL, got %s", got)
+	}
+	ld := &LiveDomain{NotNull: true, NotNullName: "d_not_null", Checks: map[string]string{}}
+	stmts := strings.Join(domainAlterStmts("app.d", dm, ld, false), "\n")
+	if stmts != `alter domain "app"."d" rename constraint "d_not_null" to "d_nn";` {
+		t.Errorf("want a rename, got %q", stmts)
+	}
+	ld.NotNullName = "d_nn"
+	if stmts := domainAlterStmts("app.d", dm, ld, false); len(stmts) != 0 {
+		t.Errorf("a matching name must be left alone, got %v", stmts)
+	}
+}
