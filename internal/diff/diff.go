@@ -5713,10 +5713,9 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
         switch {
         case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
             switch {
-            case !unsafe:
             case serverVersion > 0 && serverVersion < 170000:
                 warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); drop and re-add the column, along with the indexes and constraints that use it, in a hand-written migration", fq, cn, serverVersion/10000))
-            default:
+            case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }
         case c.Generated == "" && lc.Generated != "":
