@@ -35,6 +35,11 @@ type Live struct{
     ViewColumnComments map[string]map[string]string
     // ViewColumnDefaults: "schema.view" -> column -> DEFAULT expression
     ViewColumnDefaults map[string]map[string]string
+    // ViewProbes compares declared view queries with the live views (see
+    // ProbeViews); nil when they weren't probed, and views are create-only.
+    ViewProbes map[string]*ViewProbe
+    // ViewDependents: view or materialized view -> the views selecting from it
+    ViewDependents map[string][]string
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
     // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)
@@ -2470,6 +2475,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     live, renames := applyRenames(live, desired)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     var partitionDetaches []string
+    live, replaceViews, viewDrops, viewWarnings := planViewChanges(live, desired, unsafe)
+    recreateWarnings = append(recreateWarnings, viewWarnings...)
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
         if recreated == nil { recreated = map[string]string{} }
@@ -2814,9 +2821,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
             } else {
                 opts := viewOptions(vw)
-                // live view definitions can't be reliably text-compared (pg_get_viewdef
-                // rewrites the query), so replacement is opt-in via `replace: true`
-                if live.Views[e.Key] && !vw.Replace {
+                if live.Views[e.Key] && !vw.Replace && !replaceViews[e.Key] {
                     plan.Alters = append(plan.Alters, viewOptionStmts(e.Key, opts, live.ViewOptions[e.Key])...)
                 } else {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create or replace view %s%s as %s;", pqIdent(e.Key), renderViewWith(opts, live.ViewOptions[e.Key]), vw.Query))
@@ -3016,7 +3021,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             }
         }
     }
-    plan.Creates = append(partitionDetaches, plan.Creates...)
+    plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
     return plan

@@ -308,6 +308,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if vw == nil || vw.Query == "" { continue }
         if vw.Materialized {
             out.MatViews[k] = true
+            delete(out.ViewProbes, k)
             if vw.With != nil {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
@@ -329,6 +330,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         } else {
             out.Views[k] = true
+            delete(out.ViewProbes, k)
             if len(vw.Triggers)+len(vw.Rules) > 0 {
                 vt := out.ViewTables[k]
                 if vt == nil { vt = &LiveTable{}; out.ViewTables[k] = vt }
@@ -661,6 +663,8 @@ func cloneLive(l *Live) *Live {
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
+        ViewProbes:         cloneMap(l.ViewProbes, nil),
+        ViewDependents:     cloneMap(l.ViewDependents, nil),
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleMemberOptions:  cloneMap(l.RoleMemberOptions, func(m map[string]*LiveMembership) map[string]*LiveMembership {
             return cloneMap(m, func(v *LiveMembership) *LiveMembership { c := *v; return &c })
