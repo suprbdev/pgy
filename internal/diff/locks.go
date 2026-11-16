@@ -222,3 +222,50 @@ func atoi(s string) int {
 func (w Warning) BlockingIndexBuild() bool {
     return w.Kind == "lock" && lockIndexRe.MatchString(w.Statement)
 }
+
+// UnsafeOnly returns a warning (kind "unsafe") for each statement that
+// planning desired with --unsafe adds to the plan made with opts, so a run
+// without --unsafe reports the changes it left out. The two plans are made
+// concurrently. It returns nil when opts.Unsafe is set.
+func UnsafeOnly(live *Live, desired *schema.Database, opts Options) []Warning {
+    if opts.Unsafe || live == nil || desired == nil { return nil }
+    full := make(chan *PlanDiff, 1)
+    go func() { full <- planWithUnsafe(live, desired, opts) }()
+    safe := PlanWith(live, desired, opts)
+    return unsafeOnly(safe, <-full)
+}
+
+// PlanReportingUnsafe is PlanWith plus, unless opts.Unsafe is set, the
+// warnings of UnsafeOnly; the plan with --unsafe is made concurrently.
+func PlanReportingUnsafe(live *Live, desired *schema.Database, opts Options) *PlanDiff {
+    if opts.Unsafe || live == nil || desired == nil { return PlanWith(live, desired, opts) }
+    full := make(chan *PlanDiff, 1)
+    go func() { full <- planWithUnsafe(live, desired, opts) }()
+    safe := PlanWith(live, desired, opts)
+    safe.Warnings = append(safe.Warnings, unsafeOnly(safe, <-full)...)
+    return safe
+}
+
+func planWithUnsafe(live *Live, desired *schema.Database, opts Options) *PlanDiff {
+    opts.Unsafe = true
+    return PlanWith(live, desired, opts)
+}
+
+func unsafeOnly(safe, full *PlanDiff) []Warning {
+    have := map[string]bool{}
+    for _, s := range planStatements(safe) { have[s] = true }
+    out := []Warning{}
+    for _, s := range planStatements(full) {
+        lower := strings.ToLower(strings.TrimSpace(s))
+        if have[s] || strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") { continue }
+        have[s] = true
+        line, _, more := strings.Cut(strings.TrimSpace(s), "\n")
+        if more { line += " ..." }
+        out = append(out, Warning{Kind: "unsafe", Statement: s, Message: "needs --unsafe, so it was left out: " + line})
+    }
+    return out
+}
+
+func planStatements(p *PlanDiff) []string {
+    return append(append(append(append(append([]string{}, p.Prelude...), p.Creates...), p.Alters...), p.Drops...), p.Concurrent...)
+}

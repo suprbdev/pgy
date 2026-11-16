@@ -142,12 +142,17 @@ Exit codes:
                 if err != nil {
                     return err
                 }
+                if extra := diff.UnsafeOnly(liveOrNil(live, fromEmpty), compiled, opts); len(extra) > 0 {
+                    if len(steps) == 0 { steps = append(steps, group.Step{Plan: &diff.PlanDiff{}}) }
+                    last := steps[len(steps)-1].Plan
+                    last.Warnings = append(last.Warnings, extra...)
+                }
                 sql = group.Render(steps)
                 summary = splitSummary(steps)
                 for _, s := range steps {
                     if s.Name != "" || len(s.Plan.Creates)+len(s.Plan.Alters)+len(s.Plan.Drops)+len(s.Plan.Concurrent)+len(s.Plan.Prelude) > 0 { groups++ }
                     if noWarnings { continue }
-                    for _, w := range s.Plan.Warnings {
+                    for _, w := range capUnsafe(s.Plan.Warnings) {
                         if s.Name == "" { fmt.Fprintln(os.Stderr, "warning:", w.Message) } else { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
                     }
                 }
@@ -158,7 +163,9 @@ Exit codes:
                     cfg.indexPolicy(s.Plan.Warnings, strict, noWarnings)
                 }
             } else {
-                plan := diff.PlanWith(live, compiled, opts)
+                planner := diff.PlanReportingUnsafe
+                if fromEmpty { planner = diff.PlanWith }
+                plan := planner(live, compiled, opts)
                 sql = diff.Render(plan)
                 if len(plan.Concurrent)+len(plan.Prelude) > 0 {
                     sql = group.Render([]group.Step{{Plan: plan}})
@@ -168,7 +175,7 @@ Exit codes:
                 if len(plan.Warnings) > 0 { s["warnings"] = plan.Warnings }
                 summary = s
                 if !noWarnings {
-                    for _, w := range plan.Warnings { fmt.Fprintln(os.Stderr, "warning:", w.Message) }
+                    for _, w := range capUnsafe(plan.Warnings) { fmt.Fprintln(os.Stderr, "warning:", w.Message) }
                 }
                 for _, w := range plan.Warnings {
                     if cfg.failsOn(w.Kind) { strict.add(w.Kind, w.Message) }
@@ -265,3 +272,29 @@ type exitCodeError struct{ code int }
 func (e *exitCodeError) Error() string { return fmt.Sprintf("exit %d", e.code) }
 
 
+
+func liveOrNil(live *diff.Live, fromEmpty bool) *diff.Live {
+    if fromEmpty { return nil }
+    return live
+}
+
+// maxUnsafeWarnings is how many "needs --unsafe" warnings pgy diff prints
+// before summarising the rest.
+const maxUnsafeWarnings = 20
+
+// capUnsafe keeps the first maxUnsafeWarnings warnings of kind unsafe in ws
+// and replaces the rest with one that counts them. --json and --strict see
+// them all.
+func capUnsafe(ws []diff.Warning) []diff.Warning {
+    out, n := []diff.Warning{}, 0
+    for _, w := range ws {
+        if w.Kind == "unsafe" {
+            if n++; n > maxUnsafeWarnings { continue }
+        }
+        out = append(out, w)
+    }
+    if n > maxUnsafeWarnings {
+        out = append(out, diff.Warning{Kind: "unsafe", Message: fmt.Sprintf("and %d more statements that need --unsafe; pgy diff --unsafe shows them", n-maxUnsafeWarnings)})
+    }
+    return out
+}

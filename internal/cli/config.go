@@ -121,9 +121,10 @@ type CIConfig struct {
 }
 
 // strictKinds are the finding kinds ci.fail_on accepts: lock, public_revoke
-// and dependents warnings from pgy diff, policy: rule findings, validate
+// and dependents warnings from pgy diff, the changes it left out for want of
+// --unsafe, policy: rule findings, validate
 // findings, the objects pgy pull can't express, and all of them.
-var strictKinds = map[string]bool{"lock": true, "public_revoke": true, "dependents": true, "policy": true, "validate": true, "unsupported": true, "all": true}
+var strictKinds = map[string]bool{"lock": true, "public_revoke": true, "dependents": true, "unsafe": true, "policy": true, "validate": true, "unsupported": true, "all": true}
 
 // defaultFailOn is what --strict fails on without a ci.fail_on.
 var defaultFailOn = []string{"lock", "public_revoke", "policy", "validate"}
@@ -138,7 +139,7 @@ func strictSettings(ci *CIConfig) (map[string]bool, bool, error) {
     }
     out := map[string]bool{}
     for _, k := range failOn {
-        if !strictKinds[k] { return nil, false, fmt.Errorf("ci.fail_on: unknown kind %q (use lock, public_revoke, dependents, policy, validate, unsupported or all)", k) }
+        if !strictKinds[k] { return nil, false, fmt.Errorf("ci.fail_on: unknown kind %q (use lock, public_revoke, dependents, unsafe, policy, validate, unsupported or all)", k) }
         out[k] = true
     }
     return out, forbid, nil

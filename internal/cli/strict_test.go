@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -149,3 +150,17 @@ func TestStrictPolicyFindings(t *testing.T) {
 }
 
 func validateKinds() []string { return validate.PolicyKinds }
+
+func TestCapUnsafe(t *testing.T) {
+	ws := []diff.Warning{{Kind: "lock", Message: "lock"}}
+	for i := 0; i < maxUnsafeWarnings+5; i++ {
+		ws = append(ws, diff.Warning{Kind: "unsafe", Message: "u"})
+	}
+	got := capUnsafe(ws)
+	if len(got) != maxUnsafeWarnings+2 || got[0].Message != "lock" || !strings.Contains(got[len(got)-1].Message, "and 5 more statements") {
+		t.Errorf("capUnsafe kept %d: last %+v", len(got), got[len(got)-1])
+	}
+	if failOn, _, err := strictSettings(&CIConfig{FailOn: []string{"unsafe"}}); err != nil || !failOn["unsafe"] {
+		t.Errorf("unsafe is a fail_on kind: %v %v", failOn, err)
+	}
+}
