@@ -431,6 +431,9 @@ type LiveIndex struct {
 type LiveIndexOpclass struct {
     Name    string
     Default bool
+    // Visible is true when the operator class resolves by its bare name on
+    // the session's search_path, so an unqualified desired name matches it.
+    Visible bool
     // Collation is the key column's COLLATE when it differs from the
     // column's (or, for an expression, its type's) default; "" otherwise.
     Collation string
@@ -801,6 +804,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
+               pg_opclass_is_visible(op.oid),
                case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 then oty.typcollation end, ity.typcollation)
                     then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                coalesce(ia.attstattarget::int, -1)
@@ -824,13 +828,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
             var schemaName, tableName, idxName, opcName, collation string
-            var opcDefault bool
+            var opcDefault, visible bool
             var target int
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation, &target); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &visible, &collation, &target); err != nil {
                 return err
             }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, StatisticsTarget: target})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Visible: visible, Collation: collation, StatisticsTarget: target})
             }
         }
         return nil
@@ -6819,7 +6823,7 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
         oc := indexColumnOpclass(ix, c)
         if oc == "" {
             if !live[i].Default { return true }
-        } else if opclassName(oc) != opclassName(live[i].Name) {
+        } else if !opclassMatches(oc, live[i]) {
             return true
         }
         if collationName(indexColumnCollation(ix, c)) != collationName(live[i].Collation) { return true }
@@ -6832,6 +6836,18 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
 func opclassName(s string) string {
     s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), `"`, ""))
     return strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog.")
+}
+
+// opclassMatches reports whether desired operator class name want names the
+// live one. An unqualified want also matches a live operator class from
+// another schema that is visible on the search_path, which is the one
+// CREATE INDEX would resolve it to.
+func opclassMatches(want string, live LiveIndexOpclass) bool {
+    w, l := opclassName(want), opclassName(live.Name)
+    if w == l { return true }
+    if !live.Visible || strings.Contains(w, ".") { return false }
+    i := strings.LastIndexByte(l, '.')
+    return i >= 0 && l[i+1:] == w
 }
 
 // indexColumnCollation returns the COLLATE for one index column entry, keyed
