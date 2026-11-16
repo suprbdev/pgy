@@ -216,3 +216,53 @@ schema app:
 		t.Errorf("a 63-byte name is fine:\n%s", got)
 	}
 }
+
+func TestValidateDDLTimeErrors(t *testing.T) {
+	path := write(t, t.TempDir(), "d.yml", `
+eventTriggers:
+  log: {event: ddl_command_end, function: app.not_event()}
+schema app:
+  function not_trigger():
+    returns: int
+    language: sql
+    body: select 1
+  function not_event():
+    returns: trigger
+    language: plpgsql
+    body: begin return null; end
+  function touch():
+    returns: trigger
+    language: plpgsql
+    body: begin return new; end
+  table t:
+    columns:
+      id: {type: bigint, primaryKey: true, identity: always}
+      code: {type: text, identity: always}
+    rowLevelSecurity: true
+    triggers:
+      bad: {timing: before, events: [update], procedure: app.not_trigger(), level: row}
+      good: {timing: before, events: [update], procedure: app.touch(), level: row}
+    policies:
+      ins: {for: insert, using: "true"}
+      del: {for: delete, withCheck: "true"}
+      upd: {for: update, using: "true", withCheck: "true"}
+      ins_ok: {for: insert, withCheck: "true"}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"trigger bad calls app.not_trigger, which returns int",
+		"event trigger log: function app.not_event() returns trigger",
+		"policy ins: an insert policy can only have withCheck",
+		"policy del: a delete policy can only have using",
+		"column code: identity columns must be smallint, integer or bigint, not text",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, fine := range []string{"trigger good", "policy upd", "policy ins_ok", "column id:"} {
+		if strings.Contains(got, fine) {
+			t.Errorf("%s is valid but was flagged:\n%s", fine, got)
+		}
+	}
+}

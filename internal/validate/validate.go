@@ -214,6 +214,28 @@ func Database(d *schema.Database) []Issue {
 				add(Error, obj, "constraint %s has unknown type %q", ct.Name, ct.Type)
 			}
 		}
+		for _, p := range t.Policies {
+			if p == nil {
+				continue
+			}
+			switch cmd := strings.ToLower(strings.TrimSpace(p.For)); {
+			case cmd == "insert" && strings.TrimSpace(p.Using) != "":
+				add(Error, obj, "policy %s: an insert policy can only have withCheck, not using", p.Name)
+			case (cmd == "select" || cmd == "delete") && strings.TrimSpace(p.WithCheck) != "":
+				add(Error, obj, "policy %s: a %s policy can only have using, not withCheck", p.Name, cmd)
+			}
+		}
+		for _, cn := range sortedKeys(t.Columns) {
+			c := t.Columns[cn]
+			if c == nil || c.Identity == "" || c.Type == "" {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(c.Type)) {
+			case "smallint", "int2", "integer", "int", "int4", "bigint", "int8":
+			default:
+				add(Error, obj, "column %s: identity columns must be smallint, integer or bigint, not %s", cn, c.Type)
+			}
+		}
 		if len(t.Policies) > 0 && (t.RowLevelSecurity == nil || !*t.RowLevelSecurity) && t.PartitionOf == "" {
 			add(Warning, obj, "declares policies but not rowLevelSecurity: true; PostgreSQL ignores a table's policies until row-level security is enabled")
 		}
@@ -501,8 +523,11 @@ func Database(d *schema.Database) []Issue {
 	for _, name := range sortedKeys(d.EventTriggers) {
 		if et := d.EventTriggers[name]; et != nil {
 			fn := strings.TrimSuffix(strings.TrimSpace(et.Function), "()")
-			if len(schema.ResolveDependencyKeys("function "+fn, d)) == 0 {
+			keys := schema.ResolveDependencyKeys("function "+fn, d)
+			if len(keys) == 0 {
 				add(Warning, "event trigger "+name, "function %s is not declared in any schema file", et.Function)
+			} else if r := noArgReturns(d, keys); r != "" && r != "event_trigger" {
+				add(Error, "event trigger "+name, "function %s returns %s; event trigger functions must return event_trigger", et.Function, r)
 			}
 		}
 	}
@@ -544,8 +569,11 @@ func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(S
 	if i := strings.IndexByte(proc, '('); i >= 0 {
 		proc = proc[:i]
 	}
-	if len(schema.ResolveDependencyKeys("function "+proc, d)) == 0 {
+	keys := schema.ResolveDependencyKeys("function "+proc, d)
+	if len(keys) == 0 {
 		add(Warning, obj, "trigger %s calls %s, which no schema file declares", tr.Name, proc)
+	} else if r := noArgReturns(d, keys); r != "" && r != "trigger" {
+		add(Error, obj, "trigger %s calls %s, which returns %s; trigger functions must return trigger", tr.Name, proc, r)
 	}
 	if strings.EqualFold(strings.Join(strings.Fields(tr.Timing), " "), "instead of") && !strings.HasPrefix(obj, "view ") {
 		add(Error, obj, "trigger %s: instead of triggers are only allowed on views", tr.Name)
@@ -1312,4 +1340,18 @@ func checkNameLengths(d *schema.Database, add func(Severity, string, string, ...
 	for _, s := range sortedKeys(schemas) {
 		check("schema "+s, "schema", s)
 	}
+}
+
+// noArgReturns returns the lower-cased return type of the argument-less
+// function among keys (the one a trigger calls), or "" when there is none
+// or it doesn't declare one.
+func noArgReturns(d *schema.Database, keys []string) string {
+	for _, k := range keys {
+		f := d.Functions[k]
+		if f == nil || strings.TrimSpace(strings.Trim(strings.TrimSpace(f.ArgsSig), "()")) != "" {
+			continue
+		}
+		return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(f.Returns)), "pg_catalog.")
+	}
+	return ""
 }
