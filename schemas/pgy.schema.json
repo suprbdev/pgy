@@ -116,7 +116,8 @@
                   "properties": {
                     "table": { "type": "string", "minLength": 1 },
                     "columns": { "$ref": "#/definitions/stringList", "description": "Column list (PostgreSQL 15+)." },
-                    "where": { "type": "string", "description": "Row filter (PostgreSQL 15+)." }
+                    "where": { "type": "string", "description": "Row filter (PostgreSQL 15+)." },
+                    "only": { "type": "boolean", "description": "TABLE ONLY: publish the table without its inheritance children." }
                   },
                   "required": ["table"],
                   "additionalProperties": false

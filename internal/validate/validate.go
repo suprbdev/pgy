@@ -565,13 +565,24 @@ func Database(d *schema.Database) []Issue {
 		if p.AllTables && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
 			add(Error, "publication "+name, "allTables cannot be combined with tables or schemas")
 		}
+		listed := map[string]bool{}
 		for _, pt := range p.Tables {
+			listed[pt.Table] = true
+		}
+		for _, pt := range p.Tables {
+			if t := d.Tables[pt.Table]; t != nil {
+				for _, parent := range t.Inherits {
+					if listed[qualifyPublic(parent)] {
+						add(Warning, "publication "+name, "table %s is already published through its parent %s; list only the parent", pt.Table, parent)
+					}
+				}
+			}
 			if len(pt.Columns) > 0 && len(p.Schemas) > 0 {
 				add(Error, "publication "+name, "column lists cannot be combined with schemas (table %s)", pt.Table)
 			}
 			if t := d.Tables[pt.Table]; t != nil && len(t.Columns) > 0 {
 				for _, c := range pt.Columns {
-					if t.Columns[c] == nil {
+					if !tableHasColumn(d, pt.Table, c, 0) {
 						add(Error, "publication "+name, "table %s has no column %q", pt.Table, c)
 					}
 				}

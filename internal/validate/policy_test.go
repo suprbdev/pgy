@@ -376,3 +376,21 @@ schema app:
 		}
 	}
 }
+
+func TestValidatePublicationInheritance(t *testing.T) {
+	path := write(t, t.TempDir(), "pub.yml", `
+publications:
+  p:
+    tables: [app.base, app.ext]
+schema app:
+  table base:
+    columns: {id: {type: int, primaryKey: true}, note: {type: text}}
+  table ext:
+    columns: {extra: {type: int}}
+    inherits: [app.base]
+`)
+	got := messages(Files([]string{path}))
+	if !strings.Contains(got, "table app.ext is already published through its parent app.base") {
+		t.Errorf("missing the redundant child warning in:\n%s", got)
+	}
+}
