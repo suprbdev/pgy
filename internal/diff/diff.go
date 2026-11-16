@@ -2434,6 +2434,12 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
+    live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
+    for k, v := range renamedArgs {
+        if recreated == nil { recreated = map[string]string{} }
+        recreated[k] = v
+    }
+    recreateWarnings = append(recreateWarnings, argWarnings...)
     live, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, unsafe)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
@@ -2619,6 +2625,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || f == nil { continue }
             fname := schema.RoutineName(e.Key)
             normalizedDesired := normalizeFunctionSignature(fname + f.ArgsSig)
+            if blockedRoutines[normalizedDesired] { continue }
             found := liveFuncs[normalizedDesired]
             if found {
                 lf := live.FunctionDefs[normalizedDesired]
@@ -2669,6 +2676,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || pr == nil { continue }
             prname := schema.RoutineName(e.Key)
             norm := normalizeFunctionSignature(prname + pr.ArgsSig)
+            if blockedRoutines[norm] { continue }
             found := live.Procedures[norm]
             if found {
                 lp := live.ProcedureDefs[norm]
@@ -2688,6 +2696,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
+            if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
             plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, pr.Body, stmt, createsRelations)...)
         case "aggregate":
@@ -3867,6 +3876,113 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         delete(out.Owners, "proc:"+norm)
     }
     return out, recreated, warns
+}
+
+// recreateRenamedArguments finds desired functions and procedures that
+// aren't live under their own signature but match a live routine's argument
+// types: their argument names or modes changed, which CREATE OR REPLACE
+// rejects. Under --unsafe each is planned as new, like
+// recreateChangedFunctions does, with recreated holding the DROP of the live
+// routine. Without --unsafe each is blocked (left out of the plan) with a
+// warning, and its comment, grants and owner are compared with the live
+// routine's.
+func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, blocked map[string]bool, warns []Warning) {
+    out = live
+    if live == nil || desired == nil { return out, nil, nil, nil }
+    declared := map[string]bool{}
+    for k, f := range desired.Functions {
+        if f != nil { declared[normalizeFunctionSignature(schema.RoutineName(k)+f.ArgsSig)] = true }
+    }
+    for k, p := range desired.Procedures {
+        if p != nil { declared[normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig)] = true }
+    }
+    byIdentity := map[string]string{}
+    for norm, lf := range live.FunctionDefs {
+        if lf != nil && lf.Kind != "a" && !lf.Internal && !declared[norm] { byIdentity[routineIdentity(lf.Signature, false)] = norm }
+    }
+    for norm := range live.Procedures {
+        if !declared[norm] { byIdentity["procedure "+routineIdentity(norm, true)] = norm }
+    }
+    check := func(kind, name, args string) {
+        norm := normalizeFunctionSignature(name + args)
+        if kind == "function" && live.FunctionDefs[norm] != nil || kind == "procedure" && live.Procedures[norm] { return }
+        id := routineIdentity(name+args, kind == "procedure")
+        if kind == "procedure" { id = "procedure " + id }
+        lnorm, ok := byIdentity[id]
+        if !ok { return }
+        liveArgs := lnorm[strings.IndexByte(lnorm, '('):]
+        if lf := live.FunctionDefs[lnorm]; lf != nil { liveArgs = lf.Signature[strings.IndexByte(lf.Signature, '('):] }
+        if !unsafe {
+            if blocked == nil { blocked = map[string]bool{} }
+            if out == live { out = cloneLive(live) }
+            blocked[norm] = true
+            if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
+            if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
+            if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
+            if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
+            warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
+            return
+        }
+        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
+        recreated[norm] = fmt.Sprintf("drop %s %s;", kind, pqIdent(name)+grantFuncArgs(liveArgs))
+        if lf := out.FunctionDefs[lnorm]; lf != nil { delete(out.Functions, lf.Signature) }
+        delete(out.FunctionDefs, lnorm)
+        delete(out.Procedures, lnorm)
+        delete(out.ProcedureDefs, lnorm)
+        delete(out.FunctionComments, lnorm)
+        delete(out.FunctionGrants, lnorm)
+        delete(out.FunctionPublicExec, lnorm)
+        delete(out.Owners, "proc:"+lnorm)
+        delete(byIdentity, id)
+    }
+    for _, k := range sortedKeys(desired.Functions) {
+        if f := desired.Functions[k]; f != nil && strings.TrimSpace(f.Body) != "" { check("function", schema.RoutineName(k), f.ArgsSig) }
+    }
+    for _, k := range sortedKeys(desired.Procedures) {
+        if p := desired.Procedures[k]; p != nil { check("procedure", schema.RoutineName(k), p.ArgsSig) }
+    }
+    return out, recreated, blocked, warns
+}
+
+// routineIdentity returns "name(types)" for a routine signature: the
+// argument types PostgreSQL identifies the routine by, without argument
+// names, modes or defaults, and without OUT arguments unless procedure is set
+// (a procedure's OUT arguments are part of its identity).
+func routineIdentity(sig string, procedure bool) string {
+    open := strings.IndexByte(sig, '(')
+    if open < 0 { return strings.ToLower(strings.TrimSpace(sig)) }
+    name := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(sig[:open]), " ", ""))
+    inner := strings.TrimSuffix(strings.TrimSpace(sig[open+1:]), ")")
+    types := []string{}
+    args, depth, start := []string{}, 0, 0
+    for i, r := range inner {
+        switch r {
+        case '(':
+            depth++
+        case ')':
+            depth--
+        case ',':
+            if depth == 0 { args, start = append(args, inner[start:i]), i+1 }
+        }
+    }
+    args = append(args, inner[start:])
+    for _, a := range args {
+        if lo := strings.Index(strings.ToLower(a), " default "); lo >= 0 { a = a[:lo] }
+        if eq := strings.Index(a, "="); eq >= 0 { a = a[:eq] }
+        words := strings.Fields(typmodRe.ReplaceAllString(a, ""))
+        if len(words) == 0 { continue }
+        mode := ""
+        if len(words) > 1 {
+            switch strings.ToLower(words[0]) {
+            case "in", "out", "inout", "variadic":
+                mode, words = strings.ToLower(words[0]), words[1:]
+            }
+        }
+        if mode == "out" && !procedure { continue }
+        if len(words) > 1 && !isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) { words = words[1:] }
+        types = append(types, normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public.")))
+    }
+    return name + "(" + strings.Join(types, ", ") + ")"
 }
 
 // returnsChanged reports whether a function's declared return type differs
