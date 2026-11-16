@@ -1073,6 +1073,7 @@
         "mfinalfuncModify": { "type": "string", "enum": ["read_only", "shareable", "read_write"] },
         "minitcond": { "$ref": "#/definitions/scalar", "description": "Moving-aggregate initial state value." },
         "sortop": { "type": "string", "description": "Sort operator for min/max-like aggregates, e.g. > or myschema.>." },
+        "hypothetical": { "type": "boolean", "description": "HYPOTHETICAL: an ordered-set aggregate whose direct arguments are matched to the aggregated ones, as rank and dense_rank are (the args must use ORDER BY)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
         "owner": { "type": "string" }

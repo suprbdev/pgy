@@ -643,6 +643,8 @@ func (b *builder) routines() {
 
 var procInRe = regexp.MustCompile(`(^|, )IN `)
 
+var aggregateArgKeywordRe = regexp.MustCompile(`\b(ORDER BY|VARIADIC) `)
+
 func (b *builder) aggregates() {
 	for _, norm := range sortedKeys(b.live.AggregateDefs) {
 		la := b.live.AggregateDefs[norm]
@@ -650,7 +652,7 @@ func (b *builder) aggregates() {
 		if lf == nil || b.member("proc", norm) {
 			continue
 		}
-		name := lf.Signature
+		name := aggregateArgKeywordRe.ReplaceAllStringFunc(lf.Signature, strings.ToLower)
 		args := "(*)"
 		if i := strings.IndexByte(name, '('); i >= 0 {
 			if a := name[i:]; a != "()" {
@@ -674,7 +676,7 @@ func (b *builder) aggregates() {
 		for _, o := range schema.AggregateOptions {
 			v := la.Options[o[1]]
 			switch {
-			case strings.HasSuffix(o[1], "_extra"):
+			case strings.HasSuffix(o[1], "_extra") || o[1] == "hypothetical":
 				if v == "true" {
 					add(m, o[0], boolean(true))
 				}

@@ -40,11 +40,13 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		"operator x.===(integer, integer) is not supported by pgy and was left out",
 		"cast (x.amount as numeric) is not supported by pgy and was left out",
 		"function x.rn is written in internal and cannot be pulled",
-		"ordered-set aggregate x.my_mode(ORDER BY anyelement) is not supported by pgy and was left out",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "my_mode") {
+		t.Errorf("ordered-set aggregates are pulled, not reported:\n%s", got)
 	}
 	if strings.Contains(got, "remote_items") {
 		t.Errorf("foreign tables are pulled, not reported:\n%s", got)

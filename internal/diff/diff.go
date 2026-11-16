@@ -931,12 +931,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case when a.aggmtranstype = 0 then '' else format_type(a.aggmtranstype, null) end, a.aggmtransspace::text,
                coalesce(nullif(a.aggmfinalfn::text, '-'), ''), a.aggmfinalextra::text,
                case a.aggmfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
-               coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end
+               coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end,
+               (a.aggkind = 'h')::text
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
-        where a.aggkind = 'n'
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(aggQ, func(aggRows pgx.Rows) error {
@@ -2694,7 +2694,15 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             ag := desired.Aggregates[e.Key]
             if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
             name := schema.RoutineName(e.Key)
-            if la := live.AggregateDefs[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))]; la != nil && aggregateMatchesLive(ag, la) { continue }
+            la := live.AggregateDefs[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))]
+            if la != nil && aggregateMatchesLive(ag, la) { continue }
+            if h, ok := ag.Options["hypothetical"]; ok && la != nil && strings.EqualFold(h, "true") != strings.EqualFold(la.Options["hypothetical"], "true") {
+                if !unsafe {
+                    plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("aggregate %s%s: changing hypothetical needs DROP AGGREGATE and CREATE AGGREGATE; rerun with --unsafe", name, ag.ArgsSig)})
+                    continue
+                }
+                plan.Creates = append(plan.Creates, fmt.Sprintf("drop aggregate %s%s;", pqIdent(name), ag.ArgsSig))
+            }
             plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
@@ -3932,7 +3940,7 @@ func renderAggregate(name string, ag *schema.Aggregate) string {
         v, ok := ag.Options[o[1]]
         switch {
         case !ok || v == "":
-        case strings.HasSuffix(o[1], "_extra"):
+        case strings.HasSuffix(o[1], "_extra") || o[1] == "hypothetical":
             if strings.EqualFold(v, "true") { opts = append(opts, o[1]) }
         case o[1] == "minitcond":
             opts = append(opts, "minitcond = "+quoteString(v))
@@ -3951,7 +3959,7 @@ func aggregateOptionsMatch(ag *schema.Aggregate, la *LiveAggregate, fn func(stri
     for k, want := range ag.Options {
         have := la.Options[k]
         switch {
-        case strings.HasSuffix(k, "_extra"):
+        case strings.HasSuffix(k, "_extra") || k == "hypothetical":
             if strings.EqualFold(want, "true") != strings.EqualFold(have, "true") { return false }
         case strings.HasSuffix(k, "_modify"):
             if want == "" { want = "read_only" }
@@ -6460,6 +6468,15 @@ func normalizeFunctionSignature(sig string) string {
     
     // Normalize function name (lowercase, remove extra spaces)
     funcPart = strings.ToLower(strings.ReplaceAll(funcPart, " ", ""))
+    if loc := orderByRe.FindStringIndex(argsPart); loc != nil {
+        inner := func(args string) string {
+            n := normalizeFunctionSignature(funcPart + "(" + args + ")")
+            return strings.TrimSuffix(strings.TrimPrefix(n, funcPart+"("), ")")
+        }
+        direct, ordered := inner(argsPart[:loc[0]]), inner(argsPart[loc[1]:])
+        if direct != "" { direct += " " }
+        return funcPart + "(" + direct + "order by " + ordered + ")"
+    }
     
     // Parse and normalize arguments
     // Split by comma, but be careful of nested structures
@@ -6499,6 +6516,10 @@ func normalizeFunctionSignature(sig string) string {
     normalizedArgs := strings.Join(args, ", ")
     return fmt.Sprintf("%s(%s)", funcPart, normalizedArgs)
 }
+
+// orderByRe finds the ORDER BY that separates an ordered-set aggregate's
+// direct arguments from its aggregated ones.
+var orderByRe = regexp.MustCompile(`(?i)(?:^|\s)order\s+by\s+`)
 
 // normalizeArg removes default values from a function argument and normalizes types
 // e.g., "key text default null" -> "key text"

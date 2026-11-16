@@ -32,8 +32,8 @@ type LiveDetails struct {
     // SQL-standard body, whose references PostgreSQL records in pg_depend.
     RoutineDeps map[string][]string
     // Unsupported lists objects pgy cannot express (operators, operator
-    // classes and families, conversions, base types, casts, ordered-set and
-    // hypothetical-set aggregates, and text search parsers and templates),
+    // classes and families, conversions, base types, casts, and text search
+    // parsers and templates),
     // excluding extension members, and the tables, materialized views and
     // indexes stored outside the database's default tablespace (kind
     // "<relation kind> tablespace", Detail the tablespace).
@@ -96,9 +96,6 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'cast', case when st.typnamespace = 'pg_catalog'::regnamespace then tt.typnamespace else st.typnamespace end,
                    '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, ''
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
-            union all select case a.aggkind when 'o' then 'ordered-set aggregate' else 'hypothetical-set aggregate' end, p.pronamespace,
-                   p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', 'pg_proc'::regclass, p.oid, ''
-              from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where a.aggkind <> 'n' 
             union all select case c.relkind when 'm' then 'materialized view' when 'i' then 'index' when 'I' then 'index' else 'table' end || ' tablespace',
                    c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid, ts.spcname::text
               from pg_class c join pg_tablespace ts on ts.oid = c.reltablespace where c.relkind in ('r', 'p', 'm', 'i', 'I')
