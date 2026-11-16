@@ -58,3 +58,30 @@ func TestPartitionBoundChangeReattaches(t *testing.T) {
 		t.Errorf("an unchanged bound must be left alone, got:\n%s", sql)
 	}
 }
+
+func TestPartitionBoundSwapDetachesFirst(t *testing.T) {
+	live := liveWithTable("app.a", map[string]*LiveColumn{"id": {Type: "integer"}})
+	live.Tables["app.a"].IsPartition = true
+	live.Tables["app.b"] = &LiveTable{Columns: map[string]*LiveColumn{"id": {Type: "integer"}}, IsPartition: true}
+	live.Tables["app.p"] = &LiveTable{Columns: map[string]*LiveColumn{"id": {Type: "integer"}}, Partitioned: true}
+	live.PartitionBounds = map[string]LivePartitionBound{
+		"app.a": {Parent: "app.p", Bound: "FOR VALUES FROM (0) TO (100)"},
+		"app.b": {Parent: "app.p", Bound: "FOR VALUES FROM (100) TO (200)"},
+	}
+	bound := func(from, to string) *schema.PartitionSpec {
+		return &schema.PartitionSpec{From: []string{from}, To: []string{to}, Modulus: -1, Remainder: -1}
+	}
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"app.p": {Name: "p", Columns: map[string]*schema.Column{"id": {Type: "int"}}, PartitionBy: &schema.PartitionBy{Type: "range", Columns: []string{"id"}}},
+		"app.a": {Name: "a", PartitionOf: "app.p", Partition: bound("100", "200")},
+		"app.b": {Name: "b", PartitionOf: "app.p", Partition: bound("0", "100")},
+		"app.c": {Name: "c", PartitionOf: "app.p", Partition: bound("200", "300")},
+	}}
+	sql := Render(Plan(live, d, true))
+	lastDetach := strings.LastIndex(sql, "detach partition")
+	firstAttach := strings.Index(sql, "attach partition")
+	create := strings.Index(sql, `create table if not exists "app"."c"`)
+	if lastDetach < 0 || firstAttach < lastDetach || create < lastDetach {
+		t.Errorf("every DETACH must come before any ATTACH or new partition, so swapped bounds don't overlap:\n%s", sql)
+	}
+}

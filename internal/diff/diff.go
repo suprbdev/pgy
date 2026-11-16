@@ -2467,6 +2467,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
+    var partitionDetaches []string
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
         if recreated == nil { recreated = map[string]string{} }
@@ -2912,9 +2913,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
                     plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
                 } else if lb, ok := live.PartitionBounds[fq]; ok && unsafe && dt.PartitionOf != "" && lt.IsPartition && partitionMoved(dt, lb) {
-                    plan.Creates = append(plan.Creates,
-                        fmt.Sprintf("alter table %s detach partition %s;", pqIdent(lb.Parent), pqIdent(fq)),
-                        fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
+                    partitionDetaches = append(partitionDetaches, fmt.Sprintf("alter table %s detach partition %s;", pqIdent(lb.Parent), pqIdent(fq)))
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
                     plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("re-attaching partition %s with its new bound takes an ACCESS EXCLUSIVE lock on %s and scans %s to check its rows fit, unless a validated CHECK constraint already implies the bound", fq, lb.Parent, fq)})
                 }
                 colNames := make([]string, 0, len(dt.Columns))
@@ -3008,6 +3008,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             }
         }
     }
+    plan.Creates = append(partitionDetaches, plan.Creates...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
     return plan
 }
