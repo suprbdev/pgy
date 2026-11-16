@@ -109,3 +109,51 @@ schema app:
 		t.Errorf("a table with RLS enabled must not be flagged:\n%s", got)
 	}
 }
+
+func TestValidateForeignKeyTargets(t *testing.T) {
+	path := write(t, t.TempDir(), "fk.yml", `
+schema app:
+  table orgs:
+    columns:
+      id: {type: int, primaryKey: true}
+      code: {type: varchar(10), unique: true}
+      slug: {type: text}
+      name: {type: text}
+      region: {type: text}
+    indexes:
+      orgs_slug: {columns: [slug], unique: true}
+      orgs_name_partial: {columns: [name], unique: true, where: "id > 0"}
+    constraints:
+      orgs_region_name: {type: unique, columns: [region, name]}
+  table users:
+    columns:
+      id: {type: int, primaryKey: true}
+      org_id: {type: bigint}
+      org_code: {type: text}
+      org_slug: {type: text}
+      org_name: {type: text}
+      org_region: {type: text}
+      org_uuid: {type: uuid}
+    foreignKeys:
+      by_id: {columns: [org_id], references: {table: app.orgs, columns: [id]}}
+      by_code: {columns: [org_code], references: {table: app.orgs, columns: [code]}}
+      by_slug: {columns: [org_slug], references: {table: app.orgs, columns: [slug]}}
+      by_pair: {columns: [org_name, org_region], references: {table: app.orgs, columns: [name, region]}}
+      by_name: {columns: [org_name], references: {table: app.orgs, columns: [name]}}
+      by_uuid: {columns: [org_uuid], references: {table: app.orgs, columns: [id]}}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"foreign key by_name references app.orgs (name), which has no primary key or unique constraint on exactly those columns",
+		"foreign key by_uuid: column org_uuid is uuid but references app.orgs.id, which is int",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, fine := range []string{"by_id", "by_code", "by_slug", "by_pair"} {
+		if strings.Contains(got, "foreign key "+fine+" ") || strings.Contains(got, "foreign key "+fine+":") {
+			t.Errorf("%s is valid but was flagged:\n%s", fine, got)
+		}
+	}
+}

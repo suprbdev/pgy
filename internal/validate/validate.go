@@ -229,9 +229,26 @@ func Database(d *schema.Database) []Issue {
 				continue
 			}
 			if ref.PartitionOf == "" && len(ref.Columns) > 0 {
+				known := true
 				for _, c := range fk.RefColumns {
 					if base := columnName(c); base != "" && !tableHasColumn(d, qualifyPublic(fk.RefTable), base, 0) {
 						add(Error, obj, "foreign key %s references unknown column %s.%s", fk.Name, fk.RefTable, base)
+						known = false
+					}
+				}
+				if known && len(fk.RefColumns) > 0 && !hasUniqueKey(ref, fk.RefColumns) {
+					add(Error, obj, "foreign key %s references %s (%s), which has no primary key or unique constraint on exactly those columns", fk.Name, fk.RefTable, strings.Join(fk.RefColumns, ", "))
+				}
+				for i, c := range fk.Columns {
+					if i >= len(fk.RefColumns) {
+						break
+					}
+					lc, rc := t.Columns[columnName(c)], ref.Columns[columnName(fk.RefColumns[i])]
+					if lc == nil || rc == nil {
+						continue
+					}
+					if a, b := typeCategory(lc.Type), typeCategory(rc.Type); a != "" && b != "" && a != b {
+						add(Error, obj, "foreign key %s: column %s is %s but references %s.%s, which is %s; PostgreSQL can't compare them", fk.Name, columnName(c), lc.Type, fk.RefTable, columnName(fk.RefColumns[i]), rc.Type)
 					}
 				}
 			}
@@ -1016,4 +1033,77 @@ func dependsOnTable(deps []string, table string) bool {
 		}
 	}
 	return false
+}
+
+// hasUniqueKey reports whether t has a primary key, unique constraint,
+// unique column or full unique index on exactly cols, in any order, as a
+// foreign key referencing them requires.
+func hasUniqueKey(t *schema.Table, cols []string) bool {
+	want := map[string]bool{}
+	for _, c := range cols {
+		want[columnName(c)] = true
+	}
+	same := func(key []string) bool {
+		if len(key) != len(want) {
+			return false
+		}
+		for _, c := range key {
+			if !want[columnName(c)] {
+				return false
+			}
+		}
+		return true
+	}
+	pk := append([]string{}, t.PrimaryKey...)
+	for name, c := range t.Columns {
+		if c == nil {
+			continue
+		}
+		if c.PrimaryKey && !slices.Contains(pk, name) {
+			pk = append(pk, name)
+		}
+		if c.Unique && same([]string{name}) {
+			return true
+		}
+	}
+	if same(pk) {
+		return true
+	}
+	for _, ct := range t.Constraints {
+		if ct != nil && strings.EqualFold(ct.Type, "unique") && same(ct.Columns) {
+			return true
+		}
+	}
+	for _, ix := range t.Indexes {
+		if ix != nil && ix.Unique && strings.TrimSpace(ix.Where) == "" && same(ix.Columns) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeCategory groups a column type with the types a foreign key can
+// compare it to: "number", "text", "datetime", "time", "uuid" or "bool",
+// or "" for types it doesn't know (domains, arrays, enums, ...).
+func typeCategory(typ string) string {
+	t := strings.ToLower(strings.TrimSpace(typ))
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		t = strings.TrimSpace(t[:i]) + strings.TrimSpace(t[strings.LastIndexByte(t, ')')+1:])
+	}
+	t = strings.TrimPrefix(t, "pg_catalog.")
+	switch t {
+	case "smallint", "int2", "integer", "int", "int4", "bigint", "int8", "numeric", "decimal", "real", "float4", "double precision", "float8", "float", "smallserial", "serial", "serial2", "serial4", "bigserial", "serial8":
+		return "number"
+	case "text", "varchar", "character varying", "char", "character", "bpchar", "name":
+		return "text"
+	case "date", "timestamp", "timestamptz", "timestamp with time zone", "timestamp without time zone":
+		return "datetime"
+	case "time", "timetz", "time with time zone", "time without time zone":
+		return "time"
+	case "uuid":
+		return "uuid"
+	case "bool", "boolean":
+		return "bool"
+	}
+	return ""
 }
