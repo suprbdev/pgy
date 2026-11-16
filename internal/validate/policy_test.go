@@ -266,3 +266,45 @@ schema app:
 		}
 	}
 }
+
+func TestValidatePartitionKeysAndSetNull(t *testing.T) {
+	path := write(t, t.TempDir(), "p.yml", `
+schema app:
+  table orgs:
+    columns: {id: {type: int, primaryKey: true}}
+  table events:
+    columns:
+      id: {type: int}
+      at: {type: date}
+      org_id: {type: int}
+      opt_org: {type: int, nullable: true}
+      code: {type: text, unique: true}
+    primaryKey: [id, at]
+    partitionBy: {type: range, columns: [at]}
+    indexes:
+      events_at_code: {columns: [code, at], unique: true}
+      events_code: {columns: [code], unique: true}
+    foreignKeys:
+      bad: {columns: [org_id], references: {table: app.orgs, columns: [id]}, onDelete: set null}
+      good: {columns: [opt_org], references: {table: app.orgs, columns: [id]}, onDelete: set null}
+  table byexpr:
+    columns: {id: {type: int, primaryKey: true}, n: {type: int}}
+    partitionBy: {type: range, columns: ["(n % 10)"]}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"unique column code must include partition key column at",
+		"unique index events_code must include partition key column at",
+		"table app.byexpr: primary key: a partitioned table can't have unique keys when its partition key uses an expression",
+		"foreign key bad sets org_id to null on delete, but org_id is not nullable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, fine := range []string{"table app.events: primary key", "events_at_code", "foreign key good"} {
+		if strings.Contains(got, fine) {
+			t.Errorf("%s is valid but was flagged:\n%s", fine, got)
+		}
+	}
+}

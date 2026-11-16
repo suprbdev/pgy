@@ -239,11 +239,21 @@ func Database(d *schema.Database) []Issue {
 		if len(t.Policies) > 0 && (t.RowLevelSecurity == nil || !*t.RowLevelSecurity) && t.PartitionOf == "" {
 			add(Warning, obj, "declares policies but not rowLevelSecurity: true; PostgreSQL ignores a table's policies until row-level security is enabled")
 		}
+		if t.PartitionBy != nil {
+			checkPartitionKeys(t, obj, add)
+		}
 		for _, fk := range t.ForeignKeys {
 			if fk == nil {
 				continue
 			}
 			need("foreign key "+fk.Name, fk.Columns)
+			for _, action := range []struct{ on, spec string }{{"delete", fk.OnDelete}, {"update", fk.OnUpdate}} {
+				for _, c := range setNullColumns(action.spec, fk.Columns) {
+					if col := t.Columns[c]; col != nil && !col.Nullable && col.Type != "" {
+						add(Warning, obj, "foreign key %s sets %s to null on %s, but %s is not nullable, so those %ss will fail", fk.Name, c, action.on, c, action.on)
+					}
+				}
+			}
 			if len(fk.Columns) != len(fk.RefColumns) {
 				add(Error, obj, "foreign key %s has %d columns but references %d", fk.Name, len(fk.Columns), len(fk.RefColumns))
 			}
@@ -1354,4 +1364,85 @@ func noArgReturns(d *schema.Database, keys []string) string {
 		return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(f.Returns)), "pg_catalog.")
 	}
 	return ""
+}
+
+// setNullColumns returns the columns an ON DELETE/UPDATE SET NULL action
+// sets: the listed ones of "set null (a, b)", else all of cols. It returns
+// nil for other actions.
+func setNullColumns(action string, cols []string) []string {
+	a := strings.ToLower(strings.Join(strings.Fields(action), " "))
+	if !strings.HasPrefix(a, "set null") {
+		return nil
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(a, "set null"))
+	if !strings.HasPrefix(rest, "(") {
+		out := []string{}
+		for _, c := range cols {
+			out = append(out, columnName(c))
+		}
+		return out
+	}
+	out := []string{}
+	for _, c := range strings.Split(strings.Trim(rest, "()"), ",") {
+		if c = strings.Trim(strings.TrimSpace(c), `"`); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// checkPartitionKeys reports primary keys, unique constraints and unique
+// indexes of a partitioned table that leave out a partition key column, or
+// that exist at all when the partition key uses an expression; PostgreSQL
+// rejects both.
+func checkPartitionKeys(t *schema.Table, obj string, add func(Severity, string, string, ...any)) {
+	keyCols := []string{}
+	for _, c := range t.PartitionBy.Columns {
+		base := columnName(strings.TrimSpace(c))
+		if base == "" {
+			keyCols = nil
+			break
+		}
+		keyCols = append(keyCols, base)
+	}
+	check := func(what string, cols []string) {
+		if len(cols) == 0 {
+			return
+		}
+		if keyCols == nil {
+			add(Error, obj, "%s: a partitioned table can't have unique keys when its partition key uses an expression", what)
+			return
+		}
+		have := map[string]bool{}
+		for _, c := range cols {
+			have[columnName(strings.TrimSpace(c))] = true
+		}
+		for _, k := range keyCols {
+			if !have[k] {
+				add(Error, obj, "%s must include partition key column %s; PostgreSQL requires unique keys on a partitioned table to contain the whole partition key", what, k)
+			}
+		}
+	}
+	pk := append([]string{}, t.PrimaryKey...)
+	for _, name := range sortedKeys(t.Columns) {
+		if c := t.Columns[name]; c != nil {
+			if c.PrimaryKey && !slices.Contains(pk, name) {
+				pk = append(pk, name)
+			}
+			if c.Unique {
+				check("unique column "+name, []string{name})
+			}
+		}
+	}
+	check("primary key", pk)
+	for _, ct := range t.Constraints {
+		if ct != nil && strings.EqualFold(ct.Type, "unique") {
+			check("constraint "+ct.Name, ct.Columns)
+		}
+	}
+	for _, ix := range t.Indexes {
+		if ix != nil && ix.Unique {
+			check("unique index "+ix.Name, ix.Columns)
+		}
+	}
 }
