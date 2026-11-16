@@ -1053,8 +1053,19 @@ The other `CREATE AGGREGATE` options use the same names, in camelCase where Post
 | `msfunc`, `minvfunc`, `mstype` | Moving-aggregate mode for window frames: forward and inverse transition functions and their state type |
 | `msspace`, `mfinalfunc`, `mfinalfuncExtra`, `mfinalfuncModify`, `minitcond` | The moving-aggregate versions of `sspace`, `finalfunc`, `finalfuncExtra`, `finalfuncModify` and `initcond` |
 | `sortop` | Sort operator for `min`/`max`-like aggregates, which can then use an index (`">"`, or `myschema.>`) |
+| `hypothetical` | `true` for a hypothetical-set aggregate (ordered-set aggregates only) |
 
-These are compared with `pg_aggregate` only when set; options left out are unmanaged. A replacement redefines the whole aggregate, though, so an option missing from the YAML is lost when another one changes. Ordered-set and hypothetical-set aggregates (`ORDER BY` in the arguments) aren't supported, and `pgy pull` reports them.
+These are compared with `pg_aggregate` only when set; options left out are unmanaged. A replacement redefines the whole aggregate, though, so an option missing from the YAML is lost when another one changes. Ordered-set aggregates put `order by` between their direct and aggregated arguments, as in `aggregate my_pct(float8 order by float8):` or `aggregate my_mode(order by anyelement):`. `hypothetical: true` makes one a hypothetical-set aggregate, like `rank`. PostgreSQL can't change `hypothetical` with `CREATE OR REPLACE`, so `pgy diff` drops and re-creates the aggregate under `--unsafe`, and warns without it.
+
+```yaml
+schema app:
+  aggregate my_rank(variadic "any" order by variadic "any"):
+    sfunc: ordered_set_transition_multi
+    stype: internal
+    finalfunc: rank_final
+    finalfuncExtra: true
+    hypothetical: true
+```
 
 ## Procedures
 

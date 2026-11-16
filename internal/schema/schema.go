@@ -556,7 +556,8 @@ type Aggregate struct {
     // Options holds the other CREATE AGGREGATE options by SQL name (sspace,
     // finalfunc_extra, finalfunc_modify, serialfunc, deserialfunc, msfunc,
     // minvfunc, mstype, msspace, mfinalfunc, mfinalfunc_extra,
-    // mfinalfunc_modify, minitcond, sortop). Options left out are unmanaged.
+    // mfinalfunc_modify, minitcond, sortop, hypothetical). Options left out
+    // are unmanaged.
     Options     map[string]string
     DependsOn   []string `yaml:"dependsOn"`
     Comment     string
@@ -570,7 +571,7 @@ var AggregateOptions = [][2]string{
     {"serialfunc", "serialfunc"}, {"deserialfunc", "deserialfunc"},
     {"msfunc", "msfunc"}, {"minvfunc", "minvfunc"}, {"mstype", "mstype"}, {"msspace", "msspace"},
     {"mfinalfunc", "mfinalfunc"}, {"mfinalfuncExtra", "mfinalfunc_extra"}, {"mfinalfuncModify", "mfinalfunc_modify"},
-    {"minitcond", "minitcond"}, {"sortop", "sortop"},
+    {"minitcond", "minitcond"}, {"sortop", "sortop"}, {"hypothetical", "hypothetical"},
 }
 
 // Procedure is a CREATE PROCEDURE declaration (PostgreSQL 11+). Unlike

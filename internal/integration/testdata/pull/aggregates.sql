@@ -8,3 +8,7 @@ create aggregate s12.extra(int) (sfunc = s12.sfunc, stype = int, finalfunc = s12
 create aggregate s12.mymax(int) (sfunc = s12.big, stype = int, sortop = >, combinefunc = s12.big, parallel = safe);
 create aggregate s12.myavg(numeric) (sfunc = numeric_avg_accum, stype = internal, finalfunc = numeric_avg, combinefunc = numeric_avg_combine, serialfunc = numeric_avg_serialize, deserialfunc = numeric_avg_deserialize, sspace = 128, parallel = safe);
 comment on aggregate s12.total(int) is 'running total';
+create aggregate s12.my_mode(order by anyelement) (sfunc = ordered_set_transition, stype = internal, finalfunc = mode_final, finalfunc_extra);
+create aggregate s12.my_pct(float8 order by float8) (sfunc = ordered_set_transition, stype = internal, finalfunc = percentile_disc_final, finalfunc_extra, parallel = safe);
+create aggregate s12.my_rank(variadic "any" order by variadic "any") (sfunc = ordered_set_transition_multi, stype = internal, finalfunc = rank_final, finalfunc_extra, hypothetical);
+comment on aggregate s12.my_pct(float8 order by float8) is 'discrete percentile';
