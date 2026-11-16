@@ -2042,6 +2042,7 @@ type Entity struct {
 func TopologicalSort(d *Database) ([]Entity, error) {
     entities := []Entity{}
     entityMap := map[string]Entity{}
+    callable := callableFunctions(d)
     
     // Collect all entities
     for _, ext := range d.Extensions {
@@ -2093,7 +2094,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         if dm == nil { continue }
         exprs := []string{dm.Default, dm.Check}
         for _, c := range dm.Checks { exprs = append(exprs, c) }
-        deps := append(append([]string{}, dm.DependsOn...), calledFunctionDeps(d, k, exprs...)...)
+        deps := append(append([]string{}, dm.DependsOn...), calledFunctionDeps(callable, k, exprs...)...)
         e := Entity{Key: k, Kind: "domain", DependsOn: append(deps, typeRefDeps(d, k, dm.Type)...)}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2107,8 +2108,8 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for k, fn := range d.Functions {
         if fn == nil { continue }
         deps := append(append([]string{}, fn.DependsOn...), typeRefDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)
-        deps = append(deps, calledFunctionDeps(d, k, fn.ArgsSig)...)
-        if IsSQLStandardBody(fn.Language, fn.Body) { deps = append(deps, queryDeps(d, k, fn.Body)...) }
+        deps = append(deps, calledFunctionDeps(callable, k, fn.ArgsSig)...)
+        if IsSQLStandardBody(fn.Language, fn.Body) { deps = append(deps, queryDeps(d, callable, k, fn.Body)...) }
         e := Entity{Key: k, Kind: "function", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2126,7 +2127,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for k, pr := range d.Procedures {
         if pr == nil { continue }
         deps := append(append([]string{}, pr.DependsOn...), typeRefDeps(d, k, argTypes(pr.ArgsSig)...)...)
-        if IsSQLStandardBody(pr.Language, pr.Body) { deps = append(deps, queryDeps(d, k, pr.Body)...) }
+        if IsSQLStandardBody(pr.Language, pr.Body) { deps = append(deps, queryDeps(d, callable, k, pr.Body)...) }
         e := Entity{Key: k, Kind: "procedure", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2151,14 +2152,14 @@ func TopologicalSort(d *Database) ([]Entity, error) {
             if ix != nil { exprs = append(append(exprs, ix.Columns...), ix.Where) }
         }
         deps = append(append([]string{}, deps...), typeRefDeps(d, k, colTypes...)...)
-        deps = append(deps, calledFunctionDeps(d, k, exprs...)...)
+        deps = append(deps, calledFunctionDeps(callable, k, exprs...)...)
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }
     for k, vw := range d.Views {
         if vw == nil { continue }
-        e := Entity{Key: k, Kind: "view", DependsOn: append(append([]string{}, vw.DependsOn...), queryDeps(d, k, vw.Query)...)}
+        e := Entity{Key: k, Kind: "view", DependsOn: append(append([]string{}, vw.DependsOn...), queryDeps(d, callable, k, vw.Query)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2166,10 +2167,18 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     // Resolve dependencies: convert "table private.account" -> "private.account"
     // Build dependency graph
     graph := map[string][]string{} // node -> list of dependencies
+    fnIndex := routineIndex(d.Functions)
+    resolve := func(raw string) []string {
+        raw = strings.TrimSpace(raw)
+        if ref, ok := strings.CutPrefix(raw, "function "); ok && strings.Contains(ref, ".") {
+            return resolveIndexedRoutine(strings.TrimSpace(ref), fnIndex)
+        }
+        return ResolveDependencyKeys(raw, d)
+    }
     for _, e := range entities {
         graph[e.Key] = []string{}
         for _, rawDep := range e.DependsOn {
-            for _, resolvedKey := range ResolveDependencyKeys(rawDep, d) {
+            for _, resolvedKey := range resolve(rawDep) {
                 if resolvedKey == e.Key { continue }
                 // Edges to trigger-returning functions are dropped: triggers are
                 // emitted after every other create, so no CREATE statement can
@@ -2838,21 +2847,16 @@ var calledFunctionRe = regexp.MustCompile(`([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)
 // argument defaults), which PostgreSQL resolves when it creates the
 // object. Unqualified calls only match functions in public, so a built-in
 // such as length() isn't taken for an app.length().
-func calledFunctionDeps(d *Database, self string, exprs ...string) []string {
+func calledFunctionDeps(callable map[string]bool, self string, exprs ...string) []string {
     out := []string{}
     seen := map[string]bool{}
     for _, e := range exprs {
         for _, m := range calledFunctionRe.FindAllStringSubmatch(e, -1) {
             name := m[1]
             if !strings.Contains(name, ".") { name = "public." + name }
-            if seen[name] { continue }
+            if seen[name] || !callable[name] || name == RoutineName(self) { continue }
             seen[name] = true
-            for k, f := range d.Functions {
-                if f != nil && k != self && RoutineName(k) == name && !strings.EqualFold(strings.TrimSpace(f.Returns), "trigger") {
-                    out = append(out, "function "+name)
-                    break
-                }
-            }
+            out = append(out, "function "+name)
         }
     }
     return out
@@ -2873,7 +2877,7 @@ var (
 // creates the object: relations after FROM or JOIN, and any
 // schema-qualified relation or function call. Unqualified relations
 // elsewhere, as in a comma join, need dependsOn.
-func queryDeps(d *Database, self, sql string) []string {
+func queryDeps(d *Database, callable map[string]bool, self, sql string) []string {
     sql = quotedLiteralRe.ReplaceAllString(sql, "''")
     out := []string{}
     seen := map[string]bool{}
@@ -2900,14 +2904,42 @@ func queryDeps(d *Database, self, sql string) []string {
             continue
         }
         name := strings.ReplaceAll(m[1], `"`, "")
-        if seen["function "+name] { continue }
+        if seen["function "+name] || !callable[name] || name == RoutineName(self) { continue }
         seen["function "+name] = true
-        for k, f := range d.Functions {
-            if f != nil && k != self && RoutineName(k) == name && !strings.EqualFold(strings.TrimSpace(f.Returns), "trigger") {
-                out = append(out, "function "+name)
-                break
-            }
-        }
+        out = append(out, "function "+name)
     }
     return out
+}
+
+// callableFunctions returns the names (schema.name) of the declared
+// functions other objects can call: all but trigger functions.
+func callableFunctions(d *Database) map[string]bool {
+    out := map[string]bool{}
+    for k, f := range d.Functions {
+        if f != nil && !strings.EqualFold(strings.TrimSpace(f.Returns), "trigger") { out[RoutineName(k)] = true }
+    }
+    return out
+}
+
+// routineIndex maps each routine name (schema.name) in m to its keys, sorted.
+func routineIndex[T any](m map[string]T) map[string][]string {
+    out := map[string][]string{}
+    for k := range m { out[RoutineName(k)] = append(out[RoutineName(k)], k) }
+    for _, keys := range out { sort.Strings(keys) }
+    return out
+}
+
+// resolveIndexedRoutine is resolveRoutine for a schema-qualified ref,
+// looked up in an index from routineIndex.
+func resolveIndexedRoutine(ref string, index map[string][]string) []string {
+    name, args := ref, ""
+    if i := strings.IndexByte(ref, '('); i >= 0 { name, args = strings.TrimSpace(ref[:i]), ref[i:] }
+    keys := index[name]
+    if args != "" {
+        want := compactArgs(args)
+        for _, k := range keys {
+            if compactArgs(k[len(RoutineName(k)):]) == want { return []string{k} }
+        }
+    }
+    return keys
 }
