@@ -31,7 +31,7 @@ func TestBuildTable(t *testing.T) {
 		Schemas:        map[string]bool{"app": true},
 		Tables:         map[string]*diff.LiveTable{"app.t": lt},
 		Sequences:      map[string]bool{"app.t_id_seq": true},
-		SequenceDefs:   map[string]*diff.LiveSequence{"app.t_id_seq": {Type: "integer", Owner: "app.t.id"}},
+		SequenceDefs:   map[string]*diff.LiveSequence{"app.t_id_seq": {Type: "integer", Owner: "app.t.id", Increment: "1", Start: "1", MinValue: "1", MaxValue: "2147483647", Cache: "1"}},
 		OwnedSequences: map[string]bool{"app.t_id_seq": true},
 		RelComments:    map[string]string{"app.t": "things"},
 		Details:        &diff.LiveDetails{ColumnOrder: map[string][]string{"app.t": {"id", "email"}}},
@@ -155,5 +155,25 @@ func TestBuildEmptyGrantsWhenDefaultsWouldGrant(t *testing.T) {
 	}
 	if !strings.Contains(out[strings.Index(out, "table shared:"):], "grants: {reader: [select]}") {
 		t.Errorf("explicit grants must be pulled:\n%s", out)
+	}
+}
+
+func TestSerialShaped(t *testing.T) {
+	serial := &diff.LiveSequence{Type: "integer", Increment: "1", Start: "1", MinValue: "1", MaxValue: "2147483647", Cache: "1"}
+	if !serialShaped(serial, "integer") {
+		t.Error("a serial's own sequence must pull as serial")
+	}
+	for name, change := range map[string]func(*diff.LiveSequence){
+		"bigint sequence": func(s *diff.LiveSequence) { s.Type, s.MaxValue = "bigint", "9223372036854775807" },
+		"increment":       func(s *diff.LiveSequence) { s.Increment = "5" },
+		"cache":           func(s *diff.LiveSequence) { s.Cache = "20" },
+		"cycle":           func(s *diff.LiveSequence) { s.Cycle = true },
+		"start":           func(s *diff.LiveSequence) { s.Start = "100" },
+	} {
+		c := *serial
+		change(&c)
+		if serialShaped(&c, "integer") {
+			t.Errorf("%s: a sequence serial wouldn't recreate must stay explicit", name)
+		}
 	}
 }

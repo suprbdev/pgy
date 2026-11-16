@@ -249,6 +249,14 @@ func serialSequenceName(fq, cn, seq string) bool {
 	return regexp.MustCompile(`_seq\d*$`).MatchString(name)
 }
 
+// serialShaped reports whether ls has the type and options a serial column
+// of type typ gives its sequence, so that declaring the column serial
+// recreates it exactly.
+func serialShaped(ls *diff.LiveSequence, typ string) bool {
+	max := map[string]string{"integer": "2147483647", "bigint": "9223372036854775807", "smallint": "32767"}[typ]
+	return ls.Type == typ && ls.Increment == "1" && ls.Start == "1" && ls.MinValue == "1" && ls.MaxValue == max && ls.Cache == "1" && !ls.Cycle && !ls.Unlogged
+}
+
 func (b *builder) collectSerials() {
 	b.serials, b.serialSeqs = map[string]string{}, map[string]bool{}
 	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
@@ -267,7 +275,7 @@ func (b *builder) collectSerials() {
 				continue
 			}
 			kind := map[string]string{"integer": "serial", "bigint": "bigserial", "smallint": "smallserial"}[lc.Type]
-			if kind == "" {
+			if kind == "" || !serialShaped(ls, lc.Type) {
 				continue
 			}
 			b.serials[fq+"."+cn] = kind
