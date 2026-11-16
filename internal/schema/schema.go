@@ -140,6 +140,7 @@ type PublicationTable struct {
     Table   string // schema-qualified
     Columns []string
     Where   string
+    Only    bool // TABLE ONLY: leave out the table's inheritance children
 }
 
 // DefaultPrivilege is one ALTER DEFAULT PRIVILEGES scope: objects created
@@ -2581,6 +2582,7 @@ func parsePublications(v any) map[string]*Publication {
                         pt := &PublicationTable{Table: qualify("", strings.TrimSpace(tn))}
                         if c, ok := x["columns"]; ok { pt.Columns = parseStringListFromNode(c) }
                         if w, ok := x["where"].(string); ok { pt.Where = strings.TrimSpace(w) }
+                        if o, ok := x["only"].(bool); ok { pt.Only = o }
                         p.Tables = append(p.Tables, pt)
                     }
                 }

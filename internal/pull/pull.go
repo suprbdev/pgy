@@ -1747,12 +1747,15 @@ func (b *builder) database() *node {
 				ts := &node{Kind: yaml.SequenceNode}
 				for _, t := range sortedKeys(lp.Tables) {
 					pt := lp.Tables[t]
-					if len(pt.Columns) == 0 && pt.Where == "" {
+					if len(pt.Columns) == 0 && pt.Where == "" && !pt.Only {
 						ts.Content = append(ts.Content, str(t))
 						continue
 					}
 					e := flowMap()
 					add(e, "table", str(t))
+					if pt.Only {
+						add(e, "only", boolean(true))
+					}
 					if len(pt.Columns) > 0 {
 						add(e, "columns", list(pt.Columns))
 					}

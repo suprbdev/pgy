@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/schema"
@@ -73,5 +74,24 @@ func TestPublicationAllTablesSwitchAndPruneUnsafe(t *testing.T) {
 	}
 	if len(p.Drops) != 1 || p.Drops[0] != `drop publication "stray";` {
 		t.Errorf("prune should drop the undeclared publication, got %v", p.Drops)
+	}
+}
+
+func TestPublicationTableOnly(t *testing.T) {
+	d := &schema.Database{Publications: map[string]*schema.Publication{"p": {Name: "p", Tables: []*schema.PublicationTable{{Table: "app.base", Only: true}}}}}
+	if sql := Render(Plan(emptyLive(), d, false)); !strings.Contains(sql, `create publication "p" for table only "app"."base"`) {
+		t.Fatalf("want TABLE ONLY, got:\n%s", sql)
+	}
+	live := emptyLive()
+	live.Publications = map[string]*LivePublication{"p": {Tables: map[string]LivePublicationTable{"app.base": {Only: true}}, Publish: []string{"insert", "update", "delete", "truncate"}}}
+	if sql := Render(Plan(live, d, false)); strings.Contains(sql, "publication") {
+		t.Errorf("a matching ONLY table must be left alone, got:\n%s", sql)
+	}
+	d.Publications["p"].Tables[0].Only = false
+	if sql := Render(Plan(live, d, false)); !strings.Contains(sql, `alter publication "p" set table "app"."base"`) {
+		t.Errorf("dropping only must republish the table with its children, got:\n%s", sql)
+	}
+	if sql := Render(Plan(Simulate(emptyLive(), d), d, false)); strings.Contains(sql, "publication") {
+		t.Errorf("expected no changes after simulate, got:\n%s", sql)
 	}
 }

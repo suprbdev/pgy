@@ -178,6 +178,7 @@ type LivePublication struct {
 type LivePublicationTable struct {
     Columns []string
     Where   string
+    Only    bool // the table has inheritance children the publication leaves out
 }
 
 // LiveEventTrigger is an event trigger from pg_event_trigger. Function is
@@ -1282,23 +1283,36 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
 
+    // A table published without ONLY also publishes its inheritance
+    // children, each with its own pg_publication_rel row; those are left
+    // out, since declaring the parent again would publish them twice.
     pubRelQ := `
         select p.pubname, n.nspname || '.' || c.relname, coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''),
                (select array_agg(a.attname::text order by a.attname) from pg_attribute a
-                where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs))
+                where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs)),
+               c.relkind = 'r' and exists (select 1 from pg_inherits i where i.inhparent = pr.prrelid
+                   and not exists (select 1 from pg_publication_rel x where x.prpubid = pr.prpubid and x.prrelid = i.inhrelid))
         from pg_publication_rel pr
         join pg_publication p on p.oid = pr.prpubid
         join pg_class c on c.oid = pr.prrelid
         join pg_namespace n on n.oid = c.relnamespace
+        where not exists (
+            select 1 from pg_inherits i
+            join pg_publication_rel ppr on ppr.prrelid = i.inhparent and ppr.prpubid = pr.prpubid
+            where i.inhrelid = pr.prrelid
+            and coalesce(pg_get_expr(ppr.prqual, ppr.prrelid), '') = coalesce(pg_get_expr(pr.prqual, pr.prrelid), '')
+            and coalesce((select array_agg(a.attname::text order by a.attname) from pg_attribute a where a.attrelid = ppr.prrelid and a.attnum = any(ppr.prattrs)), '{}')
+              = coalesce((select array_agg(a.attname::text order by a.attname) from pg_attribute a where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs)), '{}'))
     `
     batch.add(pubRelQ, func(pubRelRows pgx.Rows) error {
         for pubRelRows.Next() {
             var pub, table, where string
             var cols []string
-            if err := pubRelRows.Scan(&pub, &table, &where, &cols); err != nil {
+            var only bool
+            if err := pubRelRows.Scan(&pub, &table, &where, &cols, &only); err != nil {
                 return err
             }
-            if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where} }
+            if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where, Only: only} }
         }
         return nil
     })
@@ -3680,6 +3694,7 @@ func publicationMembers(p *schema.Publication) string {
     parts := []string{}
     for _, t := range p.Tables {
         entry := "table " + pqIdent(t.Table)
+        if t.Only { entry = "table only " + pqIdent(t.Table) }
         if len(t.Columns) > 0 { entry += " (" + joinIdentList(t.Columns) + ")" }
         if t.Where != "" { entry += " where (" + t.Where + ")" }
         parts = append(parts, entry)
@@ -3692,7 +3707,7 @@ func publicationMembersMatch(p *schema.Publication, lp *LivePublication) bool {
     if len(p.Tables) != len(lp.Tables) { return false }
     for _, t := range p.Tables {
         lt, ok := lp.Tables[t.Table]
-        if !ok || !constraintDefsEqual(t.Where, lt.Where) { return false }
+        if !ok || t.Only != lt.Only || !constraintDefsEqual(t.Where, lt.Where) { return false }
         want := append([]string(nil), t.Columns...)
         sort.Strings(want)
         if strings.Join(want, ",") != strings.Join(lt.Columns, ",") { return false }

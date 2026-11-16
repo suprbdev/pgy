@@ -163,7 +163,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             cols := append([]string(nil), t.Columns...)
             sort.Strings(cols)
             if len(cols) == 0 { cols = nil }
-            lp.Tables[t.Table] = LivePublicationTable{Columns: cols, Where: t.Where}
+            lp.Tables[t.Table] = LivePublicationTable{Columns: cols, Where: t.Where, Only: t.Only}
         }
         lp.Schemas = append([]string(nil), p.Schemas...)
         sort.Strings(lp.Schemas)
