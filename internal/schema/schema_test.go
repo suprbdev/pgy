@@ -2762,3 +2762,36 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestTopologicalSortRowTypeUsers(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"app.items": {Name: "items"},
+			"app.a_log": {Name: "a_log", Columns: map[string]*Column{"snapshot": {Type: "app.items"}}},
+			"public.users": {Name: "users"},
+		},
+		Views: map[string]*View{"app.v": {Name: "v"}},
+		Functions: map[string]*Function{
+			"app.all_items()":     {Name: "all_items", ArgsSig: "()", Returns: "setof app.items"},
+			"app.first(r app.v)":  {Name: "first", ArgsSig: "(r app.v)", Returns: "int"},
+			"app.rows()":          {Name: "rows", ArgsSig: "()", Returns: "table(i app.items, n int)"},
+			"app.by_name(users int)": {Name: "by_name", ArgsSig: "(users int)", Returns: "int"},
+		},
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, e := range sorted {
+		pos[e.Key] = i
+	}
+	for user, rel := range map[string]string{"app.all_items()": "app.items", "app.rows()": "app.items", "app.first(r app.v)": "app.v", "app.a_log": "app.items"} {
+		if pos[user] < pos[rel] {
+			t.Errorf("%s uses %s's row type and must sort after it; order: %v", user, rel, sorted)
+		}
+	}
+	if pos["app.by_name(users int)"] > pos["public.users"] {
+		t.Errorf("an argument named like a table is not a dependency; order: %v", sorted)
+	}
+}

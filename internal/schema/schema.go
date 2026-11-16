@@ -2099,7 +2099,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, fn := range d.Functions {
         if fn == nil { continue }
-        e := Entity{Key: k, Kind: "function", DependsOn: fn.DependsOn}
+        e := Entity{Key: k, Kind: "function", DependsOn: append(append([]string{}, fn.DependsOn...), rowTypeDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2109,13 +2109,13 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         for _, fn := range []string{ag.SFunc, ag.FinalFunc, ag.CombineFunc} {
             if fn != "" && len(resolveRoutine(fn, d.Functions)) > 0 { deps = append(append([]string{}, deps...), "function "+fn) }
         }
-        e := Entity{Key: k, Kind: "aggregate", DependsOn: deps}
+        e := Entity{Key: k, Kind: "aggregate", DependsOn: append(deps, rowTypeDeps(d, k, append(argTypes(strings.ReplaceAll(strings.ToLower(ag.ArgsSig), " order by ", ", ")), ag.SType)...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
     for k, pr := range d.Procedures {
         if pr == nil { continue }
-        e := Entity{Key: k, Kind: "procedure", DependsOn: pr.DependsOn}
+        e := Entity{Key: k, Kind: "procedure", DependsOn: append(append([]string{}, pr.DependsOn...), rowTypeDeps(d, k, argTypes(pr.ArgsSig)...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2128,6 +2128,11 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         }
         for _, p := range t.Inherits { deps = append(append([]string{}, deps...), "table "+p) }
         if t.Of != "" && d.Types[t.Of] != nil { deps = append(append([]string{}, deps...), "type "+t.Of) }
+        colTypes := []string{}
+        for _, c := range t.Columns {
+            if c != nil { colTypes = append(colTypes, c.Type) }
+        }
+        deps = append(append([]string{}, deps...), rowTypeDeps(d, k, colTypes...)...)
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2732,3 +2737,69 @@ func errorsIs(err, target error) bool { // tiny helper to avoid importing errors
 }
 
 
+
+// argTypes returns the type of each argument in a routine signature:
+// its last word, after the mode, name and default are dropped. Only
+// single-word types matter to rowTypeDeps, so multi-word built-in types
+// needn't be kept whole.
+func argTypes(sig string) []string {
+    inner := strings.TrimSpace(sig)
+    inner = strings.TrimSuffix(strings.TrimPrefix(inner, "("), ")")
+    out := []string{}
+    depth, start := 0, 0
+    flush := func(a string) {
+        lower := strings.ToLower(a)
+        if i := strings.Index(lower, " default "); i >= 0 { a = a[:i] }
+        if i := strings.IndexByte(a, '='); i >= 0 { a = a[:i] }
+        if w := strings.Fields(a); len(w) > 0 { out = append(out, w[len(w)-1]) }
+    }
+    for i, r := range inner {
+        switch r {
+        case '(':
+            depth++
+        case ')':
+            depth--
+        case ',':
+            if depth == 0 { flush(inner[start:i]); start = i + 1 }
+        }
+    }
+    flush(inner[start:])
+    return out
+}
+
+// returnTypes returns the types a RETURNS clause names: the type of
+// "[setof] type", or each column's of "table(...)".
+func returnTypes(returns string) []string {
+    r := strings.TrimSpace(returns)
+    lower := strings.ToLower(r)
+    if strings.HasPrefix(lower, "table") && strings.Contains(r, "(") {
+        return argTypes(r[strings.IndexByte(r, '('):])
+    }
+    if strings.HasPrefix(lower, "setof ") { r = strings.TrimSpace(r[len("setof "):]) }
+    return []string{r}
+}
+
+// rowTypeDeps returns dependsOn entries for the declared tables and views
+// whose row types the given types are (app.t, "App"."T", app.t[]), other
+// than self, since PostgreSQL needs the relation before anything that
+// names its row type.
+func rowTypeDeps(d *Database, self string, types ...string) []string {
+    out := []string{}
+    seen := map[string]bool{}
+    for _, typ := range types {
+        name := strings.ReplaceAll(strings.TrimSpace(strings.TrimRight(strings.TrimSpace(typ), "[]")), `"`, "")
+        if name == "" { continue }
+        if !strings.Contains(name, ".") { name = "public." + name }
+        if name == self || seen[name] { continue }
+        switch {
+        case d.Tables[name] != nil:
+            out = append(out, "table "+name)
+        case d.Views[name] != nil:
+            out = append(out, "view "+name)
+        default:
+            continue
+        }
+        seen[name] = true
+    }
+    return out
+}
