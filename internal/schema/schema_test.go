@@ -2830,3 +2830,38 @@ func TestTopologicalSortDomainAfterFunctionsItCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestTopologicalSortTypesAfterTheTypesTheyUse(t *testing.T) {
+	db := &Database{
+		Domains: map[string]*Domain{
+			"app.a_posint":    {Name: "a_posint", Type: "int"},
+			"app.a_small_box": {Name: "a_small_box", Type: "app.z_box"},
+		},
+		Types: map[string]*TypeDef{
+			"app.z_box":     {Name: "z_box", Kind: "composite", Attributes: map[string]string{"w": "app.a_posint"}},
+			"app.a_wrapper": {Name: "a_wrapper", Kind: "composite", Attributes: map[string]string{"b": "app.a_small_box", "r": "app.b_range[]"}},
+			"app.b_range":   {Name: "b_range", Kind: "range", Range: &RangeDef{Subtype: "app.a_posint"}},
+			"app.snap":      {Name: "snap", Kind: "composite", Attributes: map[string]string{"row": "app.items"}},
+		},
+		Tables: map[string]*Table{"app.items": {Name: "items"}},
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, e := range sorted {
+		pos[e.Key] = i
+	}
+	for user, used := range map[string]string{
+		"app.z_box": "app.a_posint", "app.a_small_box": "app.z_box", "app.a_wrapper": "app.a_small_box",
+		"app.b_range": "app.a_posint", "app.snap": "app.items",
+	} {
+		if pos[user] < pos[used] {
+			t.Errorf("%s uses %s and must sort after it; order: %v", user, used, sorted)
+		}
+	}
+	if pos["app.a_wrapper"] < pos["app.b_range"] {
+		t.Errorf("an array of a range type is a use too; order: %v", sorted)
+	}
+}

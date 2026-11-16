@@ -2057,6 +2057,10 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         if td.Range != nil && td.Range.SubtypeDiff != "" && len(resolveRoutine(td.Range.SubtypeDiff, d.Functions)) > 0 {
             deps = append(append([]string{}, deps...), "function "+td.Range.SubtypeDiff)
         }
+        used := []string{}
+        for _, a := range td.Attributes { used = append(used, a) }
+        if td.Range != nil { used = append(used, td.Range.Subtype) }
+        deps = append(append([]string{}, deps...), typeRefDeps(d, k, used...)...)
         e := Entity{Key: k, Kind: "type", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2089,7 +2093,8 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         if dm == nil { continue }
         exprs := []string{dm.Default, dm.Check}
         for _, c := range dm.Checks { exprs = append(exprs, c) }
-        e := Entity{Key: k, Kind: "domain", DependsOn: append(append([]string{}, dm.DependsOn...), calledFunctionDeps(d, k, exprs...)...)}
+        deps := append(append([]string{}, dm.DependsOn...), calledFunctionDeps(d, k, exprs...)...)
+        e := Entity{Key: k, Kind: "domain", DependsOn: append(deps, typeRefDeps(d, k, dm.Type)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2101,7 +2106,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, fn := range d.Functions {
         if fn == nil { continue }
-        deps := append(append([]string{}, fn.DependsOn...), rowTypeDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)
+        deps := append(append([]string{}, fn.DependsOn...), typeRefDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)
         e := Entity{Key: k, Kind: "function", DependsOn: append(deps, calledFunctionDeps(d, k, fn.ArgsSig)...)}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2112,13 +2117,13 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         for _, fn := range []string{ag.SFunc, ag.FinalFunc, ag.CombineFunc} {
             if fn != "" && len(resolveRoutine(fn, d.Functions)) > 0 { deps = append(append([]string{}, deps...), "function "+fn) }
         }
-        e := Entity{Key: k, Kind: "aggregate", DependsOn: append(deps, rowTypeDeps(d, k, append(argTypes(strings.ReplaceAll(strings.ToLower(ag.ArgsSig), " order by ", ", ")), ag.SType)...)...)}
+        e := Entity{Key: k, Kind: "aggregate", DependsOn: append(deps, typeRefDeps(d, k, append(argTypes(strings.ReplaceAll(strings.ToLower(ag.ArgsSig), " order by ", ", ")), ag.SType)...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
     for k, pr := range d.Procedures {
         if pr == nil { continue }
-        e := Entity{Key: k, Kind: "procedure", DependsOn: append(append([]string{}, pr.DependsOn...), rowTypeDeps(d, k, argTypes(pr.ArgsSig)...)...)}
+        e := Entity{Key: k, Kind: "procedure", DependsOn: append(append([]string{}, pr.DependsOn...), typeRefDeps(d, k, argTypes(pr.ArgsSig)...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2135,7 +2140,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         for _, c := range t.Columns {
             if c != nil { colTypes = append(colTypes, c.Type) }
         }
-        deps = append(append([]string{}, deps...), rowTypeDeps(d, k, colTypes...)...)
+        deps = append(append([]string{}, deps...), typeRefDeps(d, k, colTypes...)...)
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
@@ -2743,7 +2748,7 @@ func errorsIs(err, target error) bool { // tiny helper to avoid importing errors
 
 // argTypes returns the type of each argument in a routine signature:
 // its last word, after the mode, name and default are dropped. Only
-// single-word types matter to rowTypeDeps, so multi-word built-in types
+// single-word types matter to typeRefDeps, so multi-word built-in types
 // needn't be kept whole.
 func argTypes(sig string) []string {
     inner := strings.TrimSpace(sig)
@@ -2782,11 +2787,13 @@ func returnTypes(returns string) []string {
     return []string{r}
 }
 
-// rowTypeDeps returns dependsOn entries for the declared tables and views
-// whose row types the given types are (app.t, "App"."T", app.t[]), other
-// than self, since PostgreSQL needs the relation before anything that
-// names its row type.
-func rowTypeDeps(d *Database, self string, types ...string) []string {
+// typeRefDeps returns dependsOn entries for the declared types, domains,
+// tables and views (row types) that the given types name (app.t,
+// "App"."T", app.t[]), other than self, since PostgreSQL needs a type
+// before anything that uses it. Types sort before domains and relations,
+// and functions before tables, so without these a composite of a domain or
+// a function returning a table's rows would be created too early.
+func typeRefDeps(d *Database, self string, types ...string) []string {
     out := []string{}
     seen := map[string]bool{}
     for _, typ := range types {
@@ -2794,11 +2801,16 @@ func rowTypeDeps(d *Database, self string, types ...string) []string {
         if name == "" { continue }
         if !strings.Contains(name, ".") { name = "public." + name }
         if name == self || seen[name] { continue }
+        if i := strings.IndexByte(name, '('); i >= 0 { name = strings.TrimSpace(name[:i]) }
         switch {
         case d.Tables[name] != nil:
             out = append(out, "table "+name)
         case d.Views[name] != nil:
             out = append(out, "view "+name)
+        case d.Types[name] != nil:
+            out = append(out, "type "+name)
+        case d.Domains[name] != nil:
+            out = append(out, "domain "+name)
         default:
             continue
         }
