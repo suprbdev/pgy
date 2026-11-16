@@ -2107,7 +2107,9 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for k, fn := range d.Functions {
         if fn == nil { continue }
         deps := append(append([]string{}, fn.DependsOn...), typeRefDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)
-        e := Entity{Key: k, Kind: "function", DependsOn: append(deps, calledFunctionDeps(d, k, fn.ArgsSig)...)}
+        deps = append(deps, calledFunctionDeps(d, k, fn.ArgsSig)...)
+        if IsSQLStandardBody(fn.Language, fn.Body) { deps = append(deps, queryDeps(d, k, fn.Body)...) }
+        e := Entity{Key: k, Kind: "function", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2123,7 +2125,9 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, pr := range d.Procedures {
         if pr == nil { continue }
-        e := Entity{Key: k, Kind: "procedure", DependsOn: append(append([]string{}, pr.DependsOn...), typeRefDeps(d, k, argTypes(pr.ArgsSig)...)...)}
+        deps := append(append([]string{}, pr.DependsOn...), typeRefDeps(d, k, argTypes(pr.ArgsSig)...)...)
+        if IsSQLStandardBody(pr.Language, pr.Body) { deps = append(deps, queryDeps(d, k, pr.Body)...) }
+        e := Entity{Key: k, Kind: "procedure", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2136,18 +2140,25 @@ func TopologicalSort(d *Database) ([]Entity, error) {
         }
         for _, p := range t.Inherits { deps = append(append([]string{}, deps...), "table "+p) }
         if t.Of != "" && d.Types[t.Of] != nil { deps = append(append([]string{}, deps...), "type "+t.Of) }
-        colTypes := []string{}
+        colTypes, exprs := []string{}, []string{}
         for _, c := range t.Columns {
-            if c != nil { colTypes = append(colTypes, c.Type) }
+            if c != nil { colTypes, exprs = append(colTypes, c.Type), append(exprs, c.Default, c.Generated) }
+        }
+        for _, ct := range t.Constraints {
+            if ct != nil { exprs = append(exprs, ct.Expression) }
+        }
+        for _, ix := range t.Indexes {
+            if ix != nil { exprs = append(append(exprs, ix.Columns...), ix.Where) }
         }
         deps = append(append([]string{}, deps...), typeRefDeps(d, k, colTypes...)...)
+        deps = append(deps, calledFunctionDeps(d, k, exprs...)...)
         e := Entity{Key: k, Kind: "table", DependsOn: deps}
         entities = append(entities, e)
         entityMap[k] = e
     }
     for k, vw := range d.Views {
         if vw == nil { continue }
-        e := Entity{Key: k, Kind: "view", DependsOn: vw.DependsOn}
+        e := Entity{Key: k, Kind: "view", DependsOn: append(append([]string{}, vw.DependsOn...), queryDeps(d, k, vw.Query)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2841,6 +2852,60 @@ func calledFunctionDeps(d *Database, self string, exprs ...string) []string {
                     out = append(out, "function "+name)
                     break
                 }
+            }
+        }
+    }
+    return out
+}
+
+var (
+    // fromRelationRe matches the relation after FROM or JOIN.
+    fromRelationRe = regexp.MustCompile(`(?i)\b(?:from|join)\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_][\w$]*))?)`)
+    // qualifiedNameRe matches a schema-qualified name, and a following
+    // opening parenthesis when it is a function call.
+    qualifiedNameRe = regexp.MustCompile(`((?:"[^"]+"|[A-Za-z_][\w$]*)\.(?:"[^"]+"|[A-Za-z_][\w$]*))(\s*\()?`)
+    quotedLiteralRe = regexp.MustCompile(`'(?:[^']|'')*'`)
+)
+
+// queryDeps returns dependsOn entries for the declared tables, views,
+// sequences and functions, other than self, that a view query or
+// SQL-standard routine body uses, since PostgreSQL resolves them when it
+// creates the object: relations after FROM or JOIN, and any
+// schema-qualified relation or function call. Unqualified relations
+// elsewhere, as in a comma join, need dependsOn.
+func queryDeps(d *Database, self, sql string) []string {
+    sql = quotedLiteralRe.ReplaceAllString(sql, "''")
+    out := []string{}
+    seen := map[string]bool{}
+    relation := func(name string) {
+        name = strings.ReplaceAll(name, `"`, "")
+        if !strings.Contains(name, ".") { name = "public." + name }
+        if name == self || seen[name] { return }
+        seen[name] = true
+        switch {
+        case d.Tables[name] != nil:
+            out = append(out, "table "+name)
+        case d.Views[name] != nil:
+            out = append(out, "view "+name)
+        case d.Sequences[name] != nil:
+            out = append(out, "sequence "+name)
+        }
+    }
+    for _, m := range fromRelationRe.FindAllStringSubmatch(sql, -1) {
+        relation(m[1])
+    }
+    for _, m := range qualifiedNameRe.FindAllStringSubmatch(sql, -1) {
+        if m[2] == "" {
+            relation(m[1])
+            continue
+        }
+        name := strings.ReplaceAll(m[1], `"`, "")
+        if seen["function "+name] { continue }
+        seen["function "+name] = true
+        for k, f := range d.Functions {
+            if f != nil && k != self && RoutineName(k) == name && !strings.EqualFold(strings.TrimSpace(f.Returns), "trigger") {
+                out = append(out, "function "+name)
+                break
             }
         }
     }

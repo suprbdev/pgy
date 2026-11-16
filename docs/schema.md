@@ -1526,6 +1526,15 @@ All object types support `dependsOn` to control creation order. The topological 
 
 The sort is **deterministic**: entities with no ordering constraint between them are emitted by kind (types → domains → sequences → functions → procedures → tables → views), then by name, so identical YAML always produces an identical buffer.
 
+pgy also infers the dependencies it can read from the YAML, so these need no `dependsOn`:
+
+- partitions, `inherits` children and typed tables on their parent or type
+- anything naming a declared type, domain, table or view as a type: column types, composite attributes, range subtypes, domain base types, routine arguments and return types (`returns setof app.items`)
+- declared functions called in domain defaults and checks, column defaults and generated expressions, check constraints, index expressions and argument defaults
+- in view queries and SQL-standard routine bodies, relations after `FROM` or `JOIN` and any schema-qualified relation or function call
+
+Unqualified names only match objects in `public`. Other references, such as an unqualified table in a comma join or a non-public table named only in a string-literal function body, still need `dependsOn`.
+
 Two kinds of `dependsOn` are never needed (and can only manufacture cycles):
 
 - **On trigger functions** (`returns: trigger`). Triggers are emitted after every other create, and no `CREATE` statement can call a trigger function, so edges pointing at trigger-returning functions are silently ignored. Declare `dependsOn` the other way if the trigger function's body needs a table (required for `language: sql`; `plpgsql` bodies are not validated at `CREATE`).

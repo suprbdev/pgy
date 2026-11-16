@@ -2865,3 +2865,41 @@ func TestTopologicalSortTypesAfterTheTypesTheyUse(t *testing.T) {
 		t.Errorf("an array of a range type is a use too; order: %v", sorted)
 	}
 }
+
+func TestTopologicalSortQueryDependencies(t *testing.T) {
+	db := &Database{
+		Tables: map[string]*Table{
+			"vd.t":        {Name: "t"},
+			"vd.a_counts": {Name: "a_counts", Columns: map[string]*Column{"n": {Type: "bigint", Default: "vd.z_count()"}}},
+		},
+		Views: map[string]*View{
+			"vd.a_top":   {Name: "a_top", Query: "select id from vd.z_mid where note <> 'from vd.b_unused'"},
+			"vd.z_mid":   {Name: "z_mid", Query: "select id, note from t join vd.t2 using (id)"},
+			"vd.b_unused": {Name: "b_unused", Query: "select 1"},
+			"vd.t2":      {Name: "t2", Query: "select 1 as id"},
+		},
+		Functions: map[string]*Function{
+			"vd.z_count()": {Name: "z_count", ArgsSig: "()", Returns: "bigint", Language: "sql", Body: "begin atomic select count(*) from vd.z_mid; end"},
+		},
+	}
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	deps := map[string][]string{}
+	for i, e := range sorted {
+		pos[e.Key], deps[e.Key] = i, e.DependsOn
+	}
+	for user, used := range map[string]string{"vd.a_top": "vd.z_mid", "vd.z_mid": "vd.t2", "vd.z_count()": "vd.z_mid", "vd.a_counts": "vd.z_count()"} {
+		if pos[user] < pos[used] {
+			t.Errorf("%s uses %s and must sort after it; order: %v", user, used, sorted)
+		}
+	}
+	if slices.Contains(deps["vd.a_top"], "view vd.b_unused") {
+		t.Errorf("names inside string literals are not dependencies: %v", deps["vd.a_top"])
+	}
+	if slices.Contains(deps["vd.z_mid"], "table public.t") {
+		t.Errorf("an unqualified relation only matches public: %v", deps["vd.z_mid"])
+	}
+}
