@@ -203,6 +203,7 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 - tables, views, materialized views, functions, procedures, aggregates, sequences, domains, enum/composite/range types, collations, text search configurations and dictionaries
 - triggers, foreign keys, check/unique/exclude constraints and indexes on declared tables, and indexes on declared materialized views
 - event triggers and publications, when the YAML has an `eventTriggers:` / `publications:` block
+- role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
 - rows of tables with a `data:` block that the block no longer lists
 
 Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions PostgreSQL created for another object (such as range type constructors), roles, schemas, extensions, and the migrations table.
