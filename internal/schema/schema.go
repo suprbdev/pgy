@@ -2848,9 +2848,11 @@ var calledFunctionRe = regexp.MustCompile(`([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)
 // object. Unqualified calls only match functions in public, so a built-in
 // such as length() isn't taken for an app.length().
 func calledFunctionDeps(callable map[string]bool, self string, exprs ...string) []string {
+    if len(callable) == 0 { return nil }
     out := []string{}
     seen := map[string]bool{}
     for _, e := range exprs {
+        if strings.IndexByte(e, '(') < 0 { continue }
         for _, m := range calledFunctionRe.FindAllStringSubmatch(e, -1) {
             name := m[1]
             if !strings.Contains(name, ".") { name = "public." + name }
