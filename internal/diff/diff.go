@@ -133,6 +133,9 @@ type Live struct{
     OwnedSequences map[string]bool
     // Partitions: "schema.parent" -> its direct partitions, sorted
     Partitions map[string][]string
+    // PartitionBounds: "schema.partition" -> its parent and bound clause
+    // (pg_get_expr of relpartbound); nil or missing when unknown.
+    PartitionBounds map[string]LivePartitionBound
     // TableData: "schema.table" -> comparison of its declared data rows
     // with the live rows; filled by IntrospectData
     TableData map[string]*LiveTableData
@@ -358,6 +361,12 @@ type LiveAggregate struct {
     Options map[string]string
 }
 
+// LivePartitionBound is a partition's parent and its bound clause as
+// pg_get_expr prints it ("FOR VALUES FROM ('2024-01-01') TO (MAXVALUE)").
+type LivePartitionBound struct {
+    Parent, Bound string
+}
+
 // LiveStatistic is an extended statistics object: its kinds (empty = all)
 // and items (columns and expressions) from pg_get_statisticsobjdef.
 type LiveStatistic struct {
@@ -538,6 +547,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         EnumLabels: map[string][]string{},
         AggregateDefs: map[string]*LiveAggregate{},
         Partitions: map[string][]string{},
+        PartitionBounds: map[string]LivePartitionBound{},
         CompositeAttributes: map[string]map[string]string{},
         CompositeCollations: map[string]map[string]string{},
         CompositeComments: map[string]map[string]string{},
@@ -903,7 +913,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     partQ := `
-        select pn.nspname || '.' || p.relname, cn.nspname || '.' || c.relname
+        select pn.nspname || '.' || p.relname, cn.nspname || '.' || c.relname, coalesce(pg_get_expr(c.relpartbound, c.oid), '')
         from pg_inherits i
         join pg_class p on p.oid = i.inhparent
         join pg_namespace pn on pn.oid = p.relnamespace
@@ -915,9 +925,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(partQ, func(rows pgx.Rows) error {
         for rows.Next() {
-            var parent, child string
-            if err := rows.Scan(&parent, &child); err != nil { return err }
+            var parent, child, bound string
+            if err := rows.Scan(&parent, &child, &bound); err != nil { return err }
             l.Partitions[parent] = append(l.Partitions[parent], child)
+            if bound != "" { l.PartitionBounds[child] = LivePartitionBound{Parent: parent, Bound: bound} }
         }
         return nil
     })
@@ -2884,6 +2895,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if attachesPartition(dt, lt) {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
                     plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
+                } else if lb, ok := live.PartitionBounds[fq]; ok && unsafe && dt.PartitionOf != "" && lt.IsPartition && partitionMoved(dt, lb) {
+                    plan.Creates = append(plan.Creates,
+                        fmt.Sprintf("alter table %s detach partition %s;", pqIdent(lb.Parent), pqIdent(fq)),
+                        fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
+                    plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("re-attaching partition %s with its new bound takes an ACCESS EXCLUSIVE lock on %s and scans %s to check its rows fit, unless a validated CHECK constraint already implies the bound", fq, lb.Parent, fq)})
                 }
                 colNames := make([]string, 0, len(dt.Columns))
                 if dt.PartitionOf == "" {
@@ -3418,6 +3434,92 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []str
 // parent's when it is attached, so they are not pruned.
 func attachesPartition(dt *schema.Table, lt *LiveTable) bool {
     return dt.PartitionOf != "" && lt != nil && !lt.IsPartition && !lt.Partitioned
+}
+
+// partitionMoved reports whether a declared partition has a different parent
+// or bound than the live one.
+func partitionMoved(dt *schema.Table, lb LivePartitionBound) bool {
+    if qualifyName(dt.PartitionOf) != qualifyName(lb.Parent) && !strings.EqualFold(dt.PartitionOf, lb.Parent) { return true }
+    return !partitionBoundsEqual(renderPartitionBound(dt.Partition), lb.Bound)
+}
+
+// partitionBoundsEqual compares two bound clauses value by value: string
+// literals by content, numbers numerically, dates and timestamps as times,
+// and casts ignored, so '2024-01-01' matches ('2024-01-01 00:00:00').
+func partitionBoundsEqual(a, b string) bool {
+    ta, tb := boundTokens(a), boundTokens(b)
+    if len(ta) != len(tb) { return false }
+    for i := range ta {
+        if ta[i] == tb[i] { continue }
+        if x, errX := strconv.ParseFloat(ta[i], 64); errX == nil {
+            if y, errY := strconv.ParseFloat(tb[i], 64); errY == nil && x == y { continue }
+        }
+        if x, zx, okX := boundTime(ta[i]); okX {
+            if y, zy, okY := boundTime(tb[i]); okY && (zx && zy && x.Equal(y) || (!zx || !zy) && x.Format(time.DateTime+".999999") == y.Format(time.DateTime+".999999")) { continue }
+        }
+        return false
+    }
+    return true
+}
+
+// boundTokens splits a bound clause into lower-cased keywords and
+// punctuation, and literal values with their quotes and casts removed.
+func boundTokens(s string) []string {
+    out := []string{}
+    for i := 0; i < len(s); {
+        c := s[i]
+        switch {
+        case c == ' ' || c == '\t' || c == '\n':
+            i++
+        case c == '\'':
+            j, v := i+1, strings.Builder{}
+            for j < len(s) {
+                if s[j] == '\'' {
+                    if j+1 < len(s) && s[j+1] == '\'' { v.WriteByte('\''); j += 2; continue }
+                    break
+                }
+                v.WriteByte(s[j])
+                j++
+            }
+            out = append(out, "'"+v.String())
+            i = j + 1
+        case c == ':' && i+1 < len(s) && s[i+1] == ':':
+            j := i + 2
+            for j < len(s) && s[j] != ',' && s[j] != ')' { j++ }
+            i = j
+        case c == '(' || c == ')' || c == ',':
+            out = append(out, string(c))
+            i++
+        default:
+            j := i
+            for j < len(s) && !strings.ContainsRune(" \t\n'(),", rune(s[j])) && (s[j] != ':' || j+1 >= len(s) || s[j+1] != ':') { j++ }
+            out = append(out, strings.ToLower(s[i:j]))
+            i = j
+        }
+    }
+    for i, t := range out {
+        if strings.HasPrefix(t, "'") {
+            if _, err := strconv.ParseFloat(t[1:], 64); err == nil { out[i] = t[1:] }
+        }
+    }
+    return out
+}
+
+var boundTimeLayouts = []string{"2006-01-02", "2006-01-02 15:04:05", "2006-01-02 15:04:05.999999", "2006-01-02T15:04:05", "2006-01-02T15:04:05.999999"}
+
+var boundZonedLayouts = []string{"2006-01-02 15:04:05-07", "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05.999999-07", "2006-01-02 15:04:05.999999-07:00", "2006-01-02T15:04:05Z07:00"}
+
+// boundTime parses a date or timestamp bound value, reporting whether it
+// carries a zone offset.
+func boundTime(t string) (v time.Time, zoned, ok bool) {
+    t = strings.TrimPrefix(t, "'")
+    for _, layout := range boundZonedLayouts {
+        if v, err := time.Parse(layout, t); err == nil { return v, true, true }
+    }
+    for _, layout := range boundTimeLayouts {
+        if v, err := time.Parse(layout, t); err == nil { return v, false, true }
+    }
+    return time.Time{}, false, false
 }
 
 // renderPartitionBound renders a partition child's bound clause:
