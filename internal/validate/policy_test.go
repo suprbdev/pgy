@@ -157,3 +157,35 @@ schema app:
 		}
 	}
 }
+
+func TestValidateNameClashes(t *testing.T) {
+	path := write(t, t.TempDir(), "n.yml", `
+schema app:
+  type status:
+    type: enum
+    labels: [a]
+  table status:
+    columns: {id: {type: int, primaryKey: true}}
+  table a:
+    columns: {id: {type: int, primaryKey: true}, x: {type: int}}
+    indexes: {a_x: {columns: [x]}}
+    constraints: {Shared: {type: unique, columns: [x]}}
+  table b:
+    columns: {id: {type: int, primaryKey: true}, x: {type: int}}
+    indexes: {a_x: {columns: [x]}, shared: {columns: [x]}}
+  sequence b:
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"type app.status: has the same name as table app.status",
+		"index a_x on app.b: has the same name as index a_x on app.a",
+		"sequence app.b: has the same name as table app.b",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "shared on app.b: has the same name") {
+		t.Errorf("names are case-sensitive, so shared and Shared don't clash:\n%s", got)
+	}
+}

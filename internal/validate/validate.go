@@ -142,6 +142,7 @@ func Database(d *schema.Database) []Issue {
 	}
 	checkRenames(d, add)
 	checkOwnerGrants(d, add)
+	checkNameClashes(d, add)
 
 	for _, fq := range sortedKeys(d.Tables) {
 		t := d.Tables[fq]
@@ -1106,4 +1107,81 @@ func typeCategory(typ string) string {
 		return "bool"
 	}
 	return ""
+}
+
+// checkNameClashes reports two objects of a schema that need the same name
+// in pg_class (tables, views, sequences, indexes, and the indexes behind
+// named primary keys and unique and exclusion constraints) or in pg_type
+// (relations and types), which PostgreSQL rejects with "already exists".
+// Default primary key names are left out, since PostgreSQL picks another
+// one when <table>_pkey is taken.
+func checkNameClashes(d *schema.Database, add func(Severity, string, string, ...any)) {
+	relations, types := map[string]string{}, map[string]string{}
+	claim := func(names map[string]string, fq, what string) {
+		if prev, ok := names[fq]; ok && prev != what {
+			add(Error, what, "has the same name as %s; PostgreSQL needs a different name for each", prev)
+			return
+		}
+		names[fq] = what
+	}
+	schemaOf := func(fq string) string {
+		if i := strings.IndexByte(fq, '.'); i >= 0 {
+			return fq[:i]
+		}
+		return "public"
+	}
+	for _, fq := range sortedKeys(d.Tables) {
+		t := d.Tables[fq]
+		if t == nil {
+			continue
+		}
+		what := "table " + fq
+		claim(relations, fq, what)
+		claim(types, fq, what)
+		s := schemaOf(fq)
+		if name := t.PrimaryKeyName; name != "" {
+			claim(relations, s+"."+name, "primary key "+name+" on "+fq)
+		}
+		for _, ix := range t.Indexes {
+			if ix != nil && ix.Name != "" {
+				claim(relations, s+"."+ix.Name, "index "+ix.Name+" on "+fq)
+			}
+		}
+		for _, ct := range t.Constraints {
+			if ct != nil && ct.Name != "" && (strings.EqualFold(ct.Type, "unique") || strings.EqualFold(ct.Type, "exclude")) {
+				claim(relations, s+"."+ct.Name, "constraint "+ct.Name+" on "+fq)
+			}
+		}
+	}
+	for _, fq := range sortedKeys(d.Views) {
+		if v := d.Views[fq]; v != nil {
+			what := "view " + fq
+			if v.Materialized {
+				what = "materialized view " + fq
+			}
+			claim(relations, fq, what)
+			claim(types, fq, what)
+			for _, ix := range v.Indexes {
+				if ix != nil && ix.Name != "" {
+					claim(relations, schemaOf(fq)+"."+ix.Name, "index "+ix.Name+" on "+fq)
+				}
+			}
+		}
+	}
+	for _, fq := range sortedKeys(d.Sequences) {
+		if d.Sequences[fq] != nil {
+			claim(relations, fq, "sequence "+fq)
+			claim(types, fq, "sequence "+fq)
+		}
+	}
+	for _, fq := range sortedKeys(d.Types) {
+		if d.Types[fq] != nil {
+			claim(types, fq, "type "+fq)
+		}
+	}
+	for _, fq := range sortedKeys(d.Domains) {
+		if d.Domains[fq] != nil {
+			claim(types, fq, "domain "+fq)
+		}
+	}
 }
