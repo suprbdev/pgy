@@ -72,10 +72,51 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
         queries = append(queries, strings.TrimRight(strings.TrimSpace(vw.Query), "; \t\n"))
     }
     if len(keys) == 0 { return nil }
+    workers := min(viewProbeWorkers, (len(keys)+viewProbeChunk-1)/viewProbeChunk)
+    type result struct {
+        probes map[string]*ViewProbe
+        deps   map[string][]string
+        err    error
+    }
+    results := make(chan result, workers)
+    for w := 0; w < workers; w++ {
+        go func(w int) {
+            var ck, cq, cs, cn []string
+            for i := w; i < len(keys); i += workers {
+                ck, cq, cs, cn = append(ck, keys[i]), append(cq, queries[i]), append(cs, schemas[i]), append(cn, names[i])
+            }
+            probes, deps, err := probeViewChunk(ctx, pool, ck, cq, cs, cn, w == 0)
+            results <- result{probes, deps, err}
+        }(w)
+    }
+    probes, deps := map[string]*ViewProbe{}, map[string][]string{}
+    var firstErr error
+    for w := 0; w < workers; w++ {
+        r := <-results
+        if r.err != nil && firstErr == nil { firstErr = r.err }
+        for k, p := range r.probes { probes[k] = p }
+        for k, d := range r.deps { deps[k] = d }
+    }
+    if firstErr != nil { return firstErr }
+    live.ViewProbes, live.ViewDependents = probes, deps
+    return nil
+}
+
+// viewProbeWorkers is how many connections ProbeViews splits the views
+// across, and viewProbeChunk the fewest views worth a connection of their
+// own; each probe creates and drops a temporary view, about a millisecond.
+const (
+    viewProbeWorkers = 4
+    viewProbeChunk   = 50
+)
+
+// probeViewChunk probes the given views in a transaction of its own, which
+// it always rolls back, and with withDeps also returns the views' dependents.
+func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, schemas, names []string, withDeps bool) (map[string]*ViewProbe, map[string][]string, error) {
     tx, err := pool.Begin(ctx)
-    if err != nil { return err }
+    if err != nil { return nil, nil, err }
     defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-    if _, err := tx.Exec(ctx, viewProbeFunc); err != nil { return fmt.Errorf("view probe: %w", err) }
+    if _, err := tx.Exec(ctx, viewProbeFunc); err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
     rows, err := tx.Query(ctx, `
         select t.k, d.def, d.cols, d.err,
                pg_get_viewdef(c.oid, true),
@@ -86,7 +127,7 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
         join pg_class c on c.relnamespace = ns.oid and c.relname = t.n
         cross join lateral pg_temp.pgy_viewdef(t.q) d
         order by t.i`, keys, queries, schemas, names)
-    if err != nil { return fmt.Errorf("view probe: %w", err) }
+    if err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
     probes := map[string]*ViewProbe{}
     for rows.Next() {
         var k string
@@ -95,7 +136,7 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
         p := &ViewProbe{}
         if err := rows.Scan(&k, &def, &cols, &errText, &p.LiveDef, &p.LiveCols); err != nil {
             rows.Close()
-            return fmt.Errorf("view probe: %w", err)
+            return nil, nil, fmt.Errorf("view probe: %w", err)
         }
         if def != nil { p.DesiredDef = *def }
         if errText != nil { p.Err = *errText }
@@ -103,11 +144,10 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
         probes[k] = p
     }
     rows.Close()
-    if err := rows.Err(); err != nil { return fmt.Errorf("view probe: %w", err) }
+    if err := rows.Err(); err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
+    if !withDeps { return probes, nil, nil }
     deps, err := viewDependents(ctx, tx)
-    if err != nil { return err }
-    live.ViewProbes, live.ViewDependents = probes, deps
-    return nil
+    return probes, deps, err
 }
 
 // viewDependents returns, for each view and materialized view, the views
