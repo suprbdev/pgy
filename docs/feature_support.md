@@ -86,7 +86,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 - [x] **Rules** (`rules:` on tables and views → `CREATE OR REPLACE RULE`; event/instead/where compared against live, actions only re-emitted with `replace: true`; comments diffed, prunable)
 - [x] **Event Triggers** (top-level `eventTriggers:` → `CREATE EVENT TRIGGER` with event/tags/function; changed definition drop+recreate, `enabled` → `ALTER EVENT TRIGGER ... ENABLE/DISABLE/ENABLE REPLICA/ALWAYS`, comments diffed; present block authoritative for `--prune`)
 - [x] **Logical Replication — Publications** (top-level `publications:` with tables (column lists, row filters), schemas, `allTables`, `publish`, `viaPartitionRoot`, `generatedColumns` (PostgreSQL 18 `publish_generated_columns`), `owner`; membership → `ALTER PUBLICATION ... SET`, options → `SET (...)`, comments diffed; switching `allTables` and `--prune` drops need `--unsafe`. Subscriptions are out of scope: they carry connection strings with credentials)
-- [ ] **Tablespaces** (Physical storage mapping; `pgy pull` reports tables, materialized views and indexes outside the default tablespace)
+- [x] **Tablespaces** (`tablespace:` on tables, partitions, materialized views, indexes and key/exclusion constraints → `TABLESPACE` / `USING INDEX TABLESPACE`; moves with `ALTER ... SET TABLESPACE` (lock warning) or `REINDEX CONCURRENTLY` for `concurrently` indexes; pulled; tablespaces themselves are created outside pgy)
 
 ---
 

@@ -79,6 +79,9 @@ type Live struct{
     // connected database
     DatabaseRoleConfig map[string]map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
+    // DefaultTablespace is the database's default tablespace, which a
+    // relation with no tablespace of its own is stored in; "" when unknown.
+    DefaultTablespace string
     // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
     Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
@@ -322,6 +325,7 @@ type LiveTable struct{
     Inherits    []string        // INHERITS parents (not partitioning), in inhseqno order
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
+    Tablespace  string          // the relation's own tablespace; "" = the database default
     Options     map[string]string // reloptions: lower-cased name -> value
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
     Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
@@ -417,6 +421,7 @@ type LiveIndex struct {
     Constraint       bool              // backs a primary key, unique or exclusion constraint
     Inherited        bool              // a partition's copy of an index on its parent
     Invalid          bool              // indisvalid is false (interrupted concurrent build, or a partitioned index missing partitions)
+    Tablespace       string            // the index's own tablespace; "" = the database default
 }
 
 // LiveIndexOpclass is the operator class of one index key column. Default is
@@ -593,9 +598,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                     when 'i' then 'index ' || coalesce((select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid
                                                         where x.indrelid = c.oid and x.indisreplident), '')
                     else 'default' end,
-               coalesce((select tn.nspname || '.' || ty.typname from pg_type ty join pg_namespace tn on tn.oid = ty.typnamespace where ty.oid = c.reloftype), '')
+               coalesce((select tn.nspname || '.' || ty.typname from pg_type ty join pg_namespace tn on tn.oid = ty.typnamespace where ty.oid = c.reloftype), ''),
+               coalesce(ts.spcname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
+        left join pg_tablespace ts on ts.oid = c.reltablespace
         left join pg_foreign_table ft on ft.ftrelid = c.oid
         left join pg_foreign_server fs on fs.oid = ft.ftserver
         where c.relkind in ('r', 'p', 'f')
@@ -607,8 +614,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, server string
             var isPartition, partitioned, unlogged, noToast, foreign bool
             var reloptions, ftoptions []string
-            var replident, ofType string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType); err != nil {
+            var replident, ofType, tablespace string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType, &tablespace); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
@@ -616,6 +623,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt.NoToast = noToast
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
+            lt.Tablespace = tablespace
             l.Tables[key] = lt
         }
         return nil
@@ -625,19 +633,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     matViewQ := `
         select n.nspname, c.relname, c.reltoastrelid = 0,
                coalesce(c.reloptions, '{}'::text[]) ||
-               coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[])
+               coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
+               coalesce(ts.spcname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
+        left join pg_tablespace ts on ts.oid = c.reltablespace
         where c.relkind = 'm'
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(matViewQ, func(matViewRows pgx.Rows) error {
         for matViewRows.Next() {
-            var schemaName, viewName string
+            var schemaName, viewName, tablespace string
             var noToast bool
             var reloptions []string
-            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions); err != nil {
+            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions, &tablespace); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, viewName)
@@ -645,6 +655,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt := newLiveTable()
             lt.NoToast = noToast
             lt.Options = parseProconfig(reloptions)
+            lt.Tablespace = tablespace
             l.MatViewTables[key] = lt
         }
         return nil
@@ -834,9 +845,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                exists (select 1 from pg_constraint con where con.conindid = x.indexrelid and con.contype in ('p', 'u', 'x')),
                i.relispartition,
                x.indisclustered,
-               not x.indisvalid
+               not x.indisvalid,
+               coalesce(ts.spcname::text, '')
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
+        left join pg_tablespace ts on ts.oid = i.reltablespace
         join pg_class t on t.oid = x.indrelid
         join pg_am am on am.oid = i.relam
         join pg_namespace n on n.oid = t.relnamespace
@@ -845,17 +858,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(idefQ, func(idefRows pgx.Rows) error {
         for idefRows.Next() {
-            var schemaName, tableName, idxName, method, predicate string
+            var schemaName, tableName, idxName, method, predicate, tablespace string
             var unique, nullsNotDistinct, constraint, inherited, clustered, invalid bool
             var nKey int16
             var cols, reloptions []string
             var indoption []int16
-            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid); err != nil {
+            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid, &tablespace); err != nil {
                 return err
             }
             t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
             if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Invalid: invalid}
+            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Invalid: invalid, Tablespace: tablespace}
             for _, opt := range indoption[:nKey] {
                 li.Descending = append(li.Descending, opt&1 != 0)
                 li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
@@ -2110,10 +2123,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
     batch.add(`select current_user, current_setting('server_version_num')::int,
                       coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
-                                where d.datname = current_database() and s.setrole = 0), '{}'::text[])`, func(rows pgx.Rows) error {
+                                where d.datname = current_database() and s.setrole = 0), '{}'::text[]),
+                      coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), '')`, func(rows pgx.Rows) error {
         for rows.Next() {
             var config []string
-            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config); err != nil { return err }
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
         }
         return nil
@@ -2808,13 +2822,17 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With), tablespaceClause(vw.Tablespace), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
-                } else if vw.With != nil {
+                } else {
                     lt := live.MatViewTables[e.Key]
                     if lt == nil { lt = newLiveTable() }
-                    plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, lt)...)
+                    if vw.With != nil { plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, lt)...) }
+                    if tablespaceDiffers(vw.Tablespace, lt.Tablespace, live) {
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter materialized view %s set tablespace %s;", pqIdent(e.Key), quoteIdent(vw.Tablespace)))
+                        plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("materialized view "+e.Key, e.Key))
+                    }
                 }
                 if len(vw.Indexes) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
@@ -2850,7 +2868,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         sub, unlogged := "", ""
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With)))
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         if c := dt.Columns[cn]; c != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...) }
@@ -2910,7 +2928,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
-                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+";")
+                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
@@ -2977,6 +2995,10 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                 }
                 if dt.Foreign == nil { plan.Alters = append(plan.Alters, tableStorageStmts(fq, dt, lt, unsafe)...) }
+                if dt.Foreign == nil && tablespaceDiffers(dt.Tablespace, lt.Tablespace, live) {
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s set tablespace %s;", pqIdent(fq), quoteIdent(dt.Tablespace)))
+                    if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("table "+fq, fq)) }
+                }
                 plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
@@ -5307,7 +5329,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     if dt.PrimaryKeyName != "" { pkAdd = "add constraint " + quoteIdent(truncateIdent(dt.PrimaryKeyName)) + " primary key" }
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith, dt.PrimaryKeyTablespace)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
@@ -5325,6 +5347,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             name = want
         }
         if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, lt.IndexDefs[have])...) }
+        if li := lt.IndexDefs[have]; have != "" && li != nil && tablespaceDiffers(dt.PrimaryKeyTablespace, li.Tablespace, live) {
+            plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, name, dt.PrimaryKeyTablespace))
+            if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("primary key index "+name, fq)) }
+        }
     }
 
     // Foreign keys
@@ -5438,6 +5464,17 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             switch {
             case !unsafe || !changed:
                 plan.Alters = append(plan.Alters, indexComment(false)...)
+                if li := lt.IndexDefs[name]; li != nil && tablespaceDiffers(ix.Tablespace, li.Tablespace, live) {
+                    switch {
+                    case partitioned:
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter index %s set tablespace %s;", pqIdent(idxFq), quoteIdent(ix.Tablespace)))
+                    case concurrent:
+                        plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("reindex (tablespace %s) index concurrently %s;", quoteIdent(ix.Tablespace), pqIdent(idxFq)))
+                    default:
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter index %s set tablespace %s;", pqIdent(idxFq), quoteIdent(ix.Tablespace)))
+                        plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("index "+idxFq, fq))
+                    }
+                }
             case partitioned:
                 plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
             case concurrent:
@@ -5484,6 +5521,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
                 plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, ct.With, lt.IndexDefs[ctName])...)
+                if li := lt.IndexDefs[ctName]; li != nil && tablespaceDiffers(ct.Tablespace, li.Tablespace, live) {
+                    plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, ctName, ct.Tablespace))
+                    if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("constraint "+ctName+"'s index", fq)) }
+                }
             }
             continue
         }
@@ -6342,12 +6383,61 @@ func deferralClause(deferrable, initiallyDeferred bool) string {
 
 // renderConstraintDef renders the definition body of a named check/unique/
 // exclude constraint. Returns "" for unknown constraint types.
-// indexParameters renders the INCLUDE and WITH clauses of a primary key or
-// unique constraint's index.
-func indexParameters(include []string, with map[string]string) string {
+// indexParameters renders the INCLUDE, WITH and USING INDEX TABLESPACE
+// clauses of a primary key or unique constraint's index.
+func indexParameters(include []string, with map[string]string, tablespace string) string {
     out := ""
     if len(include) > 0 { out = " include (" + constraintColumns(include) + ")" }
-    return out + renderStorageParams(with)
+    out += renderStorageParams(with)
+    if tablespace != "" { out += " using index tablespace " + quoteIdent(tablespace) }
+    return out
+}
+
+// tablespaceClause renders a CREATE statement's TABLESPACE clause, or ""
+// when the tablespace is unmanaged.
+func tablespaceClause(ts string) string {
+    if ts == "" { return "" }
+    return " tablespace " + quoteIdent(ts)
+}
+
+// tablespaceDiffers reports whether a declared tablespace differs from a
+// relation's live one, where "" means the database's default tablespace.
+// An undeclared tablespace never differs.
+func tablespaceDiffers(want, have string, live *Live) bool {
+    if want == "" { return false }
+    if have == "" {
+        have = live.DefaultTablespace
+        if have == "" { have = "pg_default" }
+    }
+    return want != have
+}
+
+// tablespaceMoveWarning is the lock warning for SET TABLESPACE, which
+// rewrites the relation under an ACCESS EXCLUSIVE lock.
+func tablespaceMoveWarning(what, table string) Warning {
+    return Warning{Table: table, Kind: "lock", Message: fmt.Sprintf("moving %s to another tablespace rewrites it under an ACCESS EXCLUSIVE lock, blocking reads and writes until it finishes", what)}
+}
+
+// excludeWithTablespace inserts USING INDEX TABLESPACE into an exclusion
+// constraint's definition, before its WHERE clause if it has one.
+func excludeWithTablespace(expr, tablespace string) string {
+    if tablespace == "" { return expr }
+    clause := " using index tablespace " + quoteIdent(tablespace)
+    depth := 0
+    lower := strings.ToLower(expr)
+    for i := 0; i < len(expr); i++ {
+        switch expr[i] {
+        case '(':
+            depth++
+        case ')':
+            depth--
+        case ' ':
+            if depth == 0 && strings.HasPrefix(lower[i:], " where ") || depth == 0 && strings.HasPrefix(lower[i:], " where(") {
+                return expr[:i] + clause + expr[i:]
+            }
+        }
+    }
+    return expr + clause
 }
 
 func renderConstraintDef(ct *schema.Constraint) string {
@@ -6359,9 +6449,9 @@ func renderConstraintDef(ct *schema.Constraint) string {
     case "unique":
         nulls := ""
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
-        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
-        return fmt.Sprintf("exclude %s", ct.Expression) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("exclude %s", excludeWithTablespace(ct.Expression, ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
     return ""
 }
@@ -6620,7 +6710,7 @@ func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
 }
 
 // renderIndexTail renders the clauses after an index's column list: INCLUDE,
-// NULLS NOT DISTINCT, WITH (storage parameters, sorted) and WHERE.
+// NULLS NOT DISTINCT, WITH (storage parameters, sorted), TABLESPACE and WHERE.
 func renderIndexTail(ix *schema.Index) string {
     out := ""
     if len(ix.Include) > 0 { out += " include (" + joinIdentList(ix.Include) + ")" }
@@ -6633,6 +6723,7 @@ func renderIndexTail(ix *schema.Index) string {
         for _, k := range keys { parts = append(parts, k+" = "+ix.With[k]) }
         out += " with (" + strings.Join(parts, ", ") + ")"
     }
+    if ix.Tablespace != "" { out += " tablespace " + quoteIdent(ix.Tablespace) }
     if ix.Where != "" { out += fmt.Sprintf(" where (%s)", ix.Where) }
     return out
 }
@@ -6678,10 +6769,12 @@ var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\
 
 // constraintMatchesLive compares named constraint ct with its live
 // definition from pg_get_constraintdef, leaving out index storage
-// parameters, which keyIndexStorageStmts changes in place.
+// parameters and the index's tablespace, which are changed in place.
 func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bool {
     strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
-    return constraintDefsEqual(strip(renderConstraintDef(ct)), strip(lt.ConstraintDefs[name]))
+    c := *ct
+    c.Tablespace = ""
+    return constraintDefsEqual(strip(renderConstraintDef(&c)), strip(lt.ConstraintDefs[name]))
 }
 
 // keyIndexStorageStmts changes the storage parameters of index idxFq, which
@@ -7017,4 +7110,10 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
         }
     }
     return out
+}
+
+// keyIndexTablespaceStmt moves the index behind a key or exclusion
+// constraint, which shares the constraint's name, to another tablespace.
+func keyIndexTablespaceStmt(fq, index, tablespace string) string {
+    return fmt.Sprintf("alter index %s set tablespace %s;", pqIdent(schemaPrefixOf(fq)+index), quoteIdent(tablespace))
 }

@@ -315,6 +315,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 lt.Options = map[string]string{}
                 for o, v := range vw.With { lt.Options[strings.ToLower(o)] = v }
             }
+            if vw.Tablespace != "" {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                lt.Tablespace = vw.Tablespace
+            }
             if len(vw.Indexes) > 0 {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
@@ -585,6 +590,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         lt.Options = map[string]string{}
         for k, v := range dt.With { lt.Options[strings.ToLower(k)] = v }
     }
+    if dt.Tablespace != "" { lt.Tablespace = dt.Tablespace }
     if dt.Grants != nil { out.TableGrants[fq] = simulateGrants(out.TableGrants[fq], dt.Grants) }
     if dt.Comment != "" { out.RelComments[fq] = dt.Comment }
 }
@@ -663,6 +669,7 @@ func cloneLive(l *Live) *Live {
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
+        DefaultTablespace:  l.DefaultTablespace,
         ViewProbes:         cloneMap(l.ViewProbes, nil),
         ViewDependents:     cloneMap(l.ViewDependents, nil),
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
