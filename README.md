@@ -158,9 +158,22 @@ policy:
   require_grants: [tables, views, functions]   # these must declare a grants block
   require_owners: true                  # every object must declare an owner (or a list of kinds)
   row_level_security: [app]             # tables in these schemas must enable RLS and declare a policy
+  concurrent_indexes: true              # indexes added to existing tables must set concurrently: true
 ```
 
-The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked.
+The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked. `concurrent_indexes` needs the database, so only `pgy diff` checks it.
+
+Two more `policy:` settings change what pgy does rather than adding checks:
+
+```yaml
+policy:
+  public_grants: authoritative   # or explicit; the default is by_kind
+  lock_timeout: 5s               # pgy migrate's default --lock-timeout
+  statement_timeout: 1min        # pgy migrate's default --statement-timeout
+```
+
+- **`public_grants`** sets which grants blocks cover PUBLIC. `by_kind`, the default, covers it where PostgreSQL gives PUBLIC nothing by default (see [grants](docs/schema.md#grants)). `authoritative` covers it in every grants block, so PostgreSQL's default `EXECUTE` on routines and `USAGE` on types, domains and the `public` schema are revoked unless the block lists `public`. `explicit` covers it only in blocks that list `public`.
+- **`lock_timeout`** and **`statement_timeout`** set the timeouts `pgy migrate` uses unless its `--lock-timeout` and `--statement-timeout` flags are given.
 
 ## Commands
 
@@ -212,7 +225,7 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 
 Foreign keys and checks added to an existing table don't need a warning: pgy adds them `NOT VALID` in the main migration, which enforces them for new rows straight away, and validates the existing rows in the no-transaction migration after it. `VALIDATE CONSTRAINT` doesn't block reads or writes. If existing rows violate the constraint, that migration fails and the constraint stays `NOT VALID`; fix the rows and migrate again (`pgy diff` emits the pending `VALIDATE` meanwhile). Set `notValid: true` to leave a constraint unvalidated. Before PostgreSQL 18 a partitioned table's foreign key cannot be `NOT VALID`, so it is still added validated, with a warning.
 
-Even a quick `ALTER TABLE` waits for its lock behind long-running queries, and every query that arrives meanwhile waits behind it. `pgy migrate --lock-timeout 2s --retries 5` gives up on a lock after two seconds instead, rolls the migration back and tries again, waiting `--retry-wait` (2s by default) before the first retry and twice as long before each later one, up to 30s. Deadlocks are retried the same way. Migrations without a transaction are never retried, because a failure can leave part of them applied.
+Even a quick `ALTER TABLE` waits for its lock behind long-running queries, and every query that arrives meanwhile waits behind it. `pgy migrate --lock-timeout 2s --retries 5` (or `policy.lock_timeout` in the config) gives up on a lock after two seconds instead, rolls the migration back and tries again, waiting `--retry-wait` (2s by default) before the first retry and twice as long before each later one, up to 30s. Deadlocks are retried the same way. Migrations without a transaction are never retried, because a failure can leave part of them applied.
 
 ### Migrations without a transaction
 

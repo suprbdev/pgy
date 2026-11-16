@@ -89,7 +89,7 @@ func TestGrantOption(t *testing.T) {
 			t.Errorf("desired %v live %v: revokes %q grants %q", c.desired, c.live, rv, gr)
 		}
 	}
-	_, gr := columnGrantDiffStmts("app.t", "a", map[string][]string{"r": {"update*"}}, nil)
+	_, gr := columnGrantDiffStmts("app.t", "a", map[string][]string{"r": {"update*"}}, nil, true)
 	if strings.Join(gr, "") != `grant update ("a") on table "app"."t" to "r" with grant option;` {
 		t.Errorf("column grant = %q", gr)
 	}

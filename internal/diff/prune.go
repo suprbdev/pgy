@@ -8,6 +8,20 @@ import (
     "github.com/suprbdev/pgy/internal/schema"
 )
 
+// PublicGrants is how grants blocks treat the PUBLIC pseudo-role.
+type PublicGrants int
+
+const (
+    // PublicByKind covers PUBLIC where PostgreSQL gives it nothing by
+    // default, and elsewhere only when a block lists public.
+    PublicByKind PublicGrants = iota
+    // PublicAuthoritative covers PUBLIC in every grants block, so PostgreSQL's
+    // default EXECUTE and USAGE are revoked unless the block lists public.
+    PublicAuthoritative
+    // PublicExplicit covers PUBLIC only in blocks that list public.
+    PublicExplicit
+)
+
 // Options controls optional Plan behaviour.
 type Options struct {
     // Unsafe enables destructive changes: DROP COLUMN, type changes,
@@ -18,6 +32,9 @@ type Options struct {
     // procedures, sequences, domains and types in managed schemas, and
     // triggers, constraints and indexes on declared tables. See planPrune.
     Prune bool
+    // PublicGrants sets which grants blocks cover PUBLIC
+    // (policy.public_grants); see planGrantsWarned.
+    PublicGrants PublicGrants
     // MigrationsTable is pgy's own bookkeeping table ("schema.table"), never
     // pruned. Empty means pgy.migrations.
     MigrationsTable string

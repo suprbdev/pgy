@@ -57,7 +57,7 @@ Exit codes:
                 return fmt.Errorf("--strict refuses --unsafe and --prune (set ci.forbid_unsafe: false in the config to allow them)")
             }
             strict := &strictFindings{}
-            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable}
+            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err
@@ -154,6 +154,7 @@ Exit codes:
                     for _, w := range s.Plan.Warnings {
                         if cfg.failsOn(w.Kind) { strict.add(w.Kind, w.Message) }
                     }
+                    cfg.indexPolicy(s.Plan.Warnings, strict, noWarnings)
                 }
             } else {
                 plan := diff.PlanWith(live, compiled, opts)
@@ -171,6 +172,7 @@ Exit codes:
                 for _, w := range plan.Warnings {
                     if cfg.failsOn(w.Kind) { strict.add(w.Kind, w.Message) }
                 }
+                cfg.indexPolicy(plan.Warnings, strict, noWarnings)
             }
 
             if jsonOut || cfg.JSON {

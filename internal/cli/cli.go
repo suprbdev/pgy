@@ -31,8 +31,10 @@ type GlobalConfig struct {
     Strict        bool
     FailOn        map[string]bool
     ForbidUnsafe  bool
-    // Policy holds the rules of the config's policy: block.
+    // Policy holds the rules of the config's policy: block, and Migrate its
+    // other settings.
     Policy        validate.Policy
+    Migrate       migratePolicy
 }
 
 // failsOn reports whether a --strict run fails on a finding of kind.
@@ -114,6 +116,9 @@ func AttachGlobalFlags(root *cobra.Command) {
             return err
         }
         if cfg.Policy, err = resolvePolicy(fc.Policy); err != nil {
+            return err
+        }
+        if cfg.Migrate, err = resolveMigratePolicy(fc.Policy); err != nil {
             return err
         }
 
