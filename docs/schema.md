@@ -343,6 +343,7 @@ schema public:
 schema public:
   table events_log:
     unlogged: true              # UNLOGGED: no WAL, emptied after a crash
+    tablespace: fast_ssd        # TABLESPACE (created outside pgy)
     with:                       # storage parameters
       fillfactor: 80
       autovacuum_vacuum_scale_factor: 0.05
@@ -357,6 +358,10 @@ schema public:
 ```
 
 `unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
+
+#### Tablespaces
+
+`tablespace:` puts a table, partition, materialized view, index, or the index of a primary key, unique or exclusion constraint in a tablespace that already exists; pgy doesn't create tablespaces. New objects get `TABLESPACE` (or `USING INDEX TABLESPACE`). An existing one in another tablespace is moved with `ALTER ... SET TABLESPACE`, which rewrites it under an `ACCESS EXCLUSIVE` lock, so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). An index with `concurrently: true` moves with `REINDEX (TABLESPACE ...) INDEX CONCURRENTLY` in the no-transaction migration instead, without blocking writes. On a partitioned table or index, `SET TABLESPACE` only sets the default for new partitions, so it has no warning. `tablespace: pg_default` moves an object back; a relation in the database's default tablespace matches its name. Without the key, the tablespace is unmanaged. `pgy pull` writes it for every relation stored outside the database default.
 
 #### Replica identity and extended statistics
 
@@ -415,6 +420,7 @@ primaryKey:
     columns: [col1, col2]
     include: [col3]           # optional: INCLUDE (non-key) columns of the key's index
     with: {fillfactor: 80}    # optional: storage parameters of the key's index
+    tablespace: fast_ssd      # optional: USING INDEX TABLESPACE for the key's index
     comment: "natural key"    # optional: COMMENT ON CONSTRAINT
 ```
 
@@ -439,6 +445,7 @@ indexes:
     concurrently: true      # optional: on an existing table, build without blocking writes
     with:                   # optional storage parameters
       fillfactor: 70
+    tablespace: archive     # optional TABLESPACE
     comment: "lookup by col1"   # optional COMMENT ON INDEX (diffed against live)
 ```
 
@@ -593,6 +600,7 @@ constraints:
     nullsNotDistinct: true      # unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     include: [col3]             # unique: INCLUDE (non-key) columns of its index
     with: {fillfactor: 70}      # unique: storage parameters of its index
+    tablespace: fast_ssd        # unique/exclude: USING INDEX TABLESPACE
     deferrable: true            # unique/exclude: DEFERRABLE
     initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
     noInherit: true             # check: NO INHERIT
@@ -791,6 +799,7 @@ schema public:
     query: "select count(*) as total, status from users group by status"
     withData: false
     with: {autovacuum_enabled: false}
+    tablespace: archive
     indexes:
       user_stats_status:
         columns: [status]

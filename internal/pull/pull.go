@@ -161,8 +161,6 @@ func (b *builder) unsupported() {
 		case !b.wantSchema(o.Schema):
 		case o.Kind == "cast":
 			b.warn("cast %s is not supported by pgy and was left out", o.Name)
-		case strings.HasSuffix(o.Kind, " tablespace"):
-			b.warn("%s %s.%s is stored in tablespace %s, which pgy does not manage; it was pulled without it", strings.TrimSuffix(o.Kind, " tablespace"), o.Schema, o.Name, o.Detail)
 		default:
 			b.warn("%s %s.%s is not supported by pgy and was left out", o.Kind, o.Schema, o.Name)
 		}
@@ -761,7 +759,7 @@ func (b *builder) tables() {
 			if pk := pkColumns(lt); len(pk) > 0 {
 				name := diff.LivePrimaryKeyName(lt)
 				li := lt.IndexDefs[name]
-				params := li != nil && (len(li.Include) > 0 || len(li.Options) > 0)
+				params := li != nil && (len(li.Include) > 0 || len(li.Options) > 0 || li.Tablespace != "")
 				if note := lt.ConstraintComments[name]; name != "" && (name != diff.DefaultPrimaryKeyName(fq) || note != "" || params) {
 					cols := flowMap()
 					add(cols, "columns", list(pk))
@@ -793,6 +791,9 @@ func (b *builder) tables() {
 				add(w, k, str(lt.Options[k]))
 			}
 			add(t, "with", w)
+		}
+		if lt.Foreign == nil {
+			addStr(t, "tablespace", lt.Tablespace)
 		}
 		b.data(t, fq, lt)
 		b.indexes(t, fq, lt)
@@ -1029,8 +1030,8 @@ func parenGroup(s string) (string, bool) {
 	return "", false
 }
 
-// indexParameters adds the include and with keys for the index backing a
-// primary key or unique constraint.
+// indexParameters adds the include, with and tablespace keys for the index
+// backing a primary key or unique constraint.
 func indexParameters(m *node, li *diff.LiveIndex) {
 	if li == nil {
 		return
@@ -1045,6 +1046,7 @@ func indexParameters(m *node, li *diff.LiveIndex) {
 		}
 		add(m, "with", w)
 	}
+	addStr(m, "tablespace", li.Tablespace)
 }
 
 func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
@@ -1135,6 +1137,9 @@ func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
 			}
 			add(c, "expression", str(expr))
 			deferral(c, tail)
+			if li := lt.IndexDefs[name]; li != nil {
+				addStr(c, "tablespace", li.Tablespace)
+			}
 			addStr(c, "comment", comment)
 			add(cons, name, c)
 		default:
@@ -1228,6 +1233,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 			}
 			add(m, "with", w)
 		}
+		addStr(m, "tablespace", li.Tablespace)
 		addStr(m, "where", li.Predicate)
 		addStr(m, "comment", lt.IndexComments[name])
 		add(idx, name, m)
@@ -1637,6 +1643,7 @@ func (b *builder) views() {
 					}
 					add(m, "with", w)
 				}
+				addStr(m, "tablespace", lt.Tablespace)
 				b.indexes(m, k, lt)
 			}
 		} else {

@@ -35,9 +35,7 @@ type LiveDetails struct {
     // classes and families, conversions, base types, casts, and text search
     // parsers and templates),
     // excluding extension members and objects other objects create (such as
-    // a range type's multirange casts), and the tables, materialized views and
-    // indexes stored outside the database's default tablespace (kind
-    // "<relation kind> tablespace", Detail the tablespace).
+    // a range type's multirange casts).
     Unsupported []UnsupportedObject
 }
 
@@ -97,14 +95,11 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'cast', case when st.typnamespace = 'pg_catalog'::regnamespace then tt.typnamespace else st.typnamespace end,
                    '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, ''
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
-            union all select case c.relkind when 'm' then 'materialized view' when 'i' then 'index' when 'I' then 'index' else 'table' end || ' tablespace',
-                   c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid, ts.spcname::text
-              from pg_class c join pg_tablespace ts on ts.oid = c.reltablespace where c.relkind in ('r', 'p', 'm', 'i', 'I')
         )
         select distinct o.kind, n.nspname, o.name, o.detail
         from objs o join pg_namespace n on n.oid = o.nsp
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
-        and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and (d.deptype = 'e' or d.deptype = 'i' and o.classid <> 'pg_class'::regclass))
+        and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype in ('e', 'i'))
         order by 2, 1, 3`
     if rows, err := pool.Query(ctx, unsupportedQ); err == nil {
         for rows.Next() {

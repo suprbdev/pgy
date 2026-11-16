@@ -91,6 +91,7 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
+    Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
@@ -302,6 +303,7 @@ type Table struct {
     PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
     PrimaryKeyInclude []string `yaml:"-"` // INCLUDE (non-key) columns of the primary key's index
     PrimaryKeyWith map[string]string `yaml:"-"` // storage parameters of the primary key's index
+    PrimaryKeyTablespace string     `yaml:"-"` // tablespace of the primary key's index; "" = unmanaged
     ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
     ForeignKeys []*ForeignKey  `yaml:"-"`
@@ -329,6 +331,7 @@ type Table struct {
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
+    Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -368,6 +371,7 @@ type Constraint struct {
     Columns           []string // for unique
     Include           []string // unique: INCLUDE (non-key) columns
     With              map[string]string // unique: index storage parameters, WITH (name = value)
+    Tablespace        string            // unique and exclude: USING INDEX TABLESPACE; "" = unmanaged
     NullsNotDistinct  bool     // unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     Deferrable        bool     // unique/exclude
     InitiallyDeferred bool     // unique/exclude; implies Deferrable
@@ -416,6 +420,7 @@ type Index struct {
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
+    Tablespace string           // TABLESPACE; "" = unmanaged
     Concurrently bool           // build on existing tables with CREATE INDEX CONCURRENTLY
     Comment   string            // empty means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -687,12 +692,15 @@ func Merge(dbs []*Database) *Database {
                 if t.With != nil {
                     existing.With = t.With
                 }
+                if t.Tablespace != "" {
+                    existing.Tablespace = t.Tablespace
+                }
                 if t.Foreign != nil {
                     existing.Foreign = t.Foreign
                 }
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey, existing.PrimaryKeyName, existing.PrimaryKeyComment = t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment
-                    existing.PrimaryKeyInclude, existing.PrimaryKeyWith = t.PrimaryKeyInclude, t.PrimaryKeyWith
+                    existing.PrimaryKeyInclude, existing.PrimaryKeyWith, existing.PrimaryKeyTablespace = t.PrimaryKeyInclude, t.PrimaryKeyWith, t.PrimaryKeyTablespace
                 }
                 if t.ForceRowLevelSecurity != nil {
                     existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
@@ -1525,6 +1533,7 @@ func parseIndexes(v any) []*Index {
                 if inc, ok := dm["include"]; ok { ix.Include = parseStringListFromNode(inc) }
                 if b, ok := dm["nullsNotDistinct"].(bool); ok { ix.NullsNotDistinct = b }
                 if b, ok := dm["concurrently"].(bool); ok { ix.Concurrently = b }
+                if ts, ok := dm["tablespace"].(string); ok { ix.Tablespace = strings.TrimSpace(ts) }
                 if w, ok := dm["with"].(map[string]any); ok {
                     ix.With = map[string]string{}
                     for k, v := range w { ix.With[k] = scalarToString(v) }
@@ -1683,6 +1692,7 @@ func parseConstraints(v any) []*Constraint {
                 if b, ok := dm["nullsNotDistinct"].(bool); ok { c.NullsNotDistinct = b }
                 if v, ok := dm["include"]; ok { c.Include = parseStringListFromNode(v) }
                 if w, ok := dm["with"].(map[string]any); ok { c.With = stringMap(w) }
+                if ts, ok := dm["tablespace"].(string); ok { c.Tablespace = strings.TrimSpace(ts) }
                 if b, ok := dm["deferrable"].(bool); ok { c.Deferrable = b }
                 if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
@@ -1703,6 +1713,7 @@ func parseConstraints(v any) []*Constraint {
 // parameters from its YAML map.
 func parseTableStorage(t *Table, m map[string]any) {
     if b, ok := m["unlogged"].(bool); ok { t.Unlogged = &b }
+    if ts, ok := m["tablespace"].(string); ok { t.Tablespace = strings.TrimSpace(ts) }
     if w, ok := m["with"].(map[string]any); ok {
         t.With = map[string]string{}
         for k, v := range w { t.With[k] = scalarToString(v) }
@@ -2469,6 +2480,7 @@ func parseView(schemaName, key string, body any) *View {
     if b, ok := m["securityBarrier"].(bool); ok { vw.SecurityBarrier = &b }
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
+    if ts, ok := m["tablespace"].(string); ok { vw.Tablespace = strings.TrimSpace(ts) }
     if w, ok := m["with"].(map[string]any); ok {
         vw.With = map[string]string{}
         for k, v := range w { vw.With[k] = scalarToString(v) }
@@ -2556,6 +2568,7 @@ func (t *Table) parsePrimaryKey(v any) {
         t.PrimaryKeyComment, _ = dm["comment"].(string)
         if inc, ok := dm["include"]; ok { t.PrimaryKeyInclude = parseStringListFromNode(inc) }
         if w, ok := dm["with"].(map[string]any); ok { t.PrimaryKeyWith = stringMap(w) }
+        if ts, ok := dm["tablespace"].(string); ok { t.PrimaryKeyTablespace = strings.TrimSpace(ts) }
     }
 }
 

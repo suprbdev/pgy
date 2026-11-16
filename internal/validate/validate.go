@@ -143,6 +143,11 @@ func Database(d *schema.Database) []Issue {
 	checkRenames(d, add)
 	checkOwnerGrants(d, add)
 	checkNameClashes(d, add)
+	for _, fq := range sortedKeys(d.Views) {
+		if v := d.Views[fq]; v != nil && !v.Materialized && v.Tablespace != "" {
+			add(Error, "view "+fq, "only materialized views have storage, so a plain view can't have a tablespace")
+		}
+	}
 	checkNameLengths(d, add)
 
 	for _, fq := range sortedKeys(d.Tables) {
@@ -241,6 +246,9 @@ func Database(d *schema.Database) []Issue {
 		}
 		if t.PartitionBy != nil {
 			checkPartitionKeys(t, obj, add)
+		}
+		if t.Foreign != nil && t.Tablespace != "" {
+			add(Error, obj, "a foreign table has no storage, so it can't have a tablespace")
 		}
 		for _, fk := range t.ForeignKeys {
 			if fk == nil {
