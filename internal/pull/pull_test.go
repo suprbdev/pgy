@@ -1,6 +1,7 @@
 package pull
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -175,5 +176,23 @@ func TestSerialShaped(t *testing.T) {
 		if serialShaped(&c, "integer") {
 			t.Errorf("%s: a sequence serial wouldn't recreate must stay explicit", name)
 		}
+	}
+}
+
+func TestDataNodeQuotesInexactNumbers(t *testing.T) {
+	for in, quoted := range map[string]bool{
+		"12.3456": false, "0.0000": false, "0.1": false, "9223372036854775807": false, "1e300": false,
+		"12345678901234567890.123456789012": true, "0.12345678901234567891": true,
+	} {
+		n := dataNode(json.Number(in), "numeric")
+		if got := n.Tag == "!!str"; got != quoted {
+			t.Errorf("%s: quoted = %v, want %v (node %+v)", in, got, quoted, n)
+		}
+	}
+	if n := dataNode([]any{json.Number("12345678901234567890.5")}, "numeric[]"); n.Content[0].Tag != "!!str" {
+		t.Errorf("array elements must be quoted too: %+v", n.Content[0])
+	}
+	if n := dataNode(json.Number("12345678901234567890.5"), "jsonb"); n.Tag == "!!str" {
+		t.Error("a jsonb number must stay a number")
 	}
 }

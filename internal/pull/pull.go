@@ -6,6 +6,7 @@ package pull
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1234,7 +1235,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 const identPart = `(?:"(?:[^"]|"")*"|[^\s".]+)`
 
 var (
-	triggerRe = regexp.MustCompile(`(?s)^CREATE (CONSTRAINT )?TRIGGER (` + identPart + `) (BEFORE|AFTER|INSTEAD OF) (.+?) ON ((?:` + identPart + `\.)*` + identPart + `)(.*?) FOR EACH (ROW|STATEMENT)(?: WHEN \((.*)\))? EXECUTE (?:FUNCTION|PROCEDURE) (.+)$`)
+	triggerRe  = regexp.MustCompile(`(?s)^CREATE (CONSTRAINT )?TRIGGER (` + identPart + `) (BEFORE|AFTER|INSTEAD OF) (.+?) ON ((?:` + identPart + `\.)*` + identPart + `)(.*?) FOR EACH (ROW|STATEMENT)(?: WHEN \((.*)\))? EXECUTE (?:FUNCTION|PROCEDURE) (.+)$`)
 	oldTableRe = regexp.MustCompile(`OLD TABLE AS (` + identPart + `)`)
 	newTableRe = regexp.MustCompile(`NEW TABLE AS (` + identPart + `)`)
 )
@@ -1335,7 +1336,7 @@ func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
 				continue
 			}
 			if v, ok := row[cn]; ok {
-				add(m, cn, jsonNode(v))
+				add(m, cn, dataNode(v, lc.Type))
 			}
 		}
 		list.Content = append(list.Content, m)
@@ -1360,6 +1361,47 @@ func compareJSON(a, b any) int {
 		}
 	}
 	return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
+}
+
+// dataNode renders a data value of a column of type typ. Outside json
+// and jsonb columns, a number YAML would round through float64 inexactly,
+// such as a numeric(38,12) value, is quoted, so the row is written with all
+// its digits.
+func dataNode(v any, typ string) *node {
+	if t := strings.ToLower(typ); t == "json" || t == "jsonb" {
+		return jsonNode(v)
+	}
+	switch x := v.(type) {
+	case json.Number:
+		if !floatExact(x) {
+			return str(x.String())
+		}
+	case []any:
+		n := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+		for _, e := range x {
+			n.Content = append(n.Content, dataNode(e, typ))
+		}
+		return n
+	}
+	return jsonNode(v)
+}
+
+// floatExact reports whether n survives YAML's float64 decoding: it is an
+// int64, or its shortest float64 form has the same decimal value.
+func floatExact(n json.Number) bool {
+	if _, err := n.Int64(); err == nil {
+		return true
+	}
+	f, err := n.Float64()
+	if err != nil {
+		return false
+	}
+	want, ok := new(big.Rat).SetString(n.String())
+	if !ok {
+		return false
+	}
+	got, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
+	return ok && want.Cmp(got) == 0
 }
 
 // jsonNode renders a value decoded from JSON as a YAML node.
