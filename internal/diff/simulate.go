@@ -433,6 +433,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if !override || c.NullableSet {
             lc.Nullable = c.Nullable
             if !c.Nullable { lc.NotNullNotValid = "" }
+            if !c.Nullable && c.NotValid { lc.NotNullNotValid = "simulated" }
         }
         if !override || c.Default != "" { lc.Default = c.Default }
         if c.Identity != "" {

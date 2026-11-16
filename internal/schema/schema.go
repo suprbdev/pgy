@@ -389,6 +389,7 @@ type Column struct {
     IdentityOptions *Sequence `yaml:"-"` // identity sequence options (increment, minValue, maxValue, start, cache, cycle, and Name: sequenceName, unqualified = the table's schema); nil = unmanaged
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
+    NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
     Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
@@ -1302,6 +1303,7 @@ func parseColumnSpec(spec any) *Column {
         if id, ok := m["identity"]; ok { c.Identity, c.IdentityOptions = parseIdentity(id), parseIdentityOptions(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
+        if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }

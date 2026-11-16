@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/suprbdev/pgy/internal/schema"
@@ -60,5 +61,47 @@ func TestTemporalConstraintColumns(t *testing.T) {
 	)
 	if p := Plan(live, desired, true); len(p.Alters) != 0 {
 		t.Errorf("equivalent temporal constraints must not diff, got %+v", p.Alters)
+	}
+}
+
+func TestNotNullNotValidColumn(t *testing.T) {
+	col := func() *schema.Column { return &schema.Column{Type: "int", NotValid: true} }
+	d := &schema.Database{Tables: map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}, "a": col()}}}}
+	live := emptyLive()
+	live.ServerVersion = 180001
+	p := Plan(live, d, false)
+	sql := Render(p)
+	if !strings.Contains(sql, `("a" int, "id" int not null)`) || !strings.Contains(sql, `alter table "app"."t" add constraint "t_a_not_null" not null "a" not valid;`) || len(p.Concurrent) != 0 {
+		t.Errorf("a new table gets the NOT NULL as NOT VALID and never validates it:\n%s", sql)
+	}
+	live = liveWithTable("app.t", map[string]*LiveColumn{"id": {Type: "integer"}, "a": {Type: "integer", Nullable: true}})
+	live.ServerVersion = 180001
+	live.Schemas["app"] = true
+	if p := Plan(live, d, false); !strings.Contains(Render(p), `add constraint "t_a_not_null" not null "a" not valid;`) || len(p.Concurrent) != 0 {
+		t.Errorf("an existing nullable column gets a NOT VALID NOT NULL, not validated:\n%s", sql)
+	}
+	live.Tables["app.t"].Columns["a"] = &LiveColumn{Type: "integer", NotNullNotValid: "t_a_nn"}
+	if sql := Render(Plan(live, d, false)); sql != "" {
+		t.Errorf("a live NOT VALID NOT NULL is left alone, got:\n%s", sql)
+	}
+	if p := Plan(live, d, false); len(p.Concurrent) != 0 {
+		t.Errorf("notValid must not validate, got %v", p.Concurrent)
+	}
+	d.Tables["app.t"].Columns["a"].NotValid = false
+	if p := Plan(live, d, false); !strings.Contains(strings.Join(p.Concurrent, "\n"), `validate constraint "t_a_nn"`) {
+		t.Errorf("without notValid it is validated, got %v", p.Concurrent)
+	}
+	d.Tables["app.t"].Columns["a"].NotValid = true
+	live = emptyLive()
+	live.ServerVersion = 170004
+	found := false
+	for _, w := range Plan(live, d, false).Warnings {
+		found = found || strings.Contains(w.Message, "notValid on column app.t.a needs PostgreSQL 18")
+	}
+	if !found {
+		t.Error("notValid needs PostgreSQL 18")
+	}
+	if sql := Render(Plan(Simulate(emptyLive(), d), d, false)); strings.Contains(sql, "constraint") {
+		t.Errorf("expected no changes after simulate, got:\n%s", sql)
 	}
 }

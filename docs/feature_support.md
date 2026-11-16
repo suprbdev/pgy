@@ -56,6 +56,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 - [x] **Clustering** (`clusterOn: <index>|none` → `ALTER TABLE ... CLUSTER ON` / `SET WITHOUT CLUSTER`, diffed against `indisclustered`)
 - [x] **Extended Statistics** (`statistics:` → `CREATE STATISTICS` with kinds and column/expression lists; drop+recreate on change, `statisticsTarget` → `ALTER STATISTICS ... SET STATISTICS`, comments, prunable)
 - [x] **Generated Columns** (Column `generated: <expr>` → `GENERATED ALWAYS AS (expr) STORED`, or `VIRTUAL` with `virtual: true` on PG18+; live generation expressions introspected and compared normalized; under `--unsafe` a changed expression emits `SET EXPRESSION` (PG17+; a warning on 15/16) and a removed one `DROP EXPRESSION`)
+- [x] **NOT NULL NOT VALID** (PostgreSQL 18: a column with `notValid: true` keeps its not-null constraint `NOT VALID`; pulled from `convalidated = false` not-null constraints)
 - [x] **Identity Columns** (Column `identity: always | byDefault`, or a map with sequence options (start/increment/minValue/maxValue/cache/cycle, and `sequenceName`, renamed in place) → `GENERATED ... AS IDENTITY (...)`; kind and options diffed → `SET GENERATED` / `SET <option>`; added to or dropped from existing columns under `--unsafe`; overrides `default`)
 
 ## Migration Workflow

@@ -548,6 +548,10 @@
           "type": "boolean",
           "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
         },
+        "notValid": {
+          "type": "boolean",
+          "description": "Keep the column's NOT NULL constraint NOT VALID, so existing rows aren't checked and pgy diff never validates it. PostgreSQL 18+."
+        },
         "using": {
           "type": "string",
           "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
@@ -578,6 +582,7 @@
         },
         "generated": { "type": "string", "minLength": 1 },
         "virtual": { "type": "boolean" },
+        "notValid": { "type": "boolean" },
         "collate": { "type": "string", "minLength": 1 },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"] },

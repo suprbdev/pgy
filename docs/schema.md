@@ -313,6 +313,7 @@ database:
 | `nDistinct` | number | Planner override for the column's number of distinct values → `ALTER COLUMN ... SET (n_distinct = <n>)`: a positive count, or a negative fraction of the row count (`-1` = every value distinct). `0` removes the override. Diffed against live; omitted = unmanaged. Takes effect at the next `ANALYZE` |
 | `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
+| `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. A rebuilt database names it `<table>_<column>_not_null`. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
 

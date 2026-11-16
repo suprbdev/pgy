@@ -903,6 +903,8 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		}
 		if lc.Nullable {
 			add(c, "nullable", boolean(true))
+		} else if lc.NotNullNotValid != "" {
+			add(c, "notValid", boolean(true))
 		}
 		switch {
 		case lc.Generated != "":
