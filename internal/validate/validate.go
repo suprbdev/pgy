@@ -336,6 +336,17 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, obj, "column %s sets virtual without generated", cn)
 			}
 		}
+		for _, cn := range sortedKeys(t.Columns) {
+			c := t.Columns[cn]
+			if c == nil || c.Generated == "" {
+				continue
+			}
+			for _, ref := range exprIdentifiers(c.Generated) {
+				if g := t.Columns[ref]; g != nil && g.Generated != "" {
+					add(Error, obj, "generated column %s uses generated column %s; PostgreSQL doesn't allow that, so repeat %s's expression instead", cn, ref, ref)
+				}
+			}
+		}
 		if idx, ok := strings.CutPrefix(t.ReplicaIdentity, "index "); ok {
 			found := false
 			for _, ix := range t.Indexes {
@@ -585,8 +596,46 @@ func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(S
 	} else if r := noArgReturns(d, keys); r != "" && r != "trigger" {
 		add(Error, obj, "trigger %s calls %s, which returns %s; trigger functions must return trigger", tr.Name, proc, r)
 	}
-	if strings.EqualFold(strings.Join(strings.Fields(tr.Timing), " "), "instead of") && !strings.HasPrefix(obj, "view ") {
+	timing := strings.ToLower(strings.Join(strings.Fields(tr.Timing), " "))
+	if timing == "instead of" && !strings.HasPrefix(obj, "view ") {
 		add(Error, obj, "trigger %s: instead of triggers are only allowed on views", tr.Name)
+	}
+	row := tr.Constraint || timing == "instead of" || strings.EqualFold(strings.TrimSpace(tr.Level), "row")
+	events := map[string]bool{}
+	columnList := false
+	for _, e := range tr.Events {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if strings.HasPrefix(e, "update of ") {
+			columnList = true
+			e = "update"
+		}
+		events[e] = true
+	}
+	if !row && tr.When != "" {
+		for _, id := range exprIdentifiers(tr.When) {
+			if id == "new" || id == "old" {
+				add(Error, obj, "trigger %s: a statement-level trigger's when can't refer to new or old; set level: row", tr.Name)
+				break
+			}
+		}
+	}
+	if row && events["truncate"] {
+		add(Error, obj, "trigger %s: truncate triggers must be statement-level", tr.Name)
+	}
+	if tr.OldTable == "" && tr.NewTable == "" {
+		return
+	}
+	switch {
+	case timing != "after" || tr.Constraint:
+		add(Error, obj, "trigger %s: transition tables (oldTable, newTable) need an after trigger", tr.Name)
+	case len(events) > 1:
+		add(Error, obj, "trigger %s: transition tables can't be used with more than one event", tr.Name)
+	case columnList:
+		add(Error, obj, "trigger %s: transition tables can't be used with update of a column list", tr.Name)
+	case tr.OldTable != "" && !events["update"] && !events["delete"]:
+		add(Error, obj, "trigger %s: oldTable needs an update or delete trigger", tr.Name)
+	case tr.NewTable != "" && !events["update"] && !events["insert"]:
+		add(Error, obj, "trigger %s: newTable needs an insert or update trigger", tr.Name)
 	}
 }
 
@@ -1445,4 +1494,53 @@ func checkPartitionKeys(t *schema.Table, obj string, add func(Severity, string, 
 			check("unique index "+ix.Name, ix.Columns)
 		}
 	}
+}
+
+// exprIdentifiers returns the identifiers an SQL expression refers to,
+// outside string literals and leaving out function names: unquoted ones
+// lower-cased, quoted ones as written.
+func exprIdentifiers(expr string) []string {
+	out := []string{}
+	isStart := func(b byte) bool { return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' }
+	isPart := func(b byte) bool { return isStart(b) || b == '$' || b >= '0' && b <= '9' }
+	for i := 0; i < len(expr); {
+		switch c := expr[i]; {
+		case c == '\'':
+			j := i + 1
+			for j < len(expr) && (expr[j] != '\'' || j+1 < len(expr) && expr[j+1] == '\'') {
+				if expr[j] == '\'' {
+					j++
+				}
+				j++
+			}
+			i = j + 1
+		case c == '"':
+			j := strings.IndexByte(expr[i+1:], '"')
+			if j < 0 {
+				return out
+			}
+			out = append(out, expr[i+1:i+1+j])
+			i += j + 2
+		case isStart(c):
+			j := i
+			for j < len(expr) && isPart(expr[j]) {
+				j++
+			}
+			k := j
+			for k < len(expr) && expr[k] == ' ' {
+				k++
+			}
+			if k >= len(expr) || expr[k] != '(' {
+				out = append(out, strings.ToLower(expr[i:j]))
+			}
+			i = j
+		case c >= '0' && c <= '9':
+			for i < len(expr) && isPart(expr[i]) {
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return out
 }

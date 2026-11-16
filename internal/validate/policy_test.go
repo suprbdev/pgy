@@ -308,3 +308,71 @@ schema app:
 		}
 	}
 }
+
+func TestValidateGeneratedChains(t *testing.T) {
+	path := write(t, t.TempDir(), "g.yml", `
+schema app:
+  table t:
+    columns:
+      id: {type: int, primaryKey: true}
+      a: {type: int, nullable: true}
+      b: {type: int, nullable: true, generated: "a * 2"}
+      c: {type: int, nullable: true, generated: "b + 1"}
+      Q: {type: int, nullable: true, generated: "a"}
+      d: {type: text, nullable: true, generated: "'b' || \"Q\""}
+      e: {type: text, nullable: true, generated: "b(a)::text"}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{"generated column c uses generated column b", "generated column d uses generated column Q"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "generated column d uses generated column b") || strings.Contains(got, "generated column e uses") {
+		t.Errorf("string literals and function calls are not column references:\n%s", got)
+	}
+}
+
+func TestValidateTriggerRules(t *testing.T) {
+	path := write(t, t.TempDir(), "tr.yml", `
+schema app:
+  function f():
+    returns: trigger
+    language: plpgsql
+    body: begin return null; end
+  table t:
+    columns: {id: {type: int, primaryKey: true}, a: {type: int}}
+    triggers:
+      s1: {timing: after, events: [update], procedure: app.f(), when: "new.a > 0"}
+      s2: {timing: after, events: [truncate], procedure: app.f(), level: row}
+      s3: {timing: before, events: [update], procedure: app.f(), referencing: {new: nt}}
+      s4: {timing: after, events: [insert], procedure: app.f(), referencing: {old: ot}}
+      s5: {timing: after, events: [update of a], procedure: app.f(), referencing: {new: nt}}
+      s6: {timing: after, events: [insert, update], procedure: app.f(), referencing: {new: nt}}
+      ok1: {timing: after, events: [update], procedure: app.f(), when: "true"}
+      ok2: {timing: after, events: [update], procedure: app.f(), level: row, when: "new.a > old.a"}
+      ok3: {timing: after, events: [update], procedure: app.f(), referencing: {old: ot, new: nt}}
+      ok4: {timing: after, events: [truncate], procedure: app.f()}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"trigger s1: a statement-level trigger's when can't refer to new or old",
+		"trigger s2: truncate triggers must be statement-level",
+		"trigger s3: transition tables (oldTable, newTable) need an after trigger",
+		"trigger s4: oldTable needs an update or delete trigger",
+		"trigger s5: transition tables can't be used with update of a column list",
+		"trigger s6: transition tables can't be used with more than one event",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "additionalProperties") {
+		t.Fatalf("the fixture must be valid YAML for pgy:\n%s", got)
+	}
+	for _, fine := range []string{"trigger ok1", "trigger ok2", "trigger ok3", "trigger ok4"} {
+		if strings.Contains(got, fine) {
+			t.Errorf("%s is valid but was flagged:\n%s", fine, got)
+		}
+	}
+}
