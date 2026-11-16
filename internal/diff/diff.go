@@ -2880,6 +2880,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     sort.Strings(cols)
                 }
                 for _, cn := range inherited { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil)...) }
+                for _, cn := range sortedKeys(dt.Columns) {
+                    if c := dt.Columns[cn]; c != nil && c.NotValid && !c.Nullable && !inheritedColumn(dt, c, nil) {
+                        plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn))
+                    }
+                }
                 if dt.Foreign != nil {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s) server %s%s;", pqIdent(fq), strings.Join(cols, ", "), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
@@ -2942,16 +2947,17 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         // otherwise run before the column exists and force a
                         // two-migration split.
                         plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
+                        if c.NotValid && !c.Nullable { plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn)) }
                         plan.Alters = append(plan.Alters, newColumnStmts(fq, cn, c)...)
                         continue
                     }
                     if name := notNullNotValidName(fq, cn, c, lc, lt, dt, pkCols, live.ServerVersion); name != "" {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), pqIdent(cn)))
-                        plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name)))
+                        if !c.NotValid { plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name))) }
                         enforced := *lc
                         enforced.Nullable = false
                         lc = &enforced
-                    } else if lc.NotNullNotValid != "" && !c.Nullable {
+                    } else if lc.NotNullNotValid != "" && !c.Nullable && !c.NotValid {
                         plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
                     }
                     stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
@@ -3920,6 +3926,13 @@ func hasForeignPartition(live *Live, fq string) bool {
 // key, identity and generated columns, on foreign tables and partitions,
 // and when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip
 // the scan.
+// notValidNotNullStmt adds column cn's NOT NULL constraint NOT VALID, under
+// PostgreSQL's default name, for a column declared notValid.
+func notValidNotNullStmt(fq, cn string) string {
+    _, table := splitQualified(fq)
+    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(makeObjectName(table+"_"+cn, "not_null")), pqIdent(cn))
+}
+
 func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
     switch {
     case serverVersion < 180000, c.Nullable, !lc.Nullable:
@@ -6521,7 +6534,7 @@ func renderColumn(name string, c *schema.Column) string {
     parts := []string{pqIdent(name), c.Type}
     if c.Compression != "" && c.Compression != "default" { parts = append(parts, "compression "+c.Compression) }
     if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
-    if !c.Nullable { parts = append(parts, "not null") }
+    if !c.Nullable && !c.NotValid { parts = append(parts, "not null") }
     if c.Generated != "" {
         kind := "stored"
         if c.Virtual { kind = "virtual" }
@@ -6953,6 +6966,9 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
         for _, cn := range sortedKeys(t.Columns) {
             if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil) {
                 need(fmt.Sprintf("virtual generated column %s.%s", fq, cn), 18)
+            }
+            if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
+                need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
             }
         }
         for _, ct := range t.Constraints {
