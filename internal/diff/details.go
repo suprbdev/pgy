@@ -34,7 +34,8 @@ type LiveDetails struct {
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, and text search
     // parsers and templates),
-    // excluding extension members, and the tables, materialized views and
+    // excluding extension members and objects other objects create (such as
+    // a range type's multirange casts), and the tables, materialized views and
     // indexes stored outside the database's default tablespace (kind
     // "<relation kind> tablespace", Detail the tablespace).
     Unsupported []UnsupportedObject
@@ -103,7 +104,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         select distinct o.kind, n.nspname, o.name, o.detail
         from objs o join pg_namespace n on n.oid = o.nsp
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
-        and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype = 'e')
+        and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and (d.deptype = 'e' or d.deptype = 'i' and o.classid <> 'pg_class'::regclass))
         order by 2, 1, 3`
     if rows, err := pool.Query(ctx, unsupportedQ); err == nil {
         for rows.Next() {

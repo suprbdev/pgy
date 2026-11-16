@@ -28,7 +28,8 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		create type x.addr as (street text, city text);
 		create table x.addresses of x.addr (primary key (street));
 		create function x.rn() returns bigint language internal window as 'window_row_number';
-		create aggregate x.my_mode(order by anyelement) (sfunc = ordered_set_transition, stype = internal, finalfunc = mode_final, finalfunc_extra);`); err != nil {
+		create aggregate x.my_mode(order by anyelement) (sfunc = ordered_set_transition, stype = internal, finalfunc = mode_final, finalfunc_extra);
+		create type x.float_range as range (subtype = float8);`); err != nil {
 		t.Fatal(err)
 	}
 	res, err := pull.Build(introspectAll(t, db), pull.Options{})
@@ -44,6 +45,9 @@ func TestIntegrationPullReportsUnsupportedObjects(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "x.float_range") {
+		t.Errorf("the casts a range type creates for its multirange are not reported:\n%s", got)
 	}
 	if strings.Contains(got, "my_mode") {
 		t.Errorf("ordered-set aggregates are pulled, not reported:\n%s", got)
