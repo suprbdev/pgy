@@ -189,3 +189,30 @@ schema app:
 		t.Errorf("names are case-sensitive, so shared and Shared don't clash:\n%s", got)
 	}
 }
+
+func TestValidateNameLengths(t *testing.T) {
+	long := strings.Repeat("x", 64)
+	ok := strings.Repeat("y", 63)
+	path := write(t, t.TempDir(), "l.yml", `
+schema app:
+  table `+ok+`:
+    columns: {id: {type: int, primaryKey: true}, `+long+`: {type: int}}
+    indexes: {`+long+`: {columns: [id]}}
+  type mood:
+    type: enum
+    labels: [`+long+`]
+  function `+long+`():
+    returns: int
+    language: sql
+    body: select 1
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{`column "` + long + `" is 64 bytes`, `index "` + long + `" is 64 bytes`, `enum label "` + long + `" is 64 bytes`, `function "` + long + `" is 64 bytes`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `table "`+ok+`"`) {
+		t.Errorf("a 63-byte name is fine:\n%s", got)
+	}
+}

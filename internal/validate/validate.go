@@ -143,6 +143,7 @@ func Database(d *schema.Database) []Issue {
 	checkRenames(d, add)
 	checkOwnerGrants(d, add)
 	checkNameClashes(d, add)
+	checkNameLengths(d, add)
 
 	for _, fq := range sortedKeys(d.Tables) {
 		t := d.Tables[fq]
@@ -1183,5 +1184,132 @@ func checkNameClashes(d *schema.Database, add func(Severity, string, string, ...
 		if d.Domains[fq] != nil {
 			claim(types, fq, "domain "+fq)
 		}
+	}
+}
+
+// maxIdentifier is the longest name PostgreSQL keeps (NAMEDATALEN - 1
+// bytes); longer ones are truncated, so pgy would never find the object
+// under its declared name again.
+const maxIdentifier = 63
+
+// checkNameLengths reports declared names longer than maxIdentifier bytes.
+func checkNameLengths(d *schema.Database, add func(Severity, string, string, ...any)) {
+	check := func(obj, what, name string) {
+		if len(name) > maxIdentifier {
+			add(Error, obj, "%s %q is %d bytes; PostgreSQL truncates names to %d bytes, so pgy would never find it again", what, name, len(name), maxIdentifier)
+		}
+	}
+	last := func(fq string) string {
+		if i := strings.LastIndexByte(fq, '.'); i >= 0 {
+			return fq[i+1:]
+		}
+		return fq
+	}
+	schemas := map[string]bool{}
+	qualified := func(kind, fq string) {
+		obj := kind + " " + fq
+		if i := strings.IndexByte(fq, '.'); i >= 0 {
+			schemas[fq[:i]] = true
+		}
+		check(obj, kind, last(fq))
+	}
+	for _, fq := range sortedKeys(d.Tables) {
+		t := d.Tables[fq]
+		if t == nil {
+			continue
+		}
+		obj := "table " + fq
+		qualified("table", fq)
+		for _, c := range sortedKeys(t.Columns) {
+			check(obj, "column", c)
+		}
+		check(obj, "primary key", t.PrimaryKeyName)
+		for _, ix := range t.Indexes {
+			if ix != nil {
+				check(obj, "index", ix.Name)
+			}
+		}
+		for _, ct := range t.Constraints {
+			if ct != nil {
+				check(obj, "constraint", ct.Name)
+			}
+		}
+		for _, fk := range t.ForeignKeys {
+			if fk != nil {
+				check(obj, "foreign key", fk.Name)
+			}
+		}
+		for _, tg := range t.Triggers {
+			if tg != nil {
+				check(obj, "trigger", tg.Name)
+			}
+		}
+		for _, r := range t.Rules {
+			if r != nil {
+				check(obj, "rule", r.Name)
+			}
+		}
+		for _, st := range t.Statistics {
+			if st != nil {
+				check(obj, "statistics", st.Name)
+			}
+		}
+		for _, p := range t.Policies {
+			if p != nil {
+				check(obj, "policy", p.Name)
+			}
+		}
+	}
+	for _, fq := range sortedKeys(d.Views) {
+		if v := d.Views[fq]; v != nil {
+			qualified("view", fq)
+			for _, ix := range v.Indexes {
+				if ix != nil {
+					check("view "+fq, "index", ix.Name)
+				}
+			}
+		}
+	}
+	for _, fq := range sortedKeys(d.Sequences) {
+		qualified("sequence", fq)
+	}
+	for _, fq := range sortedKeys(d.Types) {
+		td := d.Types[fq]
+		if td == nil {
+			continue
+		}
+		qualified("type", fq)
+		for _, l := range td.Labels {
+			check("type "+fq, "enum label", l)
+		}
+		for _, a := range sortedKeys(td.Attributes) {
+			check("type "+fq, "attribute", a)
+		}
+	}
+	for _, fq := range sortedKeys(d.Domains) {
+		if dm := d.Domains[fq]; dm != nil {
+			qualified("domain", fq)
+			for _, c := range sortedKeys(dm.Checks) {
+				check("domain "+fq, "constraint", c)
+			}
+		}
+	}
+	routine := func(kind string, keys []string) {
+		for _, k := range keys {
+			name := schema.RoutineName(k)
+			if i := strings.IndexByte(name, '.'); i >= 0 {
+				schemas[name[:i]] = true
+			}
+			check(kind+" "+k, kind, last(name))
+		}
+	}
+	routine("function", sortedKeys(d.Functions))
+	routine("procedure", sortedKeys(d.Procedures))
+	routine("aggregate", sortedKeys(d.Aggregates))
+	for _, r := range sortedKeys(d.Roles) {
+		check("role "+r, "role", r)
+	}
+	for _, s := range sortedKeys(schemas) {
+		check("schema "+s, "schema", s)
 	}
 }
