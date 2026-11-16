@@ -93,7 +93,7 @@ Exit codes:
                     base := filepath.Base(f)
                     m := db.Migration{
                         SQL: string(b), Name: base, Checksum: sum,
-                        LockTimeout: lockTimeout, StatementTimeout: statementTimeout,
+                        LockTimeout: firstNonEmpty(lockTimeout, cfg.Migrate.LockTimeout), StatementTimeout: firstNonEmpty(statementTimeout, cfg.Migrate.StatementTimeout),
                         RecordIn: schemaName + "." + tableName,
                         NoTransaction: db.HasNoTransactionDirective(string(b)),
                     }
@@ -119,8 +119,8 @@ Exit codes:
     c.Flags().StringVar(&until, "until", "", "Apply up to a specific migration (prefix ok)")
     c.Flags().IntVar(&limit, "limit", 0, "Apply at most N pending migrations")
     c.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be applied")
-    c.Flags().StringVar(&lockTimeout, "lock-timeout", "", "SET lock_timeout (e.g. 5s)")
-    c.Flags().StringVar(&statementTimeout, "statement-timeout", "", "SET statement_timeout (e.g. 30s)")
+    c.Flags().StringVar(&lockTimeout, "lock-timeout", "", "SET lock_timeout (e.g. 5s); default: the config's policy.lock_timeout")
+    c.Flags().StringVar(&statementTimeout, "statement-timeout", "", "SET statement_timeout (e.g. 30s); default: the config's policy.statement_timeout")
     c.Flags().IntVar(&retries, "retries", 0, "Retry a migration up to N times when it fails to get a lock (lock_timeout or deadlock); migrations without a transaction are not retried")
     c.Flags().DurationVar(&retryWait, "retry-wait", 2*time.Second, "Wait before the first retry; doubled after each retry, up to 30s")
     return c
@@ -205,4 +205,11 @@ func parseChecksumHeader(s string) string {
 func isLockFailure(err error) bool {
     var pgErr *pgconn.PgError
     return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
+}
+
+func firstNonEmpty(vals ...string) string {
+    for _, v := range vals {
+        if v != "" { return v }
+    }
+    return ""
 }

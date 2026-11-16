@@ -215,3 +215,9 @@ func atoi(s string) int {
     n, _ := strconv.Atoi(s)
     return n
 }
+
+// BlockingIndexBuild reports whether w warns about a CREATE INDEX that blocks
+// writes to an existing table, which concurrently: true would avoid.
+func (w Warning) BlockingIndexBuild() bool {
+    return w.Kind == "lock" && lockIndexRe.MatchString(w.Statement)
+}

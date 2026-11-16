@@ -4,11 +4,13 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "regexp"
     "slices"
     "strings"
 
     yaml "gopkg.in/yaml.v3"
 
+    "github.com/suprbdev/pgy/internal/diff"
     "github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -33,6 +35,42 @@ type PolicyConfig struct {
     RequireGrants    []string `yaml:"require_grants"`
     RequireOwners    any      `yaml:"require_owners"`
     RowLevelSecurity []string `yaml:"row_level_security"`
+    ConcurrentIndexes bool    `yaml:"concurrent_indexes"`
+    PublicGrants     string   `yaml:"public_grants"`
+    LockTimeout      string   `yaml:"lock_timeout"`
+    StatementTimeout string   `yaml:"statement_timeout"`
+}
+
+// migratePolicy holds the policy: settings that aren't schema rules: how
+// pgy diff treats PUBLIC and indexes, and pgy migrate's default timeouts.
+type migratePolicy struct {
+    ConcurrentIndexes bool
+    PublicGrants      diff.PublicGrants
+    LockTimeout, StatementTimeout string
+}
+
+var durationRe = regexp.MustCompile(`^\d+(\.\d+)?\s*(us|ms|s|min|h|d)?$`)
+
+// resolveMigratePolicy checks the policy: block's non-rule settings.
+func resolveMigratePolicy(pc *PolicyConfig) (migratePolicy, error) {
+    mp := migratePolicy{}
+    if pc == nil { return mp, nil }
+    mp.ConcurrentIndexes = pc.ConcurrentIndexes
+    switch pc.PublicGrants {
+    case "", "by_kind":
+    case "authoritative":
+        mp.PublicGrants = diff.PublicAuthoritative
+    case "explicit":
+        mp.PublicGrants = diff.PublicExplicit
+    default:
+        return mp, fmt.Errorf("policy.public_grants: unknown value %q (use by_kind, authoritative or explicit)", pc.PublicGrants)
+    }
+    for _, t := range []struct{ key, v string; dst *string }{{"lock_timeout", pc.LockTimeout, &mp.LockTimeout}, {"statement_timeout", pc.StatementTimeout, &mp.StatementTimeout}} {
+        if t.v == "" { continue }
+        if !durationRe.MatchString(strings.TrimSpace(t.v)) { return mp, fmt.Errorf("policy.%s: %q is not a duration such as 5s or 500ms", t.key, t.v) }
+        *t.dst = strings.TrimSpace(t.v)
+    }
+    return mp, nil
 }
 
 // resolvePolicy checks a policy: block and returns the rules it enables.
