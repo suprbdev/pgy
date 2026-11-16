@@ -210,6 +210,7 @@ type ColumnDependent struct {
 // Inherit is the member's INHERIT attribute and Set is always true.
 type LiveMembership struct {
     Admin, Inherit, Set bool
+    Grantors []string // roles that granted the membership; PostgreSQL 16+ keeps one grant per grantor
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -1720,7 +1721,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     memQ := `
         select m.rolname, r.rolname, bool_or(am.admin_option),
                bool_or(coalesce((to_jsonb(am) ->> 'inherit_option')::boolean, m.rolinherit)),
-               bool_or(coalesce((to_jsonb(am) ->> 'set_option')::boolean, true))
+               bool_or(coalesce((to_jsonb(am) ->> 'set_option')::boolean, true)),
+               array_agg(distinct coalesce(pg_get_userbyid(am.grantor), '') order by coalesce(pg_get_userbyid(am.grantor), ''))
         from pg_auth_members am
         join pg_roles m on m.oid = am.member
         join pg_roles r on r.oid = am.roleid
@@ -1772,7 +1774,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for memRows.Next() {
             var member, parent string
             lm := &LiveMembership{}
-            if err := memRows.Scan(&member, &parent, &lm.Admin, &lm.Inherit, &lm.Set); err != nil {
+            if err := memRows.Scan(&member, &parent, &lm.Admin, &lm.Inherit, &lm.Set, &lm.Grantors); err != nil {
                 return err
             }
             if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
@@ -2472,7 +2474,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
     // policies, and memberships later in the plan
-    planRoles(plan, live, desired)
+    planRoles(plan, live, desired, opts.Unsafe && opts.Prune)
 
     // Collect all schemas needed from desired entities
     neededSchemas := map[string]bool{}
@@ -2996,10 +2998,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     return plan
 }
 
-// planRoles emits CREATE ROLE for roles missing from live and GRANT <parent>
-// TO <role> for missing memberships. Forward-only: existing roles are never
-// altered or dropped; removed memberships are not revoked.
-func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
+// planRoles emits CREATE ROLE for roles missing from live, ALTER ROLE for
+// changed attributes and settings, and GRANT <parent> TO <role> for missing
+// memberships. Roles are never dropped. With prune, a role whose inRoles is
+// declared also loses the memberships it doesn't list.
+func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool) {
     names := make([]string, 0, len(desired.Roles))
     for k := range desired.Roles { names = append(names, k) }
     sort.Strings(names)
@@ -3020,7 +3023,34 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database) {
             if parent == "" { continue }
             plan.Alters = append(plan.Alters, membershipStmts(plan, live, name, parent, r.MemberOptions[parent])...)
         }
+        if prune && r.InRoles != nil && live.Roles[name] {
+            plan.Drops = append(plan.Drops, revokeMembershipStmts(live, name, r.InRoles)...)
+        }
     }
+}
+
+// revokeMembershipStmts revokes member's live memberships in roles that
+// declared doesn't list. PostgreSQL 16+ records a grant per grantor, and
+// REVOKE only removes the current user's unless GRANTED BY names another,
+// so it emits one REVOKE per grantor there.
+func revokeMembershipStmts(live *Live, member string, declared []string) []string {
+    keep := map[string]bool{}
+    for _, p := range declared { keep[p] = true }
+    out := []string{}
+    for _, parent := range sortedKeys(live.RoleMembers[member]) {
+        if keep[parent] { continue }
+        target := fmt.Sprintf("revoke %s from %s", grantRole(parent), grantRole(member))
+        lm := live.RoleMemberOptions[member][parent]
+        if live.ServerVersion < 160000 || lm == nil || len(lm.Grantors) == 0 {
+            out = append(out, target+";")
+            continue
+        }
+        for _, g := range lm.Grantors {
+            if g == "" { out = append(out, target+";"); continue }
+            out = append(out, fmt.Sprintf("%s granted by %s;", target, grantRole(g)))
+        }
+    }
+    return out
 }
 
 // membershipStmts grants parent to member with the options o sets, or, for
