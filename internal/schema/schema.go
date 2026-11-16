@@ -2087,7 +2087,9 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, dm := range d.Domains {
         if dm == nil { continue }
-        e := Entity{Key: k, Kind: "domain", DependsOn: dm.DependsOn}
+        exprs := []string{dm.Default, dm.Check}
+        for _, c := range dm.Checks { exprs = append(exprs, c) }
+        e := Entity{Key: k, Kind: "domain", DependsOn: append(append([]string{}, dm.DependsOn...), calledFunctionDeps(d, k, exprs...)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2099,7 +2101,8 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     }
     for k, fn := range d.Functions {
         if fn == nil { continue }
-        e := Entity{Key: k, Kind: "function", DependsOn: append(append([]string{}, fn.DependsOn...), rowTypeDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)}
+        deps := append(append([]string{}, fn.DependsOn...), rowTypeDeps(d, k, append(argTypes(fn.ArgsSig), returnTypes(fn.Returns)...)...)...)
+        e := Entity{Key: k, Kind: "function", DependsOn: append(deps, calledFunctionDeps(d, k, fn.ArgsSig)...)}
         entities = append(entities, e)
         entityMap[k] = e
     }
@@ -2800,6 +2803,34 @@ func rowTypeDeps(d *Database, self string, types ...string) []string {
             continue
         }
         seen[name] = true
+    }
+    return out
+}
+
+// calledFunctionRe matches a possibly schema-qualified function call.
+var calledFunctionRe = regexp.MustCompile(`([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*\(`)
+
+// calledFunctionDeps returns dependsOn entries for the declared functions,
+// other than self, that the expressions call (domain defaults and checks,
+// argument defaults), which PostgreSQL resolves when it creates the
+// object. Unqualified calls only match functions in public, so a built-in
+// such as length() isn't taken for an app.length().
+func calledFunctionDeps(d *Database, self string, exprs ...string) []string {
+    out := []string{}
+    seen := map[string]bool{}
+    for _, e := range exprs {
+        for _, m := range calledFunctionRe.FindAllStringSubmatch(e, -1) {
+            name := m[1]
+            if !strings.Contains(name, ".") { name = "public." + name }
+            if seen[name] { continue }
+            seen[name] = true
+            for k, f := range d.Functions {
+                if f != nil && k != self && RoutineName(k) == name && !strings.EqualFold(strings.TrimSpace(f.Returns), "trigger") {
+                    out = append(out, "function "+name)
+                    break
+                }
+            }
+        }
     }
     return out
 }

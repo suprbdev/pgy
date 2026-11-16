@@ -3,6 +3,7 @@ package schema
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -2793,5 +2794,39 @@ func TestTopologicalSortRowTypeUsers(t *testing.T) {
 	}
 	if pos["app.by_name(users int)"] > pos["public.users"] {
 		t.Errorf("an argument named like a table is not a dependency; order: %v", sorted)
+	}
+}
+
+func TestTopologicalSortDomainAfterFunctionsItCalls(t *testing.T) {
+	db := &Database{
+		Domains: map[string]*Domain{"app.code": {Name: "code", Type: "text", Default: "app.next_code()", Checks: map[string]string{"c": "zz_norm(VALUE) = VALUE"}}},
+		Functions: map[string]*Function{
+			"app.next_code()":   {Name: "next_code", ArgsSig: "()", Returns: "text"},
+			"public.zz_norm(t text)": {Name: "zz_norm", ArgsSig: "(t text)", Returns: "text"},
+			"app.length(t text)":     {Name: "length", ArgsSig: "(t text)", Returns: "int"},
+			"app.f(a int default app.next_code()::int)": {Name: "f", ArgsSig: "(a int default app.next_code()::int)", Returns: "int"},
+		},
+	}
+	db.Domains["app.code"].Check = "length(VALUE) > 0"
+	sorted, err := TopologicalSort(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, e := range sorted {
+		pos[e.Key] = i
+	}
+	for _, fn := range []string{"app.next_code()", "public.zz_norm(t text)"} {
+		if pos["app.code"] < pos[fn] {
+			t.Errorf("the domain calls %s and must sort after it; order: %v", fn, sorted)
+		}
+	}
+	if pos["app.f(a int default app.next_code()::int)"] < pos["app.next_code()"] {
+		t.Errorf("an argument default's function must come first; order: %v", sorted)
+	}
+	for _, e := range sorted {
+		if e.Key == "app.code" && slices.Contains(e.DependsOn, "function app.length") {
+			t.Errorf("an unqualified call is not taken for a function outside public: %v", e.DependsOn)
+		}
 	}
 }
