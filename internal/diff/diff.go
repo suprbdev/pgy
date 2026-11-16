@@ -6966,6 +6966,25 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
             }
         }
     }
+    maintain := func(obj string, grants map[string][]string, liveG map[string]map[string]bool) {
+        for _, role := range sortedKeys(grants) {
+            for _, p := range grants[role] {
+                if strings.EqualFold(strings.TrimSuffix(strings.TrimSpace(p), "*"), "maintain") && !liveG[strings.ToLower(role)]["maintain"] && !liveG[role]["maintain"] {
+                    need(fmt.Sprintf("the maintain privilege in %s's grants", obj), 17)
+                    return
+                }
+            }
+        }
+    }
+    for _, fq := range sortedKeys(desired.Tables) {
+        if t := desired.Tables[fq]; t != nil { maintain("table "+fq, t.Grants, live.TableGrants[fq]) }
+    }
+    for _, fq := range sortedKeys(desired.Views) {
+        if vw := desired.Views[fq]; vw != nil { maintain("view "+fq, vw.Grants, live.TableGrants[fq]) }
+    }
+    for i, dp := range desired.DefaultPrivileges {
+        if dp != nil { maintain(fmt.Sprintf("defaultPrivileges[%d]", i), dp.Grants["tables"], nil) }
+    }
     for _, k := range sortedKeys(desired.Collations) {
         if co := desired.Collations[k]; co != nil && co.Rules != "" && !live.Collations[k] {
             need(fmt.Sprintf("collation %s's rules", k), 16)
