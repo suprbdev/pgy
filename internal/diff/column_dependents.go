@@ -68,7 +68,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, unsafe bool)
                 if d.Kind == "view" || d.Kind == "matview" { visit(d.Name) } else { objects = append(objects, d) }
             }
             if msg := undeclaredDependent(desired, fq, views, objects); msg != "" {
-                warns = append(warns, Warning{Table: fq, Message: fmt.Sprintf("changing the type of %s.%s: %s, so pgy can't drop and recreate it, and PostgreSQL rejects the change while it exists; declare it, or change it in a hand-written migration", fq, cn, msg)})
+                warns = append(warns, Warning{Table: fq, Kind: "dependents", Message: fmt.Sprintf("changing the type of %s.%s: %s, so pgy can't drop and recreate it, and PostgreSQL rejects the change while it exists; declare it, or change it in a hand-written migration", fq, cn, msg)})
                 continue
             }
             if out == live { out = cloneLive(live) }

@@ -115,6 +115,7 @@ Settings come from flags, then environment variables, then a config file, then d
 | `--buffer` | `PGY_BUFFER` | `./.pgy.buffer.sql` | `-` prints `pgy diff` output to stdout |
 | `--config` | `PGY_CONFIG` | `pgy.yaml`, `pgy.yml`, `.pgy.yaml`, `.pgy.yml` | config file |
 | `--quiet`, `--verbose`, `--json` | `PGY_QUIET=1`, `PGY_VERBOSE=1`, `PGY_JSON=1` | | |
+| `--strict` | `PGY_STRICT=1` | off | for CI: fail on the findings in `ci.fail_on` (see [Strict mode](#strict-mode)) |
 
 A config file uses the same names:
 
@@ -126,6 +127,27 @@ migrations_dir: ./migrations
 migrations_table: pgy.migrations
 buffer: ./.pgy.buffer.sql
 ```
+
+### Strict mode
+
+`--strict` (or `PGY_STRICT=1`) is meant for CI. It makes `pgy diff`, `pgy validate` and `pgy pull` exit 1 when they report a finding of a kind listed in `ci.fail_on`, after writing their output as usual. It also makes `pgy diff` refuse `--unsafe` and `--prune` while `ci.forbid_unsafe` is true. Without `--strict` nothing changes: findings stay warnings.
+
+```yaml
+ci:
+  fail_on: [lock, public_revoke, validate]   # the default
+  forbid_unsafe: true                        # the default
+```
+
+| Kind | Finding |
+|------|---------|
+| `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
+| `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare |
+| `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
+| `unsupported` | `pgy pull`: objects it can't express |
+| `all` | every warning |
+
+Without a `ci:` block, `--strict` uses the defaults shown above; a key in `ci:` replaces just that default.
 
 ## Commands
 
@@ -164,7 +186,7 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 
 ### Lock warnings
 
-`pgy diff` reports statements that would block traffic on a table that already exists. Warnings go to stderr, and into the `warnings` field with `--json`. They never change the plan or the exit code.
+`pgy diff` reports statements that would block traffic on a table that already exists. Warnings go to stderr, and into the `warnings` field with `--json`, which gives each warning a `kind`. They never change the plan, and they only change the exit code under [`--strict`](#strict-mode).
 
 | Statement | Why | Instead |
 |-----------|-----|---------|

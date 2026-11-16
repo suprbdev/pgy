@@ -53,13 +53,17 @@ Exit codes:
                 return fmt.Errorf("--buffer - prints the SQL to stdout and cannot be combined with --json")
             }
             migSchema, migTable := cfg.migrationsTable()
+            if cfg.Strict && cfg.ForbidUnsafe && (unsafe || prune) {
+                return fmt.Errorf("--strict refuses --unsafe and --prune (set ci.forbid_unsafe: false in the config to allow them)")
+            }
+            strict := &strictFindings{}
             opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err
             }
             issues := make(chan []validate.Issue, 1)
-            if noWarnings {
+            if noWarnings && !cfg.failsOn("validate") {
                 issues <- nil
             } else {
                 go func() { issues <- validate.Files(schemaPaths) }()
@@ -102,7 +106,8 @@ Exit codes:
             }
 
             for _, is := range <-issues {
-                if is.Severity == validate.Error { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
+                if is.Severity == validate.Error && !noWarnings { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
+                if cfg.failsOn("validate") { strict.add("validate", is.String()) }
             }
             l := <-load
             if l.err != nil {
@@ -139,6 +144,11 @@ Exit codes:
                         for _, w := range s.Plan.Warnings { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
                     }
                 }
+                for _, s := range steps {
+                    for _, w := range s.Plan.Warnings {
+                        if cfg.failsOn(w.Kind) { strict.add(w.Kind, w.Message) }
+                    }
+                }
             } else {
                 plan := diff.PlanWith(live, compiled, opts)
                 sql = diff.Render(plan)
@@ -152,6 +162,9 @@ Exit codes:
                 if !noWarnings {
                     for _, w := range plan.Warnings { fmt.Fprintln(os.Stderr, "warning:", w.Message) }
                 }
+                for _, w := range plan.Warnings {
+                    if cfg.failsOn(w.Kind) { strict.add(w.Kind, w.Message) }
+                }
             }
 
             if jsonOut || cfg.JSON {
@@ -163,10 +176,10 @@ Exit codes:
             if toStdout {
                 if len(sql) == 0 {
                     if !cfg.Quiet { fmt.Fprintln(os.Stderr, "no changes detected") }
-                    return nil
+                    return strict.err(nil)
                 }
                 if _, err := os.Stdout.WriteString(sql); err != nil { return err }
-                return &exitCodeError{code: 2}
+                return strict.err(&exitCodeError{code: 2})
             }
             if len(sql) == 0 {
                 if err := os.Remove(cfg.BufferPath); err != nil && !os.IsNotExist(err) {
@@ -175,7 +188,7 @@ Exit codes:
                 if !cfg.Quiet {
                     fmt.Println("no changes detected")
                 }
-                return nil
+                return strict.err(nil)
             }
             if err := os.WriteFile(cfg.BufferPath, []byte(sql), 0o644); err != nil {
                 return err
@@ -188,7 +201,7 @@ Exit codes:
                 }
             }
             // exit code 2 for pending changes
-            return &exitCodeError{code: 2}
+            return strict.err(&exitCodeError{code: 2})
         },
     }
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
