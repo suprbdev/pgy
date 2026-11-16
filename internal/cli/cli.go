@@ -6,6 +6,7 @@ import (
     "os"
     "path/filepath"
     "runtime/debug"
+    "slices"
     "strings"
 
     "github.com/spf13/cobra"
@@ -123,38 +124,7 @@ func AttachGlobalFlags(root *cobra.Command) {
         }
 
         if len(cfg.Schemas) == 0 {
-            // The config file is YAML too; keep it out of the schema list.
-            absConfig := ""
-            if configPath != "" {
-                absConfig, _ = filepath.Abs(configPath)
-            }
-            // default: all .yml in schema-root
-            _ = filepath.WalkDir(cfg.SchemaRoot, func(path string, d os.DirEntry, err error) error {
-                if err != nil {
-                    return nil
-                }
-                if d.IsDir() {
-                    // Never descend into dot-dirs or dependency trees; walking an
-                    // unpruned "." (e.g. $HOME) is pathologically slow.
-                    n := d.Name()
-                    if path != cfg.SchemaRoot && (strings.HasPrefix(n, ".") || n == "node_modules" || n == "vendor") {
-                        return filepath.SkipDir
-                    }
-                    return nil
-                }
-                if strings.HasSuffix(d.Name(), ".yml") || strings.HasSuffix(d.Name(), ".yaml") {
-                    if absConfig != "" {
-                        if abs, absErr := filepath.Abs(path); absErr == nil && abs == absConfig {
-                            return nil
-                        }
-                    }
-                    rel, relErr := filepath.Rel(cfg.SchemaRoot, path)
-                    if relErr == nil {
-                        cfg.Schemas = append(cfg.Schemas, rel)
-                    }
-                }
-                return nil
-            })
+            cfg.Schemas = discoverSchemas(cfg.SchemaRoot, configPath)
         }
         ctx := context.WithValue(cmd.Context(), ctxKey{}, &cfg)
         cmd.SetContext(ctx)
@@ -262,4 +232,43 @@ func isTruthy(v string) bool {
         return true
     }
     return false
+}
+
+// discoverSchemas lists the .yml and .yaml files under root, relative to it,
+// for when no schema list is given. It skips dot-directories, node_modules
+// and vendor, dotfiles such as .golangci.yml, pgy config files, and
+// configPath, the config file in use.
+func discoverSchemas(root, configPath string) []string {
+    absConfig := ""
+    if configPath != "" {
+        absConfig, _ = filepath.Abs(configPath)
+    }
+    out := []string{}
+    _ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+        if err != nil {
+            return nil
+        }
+        n := d.Name()
+        if d.IsDir() {
+            // Never descend into dot-dirs or dependency trees; walking an
+            // unpruned "." (e.g. $HOME) is pathologically slow.
+            if path != root && (strings.HasPrefix(n, ".") || n == "node_modules" || n == "vendor") {
+                return filepath.SkipDir
+            }
+            return nil
+        }
+        if !strings.HasSuffix(n, ".yml") && !strings.HasSuffix(n, ".yaml") || strings.HasPrefix(n, ".") || slices.Contains(configCandidates, n) {
+            return nil
+        }
+        if absConfig != "" {
+            if abs, absErr := filepath.Abs(path); absErr == nil && abs == absConfig {
+                return nil
+            }
+        }
+        if rel, relErr := filepath.Rel(root, path); relErr == nil {
+            out = append(out, rel)
+        }
+        return nil
+    })
+    return out
 }

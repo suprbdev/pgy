@@ -3,6 +3,7 @@ package cli
 import (
     "os"
     "path/filepath"
+    "strings"
     "testing"
 )
 
@@ -99,5 +100,18 @@ func TestConfigInvalidYAML(t *testing.T) {
     _, _, err := loadFileConfig(dir, "")
     if err == nil {
         t.Fatal("expected parse error")
+    }
+}
+
+func TestDiscoverSchemasSkipsConfigAndDotfiles(t *testing.T) {
+    dir := t.TempDir()
+    for _, f := range []string{"a.yml", "sub/b.yaml", ".golangci.yml", "sub/.pgy.yml", "sub/pgy.yaml", "custom.yml", ".github/workflows/ci.yml", "node_modules/x/y.yml", "notes.txt"} {
+        p := filepath.Join(dir, filepath.FromSlash(f))
+        if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { t.Fatal(err) }
+        if err := os.WriteFile(p, nil, 0o644); err != nil { t.Fatal(err) }
+    }
+    got := strings.Join(discoverSchemas(dir, filepath.Join(dir, "custom.yml")), ",")
+    if want := strings.Join([]string{"a.yml", filepath.Join("sub", "b.yaml")}, ","); got != want {
+        t.Errorf("discoverSchemas = %s, want %s", got, want)
     }
 }

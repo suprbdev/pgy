@@ -109,7 +109,7 @@ Settings come from flags, then environment variables, then a config file, then d
 |------|-------------|---------|---|
 | `--dsn` | `PGY_DSN` | | PostgreSQL connection string |
 | `--schema-root` | `PGY_SCHEMA_ROOT` | `.` | directory with the YAML files |
-| `--schemas` | `PGY_SCHEMAS` | every `.yml`/`.yaml` under the root | comma-separated files, relative to the root; a missing file is an error |
+| `--schemas` | `PGY_SCHEMAS` | every `.yml`/`.yaml` under the root, except dotfiles, pgy config files and files in dot-directories, `node_modules` and `vendor` | comma-separated files, relative to the root; a missing file is an error |
 | `--migrations-dir` | `PGY_MIGRATIONS_DIR` | `./migrations` | |
 | `--migrations-table` | `PGY_MIGRATIONS_TABLE` | `pgy.migrations` | `schema.table` recording applied migrations |
 | `--buffer` | `PGY_BUFFER` | `./.pgy.buffer.sql` | `-` prints `pgy diff` output to stdout |
