@@ -989,7 +989,7 @@
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
-        "as": { "type": "string", "enum": ["smallint", "integer", "bigint"] },
+        "as": { "type": "string", "enum": ["smallint", "integer", "bigint", "int", "int2", "int4", "int8"] },
         "increment": { "type": ["integer", "string"] },
         "minValue": { "type": ["integer", "string"] },
         "maxValue": { "type": ["integer", "string"] },

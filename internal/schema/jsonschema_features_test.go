@@ -29,6 +29,8 @@ servers:
   warehouse: {wrapper: postgres_fdw, version: 2, options: {host: wh.internal, port: 5432}, owner: app_owner, comment: analytics}
   files: {wrapper: file_fdw}
 schema public:
+  sequence short_ids:
+    as: int
   foreign table remote_orders:
     server: warehouse
     options: {schema_name: public, table_name: orders}
