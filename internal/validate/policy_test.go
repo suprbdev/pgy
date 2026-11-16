@@ -394,3 +394,32 @@ schema app:
 		t.Errorf("missing the redundant child warning in:\n%s", got)
 	}
 }
+
+func TestValidateTablespaces(t *testing.T) {
+	path := write(t, t.TempDir(), "ts.yml", `
+servers:
+  remote: {wrapper: postgres_fdw}
+schema app:
+  foreign table ft:
+    server: remote
+    columns: {id: {type: int}}
+    tablespace: fast
+  view v:
+    query: select 1
+    tablespace: fast
+  table t:
+    columns: {id: {type: int}}
+    primaryKey: {t_pkey: {columns: [id], tablespace: fast}}
+    tablespace: fast
+    indexes: {t_id: {columns: [id], tablespace: fast}}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{"foreign table has no storage", "a plain view can't have a tablespace"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "table app.t:") || strings.Contains(got, "> table t") {
+		t.Errorf("tablespaces on tables, keys and indexes are valid:\n%s", got)
+	}
+}

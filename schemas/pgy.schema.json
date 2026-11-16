@@ -221,6 +221,7 @@
             "properties": {
               "columns": { "$ref": "#/definitions/stringList" },
               "include": { "$ref": "#/definitions/stringList", "description": "INCLUDE (non-key) columns of the key's index." },
+              "tablespace": { "type": "string", "minLength": 1, "description": "Tablespace of the key's index (USING INDEX TABLESPACE); the tablespace must exist." },
               "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" }, "description": "Storage parameters of the key's index, e.g. {fillfactor: 80}." },
               "comment": { "type": "string", "description": "COMMENT ON CONSTRAINT for the primary key." }
             },
@@ -404,6 +405,7 @@
           "type": "boolean",
           "description": "UNLOGGED table (not WAL-logged, emptied after a crash). Changing it on a live table rewrites it and requires --unsafe."
         },
+        "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table (a partitioned table: the default for new partitions); the tablespace must exist. Absent = unmanaged." },
         "with": {
           "type": "object",
           "description": "Storage parameters, e.g. {fillfactor: 70, autovacuum_vacuum_scale_factor: 0.05}. When present, live parameters not listed are reset.",
@@ -497,6 +499,7 @@
         "forValues": { "$ref": "#/definitions/partitionSpec" },
         "default": { "type": "boolean" },
         "unlogged": { "type": "boolean" },
+        "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table; absent = unmanaged." },
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
@@ -634,6 +637,7 @@
           "type": "boolean",
           "description": "On an existing table, build (and rebuild) the index with CREATE INDEX CONCURRENTLY in a separate no-transaction migration."
         },
+        "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the index; absent = unmanaged. A concurrently index moves with REINDEX CONCURRENTLY." },
         "with": {
           "type": "object",
           "description": "Index storage parameters, e.g. {fillfactor: 70} or {fastupdate: false}.",
@@ -773,6 +777,7 @@
         },
         "nullsNotDistinct": { "type": "boolean", "description": "Unique only: NULLS NOT DISTINCT (PostgreSQL 15+)." },
         "include": { "$ref": "#/definitions/stringList", "description": "Unique only: INCLUDE (non-key) columns of the constraint's index." },
+        "tablespace": { "type": "string", "minLength": 1, "description": "Unique and exclude: the tablespace of the constraint's index (USING INDEX TABLESPACE)." },
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" }, "description": "Unique only: storage parameters of the constraint's index." },
         "deferrable": { "type": "boolean", "description": "Unique/exclude only." },
         "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
@@ -951,6 +956,7 @@
         "securityBarrier": { "type": "boolean", "description": "Views: security_barrier option." },
         "checkOption": { "type": "string", "enum": ["local", "cascaded", "none"], "description": "Views: WITH CHECK OPTION level; none removes it." },
         "withData": { "type": "boolean", "description": "Materialized views: false creates WITH NO DATA (populate later with REFRESH)." },
+        "tablespace": { "type": "string", "minLength": 1, "description": "Materialized views: TABLESPACE; absent = unmanaged." },
         "with": {
           "type": "object",
           "description": "Materialized views: storage parameters (WITH (...), e.g. fillfactor, autovacuum_enabled, toast.autovacuum_enabled). Authoritative when present: unlisted parameters are reset.",
