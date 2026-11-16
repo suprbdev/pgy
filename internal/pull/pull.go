@@ -160,6 +160,8 @@ func (b *builder) unsupported() {
 		case !b.wantSchema(o.Schema):
 		case o.Kind == "cast":
 			b.warn("cast %s is not supported by pgy and was left out", o.Name)
+		case strings.HasSuffix(o.Kind, " tablespace"):
+			b.warn("%s %s.%s is stored in tablespace %s, which pgy does not manage; it was pulled without it", strings.TrimSuffix(o.Kind, " tablespace"), o.Schema, o.Name, o.Detail)
 		default:
 			b.warn("%s %s.%s is not supported by pgy and was left out", o.Kind, o.Schema, o.Name)
 		}

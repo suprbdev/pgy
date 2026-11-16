@@ -34,7 +34,9 @@ type LiveDetails struct {
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, ordered-set and
     // hypothetical-set aggregates, and text search parsers and templates),
-    // excluding extension members.
+    // excluding extension members, and the tables, materialized views and
+    // indexes stored outside the database's default tablespace (kind
+    // "<relation kind> tablespace", Detail the tablespace).
     Unsupported []UnsupportedObject
 }
 
@@ -97,6 +99,9 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select case a.aggkind when 'o' then 'ordered-set aggregate' else 'hypothetical-set aggregate' end, p.pronamespace,
                    p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', 'pg_proc'::regclass, p.oid, ''
               from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid where a.aggkind <> 'n' 
+            union all select case c.relkind when 'm' then 'materialized view' when 'i' then 'index' when 'I' then 'index' else 'table' end || ' tablespace',
+                   c.relnamespace, c.relname::text, 'pg_class'::regclass, c.oid, ts.spcname::text
+              from pg_class c join pg_tablespace ts on ts.oid = c.reltablespace where c.relkind in ('r', 'p', 'm', 'i', 'I')
         )
         select distinct o.kind, n.nspname, o.name, o.detail
         from objs o join pg_namespace n on n.oid = o.nsp
