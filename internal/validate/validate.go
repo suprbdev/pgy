@@ -163,7 +163,19 @@ func Database(d *schema.Database) []Issue {
 				}
 			}
 		}
+		unique := func(what string, cols []string) {
+			seen := map[string]bool{}
+			for _, c := range cols {
+				if base := columnName(strings.TrimSpace(c)); base != "" {
+					if seen[base] {
+						add(Error, obj, "%s lists column %q twice", what, base)
+					}
+					seen[base] = true
+				}
+			}
+		}
 		need("primary key", t.PrimaryKey)
+		unique("primary key", t.PrimaryKey)
 		need("primary key include", t.PrimaryKeyInclude)
 		for _, ix := range t.Indexes {
 			if ix == nil {
@@ -190,6 +202,7 @@ func Database(d *schema.Database) []Issue {
 			switch strings.ToLower(ct.Type) {
 			case "unique":
 				need("constraint "+ct.Name, ct.Columns)
+				unique("constraint "+ct.Name, ct.Columns)
 				need("constraint "+ct.Name+" include", ct.Include)
 			case "check", "exclude":
 				if strings.TrimSpace(ct.Expression) == "" {
@@ -198,6 +211,9 @@ func Database(d *schema.Database) []Issue {
 			default:
 				add(Error, obj, "constraint %s has unknown type %q", ct.Name, ct.Type)
 			}
+		}
+		if len(t.Policies) > 0 && (t.RowLevelSecurity == nil || !*t.RowLevelSecurity) && t.PartitionOf == "" {
+			add(Warning, obj, "declares policies but not rowLevelSecurity: true; PostgreSQL ignores a table's policies until row-level security is enabled")
 		}
 		for _, fk := range t.ForeignKeys {
 			if fk == nil {

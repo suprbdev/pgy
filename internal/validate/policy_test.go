@@ -78,3 +78,34 @@ schema app:
 		t.Errorf("an empty policy must not flag anything: %v", issues)
 	}
 }
+
+func TestValidateKeyColumnsAndPolicies(t *testing.T) {
+	path := write(t, t.TempDir(), "k.yml", `
+schema app:
+  table t:
+    columns: {a: {type: int}, b: {type: int}}
+    primaryKey: [a, a]
+    constraints:
+      t_b: {type: unique, columns: [b, b]}
+    policies:
+      p: {for: select, using: "true"}
+  table rls:
+    columns: {a: {type: int, primaryKey: true}}
+    rowLevelSecurity: true
+    policies:
+      p: {for: select, using: "true"}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		`table app.t: primary key lists column "a" twice`,
+		`table app.t: constraint t_b lists column "b" twice`,
+		"table app.t: declares policies but not rowLevelSecurity: true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "table app.rls:") {
+		t.Errorf("a table with RLS enabled must not be flagged:\n%s", got)
+	}
+}
