@@ -793,12 +793,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query per-key-column operator classes so redefined opclasses can be
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
-    // flagged so a desired index without an explicit opclass matches.
+    // flagged so a desired index without an explicit opclass matches. An
+    // expression key's default collation is that of the opclass input type
+    // when the opclass stores another type (gin_trgm_ops indexes text but
+    // stores int4), else that of the stored type.
     opcQ := `
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
-               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, ity.typcollation)
+               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 then oty.typcollation end, ity.typcollation)
                     then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                coalesce(ia.attstattarget::int, -1)
         from pg_index x
@@ -811,6 +814,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_attribute ta on ta.attrelid = x.indrelid and ta.attnum = x.indkey[k.ord]
         left join pg_attribute ia on ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1
         left join pg_type ity on ity.oid = ia.atttypid
+        left join pg_type oty on oty.oid = op.opcintype
         left join pg_collation co on co.oid = x.indcollation[k.ord]
         left join pg_namespace cn on cn.oid = co.collnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')

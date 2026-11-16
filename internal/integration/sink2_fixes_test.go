@@ -82,3 +82,15 @@ schema SCH:
 		}
 	}
 }
+
+func TestIntegrationExpressionIndexWithStorageTypeIdempotent(t *testing.T) {
+	assertYAMLIdempotent(t, map[string]string{"trgm": `
+extensions: [pg_trgm]
+schema SCH:
+  table names:
+    columns: {id: {type: int, primaryKey: true}, name: {type: text}}
+    indexes:
+      names_lower_trgm: {columns: [lower(name)], using: gin, opclass: gin_trgm_ops}
+      names_lower: {columns: [lower(name)]}
+`})
+}
