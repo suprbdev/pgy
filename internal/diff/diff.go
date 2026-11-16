@@ -228,6 +228,7 @@ type LiveSequence struct {
 // LiveDomain is a domain's default, NOT NULL flag and CHECK constraints
 // (constraint name -> pg_get_constraintdef output).
 type LiveDomain struct {
+    Type    string // format_type of the base type, with its modifier
     Default string
     NotNull bool
     Checks  map[string]string
@@ -1458,7 +1459,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce(pg_get_expr(t.typdefaultbin, 0), t.typdefault, ''), t.typnotnull,
                coalesce((select array_agg(c.conname order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
                coalesce((select array_agg(pg_get_constraintdef(c.oid) order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
-               coalesce((select array_agg(coalesce(obj_description(c.oid, 'pg_constraint'), '') order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}')
+               coalesce((select array_agg(coalesce(obj_description(c.oid, 'pg_constraint'), '') order by c.conname) from pg_constraint c where c.contypid = t.oid and c.contype = 'c'), '{}'),
+               format_type(t.typbasetype, t.typtypmod)
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -1467,15 +1469,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(domQ, func(domRows pgx.Rows) error {
         for domRows.Next() {
-            var schemaName, domName, def string
+            var schemaName, domName, def, baseType string
             var notNull bool
             var conNames, conDefs, conComments []string
-            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs, &conComments); err != nil {
+            if err := domRows.Scan(&schemaName, &domName, &def, &notNull, &conNames, &conDefs, &conComments, &baseType); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, domName)
             l.Domains[key] = true
-            ld := &LiveDomain{Default: def, NotNull: notNull, Checks: map[string]string{}, CheckComments: map[string]string{}}
+            ld := &LiveDomain{Type: baseType, Default: def, NotNull: notNull, Checks: map[string]string{}, CheckComments: map[string]string{}}
             for i := range conNames {
                 if i < len(conDefs) { ld.Checks[conNames[i]] = conDefs[i] }
                 if i < len(conComments) && conComments[i] != "" { ld.CheckComments[conNames[i]] = conComments[i] }
@@ -2743,6 +2745,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             dm, ok := desired.Domains[e.Key]
             if !ok || dm == nil || dm.Type == "" { continue }
             if live.Domains[e.Key] {
+                if ld := live.DomainDefs[e.Key]; ld != nil && domainTypeChanged(dm.Type, ld.Type) {
+                    plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("domain %s: its base type changed from %s to %s, which ALTER DOMAIN can't do; create a new domain and move the columns to it in a hand-written migration", e.Key, ld.Type, dm.Type)})
+                }
                 plan.Alters = append(plan.Alters, domainAlterStmts(e.Key, dm, live.DomainDefs[e.Key], unsafe)...)
                 continue
             }
@@ -3262,6 +3267,18 @@ func desiredDomainChecks(fq string, dm *schema.Domain) map[string]string {
 // checks map makes the declared set authoritative; without one only the
 // single check's name is managed. The base type and collation cannot be
 // altered.
+// domainTypeChanged reports whether a domain's declared base type differs
+// from the live one (empty when unknown), ignoring case, quotes, alias
+// spellings and a public or pg_catalog qualifier.
+func domainTypeChanged(desired, live string) bool {
+    if live == "" || desired == "" { return false }
+    key := func(s string) string {
+        s = strings.ReplaceAll(strings.ToLower(strings.Join(strings.Fields(s), " ")), `"`, "")
+        return normalizeColumnType(strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog."))
+    }
+    return key(desired) != key(live)
+}
+
 func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool) []string {
     if ld == nil { return nil }
     target := "alter domain " + pqIdent(fq)

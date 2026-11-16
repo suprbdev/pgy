@@ -143,6 +143,7 @@ ci:
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
 | `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare |
+| `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
 | `unsupported` | `pgy pull`: objects it can't express |
@@ -194,6 +195,8 @@ policy:
 ### Unsafe changes and pruning
 
 Without flags, `pgy diff` only adds and adjusts. It creates missing objects, adds columns, constraints and indexes, and changes defaults, comments, grants and similar settings. Changes that can fail on existing data or lose it need `--unsafe`. That covers column type changes, dropped columns, and redefined constraints and indexes, which are dropped and recreated.
+
+Without `--unsafe`, `pgy diff` still plans those changes to report them: each statement it left out gets a `needs --unsafe, so it was left out` warning (the first 20 are printed; `--json` lists them all with kind `unsafe`), so a YAML change never goes unnoticed. `ci.fail_on: [unsafe]` makes `--strict` fail on them.
 
 `--unsafe --prune` also drops what the YAML no longer declares, in every schema the YAML declares at least one object in:
 
