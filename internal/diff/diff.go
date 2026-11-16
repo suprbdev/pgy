@@ -248,6 +248,7 @@ type LiveExtension struct {
 
 type LiveFunction struct{
     Signature  string // "schema.name(identity args)" as introspected
+    Args       string // pg_get_function_arguments: the arguments with their defaults
     Kind       string // pg_proc.prokind: f (function), w (window), a (aggregate)
     Internal   bool   // created implicitly by another object (e.g. a range type's constructors)
     Body       string
@@ -266,6 +267,7 @@ type LiveFunction struct{
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
+    Args     string // pg_get_function_arguments: the arguments with their defaults
     Body     string
     SQLBody  bool // SQL-standard body; see LiveFunction.SQLBody
     Security string // definer|invoker
@@ -1153,7 +1155,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i'),
                case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
                p.procost::float8, p.prorows::float8,
-               case when p.prokind = 'p' then '' else coalesce(pg_get_function_result(p.oid), '') end
+               case when p.prokind = 'p' then '' else coalesce(pg_get_function_result(p.oid), '') end,
+               coalesce(pg_get_function_arguments(p.oid), '')
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -1161,24 +1164,24 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
-            var schemaName, funcName, args, src, vol, kind, parallel, returns string
+            var schemaName, funcName, args, src, vol, kind, parallel, returns, fullArgs string
             var secdef, strict, leakproof, internal, sqlBody bool
             var config []string
             var cost, rows float64
-            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns); err != nil {
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns, &fullArgs); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
                 norm := normalizeFunctionSignature(key)
                 l.Procedures[norm] = true
-                lp := &LiveProcedure{Signature: key, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config)}
+                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config)}
                 if secdef { lp.Security = "definer" }
                 l.ProcedureDefs[norm] = lp
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -2145,6 +2148,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 // is whitespace-trimmed (prosrc stores the body verbatim).
 func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
     if routineBodyChanged(p.Language, p.Body, p.Replace, lp.Body, lp.SQLBody) { return true }
+    if changed, _ := argDefaultsDiff(p.ArgsSig, lp.Args); changed { return true }
     if p.Security != "" && strings.ToLower(p.Security) != lp.Security { return true }
     if len(configClauses(p.Set, lp.Config)) > 0 { return true }
     return false
@@ -2630,9 +2634,11 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found {
                 lf := live.FunctionDefs[normalizedDesired]
                 if lf == nil || returnsChanged(f.Returns, lf.Returns) { continue }
+                defaultsChanged, defaultsRemoved := argDefaultsDiff(f.ArgsSig, lf.Args)
+                if defaultsRemoved && strings.TrimSpace(f.Body) != "" { continue }
                 // Empty YAML body means the body is unmanaged (attribute-only
                 // declaration, e.g. marking an extension function leakproof).
-                bodyChanged := routineBodyChanged(f.Language, f.Body, f.Replace, lf.Body, lf.SQLBody)
+                bodyChanged := routineBodyChanged(f.Language, f.Body, f.Replace, lf.Body, lf.SQLBody) || defaultsChanged && strings.TrimSpace(f.Body) != ""
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
@@ -3861,9 +3867,14 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         fname := schema.RoutineName(k)
         norm := normalizeFunctionSignature(fname + f.ArgsSig)
         lf := live.FunctionDefs[norm]
-        if lf == nil || !returnsChanged(f.Returns, lf.Returns) { continue }
+        if lf == nil { continue }
+        _, defaultsRemoved := argDefaultsDiff(f.ArgsSig, lf.Args)
+        returnChanged := returnsChanged(f.Returns, lf.Returns)
+        if !returnChanged && !defaultsRemoved { continue }
         if !unsafe {
-            warns = append(warns, Warning{Message: fmt.Sprintf("function %s%s: return type changed from %s to %s; that drops and recreates the function, which needs --unsafe", fname, f.ArgsSig, lf.Returns, f.Returns)})
+            why := fmt.Sprintf("return type changed from %s to %s", lf.Returns, f.Returns)
+            if !returnChanged { why = "an argument default was removed, which CREATE OR REPLACE can't do" }
+            warns = append(warns, Warning{Message: fmt.Sprintf("function %s%s: %s; that drops and recreates the function, which needs --unsafe", fname, f.ArgsSig, why)})
             continue
         }
         if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
@@ -3875,8 +3886,98 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         delete(out.FunctionPublicExec, norm)
         delete(out.Owners, "proc:"+norm)
     }
+    for _, k := range sortedKeys(desired.Procedures) {
+        p := desired.Procedures[k]
+        if p == nil { continue }
+        pname := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(pname + p.ArgsSig)
+        lp := live.ProcedureDefs[norm]
+        if lp == nil { continue }
+        if _, removed := argDefaultsDiff(p.ArgsSig, lp.Args); !removed { continue }
+        if !unsafe {
+            warns = append(warns, Warning{Message: fmt.Sprintf("procedure %s%s: an argument default was removed, which CREATE OR REPLACE can't do; that drops and recreates the procedure, which needs --unsafe", pname, p.ArgsSig)})
+            if out == live { out = cloneLive(live) }
+            out.ProcedureDefs[norm] = &LiveProcedure{Signature: lp.Signature, Body: p.Body, SQLBody: lp.SQLBody, Security: lp.Security, Config: lp.Config, Args: p.ArgsSig}
+            continue
+        }
+        if recreated == nil { recreated = map[string]string{} }
+        if out == live { out = cloneLive(live) }
+        recreated[norm] = fmt.Sprintf("drop procedure %s;", pqIdent(pname)+grantFuncArgs(p.ArgsSig))
+        delete(out.Procedures, norm)
+        delete(out.ProcedureDefs, norm)
+        delete(out.FunctionComments, norm)
+        delete(out.FunctionGrants, norm)
+        delete(out.FunctionPublicExec, norm)
+        delete(out.Owners, "proc:"+norm)
+    }
     return out, recreated, warns
 }
+
+// argDefaultsDiff compares the argument defaults in a YAML signature with
+// the live pg_get_function_arguments form. changed reports a default that
+// was added or altered, which CREATE OR REPLACE can do; removed reports one
+// the YAML no longer declares, which needs DROP. Both are false when the
+// argument lists don't line up or live is unknown.
+func argDefaultsDiff(desiredArgs, liveArgs string) (changed, removed bool) {
+    d, l := argDefaults(desiredArgs), argDefaults(liveArgs)
+    if strings.TrimSpace(liveArgs) == "" && len(d) > 0 || len(d) != len(l) { return false, false }
+    for i := range d {
+        switch {
+        case l[i] != "" && d[i] == "":
+            removed = true
+        case d[i] != l[i] && (l[i] == "" || !defaultsEqual(d[i], l[i])):
+            changed = true
+        }
+    }
+    return changed, removed
+}
+
+// argDefaults returns the default expression of each argument in args (with
+// or without its enclosing parentheses), "" for those without one, leaving
+// out OUT arguments, which can't have defaults.
+func argDefaults(args string) []string {
+    args = strings.TrimSpace(args)
+    if strings.HasPrefix(args, "(") && strings.HasSuffix(args, ")") { args = args[1 : len(args)-1] }
+    out := []string{}
+    for _, a := range splitTopLevelQuotedParens(args) {
+        a = strings.TrimSpace(a)
+        if a == "" { continue }
+        if w := strings.Fields(a); len(w) > 1 && strings.EqualFold(w[0], "out") { continue }
+        out = append(out, argDefault(a))
+    }
+    return out
+}
+
+// argDefault returns the expression after an argument's top-level DEFAULT
+// or =, or "".
+func argDefault(a string) string {
+    _, def := splitArgDefault(a)
+    return def
+}
+
+// splitArgDefault splits an argument at its top-level DEFAULT or = into the
+// declaration before it and the default expression after it ("" if none).
+func splitArgDefault(a string) (decl, def string) {
+    depth, quote := 0, rune(0)
+    for i, r := range a {
+        switch {
+        case quote != 0:
+            if r == quote { quote = 0 }
+        case r == '\'' || r == '"':
+            quote = r
+        case r == '(':
+            depth++
+        case r == ')':
+            depth--
+        case depth == 0 && r == '=':
+            return strings.TrimSpace(a[:i]), strings.TrimSpace(a[i+1:])
+        case depth == 0 && (r == 'd' || r == 'D') && i > 0 && (a[i-1] == ' ' || a[i-1] == '\t') && len(a) > i+8 && strings.EqualFold(a[i:i+7], "default") && (a[i+7] == ' ' || a[i+7] == '\t'):
+            return strings.TrimSpace(a[:i]), strings.TrimSpace(a[i+8:])
+        }
+    }
+    return strings.TrimSpace(a), ""
+}
+
 
 // recreateRenamedArguments finds desired functions and procedures that
 // aren't live under their own signature but match a live routine's argument
@@ -3954,21 +4055,8 @@ func routineIdentity(sig string, procedure bool) string {
     name := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(sig[:open]), " ", ""))
     inner := strings.TrimSuffix(strings.TrimSpace(sig[open+1:]), ")")
     types := []string{}
-    args, depth, start := []string{}, 0, 0
-    for i, r := range inner {
-        switch r {
-        case '(':
-            depth++
-        case ')':
-            depth--
-        case ',':
-            if depth == 0 { args, start = append(args, inner[start:i]), i+1 }
-        }
-    }
-    args = append(args, inner[start:])
-    for _, a := range args {
-        if lo := strings.Index(strings.ToLower(a), " default "); lo >= 0 { a = a[:lo] }
-        if eq := strings.Index(a, "="); eq >= 0 { a = a[:eq] }
+    for _, a := range splitTopLevelQuotedParens(inner) {
+        a, _ = splitArgDefault(a)
         words := strings.Fields(typmodRe.ReplaceAllString(a, ""))
         if len(words) == 0 { continue }
         mode := ""
@@ -4997,30 +5085,9 @@ func grantFuncArgs(argsSig string) string {
     inner := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(argsSig), "("), ")")
     if strings.TrimSpace(inner) == "" { return "()" }
     args := []string{}
-    current := ""
-    depth := 0
-    flush := func() {
-        a := strings.TrimSpace(current)
-        if lo := strings.Index(strings.ToLower(a), " default "); lo >= 0 { a = strings.TrimSpace(a[:lo]) }
-        if eq := strings.Index(a, "="); eq >= 0 { a = strings.TrimSpace(a[:eq]) }
-        if a != "" { args = append(args, a) }
-        current = ""
+    for _, a := range splitTopLevelQuotedParens(inner) {
+        if decl, _ := splitArgDefault(a); decl != "" { args = append(args, decl) }
     }
-    for _, r := range inner {
-        switch r {
-        case '(':
-            depth++
-            current += string(r)
-        case ')':
-            depth--
-            current += string(r)
-        case ',':
-            if depth == 0 { flush() } else { current += string(r) }
-        default:
-            current += string(r)
-        }
-    }
-    flush()
     return "(" + strings.Join(args, ", ") + ")"
 }
 
@@ -6597,40 +6664,36 @@ func normalizeFunctionSignature(sig string) string {
     // Parse and normalize arguments
     // Split by comma, but be careful of nested structures
     args := []string{}
-    current := ""
-    depth := 0
-    for _, r := range argsPart {
-        switch r {
-        case '(':
-            depth++
-            current += string(r)
-        case ')':
-            depth--
-            current += string(r)
-        case ',':
-            if depth == 0 {
-                arg := normalizeArg(strings.TrimSpace(current))
-                if arg != "" {
-                    args = append(args, arg)
-                }
-                current = ""
-            } else {
-                current += string(r)
-            }
-        default:
-            current += string(r)
-        }
+    for _, a := range splitTopLevelQuotedParens(argsPart) {
+        if arg := normalizeArg(a); arg != "" { args = append(args, arg) }
     }
-    if current != "" {
-        arg := normalizeArg(strings.TrimSpace(current))
-        if arg != "" {
-            args = append(args, arg)
-        }
-    }
-    
+
     // Reconstruct normalized signature with consistent spacing
     normalizedArgs := strings.Join(args, ", ")
     return fmt.Sprintf("%s(%s)", funcPart, normalizedArgs)
+}
+
+// splitTopLevelQuotedParens splits on commas outside parentheses and single
+// or double quotes.
+func splitTopLevelQuotedParens(s string) []string {
+    out, depth, start := []string{}, 0, 0
+    var q byte
+    for i := 0; i < len(s); i++ {
+        switch c := s[i]; {
+        case q != 0:
+            if c == q { q = 0 }
+        case c == '\'' || c == '"':
+            q = c
+        case c == '(':
+            depth++
+        case c == ')':
+            depth--
+        case c == ',' && depth == 0:
+            out = append(out, s[start:i])
+            start = i + 1
+        }
+    }
+    return append(out, s[start:])
 }
 
 // orderByRe finds the ORDER BY that separates an ordered-set aggregate's
@@ -6641,27 +6704,8 @@ var orderByRe = regexp.MustCompile(`(?i)(?:^|\s)order\s+by\s+`)
 // e.g., "key text default null" -> "key text"
 // Format is typically: "param_name type_name" or "param_name type_name default value"
 func normalizeArg(arg string) string {
-    // Remove default clauses (case insensitive)
-    arg = strings.TrimSpace(arg)
-    
-    // Find where "default" keyword starts (case insensitive)
-    defaultIdx := -1
-    words := strings.Fields(arg)
-    for i, word := range words {
-        if strings.EqualFold(word, "default") {
-            defaultIdx = i
-            break
-        }
-    }
-    
-    if defaultIdx < 0 {
-        // No default clause, normalize what we have
-        return normalizeArgNoDefault(arg)
-    }
-    
-    // Take everything before "default"
-    beforeDefault := strings.Join(words[:defaultIdx], " ")
-    return normalizeArgNoDefault(beforeDefault)
+    decl, _ := splitArgDefault(arg)
+    return normalizeArgNoDefault(decl)
 }
 
 // normalizeArgNoDefault normalizes an argument without default clause
