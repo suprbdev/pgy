@@ -4,8 +4,12 @@ import (
     "fmt"
     "os"
     "path/filepath"
+    "slices"
+    "strings"
 
     yaml "gopkg.in/yaml.v3"
+
+    "github.com/suprbdev/pgy/internal/validate"
 )
 
 type FileConfig struct {
@@ -19,6 +23,56 @@ type FileConfig struct {
     Verbose       *bool    `yaml:"verbose"`
     JSON          *bool    `yaml:"json"`
     CI            *CIConfig `yaml:"ci"`
+    Policy        *PolicyConfig `yaml:"policy"`
+}
+
+// PolicyConfig is the policy: block: schema rules whose findings warn, and
+// fail under --strict when ci.fail_on includes policy.
+type PolicyConfig struct {
+    SecurityDefiner  string   `yaml:"security_definer"`
+    RequireGrants    []string `yaml:"require_grants"`
+    RequireOwners    any      `yaml:"require_owners"`
+    RowLevelSecurity []string `yaml:"row_level_security"`
+}
+
+// resolvePolicy checks a policy: block and returns the rules it enables.
+// require_owners takes a list of kinds, or true for all of them.
+func resolvePolicy(pc *PolicyConfig) (validate.Policy, error) {
+    p := validate.Policy{}
+    if pc == nil { return p, nil }
+    switch pc.SecurityDefiner {
+    case "":
+    case "hardened":
+        p.SecurityDefinerHardened = true
+    default:
+        return p, fmt.Errorf("policy.security_definer: unknown value %q (use hardened)", pc.SecurityDefiner)
+    }
+    kinds := func(key string, list []string) (map[string]bool, error) {
+        out := map[string]bool{}
+        for _, k := range list {
+            if !slices.Contains(validate.PolicyKinds, k) {
+                return nil, fmt.Errorf("policy.%s: unknown kind %q (use %s)", key, k, strings.Join(validate.PolicyKinds, ", "))
+            }
+            out[k] = true
+        }
+        return out, nil
+    }
+    var err error
+    if p.RequireGrants, err = kinds("require_grants", pc.RequireGrants); err != nil { return p, err }
+    switch v := pc.RequireOwners.(type) {
+    case nil:
+    case bool:
+        if v { p.RequireOwners, _ = kinds("require_owners", validate.PolicyKinds) }
+    case []any:
+        list := []string{}
+        for _, e := range v { list = append(list, fmt.Sprint(e)) }
+        if p.RequireOwners, err = kinds("require_owners", list); err != nil { return p, err }
+    default:
+        return p, fmt.Errorf("policy.require_owners: want true or a list of kinds")
+    }
+    p.RowLevelSecurity = map[string]bool{}
+    for _, s := range pc.RowLevelSecurity { p.RowLevelSecurity[s] = true }
+    return p, nil
 }
 
 // CIConfig is the ci: block, which sets what --strict fails on. Keys left
@@ -29,12 +83,12 @@ type CIConfig struct {
 }
 
 // strictKinds are the finding kinds ci.fail_on accepts: lock, public_revoke
-// and dependents warnings from pgy diff, validate findings, the objects pgy
-// pull can't express, and all of them.
-var strictKinds = map[string]bool{"lock": true, "public_revoke": true, "dependents": true, "validate": true, "unsupported": true, "all": true}
+// and dependents warnings from pgy diff, policy: rule findings, validate
+// findings, the objects pgy pull can't express, and all of them.
+var strictKinds = map[string]bool{"lock": true, "public_revoke": true, "dependents": true, "policy": true, "validate": true, "unsupported": true, "all": true}
 
 // defaultFailOn is what --strict fails on without a ci.fail_on.
-var defaultFailOn = []string{"lock", "public_revoke", "validate"}
+var defaultFailOn = []string{"lock", "public_revoke", "policy", "validate"}
 
 // strictSettings resolves --strict's fail_on set and forbid_unsafe from the
 // ci: block over the built-in preset.
@@ -46,7 +100,7 @@ func strictSettings(ci *CIConfig) (map[string]bool, bool, error) {
     }
     out := map[string]bool{}
     for _, k := range failOn {
-        if !strictKinds[k] { return nil, false, fmt.Errorf("ci.fail_on: unknown kind %q (use lock, public_revoke, dependents, validate, unsupported or all)", k) }
+        if !strictKinds[k] { return nil, false, fmt.Errorf("ci.fail_on: unknown kind %q (use lock, public_revoke, dependents, policy, validate, unsupported or all)", k) }
         out[k] = true
     }
     return out, forbid, nil

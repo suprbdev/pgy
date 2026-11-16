@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/suprbdev/pgy/internal/validate"
 )
 
 func TestStrictSettings(t *testing.T) {
@@ -63,7 +65,7 @@ func TestStrictRefusesUnsafe(t *testing.T) {
 func TestStrictValidateFindings(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "s.yml"), "schema app:\n  table t:\n    columns: {id: {type: int, primaryKey: true}}\n    replicaIdentity: index missing_idx\n")
-	if err := runWith(strictConfig(t, dir, nil, ""), cmdValidate()); err == nil || !strings.Contains(err.Error(), "--strict: 1 warning") {
+	if err := runWith(strictConfig(t, dir, nil, ""), cmdValidate()); err == nil || !strings.Contains(err.Error(), "--strict: 1 finding(s) of kind validate") {
 		t.Errorf("validate --strict must fail on a warning, got %v", err)
 	}
 	cfg := strictConfig(t, dir, nil, "")
@@ -109,3 +111,41 @@ func TestStrictLockWarnings(t *testing.T) {
 		t.Errorf("fail_on without lock: want exit 2, got %v", err)
 	}
 }
+
+func TestResolvePolicy(t *testing.T) {
+	p, err := resolvePolicy(&PolicyConfig{SecurityDefiner: "hardened", RequireGrants: []string{"tables"}, RequireOwners: true, RowLevelSecurity: []string{"app"}})
+	if err != nil || !p.SecurityDefinerHardened || !p.RequireGrants["tables"] || len(p.RequireOwners) != len(validateKinds()) || !p.RowLevelSecurity["app"] {
+		t.Errorf("resolved: %+v %v", p, err)
+	}
+	if p, err := resolvePolicy(&PolicyConfig{RequireOwners: []any{"views"}}); err != nil || len(p.RequireOwners) != 1 || !p.RequireOwners["views"] {
+		t.Errorf("owners list: %+v %v", p, err)
+	}
+	for _, bad := range []*PolicyConfig{{SecurityDefiner: "strict"}, {RequireGrants: []string{"table"}}, {RequireOwners: "yes"}} {
+		if _, err := resolvePolicy(bad); err == nil {
+			t.Errorf("want an error for %+v", bad)
+		}
+	}
+	if p, _ := resolvePolicy(nil); !p.Empty() {
+		t.Error("no policy block enables nothing")
+	}
+}
+
+func TestStrictPolicyFindings(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "s.yml"), "schema app:\n  table t:\n    columns: {id: {type: int, primaryKey: true}}\n")
+	cfg := strictConfig(t, dir, nil, "")
+	cfg.Policy, _ = resolvePolicy(&PolicyConfig{RequireGrants: []string{"tables"}})
+	if err := runWith(cfg, cmdValidate()); err == nil || !strings.Contains(err.Error(), "kind policy") {
+		t.Errorf("validate --strict must fail on a policy finding, got %v", err)
+	}
+	if err := runWith(cfg, cmdDiff(), "--from-empty"); err == nil || !strings.Contains(err.Error(), "kind policy") {
+		t.Errorf("diff --strict must fail on a policy finding, got %v", err)
+	}
+	cfg = strictConfig(t, dir, &CIConfig{FailOn: []string{"validate"}}, "")
+	cfg.Policy, _ = resolvePolicy(&PolicyConfig{RequireGrants: []string{"tables"}})
+	if err := runWith(cfg, cmdValidate()); err != nil {
+		t.Errorf("fail_on without policy: policy findings only warn, got %v", err)
+	}
+}
+
+func validateKinds() []string { return validate.PolicyKinds }
