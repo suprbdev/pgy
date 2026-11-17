@@ -94,8 +94,8 @@ func orderedExtensions(live *Live, desired *schema.Database) []*schema.Extension
 // object that may use the extension. A relocatable extension is moved to
 // its declared schema; others cannot be moved and are left alone. Unset
 // schema, version and comment are unmanaged; comment: null (NoComment)
-// removes the comment. Dropping undeclared
-// extensions is part of pruning; see planExtensionDrops.
+// removes the comment. Dropping undeclared extensions is part of pruning;
+// see planExtensionDrops.
 func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     warn := func(format string, args ...any) {
         plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})

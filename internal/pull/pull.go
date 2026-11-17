@@ -325,6 +325,12 @@ func (b *builder) schemas() {
 		if s == "pg_toast" || !b.wantSchema(s) {
 			continue
 		}
+		if b.member("schema", s) {
+			if m := b.memberGrants("schema:"+s, "", b.live.SchemaGrants[s]); m != nil {
+				b.blocks[s] = m
+			}
+			continue
+		}
 		blk := newMap()
 		b.owner(blk, "schema:"+s)
 		if c := b.live.SchemaComments[s]; c != "" && (s != "public" || c != "standard public schema") {

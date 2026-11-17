@@ -163,7 +163,8 @@ type Live struct{
     CompositeComments map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name",
-    // "proc:<normalized signature>", "language:name" and "fdw:name".
+    // "proc:<normalized signature>", "language:name", "fdw:name" and
+    // "schema:name".
     ExtensionMembers map[string]bool
     // MemberExtension: ExtensionMembers key -> the name of the extension
     // the object belongs to.
@@ -2318,6 +2319,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'fdw:' || w.fdwname, d.refobjid
         from pg_depend d join pg_foreign_data_wrapper w on w.oid = d.objid
         where d.deptype = 'e' and d.classid = 'pg_foreign_data_wrapper'::regclass
+        union all
+        select 'schema:' || n.nspname, d.refobjid
+        from pg_depend d join pg_namespace n on n.oid = d.objid
+        where d.deptype = 'e' and d.classid = 'pg_namespace'::regclass
         ) m(key, extension)
         join pg_extension x on x.oid = m.extension
     `
@@ -2814,6 +2819,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
     for k := range desired.Types {
+        if attributeOnly(desired, "type", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2821,6 +2827,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Functions {
+        if attributeOnly(desired, "function", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2828,9 +2835,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Aggregates {
+        if attributeOnly(desired, "aggregate", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
     for k := range desired.Procedures {
+        if attributeOnly(desired, "procedure", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2838,6 +2847,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Tables {
+        if attributeOnly(desired, "table", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2845,6 +2855,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Views {
+        if attributeOnly(desired, "view", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2871,6 +2882,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     for _, keys := range [][]string{sortedKeys(desired.Collations), sortedKeys(desired.TSConfigs), sortedKeys(desired.TSDictionaries)} {
         for _, k := range keys {
+            if attributeOnly(desired, "tsdictionary", k) { continue }
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
         }
     }
@@ -5377,7 +5389,10 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
         desiredG := resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser)
-        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
+        liveG := live.SchemaGrants[s]
+        if !live.Schemas[s] { liveG = pendingGrants(liveG, desiredG) }
+        liveG = member("schema:"+s, "", liveG, desiredG)
+        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, liveG, objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))

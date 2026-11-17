@@ -24,6 +24,7 @@ const initPrivsQ = `
              when 'pg_type'::regclass then 'type:' || tn.nspname || '.' || t.typname
              when 'pg_language'::regclass then 'language:' || l.lanname
              when 'pg_foreign_data_wrapper'::regclass then 'fdw:' || w.fdwname
+             when 'pg_namespace'::regclass then 'schema:' || s.nspname
            end,
            case when a.grantee = 0 then 'public' else coalesce(r.rolname::text, '') end,
            coalesce(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, '')
@@ -36,10 +37,11 @@ const initPrivsQ = `
     left join pg_namespace tn on tn.oid = t.typnamespace
     left join pg_language l on ip.classoid = 'pg_language'::regclass and l.oid = ip.objoid
     left join pg_foreign_data_wrapper w on ip.classoid = 'pg_foreign_data_wrapper'::regclass and w.oid = ip.objoid
-    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner) and a.grantee <> a.grantor
+    left join pg_namespace s on ip.classoid = 'pg_namespace'::regclass and s.oid = ip.objoid
+    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner, s.nspowner) and a.grantee <> a.grantor
     left join pg_roles r on r.oid = a.grantee
     where ip.privtype = 'e' and ip.objsubid = 0
-    and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid) is not null
+    and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid, s.oid) is not null
 `
 
 // extensionConfigQ lists the configuration tables of extensions
@@ -467,6 +469,38 @@ func memberTable(dt *schema.Table) *schema.Table {
 		out.Data = &schema.TableData{Key: dt.DataKey(), Rows: dt.Data.Rows}
 	}
 	return out
+}
+
+// attributeOnly reports whether desired's declaration of kind (type,
+// function, procedure, aggregate, table, view or tsdictionary) with key k
+// manages an object that already exists instead of one pgy creates (see
+// resolveAttributeOnly). Such a declaration doesn't make pgy create its
+// schema: the extension that creates the object may create the schema too.
+func attributeOnly(desired *schema.Database, kind, k string) bool {
+	switch kind {
+	case "type":
+		td := desired.Types[k]
+		return td != nil && td.Kind == ""
+	case "function":
+		f := desired.Functions[k]
+		return f != nil && !f.HasBody()
+	case "procedure":
+		p := desired.Procedures[k]
+		return p != nil && !p.HasBody()
+	case "aggregate":
+		ag := desired.Aggregates[k]
+		return ag != nil && ag.AttributeOnly()
+	case "table":
+		dt := desired.Tables[k]
+		return dt != nil && dt.AttributeOnly()
+	case "view":
+		vw := desired.Views[k]
+		return vw != nil && strings.TrimSpace(vw.Query) == ""
+	case "tsdictionary":
+		td := desired.TSDictionaries[k]
+		return td != nil && td.AttributeOnly()
+	}
+	return false
 }
 
 // signatureArgs returns the parenthesized argument list of a routine

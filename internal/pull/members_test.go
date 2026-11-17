@@ -170,6 +170,32 @@ func TestPullExtensionTablesSequencesAggregates(t *testing.T) {
 	}
 }
 
+func TestPullExtensionSchemas(t *testing.T) {
+	live := memberLive()
+	live.Schemas = map[string]bool{"public": true, "pdb": true, "pgivm": true}
+	live.SchemaComments = map[string]string{"pdb": "pg_search objects"}
+	live.SchemaGrants = map[string]map[string]map[string]bool{
+		"pdb":   {"public": {"usage": true}, "app": {"usage": true}},
+		"pgivm": {"public": {"usage": true}},
+	}
+	live.Owners = map[string]string{"schema:pdb": "someone"}
+	for _, s := range []string{"pdb", "pgivm"} {
+		live.ExtensionMembers["schema:"+s] = true
+		live.InitPrivs["schema:"+s] = map[string]map[string]bool{"public": {"usage": true}}
+	}
+	res, err := Build(live, Options{Single: true, Owners: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Files[0].Content)
+	if !strings.Contains(out, "schema pdb:\n  grants: {app: [usage]}\n") {
+		t.Errorf("an extension's schema is written with the privileges that changed only:\n%s", out)
+	}
+	if strings.Contains(out, "pgivm") || strings.Contains(out, "pg_search objects") || strings.Contains(out, "someone") {
+		t.Errorf("an extension's schema is not declared as the application's:\n%s", out)
+	}
+}
+
 func TestPullExtensionMembersUnchanged(t *testing.T) {
 	live := memberLive()
 	addMemberFunction(live, "public.digest(text, text)")

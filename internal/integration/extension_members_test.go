@@ -391,6 +391,50 @@ func TestIntegrationExtensionCommentNull(t *testing.T) {
 	}
 }
 
+func TestIntegrationExtensionSchema(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_ext_schema")
+	if _, err := db.Exec(ctx, strings.NewReplacer("APP", app).Replace(`
+		create extension hstore schema public;
+		create schema ext_objects;
+		grant usage on schema ext_objects to public;
+		comment on schema ext_objects is 'made by the extension';
+		alter extension hstore add schema ext_objects;
+		create schema ext_untouched;
+		alter extension hstore add schema ext_untouched;
+		revoke usage on schema ext_objects from public;
+		grant usage on schema ext_objects to "APP";`)); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	if !live.ExtensionMembers["schema:ext_objects"] || live.MemberExtension["schema:ext_objects"] != "hstore" {
+		t.Fatalf("ExtensionMembers lacks schema:ext_objects: %v", live.MemberExtension)
+	}
+	res, err := pull.Build(live, pull.Options{Single: true, Owners: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	if want := "schema ext_objects:\n  grants: {" + app + ": [usage], public: []}\n"; !strings.Contains(y, want) {
+		t.Errorf("want %q in the pulled YAML:\n%s", want, y)
+	}
+	if strings.Contains(y, "ext_untouched") || strings.Contains(y, "made by the extension") {
+		t.Errorf("an extension's schemas are not pulled as the application's:\n%s", y)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the pulled YAML must diff clean:\n%s", sql)
+	}
+	if _, err := db.Exec(ctx, `grant create on schema ext_objects to public`); err != nil {
+		t.Fatal(err)
+	}
+	if sql := strings.TrimSpace(diff.Render(planExtensionsLive(t, db, y, opts))); sql != `revoke create on schema "ext_objects" from public;` {
+		t.Errorf("drift on the extension's schema is repaired, got:\n%s", sql)
+	}
+}
+
 func TestIntegrationExtensionViewRulesNotPruned(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_view_rules")

@@ -188,6 +188,15 @@ func declaredMembers(live *Live, desired *schema.Database) map[string][]string {
 	for _, k := range sortedKeys(desired.TSDictionaries) {
 		add("tsdict:"+k, "text search dictionary "+k)
 	}
+	declaredSchemas := map[string]bool{}
+	for _, keys := range [][]string{sortedKeys(desired.SchemaGrants), sortedKeys(desired.SchemaOwners), sortedKeys(desired.SchemaComments)} {
+		for _, s := range keys {
+			declaredSchemas[s] = true
+		}
+	}
+	for _, s := range sortedKeys(declaredSchemas) {
+		add("schema:"+s, "schema "+s)
+	}
 	for _, k := range sortedKeys(desired.Languages) {
 		add("language:"+k, "language "+k)
 	}
