@@ -271,7 +271,7 @@ pgy commit init                    # 0001_init_core_user.sql, 0002_init_core_org
   - the file that owns a table another file extends
 - Foreign keys, triggers, policies, indexes, constraints and defaults that reference something a later group creates are moved into that later group, so circular references between files still work.
 - Extensions and roles always go into the first migration. Drops (`--unsafe`, `--prune`) only go into the last one.
-- Against an existing database, only groups with changes produce migrations.
+- Against an existing database, only groups with changes produce migrations. Each change lands in the group of the file that declares it, once: a view, routine or rule with `replace: true` is re-emitted there and not again in the groups after it.
 
 References inside SQL text are found by name. A name that only looks like a reference can, at worst, reorder or merge groups. Use `dependsOn` for any cross-file dependency the scan cannot see.
 

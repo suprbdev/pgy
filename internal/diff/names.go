@@ -97,6 +97,17 @@ func LiveUniqueKeyName(fq, col string, live map[string]bool) string {
     return name
 }
 
+// InDottedSchema reports whether key, a schema.name key of live, may belong
+// to a schema of live whose name contains a dot. pgy splits keys at the
+// first dot, so it cannot tell such an object from one whose name contains
+// a dot in the schema before it, and leaves both alone.
+func InDottedSchema(live *Live, key string) bool {
+    for s := range live.Schemas {
+        if strings.Contains(s, ".") && strings.HasPrefix(key, s+".") { return true }
+    }
+    return false
+}
+
 // ColumnRelation returns the schema.table part of a schema.table.column
 // reference. Everything after the table is the column name, which may
 // contain dots.
