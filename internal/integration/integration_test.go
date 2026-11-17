@@ -2275,7 +2275,7 @@ func TestIntegrationFunctionReplaceOnBodyChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	p = diff.Plan(live, mkDesired("select 2"), false)
-	if len(p.Creates) != 1 || !strings.Contains(p.Creates[0], "create or replace function") {
+	if len(p.Creates) != 3 || !strings.Contains(p.Creates[1], "create or replace function") {
 		t.Fatalf("expected create or replace; creates: %v", p.Creates)
 	}
 	applyPlan(t, pool, p)
