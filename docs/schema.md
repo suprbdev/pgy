@@ -51,6 +51,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Roles](#roles)
 - [Grants](#grants)
   - [Ownership](#ownership)
+  - [Objects of other owners](#objects-of-other-owners)
   - [Default Privileges](#default-privileges)
   - [Column-Level Grants](#column-level-grants)
 - [Comments](#comments)
@@ -391,6 +392,7 @@ Several rules keep this from removing something the database still needs:
 - **`plpgsql`** is never dropped.
 - **Declared objects.** An extension is kept while the YAML declares one of its own objects (see [Objects an extension owns](#objects-an-extension-owns)). `pgy diff` warns (kind `dependents`) and names the declaration.
 - **Requirements.** An extension that one staying installed requires is kept: declaring `earthdistance` without listing `cube` never drops `cube`.
+- **Owner.** An extension created by a role whose privileges the connecting role doesn't have, such as a hosting platform's, is kept, and `pgy diff` warns (kind `not_owner`). See [Objects of other owners](#objects-of-other-owners).
 - **Dependents.** PostgreSQL refuses to drop an extension while objects outside it use its types, functions, operators or operator classes: a column of type `citext`, an index with `gin_trgm_ops`, a view calling `akeys()`. With a connection, pgy looks them up in `pg_depend` for each extension it is about to drop. When the same plan drops all of them (the table is pruned, the column or the index is dropped), `DROP EXTENSION` follows those drops. Otherwise the statement is left out and `pgy diff` warns (kind `dependents`), naming the extension and what still uses it, so the migration always applies. Once nothing uses the extension, the next `pgy diff --unsafe --prune` drops it. That takes two migrations when a dependent is changed instead of dropped: retyping a column from `citext` to `text` and removing `citext` from the block changes the type in the first and drops the extension in the second.
 
 PostgreSQL does not record what a function body written as text (`plpgsql`, or `language sql` with a quoted body) calls, so such a function does not hold an extension back, and fails the next time it runs. SQL-standard bodies (`BEGIN ATOMIC`, `RETURN`) are tracked.
@@ -1364,6 +1366,8 @@ schema public:
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
+`--unsafe --prune` drops undeclared functions, procedures and aggregates in the schemas the YAML declares objects in. PostgreSQL refuses `DROP FUNCTION` while another object uses the routine: a trigger, an event trigger, a column default or check constraint, an index, a view, a routine with a SQL-standard body. With a connection, pgy looks these up in `pg_depend` for each routine it is about to drop, like it does for [extensions](#removing-extensions). A routine whose dependents the same plan drops is dropped after them. One that something the plan keeps still uses is kept, and `pgy diff` warns (kind `dependents`), naming what uses it, so the migration applies; the next `pgy diff --unsafe --prune` drops it once nothing does.
+
 ### Transforms
 
 A transform converts a type between its SQL form and a procedural language's native one: with `hstore_plpython3u` a PL/Python function receives an `hstore` argument as a dict instead of a string. PostgreSQL ships transforms as extensions (`hstore_plperl`, `hstore_plpython3u`, `jsonb_plperl`, `jsonb_plpython3u`, `ltree_plpython3u`, `bool_plperl` and the `plperlu` variants), and a function or procedure opts in per type with `TRANSFORM FOR TYPE`, which is the `transform` list:
@@ -1734,6 +1738,10 @@ schema app:
       id: {type: bigint}
 ```
 
+### Objects of other owners
+
+Only an object's owner, a role that inherits the owner's privileges, or a superuser may drop it. On a hosted database, the platform's own role (`rdsadmin`, `supabase_admin`, `azuresu` and the like) owns event triggers, extensions and sometimes tables and functions in the schemas the application uses, and the role pgy connects as is none of those. `--unsafe --prune` leaves such an object alone instead of planning a `DROP` that PostgreSQL would reject with `must be owner of`, and `pgy diff` warns (kind `not_owner`, which `ci.fail_on` accepts), naming the object and its owner. The undeclared triggers, constraints, indexes, rules and statistics of a declared table or view such a role owns are left alone the same way. This covers everything `--prune` drops: tables, views, routines, sequences, types and domains, collations, text search objects, event triggers, publications, servers, foreign-data wrappers and extensions. Declaring the object silences the warning, and for an extension so does `prune.keep_extensions`. Statements for objects the YAML declares are planned as usual.
+
 ### Default Privileges
 
 A top-level `defaultPrivileges:` list manages `ALTER DEFAULT PRIVILEGES`, the privileges objects receive automatically when they are created later.
@@ -1851,7 +1859,7 @@ publications:
     allTables: true
 ```
 
-Publications are created after every table, so their tables and columns exist. As in PostgreSQL, a table is published with its inheritance children unless it sets `only: true`; list just the parent, not the children too. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments and `owner` are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list. PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
+Publications are created after every table, so their tables and columns exist. As in PostgreSQL, a table is published with its inheritance children unless it sets `only: true`; list just the parent, not the children too. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments and `owner` are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list (see [Objects of other owners](#objects-of-other-owners) for those it may not drop). PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
 
 ## Event Triggers
 
@@ -1867,7 +1875,7 @@ eventTriggers:
     comment: DDL audit
 ```
 
-Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension.
+Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension and those whose function is in a schema the YAML declares no objects in, which is the scope `--prune` uses for other objects. A function an event trigger that stays uses is not pruned either: `pgy diff` warns (kind `dependents`) and drops it once the trigger is gone.
 
 ## Reference Data
 

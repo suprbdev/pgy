@@ -36,9 +36,15 @@ func TestEventTriggerSkippedReplacedAndPruned(t *testing.T) {
 	if sql := Render(Plan(live, same, false)); sql != "" {
 		t.Errorf("same event trigger must not diff, got:\n%s", sql)
 	}
+	if p := PlanWith(live, same, Options{Unsafe: true, Prune: true}); len(p.Drops) != 0 {
+		t.Errorf("prune leaves event triggers whose function is in a schema the YAML doesn't use, got %v", p.Drops)
+	}
+	live.EventTriggers["elsewhere"] = &LiveEventTrigger{Event: "sql_drop", Function: "platform.watch", Enabled: "origin"}
+	live.Schemas["public"], live.Tables["public.t"] = true, &LiveTable{Columns: map[string]*LiveColumn{}}
+	same.Tables["public.t"] = &schema.Table{Name: "t", Columns: map[string]*schema.Column{}}
 	p := PlanWith(live, same, Options{Unsafe: true, Prune: true})
 	if len(p.Drops) != 1 || p.Drops[0] != `drop event trigger "stray";` {
-		t.Errorf("prune should drop only the undeclared, non-extension trigger, got %v", p.Drops)
+		t.Errorf("prune should drop only the undeclared, non-extension trigger whose function is in a schema the YAML uses, got %v", p.Drops)
 	}
 	changed := etDB(map[string]*schema.EventTrigger{
 		"log_ddl": {Name: "log_ddl", Event: "ddl_command_end", Tags: []string{"CREATE TABLE"}, Function: "log_ddl", Comment: "audit", Enabled: "disabled"},

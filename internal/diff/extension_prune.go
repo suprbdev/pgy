@@ -27,11 +27,26 @@ type ExtensionDependent struct {
 const maxListedDependents = 3
 
 // prunableExtensions returns the installed extensions that --unsafe --prune
-// may drop, before their dependents are looked at: the ones a present
-// extensions block does not list, living in a schema the YAML declares
-// objects in. plpgsql, the extensions in opts.KeepExtensions and the ones
-// an extension that stays installed requires are never among them.
+// may drop, before their dependents are looked at: the ones
+// unlistedExtensions returns that the connecting role may drop (see
+// Live.OwnerRoles). The ones an extension that stays installed requires are
+// never among them.
 func prunableExtensions(live *Live, desired *schema.Database, opts Options) map[string]bool {
+	drop := unlistedExtensions(live, desired, opts)
+	for name := range drop {
+		if !live.mayDrop(live.ExtensionDefs[name].Owner) {
+			delete(drop, name)
+		}
+	}
+	keepRequired(drop, live, desired)
+	return drop
+}
+
+// unlistedExtensions returns the installed extensions a present extensions
+// block does not list, living in a schema the YAML declares objects in,
+// under --unsafe --prune. plpgsql and the extensions in opts.KeepExtensions
+// are never among them.
+func unlistedExtensions(live *Live, desired *schema.Database, opts Options) map[string]bool {
 	drop := map[string]bool{}
 	if live == nil || desired == nil || desired.Extensions == nil || !opts.Unsafe || !opts.Prune {
 		return drop
@@ -52,7 +67,6 @@ func prunableExtensions(live *Live, desired *schema.Database, opts Options) map[
 			drop[name] = true
 		}
 	}
-	keepRequired(drop, live, desired)
 	return drop
 }
 
@@ -102,10 +116,18 @@ func keepRequired(drop map[string]bool, live *Live, desired *schema.Database) {
 // Otherwise it is kept, along with the extensions it requires, and a
 // warning names what uses it, since PostgreSQL would reject the statement.
 // An extension is also kept, with the same warning, while desired declares
-// one of its own objects (see resolveAttributeOnly).
+// one of its own objects (see resolveAttributeOnly), and so is one the
+// connecting role may not drop (see Live.OwnerRoles), with a warning of
+// kind not_owner.
 // An extension whose dependents were not loaded (see IntrospectExtensions)
 // is dropped unchecked.
 func planExtensionDrops(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
+	unlisted := unlistedExtensions(live, desired, opts)
+	for _, name := range sortedKeys(unlisted) {
+		if owner := live.ExtensionDefs[name].Owner; !live.mayDrop(owner) {
+			plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "extension "+name, owner, ""))
+		}
+	}
 	drop := prunableExtensions(live, desired, opts)
 	if len(drop) == 0 {
 		return
@@ -357,6 +379,36 @@ func newExtensionDependent(a dependentAddress, description string) ExtensionDepe
 	return d
 }
 
+// dependentsQuery wraps inner, a query for the objects (key, classid, objid,
+// objsubid, owner) that depend on what key names, with owner the extension
+// such an object belongs to or "", into one that describes each of them:
+// key, owner, then the columns a dependentAddress and newExtensionDependent
+// take. Objects another session dropped after the query's snapshot was
+// taken have no address and are skipped.
+func dependentsQuery(inner string) string {
+	return `
+        select x.key, x.owner, a.type, a.object_names,
+               coalesce(tn.nspname || '.' || t.relname, ''),
+               coalesce(rn.nspname || '.' || r.relname, ''),
+               case when x.classid = 'pg_proc'::regclass then coalesce(pg_get_function_identity_arguments(x.objid), '') else '' end,
+               coalesce(yn.nspname || '.' || y.typname, ''),
+               coalesce(pg_describe_object(x.classid, x.objid, x.objsubid), '')
+        from (` + inner + `
+        ) x(key, classid, objid, objsubid, owner)
+        cross join lateral pg_identify_object_as_address(x.classid, x.objid, x.objsubid) a
+        left join pg_index i on x.classid = 'pg_class'::regclass and i.indexrelid = x.objid
+        left join pg_statistic_ext st on x.classid = 'pg_statistic_ext'::regclass and st.oid = x.objid
+        left join pg_class t on t.oid = coalesce(i.indrelid, st.stxrelid)
+        left join pg_namespace tn on tn.oid = t.relnamespace
+        left join pg_class r on r.oid = pg_partition_root(i.indexrelid) and r.oid <> i.indexrelid
+        left join pg_namespace rn on rn.oid = r.relnamespace
+        left join pg_constraint con on x.classid = 'pg_constraint'::regclass and con.oid = x.objid
+        left join pg_type y on y.oid = case when x.classid = 'pg_type'::regclass then x.objid else nullif(con.contypid, 0) end
+        left join pg_namespace yn on yn.oid = y.typnamespace
+        where a.type is not null
+        order by 1, 9`
+}
+
 // queryExtensionDependents adds to batch the query that fills Dependents of
 // the named installed extensions. A dependent is an object with a normal
 // dependency on a member of the extension. Objects PostgreSQL drops with
@@ -373,15 +425,8 @@ func queryExtensionDependents(batch *queryBatch, live *Live, names []string) {
 			le.Dependents = []ExtensionDependent{}
 		}
 	}
-	batch.add(`
-        select x.extname::text, x.owner, a.type, a.object_names,
-               coalesce(tn.nspname || '.' || t.relname, ''),
-               coalesce(rn.nspname || '.' || r.relname, ''),
-               case when x.classid = 'pg_proc'::regclass then coalesce(pg_get_function_identity_arguments(x.objid), '') else '' end,
-               coalesce(yn.nspname || '.' || y.typname, ''),
-               coalesce(pg_describe_object(x.classid, x.objid, x.objsubid), '')
-        from (
-            select e.extname, d.classid, d.objid, d.objsubid, coalesce(max(o.extname::text), '') as owner
+	batch.add(dependentsQuery(`
+            select e.extname::text, d.classid, d.objid, d.objsubid, coalesce(max(o.extname::text), '') as owner
             from pg_extension e
             join pg_depend m on m.refclassid = 'pg_extension'::regclass and m.refobjid = e.oid and m.deptype = 'e'
             join pg_depend d on d.refclassid = m.classid and d.refobjid = m.objid and d.deptype = 'n'
@@ -391,20 +436,7 @@ func queryExtensionDependents(batch *queryBatch, live *Live, names []string) {
             left join pg_extension o on o.oid = case when s.deptype = 'e' then s.refobjid else sm.refobjid end
             where e.extname in (`+strings.Join(quoted, ", ")+`)
             group by e.oid, e.extname, d.classid, d.objid, d.objsubid
-            having not coalesce(bool_or(o.oid = e.oid), false)
-        ) x
-        cross join lateral pg_identify_object_as_address(x.classid, x.objid, x.objsubid) a
-        left join pg_index i on x.classid = 'pg_class'::regclass and i.indexrelid = x.objid
-        left join pg_statistic_ext st on x.classid = 'pg_statistic_ext'::regclass and st.oid = x.objid
-        left join pg_class t on t.oid = coalesce(i.indrelid, st.stxrelid)
-        left join pg_namespace tn on tn.oid = t.relnamespace
-        left join pg_class r on r.oid = pg_partition_root(i.indexrelid) and r.oid <> i.indexrelid
-        left join pg_namespace rn on rn.oid = r.relnamespace
-        left join pg_constraint con on x.classid = 'pg_constraint'::regclass and con.oid = x.objid
-        left join pg_type y on y.oid = case when x.classid = 'pg_type'::regclass then x.objid else nullif(con.contypid, 0) end
-        left join pg_namespace yn on yn.oid = y.typnamespace
-        where a.type is not null
-        order by 1, 9`, func(rows pgx.Rows) error {
+            having not coalesce(bool_or(o.oid = e.oid), false)`), func(rows pgx.Rows) error {
 		for rows.Next() {
 			var ext, owner, description string
 			var a dependentAddress

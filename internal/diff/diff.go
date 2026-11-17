@@ -88,6 +88,11 @@ type Live struct{
     DefaultACLs    map[string]map[string]map[string]bool
     DefaultACLRows map[string]bool
     CurrentUser    string
+    // OwnerRoles: the roles whose objects the connecting role may drop and
+    // alter as their owner, those whose privileges it has
+    // (pg_has_role(current_user, role, 'USAGE'), itself included, every
+    // role for a superuser); nil when unknown, and then any owner counts.
+    OwnerRoles map[string]bool
     // DatabaseConfig: ALTER DATABASE ... SET settings of the connected
     // database (for all roles): lower-cased name -> value
     DatabaseConfig map[string]string
@@ -252,6 +257,7 @@ type LiveEventTrigger struct {
     Enabled   string
     Comment   string
     Extension bool // member of an extension
+    Owner     string
 }
 
 // LiveRole is a role's attributes from pg_roles.
@@ -325,6 +331,7 @@ type LiveExtension struct {
     Version     string
     Relocatable bool
     Comment     string
+    Owner       string
     // DefaultComment is the comment the extension's control file gives it,
     // which CREATE EXTENSION sets.
     DefaultComment string
@@ -397,6 +404,11 @@ type LiveFunction struct{
     SQLBody bool
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
+    // Dependents lists the objects outside the routine that use it, which
+    // DROP FUNCTION without CASCADE refuses to leave behind. It is nil
+    // until IntrospectExtensions loads it for a routine that pruning may
+    // drop.
+    Dependents []ExtensionDependent
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
@@ -407,6 +419,7 @@ type LiveProcedure struct{
     Config   map[string]string // proconfig: lower-cased parameter name -> value
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
+    Dependents []ExtensionDependent // see LiveFunction.Dependents
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -1535,7 +1548,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select e.evtname, e.evtevent, n.nspname || '.' || p.proname,
                case e.evtenabled when 'D' then 'disabled' when 'R' then 'replica' when 'A' then 'always' else 'origin' end,
                coalesce(e.evttags, '{}'), coalesce(d.description, ''),
-               exists (select 1 from pg_depend x where x.classid = 'pg_event_trigger'::regclass and x.objid = e.oid and x.deptype = 'e')
+               exists (select 1 from pg_depend x where x.classid = 'pg_event_trigger'::regclass and x.objid = e.oid and x.deptype = 'e'),
+               pg_get_userbyid(e.evtowner)
         from pg_event_trigger e
         join pg_proc p on p.oid = e.evtfoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -1545,7 +1559,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for etRows.Next() {
             var name string
             et := &LiveEventTrigger{}
-            if err := etRows.Scan(&name, &et.Event, &et.Function, &et.Enabled, &et.Tags, &et.Comment, &et.Extension); err != nil {
+            if err := etRows.Scan(&name, &et.Event, &et.Function, &et.Enabled, &et.Tags, &et.Comment, &et.Extension, &et.Owner); err != nil {
                 return err
             }
             l.EventTriggers[name] = et
@@ -1717,7 +1731,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce(a.comment, ''), coalesce(a.default_version, ''),
                array(select r.extname::text from pg_depend d join pg_extension r on r.oid = d.refobjid
                      where d.classid = 'pg_extension'::regclass and d.objid = e.oid
-                     and d.refclassid = 'pg_extension'::regclass order by 1)
+                     and d.refclassid = 'pg_extension'::regclass order by 1),
+               pg_get_userbyid(e.extowner)
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
         left join pg_available_extensions a on a.name = e.extname
@@ -1726,7 +1741,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for extRows.Next() {
             var extName string
             le := &LiveExtension{}
-            if err := extRows.Scan(&extName, &le.Schema, &le.Version, &le.Relocatable, &le.Comment, &le.DefaultComment, &le.DefaultVersion, &le.Requires); err != nil {
+            if err := extRows.Scan(&extName, &le.Schema, &le.Version, &le.Relocatable, &le.Comment, &le.DefaultComment, &le.DefaultVersion, &le.Requires, &le.Owner); err != nil {
                 return err
             }
             l.Extensions[extName] = true
@@ -2285,6 +2300,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
         from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'tscfg:' || n.nspname || '.' || c.cfgname, pg_get_userbyid(c.cfgowner)
+        from pg_ts_config c join pg_namespace n on n.oid = c.cfgnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'coll:' || n.nspname || '.' || c.collname, pg_get_userbyid(c.collowner)
+        from pg_collation c join pg_namespace n on n.oid = c.collnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(ownerQ, func(ownerRows pgx.Rows) error {
         for ownerRows.Next() {
@@ -2345,6 +2368,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var config []string
             if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
+        }
+        return nil
+    })
+    batch.add(`select r.rolname from pg_roles r where pg_has_role(current_user, r.oid, 'USAGE')`, func(rows pgx.Rows) error {
+        l.OwnerRoles = map[string]bool{}
+        for rows.Next() {
+            var role string
+            if err := rows.Scan(&role); err != nil { return err }
+            l.OwnerRoles[role] = true
         }
         return nil
     })
@@ -3482,8 +3514,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
-        early, late := planPrune(live, desired, opts.MigrationsTable)
+        early, late, pruneWarnings := planPrune(live, desired, opts.MigrationsTable, plan.Drops)
         plan.Drops = append(append(early, plan.Drops...), late...)
+        plan.Warnings = append(plan.Warnings, pruneWarnings...)
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
         plan.Drops = append(plan.Drops, serverDrops...)
         plan.Warnings = append(plan.Warnings, serverWarnings...)
@@ -4110,7 +4143,8 @@ func isNumericLiteral(s string) bool {
 // desired publication has no members); option changes SET (...). Switching
 // to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
 // every table, so it requires --unsafe, as does --prune dropping
-// publications missing from a present publications block.
+// publications missing from a present publications block, but for those the
+// connecting role may not drop (see Live.OwnerRoles), which are reported.
 func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.Publications == nil { return }
     for _, name := range sortedKeys(desired.Publications) {
@@ -4172,7 +4206,12 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
     }
     if !opts.Unsafe || !opts.Prune { return }
     for _, name := range sortedKeys(live.Publications) {
-        if desired.Publications[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name))) }
+        if desired.Publications[name] != nil { continue }
+        if owner := live.Publications[name].Owner; !live.mayDrop(owner) {
+            plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "publication "+name, owner, ""))
+            continue
+        }
+        plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name)))
     }
 }
 
@@ -4239,7 +4278,10 @@ func publicationWith(p *schema.Publication, lp *LivePublication) string {
 // ones whose event, tags or function changed (metadata only, so not gated
 // behind --unsafe), after every function create. Enabled state and comments
 // are reconciled with ALTER / COMMENT. With a present eventTriggers block,
-// --unsafe --prune drops undeclared ones that no extension owns.
+// --unsafe --prune drops undeclared ones that no extension owns and whose
+// function is in a schema the YAML declares objects in, like the other
+// objects it prunes; one the connecting role may not drop (see
+// Live.OwnerRoles) is reported instead.
 func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.EventTriggers == nil { return }
     for _, name := range sortedKeys(desired.EventTriggers) {
@@ -4272,8 +4314,13 @@ func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opt
         }
     }
     if !opts.Unsafe || !opts.Prune { return }
+    inScope := pruneScope(live, desired)
     for _, name := range sortedKeys(live.EventTriggers) {
-        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil { continue }
+        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil || !inScope(le.Function) { continue }
+        if owner := live.EventTriggers[name].Owner; !live.mayDrop(owner) {
+            plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "event trigger "+name, owner, ""))
+            continue
+        }
         plan.Drops = append(plan.Drops, fmt.Sprintf("drop event trigger %s;", quoteIdent(name)))
     }
 }

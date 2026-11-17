@@ -737,6 +737,7 @@ func cloneLive(l *Live) *Live {
         DefaultACLs:        cloneGrantMap(l.DefaultACLs),
         DefaultACLRows:     cloneSet(l.DefaultACLRows),
         CurrentUser:        l.CurrentUser,
+        OwnerRoles:         l.OwnerRoles,
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
