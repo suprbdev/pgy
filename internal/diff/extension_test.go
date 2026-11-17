@@ -191,6 +191,46 @@ func TestExtensionVersionWithoutUpdatePath(t *testing.T) {
 	wantStatements(t, Plan(live, d, true).Creates, []string{`alter extension "pg_stat_statements" update to '1.4';`})
 }
 
+func TestExtensionVersionWithoutUpdatePathReason(t *testing.T) {
+	live := emptyLive()
+	live.Extensions["postgres_fdw"] = true
+	live.ExtensionDefs = map[string]*LiveExtension{
+		"postgres_fdw": {Schema: "public", Version: "1.2", Relocatable: true, UpdateTargets: map[string]bool{}},
+	}
+	live.AvailableExtensions = map[string]*AvailableExtension{
+		"postgres_fdw": {DefaultVersion: "1.2", Requires: map[string][]string{"1.0": {}, "1.1": {}, "1.2": {}, "1.10": {}}},
+	}
+	for version, want := range map[string]string{
+		"1.0":  "extension postgres_fdw: PostgreSQL has no update path from the installed version 1.2 to 1.0 (an extension cannot be downgraded), so its version is left as it is",
+		"1.9":  "extension postgres_fdw: version 1.9 is not available on this server (available: 1.0, 1.1, 1.2, 1.10), so the installed version 1.2 is left as it is",
+		"1.10": "extension postgres_fdw: PostgreSQL has no update path from the installed version 1.2 to 1.10, so its version is left as it is",
+	} {
+		p := Plan(live, &schema.Database{Extensions: []*schema.Extension{{Name: "postgres_fdw", Version: version}}}, true)
+		if sql := Render(p); sql != "" {
+			t.Errorf("%s: nothing is planned, got:\n%s", version, sql)
+		}
+		if len(p.Warnings) != 1 || p.Warnings[0].Message != want {
+			t.Errorf("%s: want %q, got %v", version, want, p.Warnings)
+		}
+	}
+	live.AvailableExtensions = nil
+	p := Plan(live, &schema.Database{Extensions: []*schema.Extension{{Name: "postgres_fdw", Version: "1.9"}}}, true)
+	if len(p.Warnings) != 1 || p.Warnings[0].Message != "extension postgres_fdw: PostgreSQL has no update path from the installed version 1.2 to 1.9, so its version is left as it is" {
+		t.Errorf("without the available versions: %v", p.Warnings)
+	}
+}
+
+func TestExtensionVersionLess(t *testing.T) {
+	for _, c := range [][2]string{{"1.9", "1.10"}, {"1.1", "1.1.1"}, {"1.0", "2"}, {"1.4beta", "1.4rc"}, {"0.9", "1.0"}} {
+		if !versionLess(c[0], c[1]) || versionLess(c[1], c[0]) {
+			t.Errorf("%s must come before %s", c[0], c[1])
+		}
+	}
+	if versionLess("1.2", "1.2") {
+		t.Error("a version does not come before itself")
+	}
+}
+
 func TestExtensionUnavailableWarns(t *testing.T) {
 	live := emptyLive()
 	live.ServerVersion = 170000

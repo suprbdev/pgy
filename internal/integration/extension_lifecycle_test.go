@@ -264,18 +264,19 @@ func TestIntegrationExtensionServerChecks(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
 	db := freshDatabase(t, admin, "pgytest_ext_checks")
-	if _, err := db.Exec(ctx, `create extension hstore version '1.5' schema public`); err != nil {
+	if _, err := db.Exec(ctx, `create extension hstore version '1.5' schema public; create extension pg_trgm schema public`); err != nil {
 		t.Fatal(err)
 	}
 	plan := planExtensionsLive(t, db, `
 extensions:
   - {name: hstore, schema: public, version: "1.4"}
+  - {name: pg_trgm, schema: public, version: "9.9"}
   - {name: citext, schema: public, version: "9.9"}
   - {name: pgy_no_such_extension, schema: public}
 `, diff.Options{Unsafe: true})
 	sql := diff.Render(plan)
-	if strings.Contains(sql, `alter extension "hstore"`) {
-		t.Errorf("a downgrade must not be planned:\n%s", sql)
+	if strings.Contains(sql, `alter extension "hstore"`) || strings.Contains(sql, `alter extension "pg_trgm"`) {
+		t.Errorf("a downgrade or an update to a missing version must not be planned:\n%s", sql)
 	}
 	msgs := []string{}
 	for _, w := range plan.Warnings {
@@ -283,13 +284,17 @@ extensions:
 	}
 	all := strings.Join(msgs, "\n")
 	for _, want := range []string{
-		"extension hstore: PostgreSQL has no update path from the installed version 1.5 to 1.4",
+		"extension hstore: PostgreSQL has no update path from the installed version 1.5 to 1.4 (an extension cannot be downgraded)",
+		"extension pg_trgm: version 9.9 is not available on this server (available: ",
 		"extension citext: version 9.9 is not available on this server (available: ",
 		"extension pgy_no_such_extension is not available on this server",
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing warning %q in:\n%s", want, all)
 		}
+	}
+	if strings.Count(all, "cannot be downgraded") != 1 {
+		t.Errorf("only the downgrade says so:\n%s", all)
 	}
 	plan = planExtensionsLive(t, db, "extensions:\n  - {name: hstore, schema: public, version: \"1.6\"}\n", diff.Options{})
 	if got := strings.TrimSpace(diff.Render(plan)); got != `alter extension "hstore" update to '1.6';` || len(plan.Warnings) != 0 {

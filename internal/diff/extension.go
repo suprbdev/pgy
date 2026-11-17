@@ -109,7 +109,16 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
             }
             if ext.Version != "" && ext.Version != le.Version {
                 if le.UpdateTargets != nil && !le.UpdateTargets[ext.Version] {
-                    warn("extension %s: PostgreSQL has no update path from the installed version %s to %s (an extension cannot be downgraded), so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    av, available := live.AvailableExtensions[ext.Name], true
+                    if av != nil { _, available = av.Requires[ext.Version] }
+                    switch {
+                    case versionLess(ext.Version, le.Version):
+                        warn("extension %s: PostgreSQL has no update path from the installed version %s to %s (an extension cannot be downgraded), so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    case !available:
+                        warn("extension %s: version %s is not available on this server (available: %s), so the installed version %s is left as it is", ext.Name, ext.Version, strings.Join(sortedVersions(av.Requires), ", "), le.Version)
+                    default:
+                        warn("extension %s: PostgreSQL has no update path from the installed version %s to %s, so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    }
                 } else {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter extension %s update to %s;", name, quoteString(ext.Version)))
                 }
@@ -137,24 +146,29 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     }
 }
 
-// sortedVersions returns the keys of m in version order: numeric parts
-// compare as numbers, so 1.10 follows 1.9.
+// sortedVersions returns the keys of m in version order (see versionLess).
 func sortedVersions(m map[string][]string) []string {
     out := sortedKeys(m)
-    sort.SliceStable(out, func(i, j int) bool {
-        a, b := strings.Split(out[i], "."), strings.Split(out[j], ".")
-        for k := 0; k < len(a) && k < len(b); k++ {
-            x, errX := strconv.Atoi(a[k])
-            y, errY := strconv.Atoi(b[k])
-            if errX != nil || errY != nil {
-                if a[k] != b[k] { return a[k] < b[k] }
-                continue
-            }
-            if x != y { return x < y }
-        }
-        return len(a) < len(b)
-    })
+    sort.SliceStable(out, func(i, j int) bool { return versionLess(out[i], out[j]) })
     return out
+}
+
+// versionLess reports whether extension version a comes before b: the
+// dot-separated parts compare in turn, numeric ones as numbers, so 1.10
+// follows 1.9, and a version comes before the longer ones it starts (1.1
+// before 1.1.1).
+func versionLess(a, b string) bool {
+    x, y := strings.Split(a, "."), strings.Split(b, ".")
+    for k := 0; k < len(x) && k < len(y); k++ {
+        m, errM := strconv.Atoi(x[k])
+        n, errN := strconv.Atoi(y[k])
+        if errM != nil || errN != nil {
+            if x[k] != y[k] { return x[k] < y[k] }
+            continue
+        }
+        if m != n { return m < n }
+    }
+    return len(x) < len(y)
 }
 
 // IntrospectExtensions loads what planning the extensions needs beyond
