@@ -58,13 +58,16 @@ type PolicyConfig struct {
     PublicGrants     string   `yaml:"public_grants"`
     LockTimeout      string   `yaml:"lock_timeout"`
     StatementTimeout string   `yaml:"statement_timeout"`
+    StrictExpressions bool    `yaml:"strict_expressions"`
 }
 
 // migratePolicy holds the policy: settings that aren't schema rules: how
-// pgy diff treats PUBLIC and indexes, and pgy migrate's default timeouts.
+// pgy diff treats PUBLIC and indexes and whether it compares every
+// expression through the server, and pgy migrate's default timeouts.
 type migratePolicy struct {
     ConcurrentIndexes bool
     PublicGrants      diff.PublicGrants
+    StrictExpressions bool
     LockTimeout, StatementTimeout string
 }
 
@@ -74,7 +77,7 @@ var durationRe = regexp.MustCompile(`^\d+(\.\d+)?\s*(us|ms|s|min|h|d)?$`)
 func resolveMigratePolicy(pc *PolicyConfig) (migratePolicy, error) {
     mp := migratePolicy{}
     if pc == nil { return mp, nil }
-    mp.ConcurrentIndexes = pc.ConcurrentIndexes
+    mp.ConcurrentIndexes, mp.StrictExpressions = pc.ConcurrentIndexes, pc.StrictExpressions
     switch pc.PublicGrants {
     case "", "by_kind":
     case "authoritative":

@@ -23,6 +23,7 @@ func cmdDiff() *cobra.Command {
     var fromEmpty bool
     var split string
     var noWarnings bool
+    var strictExpressions bool
     c := &cobra.Command{
         Use:   "diff",
         Short: "Generate SQL diff between YAML schema and live DB",
@@ -33,6 +34,12 @@ concurrently, a foreign key or check added without notValid, SET NOT NULL, a
 rewriting type change, SET LOGGED/UNLOGGED, an added column whose value is
 computed per row) are reported on stderr, as are the errors pgy validate would
 report. Use --no-warnings to silence them.
+
+Declared expressions (defaults, checks, index expressions and predicates,
+policies, triggers and the like) are compared as text, and through the server
+where the text differs or matches only because a cast or a schema was left
+out on one side. --strict-expressions, or policy.strict_expressions in the
+config, compares every one through the server.
 
 With --buffer - the SQL is printed to stdout instead of written to the
 buffer file, and status messages go to stderr.
@@ -136,6 +143,11 @@ Exit codes:
                 if err := diff.ProbeViews(ctx, pool, live, compiled); err != nil && !noWarnings {
                     fmt.Fprintf(os.Stderr, "warning: views and materialized views were not compared with the YAML, so their queries are left as they are: %v\n", err)
                 }
+                probe := diff.ProbeExpressions
+                if strictExpressions || !cmd.Flags().Changed("strict-expressions") && cfg.Migrate.StrictExpressions { probe = diff.ProbeEveryExpression }
+                if err := probe(ctx, pool, live, compiled); err != nil && !noWarnings {
+                    fmt.Fprintf(os.Stderr, "warning: expressions were compared as text only, so one PostgreSQL stores the same way as the YAML may be reported as changed, and one that differs only in a cast or a schema as unchanged: %v\n", err)
+                }
             }
             var steps []group.Step
             var plan *diff.PlanDiff
@@ -162,17 +174,6 @@ Exit codes:
             }
             if err := makePlan(); err != nil {
                 return err
-            }
-            if pool != nil && reportsChanges(plan, steps) {
-                if err := diff.ProbeExpressions(ctx, pool, live, compiled); err != nil {
-                    if !noWarnings {
-                        fmt.Fprintf(os.Stderr, "warning: expressions the YAML spells differently from the database were compared as text only, so some may be reported as changed although PostgreSQL stores them the same way: %v\n", err)
-                    }
-                } else if live.ExprProbes != nil {
-                    if err := makePlan(); err != nil {
-                        return err
-                    }
-                }
             }
             var sql string
             var summary any
@@ -253,6 +254,7 @@ Exit codes:
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
     c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report schema problems or statements that lock or rewrite existing tables")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")
+    c.Flags().BoolVar(&strictExpressions, "strict-expressions", false, "Compare every declared expression (defaults, checks, index expressions and predicates, policies, triggers, domain and argument defaults) through the server, also those that match as text; catches what the text comparison hides beyond casts and schemas, such as other parentheses. Costs a temporary copy of every table that declares one: about 2 s per diff for 1000 tables, against 0.5 s without it (default: the config's policy.strict_expressions)")
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
     c.Flags().Lookup("split").NoOptDefVal = group.ModeFile
     return c
@@ -304,19 +306,6 @@ func (e *exitCodeError) Error() string { return fmt.Sprintf("exit %d", e.code) }
 func liveOrNil(live *diff.Live, fromEmpty bool) *diff.Live {
     if fromEmpty { return nil }
     return live
-}
-
-// reportsChanges reports whether plan, or a step of a split plan, holds a
-// statement or a warning. A plan that holds neither has nothing
-// diff.ProbeExpressions could take out of it.
-func reportsChanges(plan *diff.PlanDiff, steps []group.Step) bool {
-    reports := func(p *diff.PlanDiff) bool {
-        return p != nil && len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent)+len(p.Warnings) > 0
-    }
-    for _, s := range steps {
-        if reports(s.Plan) { return true }
-    }
-    return reports(plan)
 }
 
 // maxUnsafeWarnings is how many "needs --unsafe" warnings pgy diff prints

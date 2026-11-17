@@ -125,6 +125,21 @@ func TestConfigPruneKeepExtensions(t *testing.T) {
     }
 }
 
+func TestConfigPolicyStrictExpressions(t *testing.T) {
+    dir := t.TempDir()
+    writeFile(t, filepath.Join(dir, "pgy.yaml"), "policy:\n  strict_expressions: true\n")
+    fc, _, err := loadFileConfig(dir, "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if mp, err := resolveMigratePolicy(fc.Policy); err != nil || !mp.StrictExpressions {
+        t.Errorf("policy.strict_expressions: want true, got %+v, %v", mp, err)
+    }
+    if mp, _ := resolveMigratePolicy(&PolicyConfig{}); mp.StrictExpressions {
+        t.Error("strict_expressions is off by default")
+    }
+}
+
 func TestDiscoverSchemasSkipsConfigAndDotfiles(t *testing.T) {
     dir := t.TempDir()
     for _, f := range []string{"a.yml", "sub/b.yaml", ".golangci.yml", "sub/.pgy.yml", "sub/pgy.yaml", "custom.yml", ".github/workflows/ci.yml", "node_modules/x/y.yml", "notes.txt"} {

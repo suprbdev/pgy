@@ -47,8 +47,9 @@ type Live struct{
     // or use it as a whole (count(*))
     ViewDependents map[string][]string
     // ExprProbes holds what PostgreSQL made of the declared definitions that
-    // don't match the live ones as text (see ProbeExpressions); nil when
-    // none was probed, and they are compared as text only.
+    // don't match the live ones as text, or match only by dropping a cast or
+    // a schema from one side (see ProbeExpressions); nil when none was
+    // probed, and they are compared as text only.
     ExprProbes map[ExprKey]*ExprProbe
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
@@ -6912,8 +6913,11 @@ func isSerialType(t string) bool {
 // defaultsEqual compares a YAML default with its live pg_get_expr form. The
 // parenthesis-insensitive constraint normalization is the fallback, since
 // PostgreSQL wraps compound defaults in parentheses ((now() + '1 day')).
+// Two defaults that cast the same expression to other types differ (see
+// exprDrops.retyped).
 func defaultsEqual(desired, live string) bool {
-    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) || constraintDefsEqual(desired, live)
+    if d, l := normalizedDefaultExpr(desired), normalizedDefaultExpr(live); d.text == l.text && !d.drops.retyped(&l.drops) { return true }
+    return constraintDefsEqual(desired, live)
 }
 
 // memoized returns f(s), caching it in cache. The normalizers it wraps are
@@ -6926,16 +6930,26 @@ func memoized(cache *sync.Map, s string, f func(string) string) string {
     return v
 }
 
-// normalizeDefaultExpr canonicalizes a default expression for comparison:
+// memoizedExpr is memoized for a normalizer that also reports what it
+// dropped.
+func memoizedExpr(cache *sync.Map, s string, f func(string) *normalizedExpr) *normalizedExpr {
+    if v, ok := cache.Load(s); ok { return v.(*normalizedExpr) }
+    v := f(s)
+    cache.Store(s, v)
+    return v
+}
+
+// normalizedDefaultExpr canonicalizes a default expression for comparison:
 // runs canonicalizeExpr (live defaults come back as 'x'::text, '-1'::integer
 // or nextval('s'::regclass)), lowercases everything outside single-quoted
-// strings, and collapses whitespace.
-func normalizeDefaultExpr(s string) string { return memoized(&activeScope().defaultExprs, s, normalizeDefaultExprUncached) }
+// strings, and collapses whitespace. It also returns what it dropped.
+func normalizedDefaultExpr(s string) *normalizedExpr { return memoizedExpr(&activeScope().defaultExprs, s, normalizeDefaultExprUncached) }
 
-func normalizeDefaultExprUncached(s string) string {
+func normalizeDefaultExprUncached(s string) *normalizedExpr {
+    n := &normalizedExpr{}
     var b strings.Builder
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
+    rs := []rune(strings.TrimSpace(canonicalizeExprNoting(s, &n.drops)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
@@ -6949,7 +6963,9 @@ func normalizeDefaultExprUncached(s string) string {
         }
         if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
             i++
+            start := i + 1
             for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            n.drops.noteLeftoverCast(string(rs[start : i+1]))
             continue
         }
         if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
@@ -6957,9 +6973,10 @@ func normalizeDefaultExprUncached(s string) string {
     }
     out := strings.Join(strings.Fields(b.String()), " ")
     out = strings.ReplaceAll(out, " (", "(")
-    out = strings.ReplaceAll(out, "nextval('public.", "nextval('")
-    for _, sch := range activeScope().path { out = strings.ReplaceAll(out, "nextval('"+sch+".", "nextval('") }
-    return out
+    out = n.drops.dropSequenceQualifier(out, "public")
+    for _, sch := range activeScope().path { out = n.drops.dropSequenceQualifier(out, sch) }
+    n.text = out
+    return n
 }
 
 // renderFKDef renders the definition body of a foreign key constraint
@@ -7190,18 +7207,31 @@ func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string)
 // bareVisibleOperators).
 func constraintDefsEqual(desired, live string) bool {
     if constraintDefsMatch(desired, live) { return true }
-    bare := bareVisibleOperators(desired)
+    bare := bareVisibleOperators(desired, nil)
     return bare != desired && constraintDefsMatch(bare, live)
 }
 
 // constraintDefsMatch compares two definitions with normalizeConstraintDef.
 // A string literal that either side marks as an object name ('seq'::regclass)
 // matches its qualified spelling on the other side, where the cast may be
-// missing, when the qualifier is optional (see nameScope).
+// missing, when the qualifier is optional (see nameScope). Two definitions
+// that cast the same expression to other types differ (see
+// exprDrops.retyped).
 func constraintDefsMatch(desired, live string) bool {
-    if normalizeConstraintDef(desired) == normalizeConstraintDef(live) { return true }
+    d, l, ok := constraintDefsMatchDrops(desired, live)
+    return ok && !d.retyped(l)
+}
+
+// constraintDefsMatchDrops reports whether two definitions normalise to the
+// same text as constraintDefsMatch compares them, and what the
+// normalisation that matched dropped from each.
+func constraintDefsMatchDrops(desired, live string) (d, l *exprDrops, ok bool) {
+    dn, ln := normalizedConstraintDef(desired), normalizedConstraintDef(live)
+    if dn.text == ln.text { return &dn.drops, &ln.drops, true }
     names := objectLiteralNames(desired, live)
-    return len(names) > 0 && normalizeConstraintDefWith(desired, names) == normalizeConstraintDefWith(live, names)
+    if len(names) == 0 { return nil, nil, false }
+    dn, ln = normalizeConstraintDefWith(desired, names), normalizeConstraintDefWith(live, names)
+    return &dn.drops, &ln.drops, dn.text == ln.text
 }
 
 // triggerDefsEqual compares a desired CREATE TRIGGER statement against
@@ -7216,11 +7246,10 @@ func triggerDefsEqual(desired, live string) bool {
     if dok && lok {
         if equal, ok := triggerCallsEqual(dc, lc); ok { return equal && constraintDefsEqual(dh, lh) }
     }
-    n := func(s string) string {
-        s = normalizeConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";"))
-        return strings.ReplaceAll(s, "executefunction", "executeprocedure")
-    }
-    return n(desired) == n(live)
+    n := func(s string) *normalizedExpr { return normalizedConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";")) }
+    text := func(n *normalizedExpr) string { return strings.ReplaceAll(n.text, "executefunction", "executeprocedure") }
+    d, l := n(desired), n(live)
+    return text(d) == text(l) && !d.drops.retyped(&l.drops)
 }
 
 var simpleIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
@@ -7286,21 +7315,25 @@ func canonicalTriggerEvents(events []string) []string {
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
-func normalizeConstraintDef(s string) string { return memoized(&activeScope().constraintDefs, s, normalizeConstraintDefUncached) }
+func normalizeConstraintDef(s string) string { return normalizedConstraintDef(s).text }
 
-func normalizeConstraintDefUncached(s string) string { return normalizeConstraintDefWith(s, nil) }
+// normalizedConstraintDef is normalizeConstraintDef with what it dropped.
+func normalizedConstraintDef(s string) *normalizedExpr { return memoizedExpr(&activeScope().constraintDefs, s, normalizeConstraintDefUncached) }
 
-// normalizeConstraintDefWith is normalizeConstraintDef for a definition in
+func normalizeConstraintDefUncached(s string) *normalizedExpr { return normalizeConstraintDefWith(s, nil) }
+
+// normalizeConstraintDefWith is normalizedConstraintDef for a definition in
 // which the string literals spelling an object name in names lose their
 // optional qualifier too.
-func normalizeConstraintDefWith(s string, names map[string]bool) string {
+func normalizeConstraintDefWith(s string, names map[string]bool) *normalizedExpr {
+    n := &normalizedExpr{}
     var b, seg strings.Builder
     flush := func() {
-        b.WriteString(strings.ReplaceAll(seg.String(), "public.", ""))
+        b.WriteString(n.drops.dropPublic(seg.String()))
         seg.Reset()
     }
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(unqualifyObjectLiterals(s, names))))
+    rs := []rune(strings.TrimSpace(canonicalizeExprNoting(unqualifyObjectLiterals(s, names, &n.drops), &n.drops)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
@@ -7315,7 +7348,9 @@ func normalizeConstraintDefWith(s string, names map[string]bool) string {
         }
         if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
             i++
+            start := i + 1
             for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            n.drops.noteLeftoverCast(string(rs[start : i+1]))
             continue
         }
         switch r {
@@ -7326,7 +7361,8 @@ func normalizeConstraintDefWith(s string, names map[string]bool) string {
         seg.WriteRune(r)
     }
     flush()
-    return strings.TrimSuffix(b.String(), "notvalid")
+    n.text = strings.TrimSuffix(b.String(), "notvalid")
+    return n
 }
 
 func isCastTypeChar(r rune) bool {
@@ -7477,6 +7513,13 @@ func storageOptionsEqual(want, live map[string]string) bool {
 
 var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\s*=[^)]*\)`)
 
+// stripConstraintWith removes the WITH (storage parameters) clauses of a
+// constraint definition.
+func stripConstraintWith(s string) string {
+    if !strings.Contains(strings.ToLower(s), "with") { return s }
+    return constraintWithRe.ReplaceAllString(s, "")
+}
+
 // constraintMatchesLive compares named constraint ct with its live
 // definition from pg_get_constraintdef, leaving out index storage
 // parameters and the index's tablespace, which are changed in place.
@@ -7484,10 +7527,9 @@ func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bo
     if strings.EqualFold(ct.Type, "exclude") {
         if equal, ok := excludeMatchesLive(lt, name, ct); ok { return equal }
     }
-    strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
     c := *ct
     c.Tablespace = ""
-    return constraintDefsEqual(strip(renderConstraintDef(&c)), strip(lt.ConstraintDefs[name]))
+    return constraintDefsEqual(stripConstraintWith(renderConstraintDef(&c)), stripConstraintWith(lt.ConstraintDefs[name]))
 }
 
 // keyIndexStorageStmts changes the storage parameters of index idxFq, which

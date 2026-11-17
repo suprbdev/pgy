@@ -69,6 +69,13 @@ func TestIntegrationPullFixtures(t *testing.T) {
 				dump()
 				t.Fatalf("pulled YAML must diff clean against its source:\n%s", sql)
 			}
+			acquired := src.Stat().AcquireCount()
+			if err := diff.ProbeExpressions(ctx, src, live, pulled); err != nil {
+				t.Fatal(err)
+			}
+			if n := src.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil {
+				t.Errorf("pulled YAML must need no expression probe, got %d connections and probes %v", n, exprProbeKeys(live))
+			}
 			dst := freshDatabase(t, admin, "pgytest_pull_"+name+"_copy")
 			plan := diff.PlanWith(introspectAll(t, dst), pulled, diff.Options{})
 			if stmt, err := applyAsMigrations(ctx, dst, plan); err != nil {
