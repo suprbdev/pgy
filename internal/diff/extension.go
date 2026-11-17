@@ -8,6 +8,7 @@ import (
     "sort"
     "strconv"
     "strings"
+    "unicode"
 
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
@@ -106,10 +107,24 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
             if le == nil { continue }
             if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
                 plan.Creates = append(plan.Creates, fmt.Sprintf("alter extension %s set schema %s;", name, quoteIdent(ext.Schema)))
+                if !onSearchPath(desired, ext.Schema) {
+                    uses := unqualifiedMemberUses(desired, le)
+                    if len(uses) > 10 { uses = append(uses[:10], fmt.Sprintf("%d more", len(uses)-10)) }
+                    if len(uses) > 0 { warn("extension %s moves to schema %s, which is not on the search_path, while the YAML still names its objects without a schema in %s; those names will not resolve once it has moved, so qualify them with the schema", ext.Name, ext.Schema, strings.Join(uses, ", ")) }
+                }
             }
             if ext.Version != "" && ext.Version != le.Version {
                 if le.UpdateTargets != nil && !le.UpdateTargets[ext.Version] {
-                    warn("extension %s: PostgreSQL has no update path from the installed version %s to %s (an extension cannot be downgraded), so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    av, available := live.AvailableExtensions[ext.Name], true
+                    if av != nil { _, available = av.Requires[ext.Version] }
+                    switch {
+                    case versionLess(ext.Version, le.Version):
+                        warn("extension %s: PostgreSQL has no update path from the installed version %s to %s (an extension cannot be downgraded), so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    case !available:
+                        warn("extension %s: version %s is not available on this server (available: %s), so the installed version %s is left as it is", ext.Name, ext.Version, strings.Join(sortedVersions(av.Requires), ", "), le.Version)
+                    default:
+                        warn("extension %s: PostgreSQL has no update path from the installed version %s to %s, so its version is left as it is", ext.Name, le.Version, ext.Version)
+                    }
                 } else {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter extension %s update to %s;", name, quoteString(ext.Version)))
                 }
@@ -137,24 +152,151 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     }
 }
 
-// sortedVersions returns the keys of m in version order: numeric parts
-// compare as numbers, so 1.10 follows 1.9.
+// onSearchPath reports whether an unqualified name finds the objects of
+// schema s in the sessions after the migration: s is pg_catalog, public or
+// on the search_path of the session that read the snapshot (see
+// nameScope), or desired sets a database search_path that lists it.
+func onSearchPath(desired *schema.Database, s string) bool {
+    if s == "pg_catalog" || activeScope().schemas[s] { return true }
+    for k, v := range desired.DatabaseSettings {
+        if !strings.EqualFold(k, "search_path") { continue }
+        for _, p := range strings.Split(v, ",") {
+            if strings.Trim(strings.TrimSpace(p), `"`) == s { return true }
+        }
+    }
+    return false
+}
+
+var (
+    identTokenRe = regexp.MustCompile(`"(?:[^"]|"")+"|[A-Za-z_][\w$]*`)
+    wholeIdentRe = regexp.MustCompile(`^(?:` + identTokenRe.String() + `)$`)
+)
+
+// identName returns the name an identifier token spells: unquoted, or
+// folded to lower case.
+func identName(tok string) string {
+    if strings.HasPrefix(tok, `"`) { return strings.ReplaceAll(tok[1:len(tok)-1], `""`, `"`) }
+    return strings.ToLower(tok)
+}
+
+// unqualifiedTypeName returns the name of type t when it is a single
+// identifier without a schema ("citext", "citext[]", "setof citext"), and
+// "" otherwise.
+func unqualifiedTypeName(t string) string {
+    s := strings.TrimSpace(t)
+    if len(s) > 6 && strings.EqualFold(s[:6], "setof ") { s = s[6:] }
+    if i := strings.IndexAny(s, "(["); i >= 0 { s = s[:i] }
+    if s = strings.TrimSpace(s); !wholeIdentRe.MatchString(s) { return "" }
+    return identName(s)
+}
+
+// unqualifiedMemberUses names the declarations of desired that refer to an
+// object of extension le without a schema: one of its types as the type of
+// a column, domain, composite type attribute or routine argument or
+// result, or in a cast, and one of its routines called, in a column
+// default, generated column, check constraint, domain or argument default,
+// or as a trigger function. A call is not counted when pg_catalog has a
+// routine of that name too, since it may mean the built-in one. It is nil
+// while the extension's member names are unknown.
+func unqualifiedMemberUses(desired *schema.Database, le *LiveExtension) []string {
+    if le.Members == nil { return nil }
+    found := map[string]bool{}
+    typ := func(what, t string) {
+        if name := unqualifiedTypeName(t); name != "" && le.Members[name] { found[what] = true }
+    }
+    expr := func(what, s string) {
+        masked, _ := maskQuoted(s)
+        for _, loc := range identTokenRe.FindAllStringIndex(masked, -1) {
+            i, j := loc[0], loc[1]
+            for i > 0 && unicode.IsSpace(rune(masked[i-1])) { i-- }
+            for j < len(masked) && unicode.IsSpace(rune(masked[j])) { j++ }
+            before, after := masked[:i], masked[j:]
+            if strings.HasSuffix(before, ".") || strings.HasPrefix(after, ".") { continue }
+            name := identName(masked[loc[0]:loc[1]])
+            if strings.HasPrefix(after, "(") && le.Members[name] && !le.Builtins[name] || strings.HasSuffix(before, "::") && le.Members[name] { found[what] = true }
+        }
+    }
+    args := func(what, sig string) {
+        for _, a := range splitTopLevelQuotedParens(innerArgs(sig)) {
+            decl, def := splitArgDefault(a)
+            words := strings.Fields(decl)
+            if len(words) > 1 {
+                switch strings.ToLower(words[0]) {
+                case "in", "out", "inout", "variadic": words = words[1:]
+                }
+            }
+            if len(words) > 1 && !isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) { words = words[1:] }
+            typ(what, strings.Join(words, " "))
+            expr(what, def)
+        }
+    }
+    for _, fq := range sortedKeys(desired.Tables) {
+        t := desired.Tables[fq]
+        if t == nil { continue }
+        for _, cn := range sortedKeys(t.Columns) {
+            if c := t.Columns[cn]; c != nil {
+                what := "column " + fq + "." + cn
+                typ(what, c.Type)
+                expr(what, c.Default)
+                expr(what, c.Generated)
+            }
+        }
+        for _, ct := range t.Constraints {
+            if ct != nil && ct.Type == "check" { expr("constraint "+ct.Name+" on "+fq, ct.Expression) }
+        }
+        for _, tg := range t.Triggers {
+            if tg != nil { expr("trigger "+tg.Name+" on "+fq, tg.Procedure) }
+        }
+    }
+    for _, fq := range sortedKeys(desired.Domains) {
+        if dm := desired.Domains[fq]; dm != nil {
+            typ("domain "+fq, dm.Type)
+            expr("domain "+fq, dm.Default)
+            expr("domain "+fq, dm.Check)
+            for _, c := range dm.Checks { expr("domain "+fq, c) }
+        }
+    }
+    for _, fq := range sortedKeys(desired.Types) {
+        if td := desired.Types[fq]; td != nil {
+            for _, at := range td.Attributes { typ("type "+fq, at) }
+        }
+    }
+    for _, k := range sortedKeys(desired.Functions) {
+        if f := desired.Functions[k]; f != nil {
+            what := "function " + schema.RoutineName(k) + f.ArgsSig
+            args(what, f.ArgsSig)
+            typ(what, f.Returns)
+        }
+    }
+    for _, k := range sortedKeys(desired.Procedures) {
+        if p := desired.Procedures[k]; p != nil { args("procedure "+schema.RoutineName(k)+p.ArgsSig, p.ArgsSig) }
+    }
+    return sortedKeys(found)
+}
+
+// sortedVersions returns the keys of m in version order (see versionLess).
 func sortedVersions(m map[string][]string) []string {
     out := sortedKeys(m)
-    sort.SliceStable(out, func(i, j int) bool {
-        a, b := strings.Split(out[i], "."), strings.Split(out[j], ".")
-        for k := 0; k < len(a) && k < len(b); k++ {
-            x, errX := strconv.Atoi(a[k])
-            y, errY := strconv.Atoi(b[k])
-            if errX != nil || errY != nil {
-                if a[k] != b[k] { return a[k] < b[k] }
-                continue
-            }
-            if x != y { return x < y }
-        }
-        return len(a) < len(b)
-    })
+    sort.SliceStable(out, func(i, j int) bool { return versionLess(out[i], out[j]) })
     return out
+}
+
+// versionLess reports whether extension version a comes before b: the
+// dot-separated parts compare in turn, numeric ones as numbers, so 1.10
+// follows 1.9, and a version comes before the longer ones it starts (1.1
+// before 1.1.1).
+func versionLess(a, b string) bool {
+    x, y := strings.Split(a, "."), strings.Split(b, ".")
+    for k := 0; k < len(x) && k < len(y); k++ {
+        m, errM := strconv.Atoi(x[k])
+        n, errN := strconv.Atoi(y[k])
+        if errM != nil || errN != nil {
+            if x[k] != y[k] { return x[k] < y[k] }
+            continue
+        }
+        if m != n { return m < n }
+    }
+    return len(x) < len(y)
 }
 
 // IntrospectExtensions loads what planning the extensions needs beyond
@@ -231,11 +373,13 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
     if len(moving) > 0 {
         batch.add(`
             select distinct e.extname::text, o.oprname is not null,
-                   coalesce(t.typname, p.proname, c.relname, oc.opcname, o.oprname, td.dictname, tt.tmplname, tc.cfgname)::text
+                   coalesce(t.typname, p.proname, c.relname, oc.opcname, o.oprname, td.dictname, tt.tmplname, tc.cfgname)::text,
+                   b.oid is not null
             from pg_depend d
             join pg_extension e on e.oid = d.refobjid and e.extname in (`+strings.Join(moving, ", ")+`)
             left join pg_type t on d.classid = 'pg_type'::regclass and t.oid = d.objid
             left join pg_proc p on d.classid = 'pg_proc'::regclass and p.oid = d.objid
+            left join pg_proc b on b.proname = p.proname and b.pronamespace = 'pg_catalog'::regnamespace
             left join pg_class c on d.classid = 'pg_class'::regclass and c.oid = d.objid
             left join pg_opclass oc on d.classid = 'pg_opclass'::regclass and oc.oid = d.objid
             left join pg_operator o on d.classid = 'pg_operator'::regclass and o.oid = d.objid
@@ -246,12 +390,13 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
             and coalesce(t.typname, p.proname, c.relname, oc.opcname, o.oprname, td.dictname, tt.tmplname, tc.cfgname) is not null`, func(rows pgx.Rows) error {
             for rows.Next() {
                 var ext, name string
-                var operator bool
-                if err := rows.Scan(&ext, &operator, &name); err != nil { return err }
+                var operator, builtin bool
+                if err := rows.Scan(&ext, &operator, &name, &builtin); err != nil { return err }
                 le := live.ExtensionDefs[ext]
                 if le == nil { continue }
-                if le.Members == nil { le.Members, le.Operators = map[string]bool{}, map[string]bool{} }
+                if le.Members == nil { le.Members, le.Operators, le.Builtins = map[string]bool{}, map[string]bool{}, map[string]bool{} }
                 if operator { le.Operators[name] = true } else { le.Members[name] = true }
+                if builtin { le.Builtins[name] = true }
             }
             return nil
         })
@@ -367,10 +512,69 @@ func maskQuoted(s string) (string, []string) {
 // rewritten by text. Routine bodies, comments and data rows are copied as
 // they are: bodies are stored as text, so one that names the new schema
 // really differs from the live one.
-func (rq *requalifier) database(d *schema.Database) *schema.Database {
-    out := reflect.New(reflect.TypeOf(*d))
-    rq.copyValue(out.Elem(), reflect.ValueOf(*d), false)
-    return out.Interface().(*schema.Database)
+func (rq *requalifier) database(d *schema.Database) *schema.Database { return requalified(rq, d) }
+
+// requalified returns a copy of v rewritten the way database rewrites a
+// whole schema.
+func requalified[T any](rq *requalifier, v *T) *T {
+    out := reflect.New(reflect.TypeOf(*v))
+    rq.copyValue(out.Elem(), reflect.ValueOf(*v), false)
+    return out.Interface().(*T)
+}
+
+// routinesAfterMoves returns live with each routine that desired declares
+// in the new spelling of a moving extension's objects (an argument type of
+// a moved extension qualified with its new schema, say) described as
+// PostgreSQL prints it once the extension has moved: keyed by the declared
+// signature, with the declared return type, argument defaults and
+// transform types wherever the declaration spelled the old way matches the
+// live ones. The plan then replaces or alters such a routine in place
+// instead of creating it a second time. live itself is returned when no
+// declaration needs it.
+func routinesAfterMoves(live *Live, desired *schema.Database) *Live {
+    rq := newRequalifier(live, desired)
+    if rq == nil { return live }
+    r := &renamer{l: live}
+    move := func(old, norm string) {
+        if r.l == live {
+            r.l = cloneLive(live)
+            r.l.MemberExtension, r.l.InitPrivs = cloneMap(live.MemberExtension, nil), cloneMap(live.InitPrivs, cloneACL)
+        }
+        moveKey(r.l.ExtensionMembers, "proc:"+old, "proc:"+norm)
+        moveKey(r.l.MemberExtension, "proc:"+old, "proc:"+norm)
+        moveKey(r.l.InitPrivs, "proc:"+old, "proc:"+norm)
+    }
+    for _, k := range sortedKeys(desired.Functions) {
+        f := desired.Functions[k]
+        if f == nil { continue }
+        name := schema.RoutineName(k)
+        norm, old := normalizeFunctionSignature(name+f.ArgsSig), normalizeFunctionSignature(rq.text(name+f.ArgsSig))
+        if old == norm || r.l.FunctionDefs[old] == nil || r.l.FunctionDefs[norm] != nil { continue }
+        move(old, norm)
+        r.moveFunction(old, norm, name+grantFuncArgs(f.ArgsSig))
+        lf, was := r.l.FunctionDefs[norm], requalified(rq, f)
+        if f.Returns != "" && !returnsChanged(was.Returns, lf.Returns) { lf.Returns = f.Returns }
+        if changed, removed := argDefaultsDiff(was.ArgsSig, lf.Args); lf.Args != "" && !changed && !removed { lf.Args = innerArgs(f.ArgsSig) }
+        if t := schema.RoutineTransform(f.Language, f.Transform); t != nil && !transformChanged(schema.RoutineTransform(was.Language, was.Transform), lf.Transform) { lf.Transform = t }
+    }
+    for _, k := range sortedKeys(desired.Procedures) {
+        p := desired.Procedures[k]
+        if p == nil { continue }
+        name := schema.RoutineName(k)
+        norm, old := normalizeFunctionSignature(name+p.ArgsSig), normalizeFunctionSignature(rq.text(name+p.ArgsSig))
+        if old == norm || r.l.ProcedureDefs[old] == nil || r.l.Procedures[norm] { continue }
+        move(old, norm)
+        r.moveProcedure(old, norm, name+grantFuncArgs(p.ArgsSig))
+        lp, was := r.l.ProcedureDefs[norm], requalified(rq, p)
+        if changed, removed := argDefaultsDiff(was.ArgsSig, lp.Args); lp.Args != "" && !changed && !removed { lp.Args = innerArgs(p.ArgsSig) }
+        if t := schema.RoutineTransform(p.Language, p.Transform); t != nil && !transformChanged(schema.RoutineTransform(was.Language, was.Transform), lp.Transform) { lp.Transform = t }
+    }
+    return r.l
+}
+
+// innerArgs returns an argument list without its enclosing parentheses.
+func innerArgs(args string) string {
+    return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(args), "("), ")")
 }
 
 func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {

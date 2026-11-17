@@ -10,6 +10,7 @@ import (
 
 	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/pull"
+	"github.com/suprbdev/pgy/internal/schema"
 	"github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -215,6 +216,44 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		if got[object] != acl {
 			t.Errorf("%s: ACL %q was rebuilt as %q\n%s", object, acl, got[object], y)
 		}
+	}
+}
+
+func TestIntegrationExtensionMemberOwnerChangeNotPulled(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app, mon := freshRole(t, admin, "app"), freshRole(t, admin, "mon")
+	db := freshDatabase(t, admin, "pgytest_ext_member_owner")
+	if _, err := db.Exec(ctx, strings.NewReplacer("APP", app, "MON", mon).Replace(`
+		create extension pg_buffercache schema public;
+		create extension citext schema public;
+		alter function pg_buffercache_pages() owner to "MON";
+		alter type citext owner to "MON";
+		grant usage on type citext to "APP";`)); err != nil {
+		t.Fatal(err)
+	}
+	var previous string
+	if err := db.QueryRow(ctx, "select current_user").Scan(&previous); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	res, err := pull.Build(live, pull.Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	if strings.Contains(y, previous+": []") || strings.Contains(y, "pg_buffercache_pages") {
+		t.Errorf("an owner change alone must not be pulled as a revoke from the previous owner:\n%s", y)
+	}
+	if !strings.Contains(y, "type citext:\n    grants: {"+app+": [usage]}\n") {
+		t.Errorf("a grant after the owner change must still be pulled, alone:\n%s", y)
+	}
+	d, err := schema.LoadAndMerge([]string{writeYAML(t, y)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(diff.PlanWith(live, d, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+		t.Errorf("the pulled YAML must diff clean:\n%s", sql)
 	}
 }
 
