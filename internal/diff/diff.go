@@ -42,7 +42,9 @@ type Live struct{
     // ViewProbes compares declared view queries with the live views (see
     // ProbeViews); nil when they weren't probed, and views are create-only.
     ViewProbes map[string]*ViewProbe
-    // ViewDependents: view or materialized view -> the views selecting from it
+    // ViewDependents: view or materialized view -> the views and
+    // materialized views selecting from it, whether they name its columns
+    // or use it as a whole (count(*))
     ViewDependents map[string][]string
     // ExprProbes holds what PostgreSQL made of the declared definitions that
     // don't match the live ones as text (see ProbeExpressions); nil when
@@ -660,6 +662,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         RoleMembers: map[string]map[string]bool{},
         RoleMemberOptions: map[string]map[string]*LiveMembership{},
         ColumnDependents: map[string][]ColumnDependent{},
+        ViewDependents: map[string][]string{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         TypeGrants: map[string]map[string]map[string]bool{},
@@ -1937,6 +1940,29 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var dep ColumnDependent
             if err := rows.Scan(&col, &dep.Kind, &dep.Name, &dep.Table); err != nil { return err }
             l.ColumnDependents[col] = append(l.ColumnDependents[col], dep)
+        }
+        return nil
+    })
+
+    viewDepQ := `
+        select distinct rn.nspname || '.' || r.relname, vn.nspname || '.' || v.relname
+        from pg_depend d
+        join pg_rewrite rw on d.classid = 'pg_rewrite'::regclass and rw.oid = d.objid
+        join pg_class v on v.oid = rw.ev_class
+        join pg_namespace vn on vn.oid = v.relnamespace
+        join pg_class r on r.oid = d.refobjid
+        join pg_namespace rn on rn.oid = r.relnamespace
+        where d.refclassid = 'pg_class'::regclass and d.deptype = 'n'
+        and v.oid <> r.oid and v.relkind in ('v', 'm') and r.relkind in ('v', 'm')
+        and vn.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and vn.nspname !~ '^pg_(toast_)?temp_'
+        order by 1, 2
+    `
+    batch.add(viewDepQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var ref, dep string
+            if err := rows.Scan(&ref, &dep); err != nil { return err }
+            l.ViewDependents[ref] = append(l.ViewDependents[ref], dep)
         }
         return nil
     })

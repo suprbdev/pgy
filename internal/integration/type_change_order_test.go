@@ -138,6 +138,66 @@ func TestIntegrationTypeChangeOrdering(t *testing.T) {
 	}
 }
 
+func TestIntegrationTypeChangeRecreatesWholeRelationDependents(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	convergeYAML(t, pool, sch, `
+schema SCH:
+  table t:
+    columns:
+      id: {type: int, primaryKey: true}
+      b: {type: int, nullable: true}
+  view v0:
+    query: select id, b from SCH.t
+  view w:
+    query: select count(*) as n from SCH.v0
+`)
+	if _, err := pool.Exec(ctx, `insert into `+sch+`.t values (1, 10), (2, 20)`); err != nil {
+		t.Fatal(err)
+	}
+	d, err := schema.LoadAndMerge([]string{writeYAML(t, strings.ReplaceAll(`
+schema SCH:
+  table t:
+    columns:
+      id: {type: int, primaryKey: true}
+      b: {type: bigint, nullable: true}
+  view v:
+    renamedFrom: v0
+    query: select id, b from SCH.t
+  view w:
+    query: select count(*) as n from SCH.v
+`, "SCH", sch))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := introspect(t, pool, d)
+	if deps := live.ViewDependents[sch+".v0"]; len(deps) != 1 || deps[0] != sch+".w" {
+		t.Fatalf("w uses v0 as a whole: %v", live.ViewDependents)
+	}
+	p := diff.Plan(live, d, true)
+	for _, w := range p.Warnings {
+		if w.Kind == "dependents" {
+			t.Errorf("both views are declared: %v", w)
+		}
+	}
+	applyPlan(t, pool, p)
+	if again := diff.Plan(introspect(t, pool, d), d, true); diff.Render(again) != "" {
+		t.Fatalf("plan did not converge:\n%s", diff.Render(again))
+	}
+	var typ string
+	var n int
+	if err := pool.QueryRow(ctx, `select format_type(atttypid, atttypmod) from pg_attribute where attrelid = $1::regclass and attname = 'b'`, sch+".v").Scan(&typ); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select n from `+sch+`.w`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "bigint" || n != 2 {
+		t.Errorf("v.b is %s and w counts %d rows", typ, n)
+	}
+}
+
 func TestIntegrationTypeChangeWarnsAboutGeneratedColumn(t *testing.T) {
 	pool := connect(t)
 	sch := freshSchema(t, pool)

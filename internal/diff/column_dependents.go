@@ -31,9 +31,10 @@ func typeChangingColumns(live *Live, desired *schema.Database, unsafe bool) map[
 
 // recreateColumnDependents handles the objects PostgreSQL won't let ALTER
 // COLUMN ... TYPE change under: views and materialized views (and the views
-// built on them), triggers, policies and rules that use the column. Each is
-// dropped first, and the returned live is a copy without it, so the plan
-// recreates it from the YAML afterwards. The same goes for what the plan
+// built on them, whether they name a column or not), triggers, policies and
+// rules that use the column or one of those views (see columnDependents).
+// Each is dropped first, and the returned live is a copy without it, so the
+// plan recreates it from the YAML afterwards. The same goes for what the plan
 // replaces or prunes anyway and the new type may not fit: indexes and
 // constraints that use the column, and foreign keys whose columns change
 // type on both sides. pre maps a table to the DROP statements to run,
@@ -60,28 +61,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
     dropped := map[string]bool{}
     for _, fq := range sortedKeys(changing) {
         for _, cn := range changing[fq] {
-            direct := live.ColumnDependents[fq+"."+cn]
-            if len(direct) == 0 { continue }
-            views, objects := []string{}, []ColumnDependent{}
-            seen := map[string]bool{}
-            var visit func(v string)
-            visit = func(v string) {
-                if seen[v] { return }
-                seen[v] = true
-                for _, d := range byRelation[v] {
-                    if d.Kind == "view" || d.Kind == "matview" { visit(d.Name) }
-                }
-                views = append(views, v)
-            }
-            for _, d := range direct {
-                switch d.Kind {
-                case "view", "matview":
-                    visit(d.Name)
-                case "generated":
-                default:
-                    objects = append(objects, d)
-                }
-            }
+            views, objects := columnDependents(live, byRelation, fq+"."+cn)
             if len(views) == 0 && len(objects) == 0 { continue }
             if msg := undeclaredDependent(desired, fq, views, objects); msg != "" {
                 warns = append(warns, Warning{Table: fq, Kind: "dependents", Message: fmt.Sprintf("changing the type of %s.%s: %s, so pgy can't drop and recreate it, and PostgreSQL rejects the change while it exists; declare it, or change it in a hand-written migration", fq, cn, msg)})
@@ -94,6 +74,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
                 if dropped[key] { continue }
                 dropped[key] = true
                 lt := out.Tables[d.Table]
+                if lt == nil { lt = out.ViewTables[d.Table] }
                 switch d.Kind {
                 case "trigger":
                     pre[fq] = append(pre[fq], fmt.Sprintf("drop trigger %s on %s;", quoteIdent(d.Name), pqIdent(d.Table)))
@@ -279,9 +260,50 @@ func forgetConstraint(lt *LiveTable, name string) {
     forgetIndex(lt, name)
 }
 
+// columnDependents returns what has to go before column col
+// ("schema.relation.column") can change type: the views and materialized
+// views that use it, directly or through other views, each one listed after
+// the views that use it, and the triggers, policies and rules that use the
+// column or one of those views, except those on the views themselves, which
+// go with them. Views are followed through live.ViewDependents, so a view
+// that uses another one as a whole (count(*)) is found too.
+func columnDependents(live *Live, byRelation map[string][]ColumnDependent, col string) (views []string, objects []ColumnDependent) {
+    seen := map[string]bool{}
+    found := []ColumnDependent{}
+    var visit func(v string)
+    visit = func(v string) {
+        if seen[v] { return }
+        seen[v] = true
+        for _, d := range byRelation[v] {
+            switch d.Kind {
+            case "view", "matview":
+                visit(d.Name)
+            case "generated":
+            default:
+                found = append(found, d)
+            }
+        }
+        for _, w := range live.ViewDependents[v] { visit(w) }
+        views = append(views, v)
+    }
+    for _, d := range live.ColumnDependents[col] {
+        switch d.Kind {
+        case "view", "matview":
+            visit(d.Name)
+        case "generated":
+        default:
+            found = append(found, d)
+        }
+    }
+    for _, d := range found {
+        if !seen[d.Table] { objects = append(objects, d) }
+    }
+    return views, objects
+}
+
 // undeclaredDependent names the first of views and objects that desired
 // doesn't declare (a view without a query, or a trigger, policy or rule its
-// table doesn't list), or returns "".
+// table or view doesn't list), or returns "".
 func undeclaredDependent(desired *schema.Database, fq string, views []string, objects []ColumnDependent) string {
     for _, v := range views {
         if vw := desired.Views[v]; vw == nil || strings.TrimSpace(vw.Query) == "" {
@@ -289,21 +311,37 @@ func undeclaredDependent(desired *schema.Database, fq string, views []string, ob
         }
     }
     for _, d := range objects {
-        dt := desired.Tables[d.Table]
-        declared := false
-        if dt != nil {
-            switch d.Kind {
-            case "trigger":
-                for _, tr := range dt.Triggers { declared = declared || (tr != nil && truncateIdent(tr.Name) == d.Name) }
-            case "policy":
-                for _, p := range dt.Policies { declared = declared || (p != nil && truncateIdent(p.Name) == d.Name) }
-            case "rule":
-                for _, r := range dt.Rules { declared = declared || (r != nil && truncateIdent(r.Name) == d.Name) }
-            }
-        }
-        if !declared { return fmt.Sprintf("%s %s on %s depends on it and isn't declared", d.Kind, d.Name, d.Table) }
+        if !dependentDeclared(desired, d) { return fmt.Sprintf("%s %s on %s depends on it and isn't declared", d.Kind, d.Name, d.Table) }
     }
     return ""
+}
+
+// dependentDeclared reports whether desired lists trigger, policy or rule d
+// on its table or view.
+func dependentDeclared(desired *schema.Database, d ColumnDependent) bool {
+    var triggers []*schema.Trigger
+    var policies []*schema.Policy
+    var rules []*schema.Rule
+    if dt := desired.Tables[d.Table]; dt != nil {
+        triggers, policies, rules = dt.Triggers, dt.Policies, dt.Rules
+    } else if vw := desired.Views[d.Table]; vw != nil {
+        triggers, rules = vw.Triggers, vw.Rules
+    }
+    switch d.Kind {
+    case "trigger":
+        for _, tr := range triggers {
+            if tr != nil && truncateIdent(tr.Name) == d.Name { return true }
+        }
+    case "policy":
+        for _, p := range policies {
+            if p != nil && truncateIdent(p.Name) == d.Name { return true }
+        }
+    case "rule":
+        for _, r := range rules {
+            if r != nil && truncateIdent(r.Name) == d.Name { return true }
+        }
+    }
+    return false
 }
 
 func dedupeDependents(deps []ColumnDependent) []ColumnDependent {
