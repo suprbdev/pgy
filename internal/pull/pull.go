@@ -564,8 +564,8 @@ func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
 		add(m, "grants", g)
 	}
 	addStr(m, "comment", comment)
-	if i := strings.LastIndexByte(ls.Owner, '.'); i > 0 {
-		add(m, "dependsOn", list([]string{"table " + ls.Owner[:i]}))
+	if strings.Count(ls.Owner, ".") >= 2 {
+		add(m, "dependsOn", list([]string{"table " + diff.ColumnRelation(ls.Owner)}))
 	}
 	add(blk, "sequence "+name, m)
 }
