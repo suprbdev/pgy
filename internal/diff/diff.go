@@ -2773,6 +2773,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     live = routinesAfterMoves(live.scoped(), desired)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
+    desired = viewsCreatedAsViews(live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
     live, renames := applyRenames(live, desired)
     live = applyExprProbes(live, desired)
@@ -6609,7 +6610,9 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
 // storageParamStmts emits ALTER <kind> ... SET (...) / RESET (...) so the
 // relation's storage parameters match with exactly: live parameters with
 // does not list are reset. toast.* parameters are skipped while the
-// relation has no TOAST table, since PostgreSQL silently discards them.
+// relation has no TOAST table, since PostgreSQL silently discards them, and
+// so are create-time-only parameters the relation doesn't show (see
+// createTimeOnlyParam).
 func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) []string {
     out := []string{}
     set, reset := []string{}, []string{}
@@ -6619,6 +6622,7 @@ func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) [
         want[strings.ToLower(k)] = true
         if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
         lv, ok := live[strings.ToLower(k)]
+        if !ok && createTimeOnlyParam(k) { continue }
         if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(with[k])) {
             set = append(set, k+" = "+with[k])
         }
