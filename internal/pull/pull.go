@@ -196,12 +196,10 @@ func (b *builder) owner(m *node, key string) {
 func (b *builder) schemas() {
 	b.declaredSchema = map[string]bool{}
 	for _, s := range sortedKeys(b.live.Schemas) {
-		if s == "pg_toast" || !b.wantSchema(s) || b.extensionSchema(s) {
+		if s == "pg_toast" || !b.wantSchema(s) {
 			continue
 		}
 		blk := newMap()
-		b.blocks[s] = blk
-		b.declaredSchema[s] = s != "public"
 		b.owner(blk, "schema:"+s)
 		if c := b.live.SchemaComments[s]; c != "" && (s != "public" || c != "standard public schema") {
 			add(blk, "comment", str(c))
@@ -209,6 +207,11 @@ func (b *builder) schemas() {
 		if g := grantsNode(b.live.SchemaGrants[s]); g != nil {
 			add(blk, "grants", g)
 		}
+		if b.extensionSchema(s) && len(blk.Content) == 0 {
+			continue
+		}
+		b.blocks[s] = blk
+		b.declaredSchema[s] = s != "public"
 	}
 }
 
@@ -1711,8 +1714,20 @@ func (b *builder) database() *node {
 			add(e, "name", str(name))
 			add(e, "ifNotExists", boolean(true))
 			add(e, "schema", str(le.Schema))
+			if le.DefaultVersion != "" && le.Version != le.DefaultVersion {
+				add(e, "version", str(le.Version))
+			}
 			if le.Comment != "" && le.Comment != le.DefaultComment {
 				add(e, "comment", str(le.Comment))
+			}
+			deps := []string{}
+			for _, r := range le.Requires {
+				if r != "plpgsql" {
+					deps = append(deps, "extension "+r)
+				}
+			}
+			if len(deps) > 0 {
+				add(e, "dependsOn", list(deps))
 			}
 			exts.Content = append(exts.Content, e)
 		}
