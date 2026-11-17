@@ -2876,7 +2876,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     recreateWarnings = append(recreateWarnings, viewWarnings...)
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
-        if recreated == nil { recreated = map[string]string{} }
+        if recreated == nil { recreated = map[string]recreatedRoutine{} }
         recreated[k] = v
     }
     recreateWarnings = append(recreateWarnings, argWarnings...)
@@ -3027,6 +3027,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     routineAlterAt := len(plan.Creates)
     routineCreates := map[string]bool{}
     routineAlters := []string{}
+    routinePost := []string{}
 
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
@@ -3106,7 +3107,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
-            if found { f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired]) }
+            r, isRecreated := recreated[normalizedDesired]
+            if found {
+                f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired])
+            } else if isRecreated {
+                f = keepLiveFunctionAttributes(f, r.function)
+            }
             setClauses := ""
             if len(f.Set) > 0 {
                 keys := make([]string, 0, len(f.Set))
@@ -3129,7 +3135,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             body := f.Body
             verb := "create function"
             if found { verb = "create or replace function" }
-            if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
+            if isRecreated {
+                plan.Creates = append(plan.Creates, r.drop)
+                routinePost = append(routinePost, r.restore(live, desired, opts.PublicGrants, "function", fname, f.ArgsSig, f.Grants, f.RevokePublic, f.Comment, f.Owner)...)
+            }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, routineLanguageSQL(f.Language, f.Transform, liveTransforms[normalizedDesired]), attrsStr+setClauses, routineBodySQL(f.Language, body))
             plan.Creates = append(plan.Creates, stmt)
             if !schema.IsSQLStandardBody(f.Language, body) { routineCreates[stmt] = true }
@@ -3149,11 +3158,14 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
+            r, isRecreated := recreated[norm]
             if found {
                 lp := live.ProcedureDefs[norm]
                 if lp == nil || !procedureChanged(pr, lp) { continue }
                 // fall through: definition changed, emit CREATE OR REPLACE
                 pr = keepLiveProcedureAttributes(pr, lp)
+            } else if isRecreated {
+                pr = keepLiveProcedureAttributes(pr, r.procedure)
             }
             setClauses := ""
             if len(pr.Set) > 0 {
@@ -3168,7 +3180,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
-            if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
+            if isRecreated {
+                plan.Creates = append(plan.Creates, r.drop)
+                routinePost = append(routinePost, r.restore(live, desired, opts.PublicGrants, "procedure", prname, pr.ArgsSig, pr.Grants, pr.RevokePublic, pr.Comment, pr.Owner)...)
+            }
             stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, routineLanguageSQL(pr.Language, pr.Transform, liveTransforms[norm]), attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
             plan.Creates = append(plan.Creates, stmt)
             if !schema.IsSQLStandardBody(pr.Language, pr.Body) { routineCreates[stmt] = true }
@@ -3478,6 +3493,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, routinePost...)
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
@@ -4626,9 +4642,10 @@ func uncheckedRoutineCreates(creates []string, routines map[string]bool) []strin
 // from live, which CREATE OR REPLACE cannot change. Under --unsafe each is
 // planned as new: the returned live is a copy without it (or its comment,
 // grants, owner and PUBLIC EXECUTE, which DROP FUNCTION discards), and
-// recreated maps its normalized signature to the DROP FUNCTION to run first.
-// Without --unsafe, live is returned unchanged with a warning per function.
-func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, warns []Warning) {
+// recreated maps its normalized signature to the DROP FUNCTION to run first
+// and what the live function had (see recreatedRoutine). Without --unsafe,
+// live is returned unchanged with a warning per function.
+func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]recreatedRoutine, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil }
     for _, k := range sortedKeys(desired.Functions) {
@@ -4647,8 +4664,8 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
             warns = append(warns, Warning{Message: fmt.Sprintf("function %s%s: %s; that drops and recreates the function, which needs --unsafe", fname, f.ArgsSig, why)})
             continue
         }
-        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop function %s;", pqIdent(fname)+grantFuncArgs(f.ArgsSig))
+        if recreated == nil { recreated, out = map[string]recreatedRoutine{}, cloneLive(live) }
+        recreated[norm] = newRecreatedRoutine(live, norm, fmt.Sprintf("drop function %s;", pqIdent(fname)+grantFuncArgs(f.ArgsSig)))
         delete(out.Functions, lf.Signature)
         delete(out.FunctionDefs, norm)
         delete(out.FunctionComments, norm)
@@ -4670,9 +4687,9 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
             out.ProcedureDefs[norm] = &LiveProcedure{Signature: lp.Signature, Body: p.Body, SQLBody: lp.SQLBody, Security: lp.Security, Config: lp.Config, Args: p.ArgsSig, Transform: schema.RoutineTransform(p.Language, p.Transform)}
             continue
         }
-        if recreated == nil { recreated = map[string]string{} }
+        if recreated == nil { recreated = map[string]recreatedRoutine{} }
         if out == live { out = cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop procedure %s;", pqIdent(pname)+grantFuncArgs(p.ArgsSig))
+        recreated[norm] = newRecreatedRoutine(live, norm, fmt.Sprintf("drop procedure %s;", pqIdent(pname)+grantFuncArgs(p.ArgsSig)))
         delete(out.Procedures, norm)
         delete(out.ProcedureDefs, norm)
         delete(out.FunctionComments, norm)
@@ -4754,12 +4771,55 @@ func splitArgDefault(a string) (decl, def string) {
 // types: their argument names or modes changed, which CREATE OR REPLACE
 // rejects. Under --unsafe each is planned as new, like
 // recreateChangedFunctions does, with recreated holding the DROP of the live
-// routine. Without --unsafe each is blocked (left out of the plan) with a
+// routine and what it had. Without --unsafe each is blocked (left out of the plan) with a
 // warning, and its comment, grants and owner are compared with the live
 // routine's.
-func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, blocked map[string]bool, warns []Warning) {
+func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]recreatedRoutine, blocked map[string]bool, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil, nil }
+    dropped := map[string]bool{}
+    for _, rr := range renamedArgumentRoutines(live, desired) {
+        kind, name, args, norm, lnorm, liveArgs := rr.kind, rr.name, rr.args, rr.key, rr.liveKey, rr.liveArgs
+        if !unsafe {
+            if blocked == nil { blocked = map[string]bool{} }
+            if out == live { out = cloneLive(live) }
+            blocked[norm] = true
+            if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
+            if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
+            if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
+            if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
+            warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
+            continue
+        }
+        if dropped[lnorm] { continue }
+        dropped[lnorm] = true
+        if recreated == nil { recreated, out = map[string]recreatedRoutine{}, cloneLive(live) }
+        recreated[norm] = newRecreatedRoutine(live, lnorm, fmt.Sprintf("drop %s %s;", kind, pqIdent(name)+grantFuncArgs(liveArgs)))
+        if lf := out.FunctionDefs[lnorm]; lf != nil { delete(out.Functions, lf.Signature) }
+        delete(out.FunctionDefs, lnorm)
+        delete(out.Procedures, lnorm)
+        delete(out.ProcedureDefs, lnorm)
+        delete(out.FunctionComments, lnorm)
+        delete(out.FunctionGrants, lnorm)
+        delete(out.FunctionPublicExec, lnorm)
+        delete(out.Owners, "proc:"+lnorm)
+    }
+    return out, recreated, blocked, warns
+}
+
+// renamedRoutine is a declared function or procedure that is not live under
+// its own signature but has the argument types of a live routine that no
+// declaration names (see recreateRenamedArguments).
+type renamedRoutine struct {
+    kind, name, args string // function or procedure, its qualified name and its declared arguments
+    key, liveKey     string // the normalized signatures of the declaration and of the live routine
+    liveArgs         string // the live routine's arguments
+}
+
+// renamedArgumentRoutines returns the declared functions and procedures with
+// a body whose argument names or modes differ from those of a live routine
+// with the same argument types, functions first, each kind in key order.
+func renamedArgumentRoutines(live *Live, desired *schema.Database) []renamedRoutine {
     declared := map[string]bool{}
     for k, f := range desired.Functions {
         if f != nil { declared[normalizeFunctionSignature(schema.RoutineName(k)+f.ArgsSig)] = true }
@@ -4774,6 +4834,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
     for norm := range live.Procedures {
         if !declared[norm] { byIdentity["procedure "+routineIdentity(norm, true)] = norm }
     }
+    var out []renamedRoutine
     check := func(kind, name, args string) {
         norm := normalizeFunctionSignature(name + args)
         if kind == "function" && live.FunctionDefs[norm] != nil || kind == "procedure" && live.Procedures[norm] { return }
@@ -4783,28 +4844,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
         if !ok { return }
         liveArgs := lnorm[strings.IndexByte(lnorm, '('):]
         if lf := live.FunctionDefs[lnorm]; lf != nil { liveArgs = lf.Signature[strings.IndexByte(lf.Signature, '('):] }
-        if !unsafe {
-            if blocked == nil { blocked = map[string]bool{} }
-            if out == live { out = cloneLive(live) }
-            blocked[norm] = true
-            if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
-            if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
-            if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
-            if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
-            warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
-            return
-        }
-        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop %s %s;", kind, pqIdent(name)+grantFuncArgs(liveArgs))
-        if lf := out.FunctionDefs[lnorm]; lf != nil { delete(out.Functions, lf.Signature) }
-        delete(out.FunctionDefs, lnorm)
-        delete(out.Procedures, lnorm)
-        delete(out.ProcedureDefs, lnorm)
-        delete(out.FunctionComments, lnorm)
-        delete(out.FunctionGrants, lnorm)
-        delete(out.FunctionPublicExec, lnorm)
-        delete(out.Owners, "proc:"+lnorm)
-        delete(byIdentity, id)
+        out = append(out, renamedRoutine{kind: kind, name: name, args: args, key: norm, liveKey: lnorm, liveArgs: liveArgs})
     }
     for _, k := range sortedKeys(desired.Functions) {
         if f := desired.Functions[k]; f != nil && f.HasBody() { check("function", schema.RoutineName(k), f.ArgsSig) }
@@ -4812,7 +4852,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
     for _, k := range sortedKeys(desired.Procedures) {
         if p := desired.Procedures[k]; p != nil && p.HasBody() { check("procedure", schema.RoutineName(k), p.ArgsSig) }
     }
-    return out, recreated, blocked, warns
+    return out
 }
 
 // routineIdentity returns "name(types)" for a routine signature: the

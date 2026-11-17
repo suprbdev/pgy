@@ -198,6 +198,90 @@ func keepLiveProcedureAttributes(p *schema.Procedure, lp *LiveProcedure) *schema
 	return &out
 }
 
+// recreatedRoutine is a live routine that the plan drops and creates again
+// from its declaration, because CREATE OR REPLACE cannot make the change:
+// the DROP statement and what the live routine had that DROP discards.
+type recreatedRoutine struct {
+	drop       string
+	function   *LiveFunction
+	procedure  *LiveProcedure
+	comment    string
+	grants     map[string]map[string]bool
+	publicExec bool
+	owner      string
+}
+
+// newRecreatedRoutine records the live routine with normalized signature
+// key, which the plan drops with drop.
+func newRecreatedRoutine(live *Live, key, drop string) recreatedRoutine {
+	return recreatedRoutine{
+		drop:       drop,
+		function:   live.FunctionDefs[key],
+		procedure:  live.ProcedureDefs[key],
+		comment:    live.FunctionComments[key],
+		grants:     live.FunctionGrants[key],
+		publicExec: live.FunctionPublicExec[key],
+		owner:      live.Owners["proc:"+key],
+	}
+}
+
+// restore returns the statements that give the routine created again as
+// kind (function or procedure) name with arguments args back what r had
+// and its declaration leaves unmanaged: the grants when it has no grants
+// block, PUBLIC's EXECUTE when neither the block (under mode) nor
+// revokePublic manages it, the comment and the owner. The grants are
+// compared with what the new routine gets from the default privileges of
+// the connecting role, those desired declares included, so that grants the
+// old routine did not have are revoked.
+func (r recreatedRoutine) restore(live *Live, desired *schema.Database, mode PublicGrants, kind, name, args string, grants map[string][]string, revokePublic bool, comment, owner string) []string {
+	target := kind + " " + pqIdent(name) + grantFuncArgs(args)
+	out := []string{}
+	keepPublic := !revokePublic && (grants == nil || !coversPublic(mode, false, resolveGrantRoles(grants, live.CurrentUser)))
+	if grants == nil || keepPublic {
+		acls, rows := cloneGrantMap(live.DefaultACLs), cloneMap(live.DefaultACLRows, nil)
+		if acls == nil {
+			acls = map[string]map[string]map[string]bool{}
+		}
+		applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
+		have := withPublicDefault(CreatedGrants(acls, live.CurrentUser, name, "functions"), "execute", !rows[live.CurrentUser+"||functions"])
+		want := map[string][]string{}
+		for role, privs := range r.grants {
+			want[role] = sortedKeys(privs)
+		}
+		if r.publicExec && !slices.Contains(want["public"], "execute") {
+			want["public"] = append(want["public"], "execute")
+		}
+		restored := func(role string) bool {
+			switch role {
+			case "public":
+				return keepPublic
+			case live.CurrentUser:
+				return false
+			}
+			return grants == nil
+		}
+		for role := range have {
+			if !restored(role) {
+				delete(have, role)
+			}
+		}
+		for role := range want {
+			if !restored(role) {
+				delete(want, role)
+			}
+		}
+		revokes, grantStmts := roleGrantStmtsCovering(want, have, func(privs []string) string { return strings.Join(privs, ", ") + " on " + target }, true)
+		out = append(append(out, revokes...), grantStmts...)
+	}
+	if comment == "" && r.comment != "" {
+		out = append(out, "comment on "+target+" is "+quoteString(r.comment)+";")
+	}
+	if owner == "" && r.owner != "" && r.owner != live.CurrentUser {
+		out = append(out, "alter "+target+" owner to "+grantRole(r.owner)+";")
+	}
+	return out
+}
+
 // ptr returns a pointer to a copy of v.
 func ptr[T any](v T) *T { return &v }
 
