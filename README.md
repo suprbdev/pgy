@@ -142,7 +142,7 @@ ci:
 |------|---------|
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
-| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column |
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
