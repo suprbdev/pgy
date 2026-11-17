@@ -109,8 +109,8 @@ func queryUpdateDependents(batch *queryBatch, live *Live, names []string) {
 // updated extension, directly or through other views, is dropped right
 // before the update, dependents first. The returned live is a copy without
 // those views, so the plan recreates them from the YAML afterwards, and
-// post restores the grants, comments, column defaults and owner that the
-// YAML leaves unmanaged. The views and materialized views among the
+// post restores what they had and the YAML leaves unmanaged (see
+// recreateView). The views and materialized views among the
 // dependents that --prune drops anyway are dropped there too.
 //
 // Everything else stays and is reported, since the update fails if it
@@ -253,22 +253,10 @@ func recreateUpdateDependents(extensions *PlanDiff, live *Live, desired *schema.
 				kind = "materialized view"
 			}
 			stmts = append(stmts, fmt.Sprintf("drop %s %s;", kind, pqIdent(v)))
-			if vw := desired.Views[v]; vw != nil {
-				post = append(post, restoreViewAttributes(live, vw, v, kind)...)
-			}
 			if out == live {
 				out = cloneLive(live)
 			}
-			delete(out.Views, v)
-			delete(out.MatViews, v)
-			delete(out.ViewOptions, v)
-			delete(out.ViewColumnComments, v)
-			delete(out.ViewColumnDefaults, v)
-			delete(out.MatViewTables, v)
-			delete(out.ViewTables, v)
-			delete(out.RelComments, v)
-			delete(out.TableGrants, v)
-			delete(out.Owners, "rel:"+v)
+			post = append(post, recreateView(live, out, desired, v, opts.Prune)...)
 		}
 		extensions.Creates = slices.Insert(extensions.Creates, at, stmts...)
 	}

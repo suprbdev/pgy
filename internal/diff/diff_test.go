@@ -4969,19 +4969,29 @@ func TestCommentIndexAndForeignKeyUpdatedIfChanged(t *testing.T) {
 	}
 }
 
-func TestGeneratedExpressionChangeBeforePG17Warns(t *testing.T) {
+func TestGeneratedExpressionChangeBeforePG17Readds(t *testing.T) {
 	live := liveWithTable("public.t", map[string]*LiveColumn{"a": {Type: "integer"}, "b": {Type: "integer", Nullable: true, Generated: "(a * 2)"}})
 	live.ServerVersion = 160004
 	d := &schema.Database{Tables: map[string]*schema.Table{"public.t": {Name: "t", Columns: map[string]*schema.Column{
 		"a": {Type: "int"}, "b": {Type: "int", Nullable: true, Generated: "a * 3"},
 	}}}}
-	p := Plan(live, d, true)
-	if sql := Render(p); sql != "" || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "PostgreSQL 16 has no ALTER COLUMN ... SET EXPRESSION") {
-		t.Errorf("expected only a warning, got:\n%s\n%+v", sql, p.Warnings)
+	p := Plan(live, d, false)
+	if len(p.Warnings) != 1 || p.Warnings[0].Message != "generated column public.t.b changed, but PostgreSQL 16 has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it" {
+		t.Errorf("without --unsafe only a warning: %+v", p.Warnings)
 	}
-	if p := Plan(live, d, false); len(p.Warnings) != 1 {
-		t.Errorf("the warning must not need --unsafe, since --unsafe can't make the change either: %+v", p.Warnings)
+	p = Plan(live, d, true)
+	statementOrder(t, Render(p), `alter table "public"."t" drop column "b";`, `alter table "public"."t" add column "b" int generated always as (a * 3) stored;`)
+	if len(p.Warnings) != 2 || !strings.Contains(p.Warnings[0].Message, "generated column public.t.b is dropped and added again at the end of the table, because PostgreSQL 16 has no ALTER COLUMN ... SET EXPRESSION") || p.Warnings[1].Kind != "lock" {
+		t.Errorf("want a note and the rewrite warning, got %+v", p.Warnings)
 	}
+
+	live.Tables["public.t"].Indexes = map[string]bool{"t_b_idx": true}
+	live.Tables["public.t"].IndexDefs = map[string]*LiveIndex{"t_b_idx": {Method: "btree", Keys: []string{"b"}}}
+	p = Plan(live, d, true)
+	if sql := Render(p); sql != "" || len(p.Warnings) != 1 || p.Warnings[0].Message != "generated column public.t.b changed, but PostgreSQL 16 has no ALTER COLUMN ... SET EXPRESSION (added in 17), and pgy can't drop the column and add it again, because index t_b_idx on it isn't declared; do that in a hand-written migration" {
+		t.Errorf("an undeclared index keeps the column, got:\n%s\n%+v", sql, p.Warnings)
+	}
+
 	live.ServerVersion = 170002
 	if p := Plan(live, d, true); !findAlter(p, `alter table "public"."t" alter column "b" set expression as (a * 3);`) {
 		t.Errorf("PostgreSQL 17 uses SET EXPRESSION, got %v", p.Alters)
