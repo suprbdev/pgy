@@ -560,6 +560,11 @@
           "type": "boolean",
           "description": "Keep the column's NOT NULL constraint NOT VALID, so existing rows aren't checked and pgy diff never validates it. PostgreSQL 18+."
         },
+        "notNullName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the column's NOT NULL constraint (PostgreSQL 18+); default <table>_<column>_not_null. A live constraint with another name is renamed. Ignored before PostgreSQL 18."
+        },
         "using": {
           "type": "string",
           "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
@@ -591,6 +596,7 @@
         "generated": { "type": "string", "minLength": 1 },
         "virtual": { "type": "boolean" },
         "notValid": { "type": "boolean" },
+        "notNullName": { "type": "string", "minLength": 1 },
         "collate": { "type": "string", "minLength": 1 },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
         "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"] },
@@ -1254,6 +1260,11 @@
         "notNull": {
           "type": "boolean",
           "description": "Inverse of nullable."
+        },
+        "notNullName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the column's NOT NULL constraint (PostgreSQL 18+); default <table>_<column>_not_null. A live constraint with another name is renamed. Ignored before PostgreSQL 18."
         },
         "default": {
           "$ref": "#/definitions/scalar",

@@ -341,6 +341,34 @@ schema app:
 	}
 }
 
+func TestValidateNotNullName(t *testing.T) {
+	p := write(t, t.TempDir(), "n.yml", `
+schema app:
+  table t:
+    columns:
+      id: {type: int, notNullName: t_id_required}
+      a: {type: int, nullable: true, notNullName: a_must_exist}
+    partitionBy: {type: list, columns: [id]}
+  table t1:
+    partitionOf: app.t
+    forValues: {in: [1]}
+    columns:
+      id: {notNullName: t1_id_required}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"table app.t: column a sets notNullName but is nullable",
+		"table app.t1: column id: notNullName is ignored on a column of a partition",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "column id sets notNullName") || strings.Contains(got, "app.t: column id: notNullName") {
+		t.Errorf("a NOT NULL column the table declares takes a name:\n%s", got)
+	}
+}
+
 func TestValidateData(t *testing.T) {
 	p := write(t, t.TempDir(), "d.yml", `
 schema app:
@@ -367,6 +395,11 @@ schema app:
     data:
       key: [label]
       rows: [{id: 1, label: a}]
+  table shapes:
+    columns: {b: {type: box}, tags: {type: "JSON[]"}, at: {type: pg_catalog.point}, doc: {type: jsonb}, own: {type: app.box}}
+    data:
+      key: [b, tags, at, doc, own]
+      rows: [{b: "(1,1),(0,0)", tags: [], at: "(1,2)", doc: {}, own: x}]
 `)
 	got := messages(Files([]string{p}))
 	for _, want := range []string{
@@ -376,9 +409,17 @@ schema app:
 		"data row 5 sets generated column twice",
 		"table app.nokey: data needs a key",
 		"data key (label) is not the primary key or a unique constraint",
+		"table app.shapes: data key column b has type box, which has no default btree operator class",
+		"table app.shapes: data key column tags has type JSON[], which has no default btree operator class",
+		"table app.shapes: data key column at has type pg_catalog.point, which has no default btree operator class",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"data key column doc has type", "data key column own has type"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("unexpected %q in:\n%s", unwanted, got)
 		}
 	}
 }

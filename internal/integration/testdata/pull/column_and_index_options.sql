@@ -17,3 +17,7 @@ alter index s7.p_lb alter column 1 set statistics 200;
 create materialized view s7.mv as select id, b from s7.t;
 create index mv_lb on s7.mv (lower(b));
 alter index s7.mv_lb alter column 1 set statistics 50;
+create table s7.nn (id int constraint nn_id_required not null primary key, a int constraint a_must_exist not null, b text not null, c int);
+alter table s7.nn rename to named;
+create table s7.np (k int constraint np_k_required not null, v text not null) partition by list (k);
+create table s7.np1 partition of s7.np for values in (1);

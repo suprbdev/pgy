@@ -30,12 +30,14 @@ var (
     lockIndexRe     = regexp.MustCompile(`^create( unique)? index if not exists (` + quotedName + `) on ` + lockFQ)
     lockConstraintRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add constraint (` + quotedName + `) (foreign key|check|unique|exclude)`)
     lockPrimaryKeyRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add primary key`)
-    lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) set not null;$`)
+    lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` (?:alter column (` + quotedName + `) set not null|add constraint ` + quotedName + ` not null (` + quotedName + `));$`)
     lockTypeRe      = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) type (.+);$`)
     lockLoggedRe    = regexp.MustCompile(`^alter table ` + lockFQ + ` set (logged|unlogged);$`)
     lockAddColumnRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add column (` + quotedName + `) (.+);$`)
     volatileCallRe  = regexp.MustCompile(`(?i)\b(random|gen_random_uuid|uuid_generate_v[14]|uuidv[47]|clock_timestamp|timeofday|nextval)\s*\(`)
     typeModsRe      = regexp.MustCompile(`^([a-z ]+?)(?:\((\d+)(?:,(\d+))?\))?$`)
+    sqlName         = `(` + quotedName + `|[\pL_][\pL\pN_$]*)`
+    sqlCallRe       = regexp.MustCompile(`(?:` + sqlName + `\s*\.\s*)?` + sqlName + `\s*\(`)
 )
 
 // unquoteFQ turns a pqIdent-quoted "schema"."name" back into schema.name.
@@ -61,8 +63,10 @@ func unquoteFQ(s string) string {
 // against): index builds without CONCURRENTLY, constraints validated while
 // they are added, SET NOT NULL, rewriting type changes, SET LOGGED /
 // UNLOGGED, and added columns whose values must be computed per row.
-func lockWarnings(live *Live, p *PlanDiff) []Warning {
+// desired supplies the volatility of the functions it declares.
+func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
     if live == nil { return nil }
+    var volatility map[string]map[string]bool
     exists := func(fq string) bool {
         if lt := live.Tables[fq]; lt != nil { return lt.Foreign == nil }
         return live.MatViewTables[fq] != nil
@@ -109,7 +113,7 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
             continue
         }
         if m := lockNotNullRe.FindStringSubmatch(stmt); m != nil {
-            if fq, col := unquoteFQ(m[1]), unquoteFQ(m[2]); exists(fq) && !hasNotNullCheck(live.Tables[fq], col) {
+            if fq, col := unquoteFQ(m[1]), unquoteFQ(m[2]+m[3]); exists(fq) && !hasNotNullCheck(live.Tables[fq], col) {
                 warn(fq, stmt, "SET NOT NULL on %s.%s scans the whole table under an ACCESS EXCLUSIVE lock; a validated CHECK (%s IS NOT NULL) constraint, added in an earlier migration, lets PostgreSQL skip the scan", fq, col, col)
             }
             continue
@@ -135,7 +139,8 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
         if m := lockAddColumnRe.FindStringSubmatch(stmt); m != nil {
             fq, col, def := unquoteFQ(m[1]), unquoteFQ(m[2]), m[3]
             if !exists(fq) { continue }
-            if why := addColumnRewrite(def); why != "" {
+            if volatility == nil { volatility = functionVolatility(live, desired) }
+            if why := addColumnRewrite(def, volatility); why != "" {
                 warn(fq, stmt, "adding column %s with %s rewrites %s under an ACCESS EXCLUSIVE lock", col, why, fq)
             }
         }
@@ -169,8 +174,12 @@ func hasNotNullCheck(lt *LiveTable, col string) bool {
 }
 
 // addColumnRewrite explains why adding a column with definition def must
-// write every existing row, or returns "".
-func addColumnRewrite(def string) string {
+// write every existing row, or returns "". A default is volatile when it
+// calls a function that volatility (see functionVolatility) marks so, or one
+// of the built-in and common extension functions of volatileCallRe, which is
+// all there is to go by for pg_catalog and for a function that neither the
+// database nor the YAML has.
+func addColumnRewrite(def string, volatility map[string]map[string]bool) string {
     lower := strings.ToLower(def)
     first := strings.Fields(lower)
     switch {
@@ -183,9 +192,60 @@ func addColumnRewrite(def string) string {
     }
     if i := strings.Index(lower, " default "); i >= 0 {
         masked, _ := maskStringLiterals(def[i:])
-        if volatileCallRe.MatchString(masked) { return "a volatile default" }
+        if volatileCallRe.MatchString(masked) || callsVolatile(masked, volatility) { return "a volatile default" }
     }
     return ""
+}
+
+// functionVolatility maps the name of each function outside pg_catalog to
+// the schemas that have it and whether one of its overloads there is
+// volatile. A function that desired declares has the volatility the YAML
+// gives it, the live one when the YAML leaves it out, and PostgreSQL's
+// default, volatile, when the plan creates it.
+func functionVolatility(live *Live, desired *schema.Database) map[string]map[string]bool {
+    out := map[string]map[string]bool{}
+    add := func(qualified string, volatile bool) {
+        schemaName, name := "public", qualified
+        if strings.Contains(qualified, ".") { schemaName, name = splitQualified(qualified) }
+        if out[name] == nil { out[name] = map[string]bool{} }
+        out[name][schemaName] = out[name][schemaName] || volatile
+    }
+    declared := map[string]bool{}
+    if desired != nil {
+        for key, f := range desired.Functions {
+            if f == nil { continue }
+            sig := normalizeFunctionSignature(schema.RoutineName(key) + f.ArgsSig)
+            declared[sig] = true
+            v := strings.ToLower(f.Volatility)
+            if lf := live.FunctionDefs[sig]; v == "" && lf != nil { v = lf.Volatility }
+            add(schema.RoutineName(key), v == "" || v == "volatile")
+        }
+    }
+    for sig, lf := range live.FunctionDefs {
+        if lf != nil && !declared[sig] { add(schema.RoutineName(lf.Signature), lf.Volatility == "volatile") }
+    }
+    return out
+}
+
+// callsVolatile reports whether masked, an expression with its string
+// literals masked, calls a function that volatility marks volatile: in the
+// schema the call names, or in any schema when it names none.
+func callsVolatile(masked string, volatility map[string]map[string]bool) bool {
+    name := func(s string) string {
+        if strings.HasPrefix(s, `"`) { return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`) }
+        return strings.ToLower(s)
+    }
+    for _, m := range sqlCallRe.FindAllStringSubmatch(masked, -1) {
+        schemas := volatility[name(m[2])]
+        if m[1] != "" {
+            if schemas[name(m[1])] { return true }
+            continue
+        }
+        for _, volatile := range schemas {
+            if volatile { return true }
+        }
+    }
+    return false
 }
 
 // typeChangeRewrites reports whether ALTER COLUMN TYPE from -> to rewrites

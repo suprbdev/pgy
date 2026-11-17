@@ -285,3 +285,154 @@ schema app:
 		t.Errorf("expected 2 plans, got %d (%v)", n, err)
 	}
 }
+
+// TestIntegrationDataKeyOffSearchPath matches rows on key types whose
+// equality operator is in a schema the search_path does not list, where a
+// bare = compares a citext key as text and finds no operator for an isbn13
+// one. A session with that schema on its search_path gets the bare =.
+func TestIntegrationDataKeyOffSearchPath(t *testing.T) {
+	admin := connect(t)
+	const name = "pgytest_data_key_path"
+	pool := freshDatabase(t, admin, name)
+	const base = `
+extensions:
+  - {name: citext, schema: ext}
+  - {name: isn, schema: ext}
+schema app:
+  domain code:
+    type: ext.citext
+  table plan:
+    dependsOn: [domain app.code]
+    columns:
+      code: {type: app.code}
+      name: {type: text}
+    primaryKey: [code]
+    data:
+      rows: PLANS
+  table book:
+    columns:
+      id: {type: ext.isbn13}
+      edition: {type: int}
+      title: {type: text}
+    primaryKey: [id, edition]
+    data:
+      rows: BOOKS
+`
+	load := func(plans, books string) *schema.Database {
+		return loadYAML(t, "app", strings.NewReplacer("PLANS", plans, "BOOKS", books).Replace(base))
+	}
+	convergeDatabase(t, pool, load(
+		`[{code: free, name: Free}, {code: pro, name: Pro}, {code: old, name: Old}]`,
+		`[{id: 978-0-306-40615-7, edition: 1, title: First}, {id: 978-0-13-110362-7, edition: 2, title: Second}]`))
+	changed := load(
+		`[{code: FREE, name: Free}, {code: pro, name: Professional}]`,
+		`[{id: "9780306406157", edition: 1, title: Renamed}]`)
+	opts := diff.Options{Unsafe: true, Prune: true}
+
+	onPath := sessionPool(t, name, map[string]string{"search_path": "app, ext"})
+	sql := diff.Render(diff.PlanWith(introspect(t, onPath, changed), changed, opts))
+	for _, want := range []string{
+		`update only "app"."plan" set "code" = 'FREE' where "code" = 'FREE';`,
+		`delete from only "app"."book" where "id" = '978-0-13-110362-7' and "edition" = '2';`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("with the operator's schema on the search_path, missing %q in:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "operator(") {
+		t.Errorf("an operator on the search_path needs no qualifier:\n%s", sql)
+	}
+
+	sql = convergeDatabase(t, pool, changed)
+	for _, want := range []string{
+		`update only "app"."plan" set "code" = 'FREE' where "code" operator("ext".=) 'FREE';`,
+		`update only "app"."plan" set "name" = 'Professional' where "code" operator("ext".=) 'pro';`,
+		`delete from only "app"."plan" where "code" operator("ext".=) 'old';`,
+		`update only "app"."book" set "title" = 'Renamed' where "id" operator("ext".=) '9780306406157' and "edition" = 1;`,
+		`delete from only "app"."book" where "id" operator("ext".=) '978-0-13-110362-7' and "edition" = '2';`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "insert into") {
+		t.Errorf("rows that match in the key's type are updated, not inserted:\n%s", sql)
+	}
+	if got := rowTexts(t, pool, `select code::text || ' ' || name from app.plan order by 1`); strings.Join(got, ",") != "FREE Free,pro Professional" {
+		t.Errorf("plans = %v", got)
+	}
+	if got := rowTexts(t, pool, `select id::text || ' ' || title from app.book order by 1`); strings.Join(got, ",") != "978-0-306-40615-7 Renamed" {
+		t.Errorf("books = %v", got)
+	}
+	dup := load(`[{code: pro, name: Pro}, {code: Pro, name: Again}]`, `[]`)
+	if msg := dataError(t, pool, dup); !strings.Contains(msg, "rows 1 and 2 identify the same row") {
+		t.Errorf("expected rows with equal keys to be rejected, got %q", msg)
+	}
+}
+
+// TestIntegrationDataKeyWithoutBtree rejects a key column whose type has no
+// default btree operator class, for a table that exists and for one the
+// plan creates, and accepts key types that use another type's class.
+func TestIntegrationDataKeyWithoutBtree(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	pool := freshDatabase(t, admin, "pgytest_data_key_btree")
+	const base = `
+schema app:
+  table shapes:
+    columns:
+      k: {type: "TYPE"}
+      label: {type: text}
+    data:
+      key: [k]
+      rows:
+        - {k: VALUE, label: unit}
+`
+	if _, err := pool.Exec(ctx, `create schema app`); err != nil {
+		t.Fatal(err)
+	}
+	for typ, value := range map[string]string{
+		"box":     `"(1,1),(0,0)"`,
+		"point":   `"(1,2)"`,
+		"json":    `{a: 1}`,
+		"xml":     `"<a/>"`,
+		"point[]": `["(1,2)"]`,
+	} {
+		t.Run(typ, func(t *testing.T) {
+			d := loadYAML(t, "app", strings.NewReplacer("TYPE", typ, "VALUE", value).Replace(base))
+			want := "data for app.shapes: key column k has type " + typ + ", which has no default btree operator class"
+			if msg := dataError(t, pool, d); !strings.Contains(msg, want) {
+				t.Errorf("new table: expected %q, got %q", want, msg)
+			}
+			if _, err := pool.Exec(ctx, `create table app.shapes (k `+typ+`, label text)`); err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Exec(ctx, `drop table app.shapes`) //nolint:errcheck
+			if msg := dataError(t, pool, d); !strings.Contains(msg, want) {
+				t.Errorf("existing table: expected %q, got %q", want, msg)
+			}
+		})
+	}
+	for typ, value := range map[string]string{
+		"varchar(10)": `one`,
+		"cidr":        `10.0.0.0/8`,
+		"int4range":   `"[1,5)"`,
+		"text[]":      `[a, b]`,
+		"regclass":    `pg_class`,
+	} {
+		t.Run(typ, func(t *testing.T) {
+			d := loadYAML(t, "app", strings.NewReplacer("TYPE", typ, "VALUE", value).Replace(base))
+			defer pool.Exec(ctx, `drop table if exists app.shapes`) //nolint:errcheck
+			if msg := dataError(t, pool, d); msg != "" {
+				t.Fatalf("new table: %s", msg)
+			}
+			convergeDatabase(t, pool, d)
+			if _, err := pool.Exec(ctx, `insert into app.shapes select k, 'copy' from app.shapes`); err != nil {
+				t.Fatal(err)
+			}
+			if sql := diff.Render(diff.PlanWith(introspect(t, pool, d), d, diff.Options{Unsafe: true, Prune: true})); !strings.Contains(sql, `update only "app"."shapes" set "label" = 'unit'`) || strings.Contains(sql, "insert into") {
+				t.Errorf("the rows match on the key, so the changed label is updated:\n%s", sql)
+			}
+		})
+	}
+}

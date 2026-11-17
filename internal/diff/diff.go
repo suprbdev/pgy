@@ -563,6 +563,9 @@ type LiveColumn struct{
     // NotNullNotValid names a NOT VALID not-null constraint on the column
     // (PostgreSQL 18+), which is enforced for new rows but not yet validated.
     NotNullNotValid string
+    // NotNullName names the column's not-null constraint, valid or not;
+    // "" before PostgreSQL 18, which records none for a table column.
+    NotNullName string
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -780,7 +783,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
                a.attinhcount > 0,
                coalesce(a.attoptions, '{}'::text[]),
-               coalesce(a.attfdwoptions, '{}'::text[])
+               coalesce(a.attfdwoptions, '{}'::text[]),
+               coalesce(nn.conname, ''), coalesce(nn.convalidated, true)
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -788,6 +792,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_collation co on co.oid = a.attcollation and a.attcollation <> ty.typcollation
         left join pg_namespace cn on cn.oid = co.collnamespace
         left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum
+        left join pg_constraint nn on nn.conrelid = a.attrelid and nn.contype = 'n' and nn.conkey[1] = a.attnum
         where a.attnum > 0 and not a.attisdropped
         and c.relkind in ('r', 'p', 'f')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -803,36 +808,18 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var collSchema, typeStorage string
             var inherited bool
             var attoptions, fdwoptions []string
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions); err != nil { return err }
+            var notNullName string
+            var notNullValid bool
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions, &notNullName, &notNullValid); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited, NotNullName: notNullName}
+            if !notNullValid { lc.NotNullNotValid = notNullName }
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
             if len(fdwoptions) > 0 { lc.FDWOptions = parseFDWOptions(fdwoptions) }
             t.Columns[colName] = lc
-        }
-        return nil
-    })
-
-    nnQ := `
-        select n.nspname, c.relname, a.attname, con.conname
-        from pg_constraint con
-        join pg_class c on c.oid = con.conrelid
-        join pg_namespace n on n.oid = c.relnamespace
-        join pg_attribute a on a.attrelid = con.conrelid and a.attnum = con.conkey[1]
-        where con.contype = 'n' and not con.convalidated
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
-    `
-    batch.add(nnQ, func(rows pgx.Rows) error {
-        for rows.Next() {
-            var schemaName, tableName, colName, conName string
-            if err := rows.Scan(&schemaName, &tableName, &colName, &conName); err != nil { return err }
-            if t := l.Tables[schemaName+"."+tableName]; t != nil {
-                if lc := t.Columns[colName]; lc != nil { lc.NotNullNotValid = conName }
-            }
         }
         return nil
     })
@@ -3184,7 +3171,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, cn := range inherited { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil)...) }
                 for _, cn := range sortedKeys(dt.Columns) {
                     if c := dt.Columns[cn]; c != nil && c.NotValid && !c.Nullable && !inheritedColumn(dt, c, nil) {
-                        plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn))
+                        plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn, c))
                     }
                 }
                 inherits := ""
@@ -3257,7 +3244,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         // otherwise run before the column exists and force a
                         // two-migration split.
                         plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s add column %s;", pqIdent(fq), renderColumn(cn, c)))
-                        if c.NotValid && !c.Nullable { plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn)) }
+                        if c.NotValid && !c.Nullable { plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn, c)) }
                         plan.Alters = append(plan.Alters, newColumnStmts(fq, cn, c)...)
                         continue
                     }
@@ -3267,8 +3254,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         enforced := *lc
                         enforced.Nullable = false
                         lc = &enforced
-                    } else if lc.NotNullNotValid != "" && !c.Nullable && !c.NotValid {
-                        plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
+                    } else {
+                        pending := lc.NotNullNotValid
+                        if name := notNullRename(c, lc); name != "" {
+                            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(lc.NotNullName), quoteIdent(name)))
+                            if pending != "" { pending = name }
+                        }
+                        if pending != "" && !c.Nullable && !c.NotValid {
+                            plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
+                        }
                     }
                     stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
@@ -3330,7 +3324,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
-    plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
+    plan.Warnings = append(plan.Warnings, lockWarnings(live, desired, plan)...)
     return plan
 }
 
@@ -4296,10 +4290,10 @@ func hasForeignPartition(live *Live, fq string) bool {
 // and when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip
 // the scan.
 // notValidNotNullStmt adds column cn's NOT NULL constraint NOT VALID, under
-// PostgreSQL's default name, for a column declared notValid.
-func notValidNotNullStmt(fq, cn string) string {
-    _, table := splitQualified(fq)
-    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(makeObjectName(table+"_"+cn, "not_null")), quoteIdent(cn))
+// its declared name or PostgreSQL's default one, for a column declared
+// notValid.
+func notValidNotNullStmt(fq, cn string, c *schema.Column) string {
+    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn))
 }
 
 func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
@@ -4311,8 +4305,37 @@ func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *Li
     case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn):
         return ""
     }
+    return notNullConstraintName(fq, cn, c)
+}
+
+// DefaultNotNullName returns the name PostgreSQL 18 gives the NOT NULL
+// constraint of column cn of table fq when the column definition names
+// none: <table>_<column>_not_null, shortening the longer of the two names
+// first when that exceeds maxIdentifierLength.
+func DefaultNotNullName(fq, cn string) string {
     _, table := splitQualified(fq)
-    return makeObjectName(table+"_"+cn, "not_null")
+    t, c := len(table), len(cn)
+    for t+c > maxIdentifierLength-len("__not_null") {
+        if t > c { t-- } else { c-- }
+    }
+    return clipBytes(table, t) + "_" + clipBytes(cn, c) + "_not_null"
+}
+
+// notNullConstraintName returns the name the plan gives column cn's NOT
+// NULL constraint when it adds one with ADD CONSTRAINT: the declared
+// notNullName, or PostgreSQL's default.
+func notNullConstraintName(fq, cn string, c *schema.Column) string {
+    if c.NotNullName != "" { return truncateIdent(c.NotNullName) }
+    return DefaultNotNullName(fq, cn)
+}
+
+// notNullRename returns the name to rename the live NOT NULL constraint of
+// a column to: its declared notNullName, when the constraint (PostgreSQL
+// 18+) has another name. It returns "" when there is nothing to rename.
+func notNullRename(c *schema.Column, lc *LiveColumn) string {
+    name := truncateIdent(c.NotNullName)
+    if c.Nullable || lc.Nullable || name == "" || lc.NotNullName == "" || lc.NotNullName == name { return "" }
+    return name
 }
 
 // routineBodySQL renders a routine body for CREATE: a SQL-standard body
@@ -6335,7 +6358,11 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     }
 
     if !c.Nullable && lc.Nullable {
-        out = append(out, target+" set not null;")
+        if c.NotNullName != "" && serverVersion >= 180000 {
+            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s;", pqIdent(fq), quoteIdent(truncateIdent(c.NotNullName)), quoteIdent(cn)))
+        } else {
+            out = append(out, target+" set not null;")
+        }
     }
     out = append(out, identityAlterStmts(fq, target, c, lc, unsafe)...)
     droppingIdentity := lc.Identity != "" && c.Identity == "" && unsafe && c.Generated == ""
@@ -7064,7 +7091,10 @@ func renderColumn(name string, c *schema.Column) string {
     parts := []string{quoteIdent(name), c.Type}
     if c.Compression != "" && c.Compression != "default" { parts = append(parts, "compression "+c.Compression) }
     if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
-    if !c.Nullable && !c.NotValid { parts = append(parts, "not null") }
+    if !c.Nullable && !c.NotValid {
+        if c.NotNullName != "" { parts = append(parts, "constraint "+quoteIdent(c.NotNullName)) }
+        parts = append(parts, "not null")
+    }
     if c.Generated != "" {
         kind := "stored"
         if c.Virtual { kind = "virtual" }
@@ -7545,6 +7575,9 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
             }
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
                 need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
+            }
+            if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable {
+                out = append(out, Warning{Message: fmt.Sprintf("notNullName on column %s.%s is ignored: PostgreSQL %d does not record a name for a column's NOT NULL constraint (PostgreSQL 18 does)", fq, cn, v/10000)})
             }
         }
         for _, ct := range t.Constraints {
