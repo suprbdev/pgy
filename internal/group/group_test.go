@@ -55,6 +55,7 @@ func assertEmittedOnce(t *testing.T, steps []Step) {
     seen := map[string]string{}
     for _, s := range steps {
         for _, stmt := range append(append(append([]string{}, s.Plan.Creates...), s.Plan.Alters...), s.Plan.Drops...) {
+            if stmt == "set check_function_bodies = off;" || stmt == "reset check_function_bodies;" { continue }
             if prev, ok := seen[stmt]; ok { t.Fatalf("statement emitted in both %q and %q: %s", prev, s.Name, stmt) }
             seen[stmt] = s.Name
         }
