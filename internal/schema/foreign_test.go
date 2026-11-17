@@ -50,6 +50,81 @@ schema reporting:
 	}
 }
 
+func TestForeignScalarsKeepSourceText(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+servers:
+  wh:
+    wrapper: postgres_fdw
+    version: 15.10
+    options: {port: 05432, fetch_size: 1_000, connect_timeout: 0x10, keep_connections: on, sslmode: "require", application_name: ~}
+  plain:
+    wrapper: file_fdw
+    version: "9.60"
+schema rep:
+  foreign table t:
+    server: wh
+    options: {fetch_size: 2_000, table_name: 0010}
+    columns:
+      a: {type: int, options: {column_name: 007}}
+      b: {type: text, options: {column_name: b}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := d.Servers["wh"]
+	if s.Version != "15.10" {
+		t.Errorf("version = %q, want the text as written", s.Version)
+	}
+	want := map[string]string{"port": "05432", "fetch_size": "1_000", "connect_timeout": "0x10", "keep_connections": "on", "sslmode": "require", "application_name": ""}
+	for k, v := range want {
+		if s.Options[k] != v {
+			t.Errorf("server option %s = %q, want %q", k, s.Options[k], v)
+		}
+	}
+	if v := d.Servers["plain"].Version; v != "9.60" {
+		t.Errorf("quoted version = %q", v)
+	}
+	ft := d.Tables["rep.t"]
+	if ft.Foreign.Options["fetch_size"] != "2_000" || ft.Foreign.Options["table_name"] != "0010" {
+		t.Errorf("table options = %v", ft.Foreign.Options)
+	}
+	if ft.Columns["a"].FDWOptions["column_name"] != "007" || ft.Columns["b"].FDWOptions["column_name"] != "b" {
+		t.Errorf("column options = %v / %v", ft.Columns["a"].FDWOptions, ft.Columns["b"].FDWOptions)
+	}
+}
+
+func TestServerRenamedFromAndForeignInheritsParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+servers:
+  warehouse: {wrapper: postgres_fdw, renamedFrom: " wh "}
+schema rep:
+  table parent:
+    columns: {id: {type: int}}
+  foreign table child:
+    server: warehouse
+    inherits: [parent]
+    columns:
+      id: {options: {column_name: ident}}
+      extra: {type: int, generated: id * 2, storage: plain}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := d.Servers["warehouse"]; s.RenamedFrom != "wh" {
+		t.Errorf("renamedFrom = %q", s.RenamedFrom)
+	}
+	ft := d.Tables["rep.child"]
+	if ft.Foreign == nil || len(ft.Inherits) != 1 || ft.Inherits[0] != "rep.parent" {
+		t.Fatalf("foreign table = %+v", ft)
+	}
+	if c := ft.Columns["id"]; c.Type != "" || c.FDWOptions["column_name"] != "ident" {
+		t.Errorf("inherited column = %+v", c)
+	}
+	if c := ft.Columns["extra"]; c.Generated != "id * 2" || c.Storage != "plain" {
+		t.Errorf("own column = %+v", c)
+	}
+}
+
 func TestPublicationGeneratedColumnsParse(t *testing.T) {
 	d, err := parseFlexibleDatabase([]byte(`
 publications:

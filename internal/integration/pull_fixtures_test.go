@@ -85,6 +85,10 @@ func TestIntegrationPullFixtures(t *testing.T) {
 					t.Errorf("pg_dump of the rebuilt database differs from the original:\n%s", strings.Join(d, "\n"))
 				}
 			}
+			if d := routineSourceDifferences(t, src, dst); len(d) > 0 {
+				dump()
+				t.Errorf("routine bodies of the rebuilt database differ from the original:\n%s", strings.Join(d, "\n"))
+			}
 		})
 	}
 }

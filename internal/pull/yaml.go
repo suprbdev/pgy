@@ -54,6 +54,32 @@ func literal(s string) *node {
 	return n
 }
 
+// exact renders text so that it reads back unchanged: as a block scalar
+// when it has several lines and survives one, otherwise as a flow scalar.
+func exact(s string) *node {
+	n := str(s)
+	if strings.Contains(s, "\n") {
+		n.Style = yaml.LiteralStyle
+	}
+	if !readsBack(n) {
+		n.Style = yaml.DoubleQuotedStyle
+	}
+	return n
+}
+
+// readsBack reports whether n, encoded as pull encodes it, decodes to its
+// value.
+func readsBack(n *node) bool {
+	doc := newMap()
+	add(doc, "k", n)
+	out, err := render(doc)
+	if err != nil {
+		return false
+	}
+	var back map[string]any
+	return yaml.Unmarshal(out, &back) == nil && back["k"] == any(n.Value)
+}
+
 func list(items []string) *node {
 	n := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
 	for _, it := range items {

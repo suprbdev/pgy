@@ -83,6 +83,10 @@ type Live struct{
     // connected database
     DatabaseRoleConfig map[string]map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
+    // Offline marks a Live that stands for an empty database rather than
+    // one that was introspected (pgy diff --from-empty), so there is no
+    // connected role and no server to report on.
+    Offline bool
     // DefaultTablespace is the database's default tablespace, which a
     // relation with no tablespace of its own is stored in; "" when unknown.
     DefaultTablespace string
@@ -166,6 +170,9 @@ type LiveServer struct {
     // UserMapping reports whether the connected role, or PUBLIC, has a
     // user mapping for the server.
     UserMapping bool
+    // UserMappings lists the roles with a user mapping for the server,
+    // "public" for PUBLIC. Their options are never read.
+    UserMappings []string
 }
 
 // LiveForeignTable is what pg_foreign_table records for a foreign table.
@@ -316,6 +323,8 @@ type LiveFunction struct{
     // SQLBody reports a SQL-standard body (BEGIN ATOMIC / RETURN); Body then
     // holds PostgreSQL's rewritten form, from pg_get_function_sqlbody.
     SQLBody bool
+    Language  string   // pg_language.lanname; "" when unknown
+    Transform []string // protrftypes as type names, in declaration order
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
@@ -324,6 +333,8 @@ type LiveProcedure struct{
     SQLBody  bool // SQL-standard body; see LiveFunction.SQLBody
     Security string // definer|invoker
     Config   map[string]string // proconfig: lower-cased parameter name -> value
+    Language  string   // pg_language.lanname; "" when unknown
+    Transform []string // protrftypes as type names, in declaration order
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -405,8 +416,10 @@ func newLiveTable() *LiveTable {
 // unsafe. Options holds every schema.AggregateOptions entry by SQL name:
 // functions, types and sortop as text ("" when unset), spaces as integers,
 // *_extra as true/false and *_modify as read_only | shareable | read_write.
+// HasInitCond and HasMInitCond tell an empty initial condition from none.
 type LiveAggregate struct {
     SFunc, SType, FinalFunc, InitCond, CombineFunc, Parallel string
+    HasInitCond, HasMInitCond bool
     Options map[string]string
 }
 
@@ -990,7 +1003,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace cn on cn.oid = c.relnamespace
         join pg_class p on p.oid = i.inhparent
         join pg_namespace pn on pn.oid = p.relnamespace
-        where not c.relispartition and c.relkind in ('r', 'p') and p.relkind in ('r', 'p')
+        where not c.relispartition and c.relkind in ('r', 'p', 'f') and p.relkind in ('r', 'p', 'f')
         and cn.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         order by 1, i.inhseqno
     `
@@ -1037,7 +1050,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce(nullif(a.aggmfinalfn::text, '-'), ''), a.aggmfinalextra::text,
                case a.aggmfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
                coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end,
-               (a.aggkind = 'h')::text
+               (a.aggkind = 'h')::text, a.agginitval is not null, a.aggminitval is not null
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -1051,6 +1064,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             opts := make([]string, len(schema.AggregateOptions))
             dest := []any{&schemaName, &name, &args, &la.SFunc, &la.SType, &la.FinalFunc, &la.InitCond, &la.CombineFunc, &la.Parallel}
             for i := range opts { dest = append(dest, &opts[i]) }
+            dest = append(dest, &la.HasInitCond, &la.HasMInitCond)
             if err := aggRows.Scan(dest...); err != nil { return err }
             la.Options = map[string]string{}
             for i, o := range schema.AggregateOptions { la.Options[o[1]] = opts[i] }
@@ -1259,32 +1273,34 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case p.proparallel when 's' then 'safe' when 'r' then 'restricted' else 'unsafe' end,
                p.procost::float8, p.prorows::float8,
                case when p.prokind = 'p' then '' else coalesce(pg_get_function_result(p.oid), '') end,
-               coalesce(pg_get_function_arguments(p.oid), '')
+               coalesce(pg_get_function_arguments(p.oid), ''),
+               lang.lanname, coalesce(p.protrftypes::regtype[]::text[], '{}'::text[])
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
+        join pg_language lang on lang.oid = p.prolang
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
-            var schemaName, funcName, args, src, vol, kind, parallel, returns, fullArgs string
+            var schemaName, funcName, args, src, vol, kind, parallel, returns, fullArgs, language string
             var secdef, strict, leakproof, internal, sqlBody bool
-            var config []string
+            var config, transform []string
             var cost, rows float64
-            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns, &fullArgs); err != nil {
+            if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns, &fullArgs, &language, &transform); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
                 norm := normalizeFunctionSignature(key)
                 l.Procedures[norm] = true
-                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config)}
+                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), Language: language, Transform: transform}
                 if secdef { lp.Security = "definer" }
                 l.ProcedureDefs[norm] = lp
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs, Language: language, Transform: transform}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -1324,7 +1340,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                exists (select 1 from pg_user_mappings um where um.srvid = s.oid and (um.umuser = 0 or um.usename = current_user)),
                coalesce((select array_agg(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end || '=' ||
                                           lower(a.privilege_type) || case when a.is_grantable then '*' else '' end)
-                         from aclexplode(s.srvacl) a where a.grantee <> s.srvowner), '{}'::text[])
+                         from aclexplode(s.srvacl) a where a.grantee <> s.srvowner), '{}'::text[]),
+               coalesce((select array_agg(um.usename::text order by um.usename) from pg_user_mappings um where um.srvid = s.oid), '{}'::text[])
         from pg_foreign_server s
         join pg_foreign_data_wrapper w on w.oid = s.srvfdw
         where not exists (select 1 from pg_depend d where d.classid = 'pg_foreign_server'::regclass and d.objid = s.oid and d.deptype = 'e')
@@ -1334,7 +1351,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var name string
             var options, acl []string
             ls := &LiveServer{}
-            if err := rows.Scan(&name, &ls.Wrapper, &ls.Type, &ls.Version, &options, &ls.Owner, &ls.Comment, &ls.UserMapping, &acl); err != nil { return err }
+            if err := rows.Scan(&name, &ls.Wrapper, &ls.Type, &ls.Version, &options, &ls.Owner, &ls.Comment, &ls.UserMapping, &acl, &ls.UserMappings); err != nil { return err }
             ls.Options = parseFDWOptions(options)
             for _, e := range acl {
                 if role, priv, ok := strings.Cut(e, "="); ok {
@@ -2277,7 +2294,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 // desired. Security is compared only when the YAML sets it; body comparison
 // is whitespace-trimmed (prosrc stores the body verbatim).
 func procedureChanged(p *schema.Procedure, lp *LiveProcedure) bool {
-    if routineBodyChanged(p.Language, p.Body, p.Replace, lp.Body, lp.SQLBody) { return true }
+    if routineBodyChanged(p.Language, p.Body, p.HasBody(), p.Replace, lp.Body, lp.SQLBody) { return true }
+    if p.HasBody() && (routineLanguageChanged(p.Language, lp.Language) || transformChanged(schema.RoutineTransform(p.Language, p.Transform), lp.Transform)) { return true }
     if changed, _ := argDefaultsDiff(p.ArgsSig, lp.Args); changed { return true }
     if p.Security != "" && strings.ToLower(p.Security) != lp.Security { return true }
     if len(configClauses(p.Set, lp.Config)) > 0 { return true }
@@ -2651,6 +2669,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
+    liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     var partitionDetaches []string
     live, replaceViews, viewDrops, viewWarnings := planViewChanges(live, desired, unsafe)
@@ -2775,7 +2794,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
     }
     planServers(plan, live, desired)
-    
+    plan.Warnings = append(plan.Warnings, unmappedMatViewWarnings(live, desired)...)
+
     // Topologically sort remaining entities (types, functions, tables) respecting dependsOn.
     // On a cycle the sort still returns every entity (cycle members appended in
     // name order) — use it as-is; the CLI surfaces the cycle error before
@@ -2839,10 +2859,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 lf := live.FunctionDefs[normalizedDesired]
                 if lf == nil || returnsChanged(f.Returns, lf.Returns) { continue }
                 defaultsChanged, defaultsRemoved := argDefaultsDiff(f.ArgsSig, lf.Args)
-                if defaultsRemoved && strings.TrimSpace(f.Body) != "" { continue }
-                // Empty YAML body means the body is unmanaged (attribute-only
-                // declaration, e.g. marking an extension function leakproof).
-                bodyChanged := routineBodyChanged(f.Language, f.Body, f.Replace, lf.Body, lf.SQLBody) || defaultsChanged && strings.TrimSpace(f.Body) != ""
+                if defaultsRemoved && f.HasBody() { continue }
+                // A declaration without a body leaves the body unmanaged
+                // (attribute-only, e.g. marking an extension function leakproof).
+                bodyChanged := routineBodyChanged(f.Language, f.Body, f.HasBody(), f.Replace, lf.Body, lf.SQLBody) ||
+                    f.HasBody() && (defaultsChanged || routineLanguageChanged(f.Language, lf.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), lf.Transform))
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
@@ -2851,7 +2872,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     continue
                 }
                 // fall through: body changed, emit CREATE OR REPLACE
-            } else if strings.TrimSpace(f.Body) == "" {
+            } else if !f.HasBody() {
                 // Attribute-only declaration for a function that doesn't exist
                 // yet (extension not installed on this DB) — nothing to create.
                 continue
@@ -2879,7 +2900,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             verb := "create function"
             if found { verb = "create or replace function" }
             if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
-            stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, f.Language, attrsStr+setClauses, routineBodySQL(f.Language, body))
+            stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, routineLanguageSQL(f.Language, f.Transform, liveTransforms[normalizedDesired]), attrsStr+setClauses, routineBodySQL(f.Language, body))
             plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, body, stmt, createsRelations)...)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
@@ -2907,7 +2928,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
             if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
-            stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, pr.Language, attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
+            stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, routineLanguageSQL(pr.Language, pr.Transform, liveTransforms[norm]), attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
             plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, pr.Body, stmt, createsRelations)...)
         case "aggregate":
             ag := desired.Aggregates[e.Key]
@@ -3022,7 +3043,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
-                        if c := dt.Columns[cn]; c != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...) }
+                        c := dt.Columns[cn]
+                        if c == nil { continue }
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...)
+                        if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignColumnOptionStmts(fq, cn, c)...) }
                     }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
@@ -3061,8 +3085,14 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn))
                     }
                 }
+                inherits := ""
+                if len(dt.Inherits) > 0 {
+                    parents := make([]string, len(dt.Inherits))
+                    for i, p := range dt.Inherits { parents[i] = pqIdent(p) }
+                    inherits = " inherits (" + strings.Join(parents, ", ") + ")"
+                }
                 if dt.Foreign != nil {
-                    plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s) server %s%s;", pqIdent(fq), strings.Join(cols, ", "), quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s)%s server %s%s;", pqIdent(fq), strings.Join(cols, ", "), inherits, quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                     continue
@@ -3071,11 +3101,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                 create := fmt.Sprintf("create %stable if not exists %s (%s)", unlogged, pqIdent(fq), strings.Join(cols, ", "))
                 if dt.Of != "" { create = fmt.Sprintf("create %stable if not exists %s of %s", unlogged, pqIdent(fq), pqIdent(dt.Of)) }
-                if len(dt.Inherits) > 0 {
-                    parents := make([]string, len(dt.Inherits))
-                    for i, p := range dt.Inherits { parents[i] = pqIdent(p) }
-                    create += " inherits (" + strings.Join(parents, ", ") + ")"
-                }
+                create += inherits
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
@@ -3085,6 +3111,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
             } else {
+                if foreignKindMismatch(dt, lt) {
+                    declared, actual := "a table", "a foreign table"
+                    if dt.Foreign != nil { declared, actual = actual, declared }
+                    plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("%s is declared as %s but is %s in the database, which no ALTER can change; it is left as it is, so drop and recreate it in a hand-written migration", fq, declared, actual)})
+                    continue
+                }
                 // existing table: add missing columns, reconcile attributes
                 // of columns present in both
                 pkCols := map[string]bool{}
@@ -3188,11 +3220,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
-        if desired.Servers != nil {
-            for _, name := range sortedKeys(live.Servers) {
-                if desired.Servers[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop server %s;", quoteIdent(name))) }
-            }
-        }
+        serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
+        plan.Drops = append(plan.Drops, serverDrops...)
+        plan.Warnings = append(plan.Warnings, serverWarnings...)
         planExtensionDrops(plan, live, desired, opts)
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
@@ -4001,7 +4031,8 @@ func inCurrentDatabase(prefix, clause string) string {
 }
 
 // planServers creates and reconciles the declared foreign servers. A
-// changed wrapper or type cannot be altered and is reported as a warning.
+// changed wrapper or type cannot be altered: it is reported as a warning
+// and the server gets no other statement until it has been recreated.
 // Dropping undeclared servers is part of pruning.
 func planServers(plan *PlanDiff, live *Live, desired *schema.Database) {
     for _, name := range sortedKeys(desired.Servers) {
@@ -4017,6 +4048,7 @@ func planServers(plan *PlanDiff, live *Live, desired *schema.Database) {
         } else {
             if s.Wrapper != ls.Wrapper || s.Type != ls.Type {
                 plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("server %s: its foreign-data wrapper or type changed, which ALTER SERVER cannot do; drop and recreate it, with its foreign tables and user mappings, in a hand-written migration", name)})
+                continue
             }
             if s.Version != "" && s.Version != ls.Version {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter server %s version %s;", ident, quoteString(s.Version)))
@@ -4031,20 +4063,70 @@ func planServers(plan *PlanDiff, live *Live, desired *schema.Database) {
         if s.Comment != "" && (ls == nil || s.Comment != ls.Comment) {
             plan.Alters = append(plan.Alters, fmt.Sprintf("comment on server %s is %s;", ident, quoteString(s.Comment)))
         }
-        if s.Wrapper == "postgres_fdw" && (ls == nil || !ls.UserMapping) {
+        if !live.Offline && needsUserMapping(s.Wrapper) && (ls == nil || !ls.UserMapping) {
             plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("server %s has no user mapping for the connected role or PUBLIC; create one outside pgy (its options hold credentials) before querying its foreign tables", name)})
         }
     }
+}
+
+// needsUserMapping reports whether foreign tables of a server on wrapper
+// can only be read through a user mapping.
+func needsUserMapping(wrapper string) bool { return wrapper == "postgres_fdw" }
+
+// unmappedMatViewWarnings reports the materialized views this plan creates
+// with data whose query reads a foreign table on a server without a user
+// mapping. Populating such a view fails, and pgy cannot create the mapping:
+// its options hold credentials.
+func unmappedMatViewWarnings(live *Live, desired *schema.Database) []Warning {
+    type remote struct {
+        re     *regexp.Regexp
+        table  string
+        server string
+        reason string
+    }
+    remotes := []remote{}
+    for _, fq := range sortedKeys(desired.Tables) {
+        dt := desired.Tables[fq]
+        if dt == nil || dt.Foreign == nil || !strings.Contains(fq, ".") { continue }
+        name := dt.Foreign.Server
+        ls := live.Servers[name]
+        wrapper, reason := "", "this plan creates without a user mapping"
+        switch {
+        case ls != nil && ls.UserMapping:
+            continue
+        case ls != nil:
+            wrapper, reason = ls.Wrapper, "has no user mapping for the connected role or PUBLIC"
+        case desired.Servers[name] != nil:
+            wrapper = desired.Servers[name].Wrapper
+        }
+        if !needsUserMapping(wrapper) { continue }
+        remotes = append(remotes, remote{regexp.MustCompile(`(?i)(?:^|[^\w."$])` + relationPattern(fq) + `(?:$|[^\w."$(])`), fq, name, reason})
+    }
+    out := []Warning{}
+    if len(remotes) == 0 { return out }
+    for _, k := range sortedKeys(desired.Views) {
+        vw := desired.Views[k]
+        if vw == nil || !vw.Materialized || vw.Query == "" || live.MatViews[k] || (vw.WithData != nil && !*vw.WithData) { continue }
+        for _, r := range remotes {
+            if !r.re.MatchString(vw.Query) { continue }
+            out = append(out, Warning{Message: fmt.Sprintf("materialized view %s reads foreign table %s, whose server %s %s, so creating it with data fails; set withData: false and refresh it once the user mapping exists, or create the server and its user mapping before this migration runs", k, r.table, r.server, r.reason)})
+        }
+    }
+    return out
+}
+
+// foreignKindMismatch reports whether dt declares a foreign table while lt
+// is an ordinary one, or the reverse. PostgreSQL cannot turn one into the
+// other, so the plan reports such a table and leaves it alone.
+func foreignKindMismatch(dt *schema.Table, lt *LiveTable) bool {
+    return dt != nil && lt != nil && (dt.Foreign != nil) != (lt.Foreign != nil)
 }
 
 // foreignTableAlterStmts reconciles a live foreign table's options and its
 // columns' options. A changed server cannot be altered and is reported
 // through warn.
 func foreignTableAlterStmts(fq string, dt *schema.Table, lt *LiveTable, warn func(string)) []string {
-    if lt.Foreign == nil {
-        warn(fmt.Sprintf("%s is declared as a foreign table but is a table in the database; it is left as it is", fq))
-        return nil
-    }
+    if lt.Foreign == nil { return nil }
     out := []string{}
     if dt.Foreign.Server != lt.Foreign.Server {
         warn(fmt.Sprintf("foreign table %s: server changed from %s to %s, which ALTER FOREIGN TABLE cannot do; drop and recreate it in a hand-written migration", fq, lt.Foreign.Server, dt.Foreign.Server))
@@ -4136,15 +4218,18 @@ func routineBodySQL(language, body string) string {
     if schema.IsSQLStandardBody(language, body) {
         return strings.TrimRight(strings.TrimSpace(body), "; \n\t")
     }
-    return "as " + dollarQuote(body)
+    return "as " + dollarQuote(StoredRoutineBody(body))
 }
 
 // routineBodyChanged reports whether a routine's declared body differs from
-// the live one. An empty body is unmanaged. A change between a string body
-// and a SQL-standard one always counts; two SQL-standard bodies are compared
-// only with replace, since PostgreSQL stores a rewritten form.
-func routineBodyChanged(language, body string, replace bool, liveBody string, liveSQLBody bool) bool {
-    if strings.TrimSpace(body) == "" { return false }
+// the live one. Without a declared body (hasBody false) it is unmanaged. A
+// change between a string body and a SQL-standard one always counts; two
+// SQL-standard bodies are compared only with replace, since PostgreSQL
+// stores a rewritten form. String bodies are compared without their
+// surrounding whitespace, so the newlines pgy puts around a body, now or in
+// earlier versions, never count as a change.
+func routineBodyChanged(language, body string, hasBody, replace bool, liveBody string, liveSQLBody bool) bool {
+    if !hasBody { return false }
     standard := schema.IsSQLStandardBody(language, body)
     switch {
     case standard != liveSQLBody:
@@ -4225,7 +4310,7 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
     if live == nil || desired == nil { return out, nil, nil }
     for _, k := range sortedKeys(desired.Functions) {
         f := desired.Functions[k]
-        if f == nil || strings.TrimSpace(f.Body) == "" { continue }
+        if f == nil || !f.HasBody() { continue }
         fname := schema.RoutineName(k)
         norm := normalizeFunctionSignature(fname + f.ArgsSig)
         lf := live.FunctionDefs[norm]
@@ -4259,7 +4344,7 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         if !unsafe {
             warns = append(warns, Warning{Message: fmt.Sprintf("procedure %s%s: an argument default was removed, which CREATE OR REPLACE can't do; that drops and recreates the procedure, which needs --unsafe", pname, p.ArgsSig)})
             if out == live { out = cloneLive(live) }
-            out.ProcedureDefs[norm] = &LiveProcedure{Signature: lp.Signature, Body: p.Body, SQLBody: lp.SQLBody, Security: lp.Security, Config: lp.Config, Args: p.ArgsSig}
+            out.ProcedureDefs[norm] = &LiveProcedure{Signature: lp.Signature, Body: p.Body, SQLBody: lp.SQLBody, Security: lp.Security, Config: lp.Config, Args: p.ArgsSig, Transform: schema.RoutineTransform(p.Language, p.Transform)}
             continue
         }
         if recreated == nil { recreated = map[string]string{} }
@@ -4399,7 +4484,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
         delete(byIdentity, id)
     }
     for _, k := range sortedKeys(desired.Functions) {
-        if f := desired.Functions[k]; f != nil && strings.TrimSpace(f.Body) != "" { check("function", schema.RoutineName(k), f.ArgsSig) }
+        if f := desired.Functions[k]; f != nil && f.HasBody() { check("function", schema.RoutineName(k), f.ArgsSig) }
     }
     for _, k := range sortedKeys(desired.Procedures) {
         if p := desired.Procedures[k]; p != nil { check("procedure", schema.RoutineName(k), p.ArgsSig) }
@@ -4462,18 +4547,19 @@ func returnTypeKey(s string) (string, bool) {
 // dollarTag returns a dollar-quote delimiter that does not occur in body:
 // $$, else $body$, $body1$, ...
 func dollarTag(body string) string {
-    if !strings.Contains(body, "$$") { return "$$" }
+    closes := func(tag string) bool { return strings.Index(body+tag, tag) == len(body) }
+    if closes("$$") { return "$$" }
     for i := 0; ; i++ {
         tag := "$body$"
         if i > 0 { tag = fmt.Sprintf("$body%d$", i) }
-        if !strings.Contains(body, tag) { return tag }
+        if closes(tag) { return tag }
     }
 }
 
-// dollarQuote quotes a routine body on lines of its own.
+// dollarQuote quotes body exactly as given.
 func dollarQuote(body string) string {
     tag := dollarTag(body)
-    return tag + "\n" + body + "\n" + tag
+    return tag + body + tag
 }
 
 // dollarQuoteInline quotes body on one line.
@@ -4500,16 +4586,17 @@ func renderAggregate(name string, ag *schema.Aggregate) string {
     opts := []string{"sfunc = " + ag.SFunc, "stype = " + ag.SType}
     if ag.FinalFunc != "" { opts = append(opts, "finalfunc = "+ag.FinalFunc) }
     if ag.CombineFunc != "" { opts = append(opts, "combinefunc = "+ag.CombineFunc) }
-    if ag.InitCond != "" { opts = append(opts, "initcond = "+quoteString(ag.InitCond)) }
+    if ag.HasInitCond() { opts = append(opts, "initcond = "+quoteString(ag.InitCond)) }
     if ag.Parallel != "" { opts = append(opts, "parallel = "+ag.Parallel) }
     for _, o := range schema.AggregateOptions {
         v, ok := ag.Options[o[1]]
         switch {
-        case !ok || v == "":
-        case strings.HasSuffix(o[1], "_extra") || o[1] == "hypothetical":
-            if strings.EqualFold(v, "true") { opts = append(opts, o[1]) }
+        case !ok:
         case o[1] == "minitcond":
             opts = append(opts, "minitcond = "+quoteString(v))
+        case v == "":
+        case strings.HasSuffix(o[1], "_extra") || o[1] == "hypothetical":
+            if strings.EqualFold(v, "true") { opts = append(opts, o[1]) }
         case o[1] == "sortop" && strings.Contains(v, ".") && !strings.HasPrefix(strings.ToLower(v), "operator("):
             opts = append(opts, "sortop = operator("+v+")")
         default:
@@ -4536,7 +4623,7 @@ func aggregateOptionsMatch(ag *schema.Aggregate, la *LiveAggregate, fn func(stri
         case k == "mstype":
             if normalizeColumnType(want) != normalizeColumnType(have) { return false }
         case k == "minitcond":
-            if want != have { return false }
+            if !initCondMatches(want, true, have, la.HasMInitCond) { return false }
         case k == "sortop":
             op := func(s string) string {
                 s = strings.TrimSpace(s)
@@ -4551,6 +4638,15 @@ func aggregateOptionsMatch(ag *schema.Aggregate, la *LiveAggregate, fn func(stri
     return true
 }
 
+// initCondMatches compares a declared initial condition with the live one.
+// The empty string is a condition of its own, so a declared one (wantSet)
+// does not match an aggregate that has none (haveSet false). An undeclared
+// condition still matches a live empty one, which pgy versions that could
+// not express it left out of pulled YAML.
+func initCondMatches(want string, wantSet bool, have string, haveSet bool) bool {
+    return want == have && (want != "" || !wantSet || haveSet)
+}
+
 // aggregateMatchesLive compares an aggregate's functions (ignoring public
 // and pg_catalog qualifiers), state type, initial condition and, when set,
 // parallel safety.
@@ -4561,7 +4657,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
     }
     return fn(ag.SFunc) == fn(la.SFunc) && normalizeColumnType(ag.SType) == normalizeColumnType(la.SType) &&
         fn(ag.FinalFunc) == fn(la.FinalFunc) && fn(ag.CombineFunc) == fn(la.CombineFunc) &&
-        ag.InitCond == la.InitCond && (ag.Parallel == "" || ag.Parallel == la.Parallel) && aggregateOptionsMatch(ag, la, fn)
+        initCondMatches(ag.InitCond, ag.InitCondSet, la.InitCond, la.HasInitCond) && (ag.Parallel == "" || ag.Parallel == la.Parallel) && aggregateOptionsMatch(ag, la, fn)
 }
 
 // tsDictionaryAlterStmts brings live dictionary ld's options in line with
@@ -4759,7 +4855,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     sort.Strings(tableNames)
     for _, k := range tableNames {
         dt := desired.Tables[k]
-        if dt == nil { continue }
+        if dt == nil || foreignKindMismatch(dt, live.Tables[k]) { continue }
         kind := "table "
         if dt.Foreign != nil { kind = "foreign table " }
         comment(kind+pqIdent(k), dt.Comment, live.RelComments[k])
@@ -5944,6 +6040,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
         dt := desired.Tables[fq]
         if dt == nil { continue }
         lt := live.Tables[fq]
+        if foreignKindMismatch(dt, lt) { continue }
 
         // Row level security. nil means unmanaged: the live state is left
         // alone. Disabling widens access — every policy on the table stops
@@ -6219,25 +6316,38 @@ func renderStorageParams(with map[string]string) string {
     return " with (" + strings.Join(parts, ", ") + ")"
 }
 
-// columnStorageStmts emits newColumnStmts for every column of a newly
-// created table.
+// columnStorageStmts emits newColumnStmts for every column a newly created
+// table declares itself. Columns it inherits get their settings from
+// inheritedColumnStmts, so only a foreign table's column options are added
+// for them here.
 func columnStorageStmts(fq string, dt *schema.Table) []string {
     out := []string{}
     for _, cn := range sortedKeys(dt.Columns) {
-        if c := dt.Columns[cn]; c != nil { out = append(out, newColumnStmts(fq, cn, c)...) }
+        c := dt.Columns[cn]
+        if c == nil { continue }
+        if inheritedColumn(dt, c, nil) {
+            if dt.Foreign != nil { out = append(out, foreignColumnOptionStmts(fq, cn, c)...) }
+            continue
+        }
+        out = append(out, newColumnStmts(fq, cn, c)...)
     }
     return out
+}
+
+// foreignColumnOptionStmts adds the wrapper options column cn of new foreign
+// table fq declares.
+func foreignColumnOptionStmts(fq, cn string, c *schema.Column) []string {
+    clause := fdwOptionsAlter(c.FDWOptions, nil)
+    if clause == "" { return nil }
+    return []string{fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), quoteIdent(cn), clause)}
 }
 
 // newColumnStmts emits the column settings CREATE TABLE and ADD COLUMN
 // cannot carry: SET STORAGE (accepted inline only from PostgreSQL 16), SET
 // STATISTICS, attribute options and a foreign table column's options.
 func newColumnStmts(fq, cn string, c *schema.Column) []string {
-    out := []string{}
+    out := foreignColumnOptionStmts(fq, cn, c)
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
-    if clause := fdwOptionsAlter(c.FDWOptions, nil); clause != "" {
-        out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), quoteIdent(cn), clause))
-    }
     if c.Storage != "" { out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage)) }
     if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
         out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))

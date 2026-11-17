@@ -182,7 +182,7 @@ policy:
 
 | Command | What it does |
 |---------|--------------|
-| `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, and text search parsers and templates. |
+| `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, and procedural languages, transforms and foreign-data wrappers that no extension owns. |
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations, and warnings such as policies on a table without row-level security. Exits 1 on errors. |
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
@@ -209,7 +209,7 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 - role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
 - rows of tables with a `data:` block that the block no longer lists
 
-Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
+Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
 
 A `prune:` block in the config file names extensions that `--prune` must leave alone, for example ones the hosting platform installed:
 
