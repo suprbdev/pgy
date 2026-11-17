@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "regexp"
     "slices"
     "sort"
     "strconv"
@@ -492,14 +493,60 @@ func arrayLiteral(list []any) string {
     return "{" + strings.Join(parts, ",") + "}"
 }
 
+// arrayConstructor renders a list as array[...] of its elements: nested
+// lists as nested array[...], nil as null and anything else as a quoted
+// literal, which a cast of the constructor to an array type reads with the
+// element type's input function, as array_in reads an array literal's
+// elements.
+func arrayConstructor(list []any) string {
+    parts := make([]string, len(list))
+    for i, e := range list {
+        switch x := e.(type) {
+        case nil:
+            parts[i] = "null"
+        case []any:
+            parts[i] = arrayConstructor(x)
+        case bool, int, int64, uint64, float64:
+            parts[i] = quoteString(sqlValue(x))
+        default:
+            parts[i] = quoteString(fmt.Sprint(dataValue(x)))
+        }
+    }
+    return "array[" + strings.Join(parts, ", ") + "]"
+}
+
+var (
+    arrayTypeNameRe  = regexp.MustCompile(`(?i)(\[\s*\d*\s*\]|\sarray(\s*\[\s*\d*\s*\])?)\s*$`)
+    fixedCharArrayRe = regexp.MustCompile(`(?i)^(pg_catalog\.)?(character|char|nchar|national\s+character|national\s+char)(\s*\[|\s+array\b)`)
+    fixedBitArrayRe  = regexp.MustCompile(`(?i)^(pg_catalog\.)?bit(\s*\[|\s+array\b)`)
+)
+
+// isArrayTypeName reports whether typ is spelled as an array type (text[],
+// integer array[3]). A domain over an array type is not recognized.
+func isArrayTypeName(typ string) bool { return arrayTypeNameRe.MatchString(typ) }
+
+// arrayCastType returns array type typ without its type modifiers, for the
+// cast of an arrayConstructor: the assignment to the column then applies
+// them with the checks an array literal gets, where a cast to varchar(3)[]
+// would cut a longer element short instead of failing. char(n) and bit(n)
+// become bpchar and "bit", since a bare char or bit is char(1) or bit(1).
+func arrayCastType(typ string) string {
+    t := strings.TrimSpace(typmodRe.ReplaceAllString(typ, ""))
+    t = fixedCharArrayRe.ReplaceAllString(t, "${1}bpchar$3")
+    return fixedBitArrayRe.ReplaceAllString(t, `${1}"bit"$2`)
+}
+
 // dataSQL renders column col's value for table fq. Every value of a json or
 // jsonb column is a JSON document (a list or string is not an array or text
 // literal) and is written as a jsonb literal, cast on to json where the
-// column is json. Other values containing a map (composite types and their
-// arrays) are converted by jsonb_to_record to the column's declared type,
-// the conversion the comparison uses; a column the YAML gives no type
-// (an inherited or partition column) is converted through the table's row
-// type instead. Anything else is a plain literal.
+// column is json. A non-empty list for a column declared as an array is an
+// ARRAY[...] of its elements' literals cast to that array type (see
+// arrayConstructor), which unlike an array literal does not depend on the
+// element type's delimiter (; for box). Other values containing a map
+// (composite types and their arrays) are converted by jsonb_to_record to the
+// column's declared type, the conversion the comparison uses; a column the
+// YAML gives no type (an inherited or partition column) is converted through
+// the table's row type instead. Anything else is a plain literal.
 func dataSQL(fq string, dt *schema.Table, col string, v any) string {
     typ := dataColumnType(dt, col)
     if kind := jsonTypeKind(typ); kind != "" {
@@ -507,6 +554,9 @@ func dataSQL(fq string, dt *schema.Table, col string, v any) string {
         b, _ := json.Marshal(dataValue(v))
         if kind == "json" { return quoteString(string(b)) + "::jsonb::json" }
         return quoteString(string(b)) + "::jsonb"
+    }
+    if list, ok := v.([]any); ok && len(list) > 0 && typ != "" && !containsMap(v) && isArrayTypeName(typ) {
+        return arrayConstructor(list) + "::" + arrayCastType(typ)
     }
     if !containsMap(v) { return sqlValue(v) }
     if typ != "" {
