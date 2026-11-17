@@ -189,6 +189,7 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.MatViews, old, new)
     moveKey(l.ViewOptions, old, new)
     moveKey(l.ViewColumnComments, old, new)
+    moveKey(l.ViewColumnDefaults, old, new)
     moveKey(l.MatViewTables, old, new)
     moveKey(l.ViewTables, old, new)
     moveKey(l.Sequences, old, new)

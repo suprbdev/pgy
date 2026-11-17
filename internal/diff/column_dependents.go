@@ -39,11 +39,11 @@ func typeChangingColumns(live *Live, desired *schema.Database, unsafe bool) map[
 // constraints that use the column, and foreign keys whose columns change
 // type on both sides. pre maps a table to the DROP statements to run,
 // dependents first, before its columns change type; early holds the foreign
-// key drops that must precede every table's changes; post restores the
-// grants, comments and owners of recreated views that the YAML leaves
-// unmanaged. A view that an earlier statement of the plan already drops
-// (see planViewChanges and recreateUpdateDependents) gets DROP VIEW IF
-// EXISTS, which still puts the type change ahead of the view's recreation.
+// key drops that must precede every table's changes; post restores what
+// recreated views had and the YAML leaves unmanaged (see recreateView). A
+// view that an earlier statement of the plan already drops (see
+// planViewChanges and recreateUpdateDependents) gets DROP VIEW IF EXISTS,
+// which still puts the type change ahead of the view's recreation.
 // A dependent the YAML doesn't declare, which pgy can't recreate, gets a
 // warning and leaves the column's dependents alone, as does a generated
 // column that stays generated.
@@ -94,17 +94,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
                 if live.MatViews[v] { kind = "materialized view" }
                 if !live.Views[v] && !live.MatViews[v] { guard = "if exists " }
                 pre[fq] = append(pre[fq], fmt.Sprintf("drop %s %s%s;", kind, guard, pqIdent(v)))
-                post = append(post, restoreViewAttributes(live, desired.Views[v], v, kind)...)
-                delete(out.Views, v)
-                delete(out.MatViews, v)
-                delete(out.ViewOptions, v)
-                delete(out.ViewColumnComments, v)
-                delete(out.ViewColumnDefaults, v)
-                delete(out.MatViewTables, v)
-                delete(out.ViewTables, v)
-                delete(out.RelComments, v)
-                delete(out.TableGrants, v)
-                delete(out.Owners, "rel:"+v)
+                post = append(post, recreateView(live, out, desired, v, opts.Prune)...)
             }
         }
     }
@@ -358,16 +348,51 @@ func dedupeDependents(deps []ColumnDependent) []ColumnDependent {
     return out
 }
 
-// restoreViewAttributes returns the statements that give a recreated view
-// back the grants, comment, column comments and owner it has live, for each
-// one the YAML leaves unmanaged.
-func restoreViewAttributes(live *Live, vw *schema.View, v, kind string) []string {
+// recreateView removes view or materialized view v from out, as DROP does,
+// so that the plan creates it again from the YAML, and returns the
+// statements that give the new one back what v has in live and its YAML
+// leaves unmanaged (see restoreView). Every path that drops a view to create
+// it again goes through here: a changed view (planViewChanges), an extension
+// update (recreateUpdateDependents) and a column type change
+// (recreateColumnDependents). The live view options stay in out, so CREATE
+// OR REPLACE VIEW keeps those the YAML doesn't manage.
+func recreateView(live, out *Live, desired *schema.Database, v string, prune bool) []string {
+    var post []string
+    if vw := desired.Views[v]; vw != nil { post = restoreView(live, vw, v, prune) }
+    delete(out.Views, v)
+    delete(out.MatViews, v)
+    delete(out.MatViewTables, v)
+    delete(out.ViewTables, v)
+    delete(out.ViewColumnComments, v)
+    delete(out.ViewColumnDefaults, v)
+    delete(out.ViewProbes, v)
+    delete(out.RelComments, v)
+    delete(out.TableGrants, v)
+    delete(out.ColumnGrants, v)
+    delete(out.Owners, "rel:"+v)
+    return post
+}
+
+// restoreView returns the statements that give view v, created again from
+// vw, back what it has in live and vw leaves unmanaged: the grants on the
+// view and on its columns, its comment, column comments and column
+// defaults, its owner, and the comments of its declared triggers and rules.
+// The triggers and rules vw doesn't declare are created again from their
+// live definitions, with their comments, unless prune drops them anyway.
+func restoreView(live *Live, vw *schema.View, v string, prune bool) []string {
     out := []string{}
-    target := kind + " " + pqIdent(v)
+    target := "view " + pqIdent(v)
+    if live.MatViews[v] { target = "materialized " + target }
     if vw.Grants == nil {
         want := map[string][]string{}
         for role, privs := range live.TableGrants[v] { want[role] = sortedKeys(privs) }
         _, grants := roleGrantStmts(want, nil, func(privs []string) string { return strings.Join(privs, ", ") + " on table " + pqIdent(v) })
+        out = append(out, grants...)
+    }
+    for _, col := range sortedKeys(live.ColumnGrants[v]) {
+        want := map[string][]string{}
+        for role, privs := range live.ColumnGrants[v][col] { want[role] = sortedKeys(privs) }
+        _, grants := columnGrantDiffStmts(v, col, want, nil, false)
         out = append(out, grants...)
     }
     if c := live.RelComments[v]; vw.Comment == "" && c != "" {
@@ -381,6 +406,31 @@ func restoreViewAttributes(live *Live, vw *schema.View, v, kind string) []string
     for _, col := range sortedKeys(live.ViewColumnDefaults[v]) {
         if _, managed := vw.ColumnDefaults[col]; !managed {
             out = append(out, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(v), quoteIdent(col), live.ViewColumnDefaults[v][col]))
+        }
+    }
+    if vt := live.ViewTables[v]; vt != nil {
+        triggers, rules := map[string]*schema.Trigger{}, map[string]*schema.Rule{}
+        for _, tr := range vw.Triggers {
+            if tr != nil { triggers[truncateIdent(tr.Name)] = tr }
+        }
+        for _, r := range vw.Rules {
+            if r != nil { rules[truncateIdent(r.Name)] = r }
+        }
+        for _, name := range sortedKeys(vt.Triggers) {
+            tr, def, comment := triggers[name], vt.Triggers[name], vt.TriggerComments[name]
+            if tr == nil && (prune || def == "") { continue }
+            if tr == nil { out = append(out, strings.TrimRight(def, "; \n")+";") }
+            if comment != "" && (tr == nil || tr.Comment == "") {
+                out = append(out, fmt.Sprintf("comment on trigger %s on %s is %s;", quoteIdent(name), pqIdent(v), quoteString(comment)))
+            }
+        }
+        for _, name := range sortedKeys(vt.Rules) {
+            r, lr, comment := rules[name], vt.Rules[name], vt.RuleComments[name]
+            if r == nil && (prune || lr == nil || lr.Def == "") { continue }
+            if r == nil { out = append(out, strings.TrimRight(lr.Def, "; \n")+";") }
+            if comment != "" && (r == nil || r.Comment == "") {
+                out = append(out, fmt.Sprintf("comment on rule %s on %s is %s;", quoteIdent(name), pqIdent(v), quoteString(comment)))
+            }
         }
     }
     if o := live.Owners["rel:"+v]; vw.Owner == "" && o != "" && o != live.CurrentUser {

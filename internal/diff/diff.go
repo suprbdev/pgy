@@ -133,7 +133,8 @@ type Live struct{
     TypePublicRevoked map[string]bool
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
     SchemaGrants   map[string]map[string]map[string]bool // key schema name
-    // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists (pg_attribute.attacl)
+    // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists
+    // (pg_attribute.attacl), for tables, views and materialized views
     ColumnGrants map[string]map[string]map[string]map[string]bool
     // FunctionPublicExec: normalized signature -> PUBLIC still has EXECUTE
     // (true when proacl is NULL, i.e. default privileges, or PUBLIC=X entry present).
@@ -1791,7 +1792,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         join pg_attribute att on att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
         cross join lateral aclexplode(att.attacl) a
-        where c.relkind in ('r', 'p', 'f')
+        where c.relkind in ('r', 'p', 'f', 'v', 'm')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
@@ -2785,7 +2786,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     var partitionDetaches []string
-    live, replaceViews, viewDrops, viewWarnings := planViewChanges(live, desired, unsafe)
+    live, replaceViews, viewDrops, viewPost, viewWarnings := planViewChanges(live, desired, opts)
     recreateWarnings = append(recreateWarnings, viewWarnings...)
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
@@ -3363,6 +3364,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
