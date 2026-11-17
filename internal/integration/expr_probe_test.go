@@ -636,8 +636,8 @@ func TestIntegrationProbeExpressionsInSyncOpensNoTransaction(t *testing.T) {
 			if err := diff.ProbeExpressions(ctx, pool, live, d); err != nil {
 				t.Fatal(err)
 			}
-			if n := pool.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil {
-				t.Errorf("a schema that is in sync must not be probed: %d connections used, probes %v", n, exprProbeKeys(live))
+			if n := pool.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil || live.TypeProbes != nil {
+				t.Errorf("a schema that is in sync must not be probed: %d connections used, probes %v, types %v", n, exprProbeKeys(live), live.TypeProbes)
 			}
 			if p := diff.PlanReportingUnsafe(live, d, diff.Options{}); diff.Render(p) != "" || len(p.Warnings) > 0 {
 				t.Errorf("pulled YAML must diff clean, got:\n%s%+v", diff.Render(p), p.Warnings)

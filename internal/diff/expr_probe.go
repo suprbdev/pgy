@@ -868,6 +868,10 @@ func (e *liveEdit) viewDefaults(fq string) map[string]string {
 	return editable(e, "view", fq, &e.live().ViewColumnDefaults, func(m map[string]string) map[string]string { return cloneMap(m, nil) })
 }
 
+func (e *liveEdit) compositeAttributes(fq string) map[string]string {
+	return editable(e, "composite", fq, &e.live().CompositeAttributes, func(m map[string]string) map[string]string { return cloneMap(m, nil) })
+}
+
 func (e *liveEdit) domain(fq string) *LiveDomain {
 	return editable(e, "domain", fq, &e.live().DomainDefs, func(d *LiveDomain) *LiveDomain {
 		c := *d
@@ -891,8 +895,9 @@ func (e *liveEdit) procedure(norm string) *LiveProcedure {
 // something else although the text comparison takes the two for the same,
 // the live definition is marked changed (see exprChanged), so they find
 // the two different. A definition the probe couldn't attach or didn't
-// cover keeps its live text, and is compared as text. live itself is not
-// modified.
+// cover keeps its live text, and is compared as text. The declared types
+// of live.TypeProbes are applied the same way (see applyTypeProbes). live
+// itself is not modified.
 func applyExprProbes(live *Live, desired *schema.Database) *Live {
 	return applyExprProbesAs(live, desired, false)
 }
@@ -906,10 +911,11 @@ func simulateExprProbes(live *Live, desired *schema.Database) *Live {
 }
 
 func applyExprProbesAs(live *Live, desired *schema.Database, simulated bool) *Live {
-	if live == nil || desired == nil || len(live.ExprProbes) == 0 {
+	if live == nil || desired == nil || len(live.ExprProbes)+len(live.TypeProbes) == 0 {
 		return live
 	}
 	e := &liveEdit{src: live}
+	applyTypeProbes(e, live, desired)
 	for key, p := range live.ExprProbes {
 		if p == nil || p.Err != "" {
 			continue
@@ -951,10 +957,11 @@ type probeRelation struct {
 // the session that runs the migration.
 const selfReference = "it reads its own table through a name without a schema"
 
-// probeSpec is the input of pg_temp.pgy_probe: the relations to copy with
-// the statements to run on each copy, and the statements for domains and
-// routines.
+// probeSpec is the input of pg_temp.pgy_probe: the declared types to
+// canonicalise, the relations to copy with the statements to run on each
+// copy, and the statements for domains and routines.
 type probeSpec struct {
+	Types     []string         `json:"types,omitempty"`
 	Relations []*probeRelation `json:"relations"`
 	Run       []probeStmt      `json:"run"`
 }
@@ -985,6 +992,7 @@ type probeReply struct {
 	Errors    []probeFailure       `json:"errors"`
 	Relations []probeRelationReply `json:"relations"`
 	Defs      []probeDef           `json:"defs"`
+	Types     []probeType          `json:"types"`
 }
 
 // probeRequest is one definition to probe. relation is its index in
@@ -1171,13 +1179,15 @@ func renameSourceOf(fq, renamedFrom string, exists func(string) bool) (string, b
 // collectExprProbes finds the declared definitions that have a live
 // counterpart the text comparison takes for different, or for the same
 // only by dropping something from one side (see exprProbePlan.consider),
-// or, with all, every declared definition that has a live counterpart.
-// live is the snapshot as introspected.
+// or, with all, every declared definition that has a live counterpart, and
+// the declared types the text comparison takes for different from the live
+// ones (see typesToProbe). live is the snapshot as introspected.
 func collectExprProbes(live *Live, desired *schema.Database, all bool) *exprProbePlan {
 	p := &exprProbePlan{relations: map[string]int{}, domains: map[string]string{}, all: all}
 	p.spec.Relations, p.spec.Run = []*probeRelation{}, []probeStmt{}
 	scoped := live.scoped()
 	renamed, _ := applyRenames(scoped, desired)
+	p.spec.Types = typesToProbe(renamed, desired)
 
 	for _, fq := range sortedKeys(desired.Tables) {
 		dt, lt := desired.Tables[fq], renamed.Tables[fq]
@@ -1332,8 +1342,10 @@ func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
 // which is how the migration will run them, each in a subtransaction, and
 // returns the errors.
 //
-// pgy_probe copies each relation into a temporary table of the same name
-// and runs its statements. It then renames the copy, which is cheaper than
+// pgy_probe canonicalises the declared types first (see typeProbeFuncs),
+// before any temporary table could hide a type of its name. It then copies
+// each relation into a temporary table of the same name and runs its
+// statements. It renames the copy afterwards, which is cheaper than
 // dropping it: a temporary table hides the tables and types of its name in
 // other schemas, from the deparser and from the next relation's
 // definitions.
@@ -1422,7 +1434,9 @@ declare
     failure text;
     failed jsonb[] := '{}';
     relations jsonb[] := '{}';
+    types jsonb;
 begin
+    types := pg_temp.pgy_probe_types(coalesce(spec->'types', '[]'));
     for r in select * from jsonb_array_elements(spec->'relations') loop
         failure := null;
         begin
@@ -1441,7 +1455,7 @@ begin
             pg_temp.pgy_probe_defs(rel, r->>'temp', format('%I', r->>'name'), format('%I.%I', r->>'schema', r->>'name')));
     end loop;
     failed := failed || pg_temp.pgy_probe_run(spec->'run');
-    return jsonb_build_object('errors', to_jsonb(failed), 'relations', to_jsonb(relations), 'defs', pg_temp.pgy_probe_globals());
+    return jsonb_build_object('errors', to_jsonb(failed), 'relations', to_jsonb(relations), 'defs', pg_temp.pgy_probe_globals(), 'types', types);
 end
 $f$`}
 
@@ -1484,8 +1498,8 @@ const (
 )
 
 // runExprProbes runs spec, on one connection, or with its relations split
-// across several when there are many of them. The statements for domains
-// and routines stay with the first.
+// across several when there are many of them. The types and the statements
+// for domains and routines stay with the first.
 func runExprProbes(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*probeReply, error) {
 	workers := min(exprProbeWorkers, (len(spec.Relations)+exprProbeChunk-1)/exprProbeChunk)
 	if workers <= 1 {
@@ -1495,7 +1509,7 @@ func runExprProbes(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*p
 	for w := range specs {
 		specs[w] = &probeSpec{Relations: []*probeRelation{}, Run: []probeStmt{}}
 	}
-	specs[0].Run = spec.Run
+	specs[0].Types, specs[0].Run = spec.Types, spec.Run
 	for i, r := range spec.Relations {
 		w := i % workers
 		specs[w].Relations, index[w] = append(specs[w].Relations, r), append(index[w], i)
@@ -1528,7 +1542,7 @@ func runExprProbes(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*p
 		for j, rel := range r.reply.Relations {
 			merged.Relations[index[r.worker][j]] = rel
 		}
-		merged.Errors, merged.Defs = append(merged.Errors, r.reply.Errors...), append(merged.Defs, r.reply.Defs...)
+		merged.Errors, merged.Defs, merged.Types = append(merged.Errors, r.reply.Errors...), append(merged.Defs, r.reply.Defs...), append(merged.Types, r.reply.Types...)
 	}
 	if firstErr != nil {
 		return nil, firstErr
@@ -1561,10 +1575,11 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 	batch.ExecParams("begin", nil, nil, nil, nil)
 	batch.ExecParams("set local jit = off", nil, nil, nil, nil)
 	batch.ExecParams("set local check_function_bodies = off", nil, nil, nil, nil)
-	for _, q := range exprProbeFuncs {
+	funcs := append(slices.Clone(typeProbeFuncs), exprProbeFuncs...)
+	for _, q := range funcs {
 		batch.ExecParams(q, nil, nil, nil, nil)
 	}
-	call := 3 + len(exprProbeFuncs)
+	call := 3 + len(funcs)
 	batch.ExecParams("select pg_temp.pgy_probe($1::jsonb)::text", [][]byte{payload}, nil, nil, nil)
 	batch.ExecParams("rollback", nil, nil, nil, nil)
 	results, err := pg.ExecBatch(ctx, batch).ReadAll()
@@ -1611,14 +1626,22 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 // are parsed on the session's own search_path, as the migration will parse
 // them, and deparsed on the pinned one (see pinSearchPathQ).
 //
-// The results go to live.ExprProbes, which planning applies (see
-// applyExprProbes): a probe takes the statements for a definition spelled
-// another way out of the plan, and adds those for a definition that only
-// looked the same. Nothing is sent to the server when every definition
-// matches as text, dropping the same from both sides. A server that can't
-// run the probe, such as a read-only standby or a role without the
-// TEMPORARY privilege, leaves ExprProbes nil, and every definition is
-// compared as text; the error is returned for the caller to report.
+// In the same round trip, the declared types of columns, composite
+// attributes and domains that differ from the live ones as text
+// (geography(Point) against geography(Point,4326), numeric(10) against
+// numeric(10,0), varchar( 5 ) against character varying(5)) are resolved
+// on the session's search_path and printed as Introspect prints the live
+// ones (see typeProbeFuncs).
+//
+// The results go to live.ExprProbes and live.TypeProbes, which planning
+// applies (see applyExprProbes): a probe takes the statements for a
+// definition or a type spelled another way out of the plan, and adds those
+// for a definition that only looked the same. Nothing is sent to the
+// server when every definition and type matches as text, dropping the same
+// from both sides. A server that can't run the probe, such as a read-only
+// standby or a role without the TEMPORARY privilege, leaves both nil, and
+// everything is compared as text; the error is returned for the caller to
+// report.
 func ProbeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
 	return probeExpressions(ctx, pool, live, desired, false)
 }
@@ -1644,13 +1667,18 @@ func probeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desir
 		}
 		plan.resolve(shared)
 	}
-	if len(plan.requests) == 0 {
+	if len(plan.requests)+len(plan.spec.Types) == 0 {
 		return nil
 	}
 	reply, err := runExprProbes(ctx, pool, &plan.spec)
 	if err != nil {
 		return fmt.Errorf("expression probe: %w", err)
 	}
-	live.ExprProbes = plan.results(reply)
+	if len(plan.requests) > 0 {
+		live.ExprProbes = plan.results(reply)
+	}
+	if len(plan.spec.Types) > 0 {
+		live.TypeProbes = typeResults(reply)
+	}
 	return nil
 }

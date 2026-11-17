@@ -17,10 +17,10 @@ import (
 const exprProbeWarning = "compared as text only"
 
 // TestDiffComparesExpressionsThroughServer builds a database from YAML that
-// spells constants another way than PostgreSQL prints them. Every later
-// diff has to be empty, also with --split and --unsafe --prune. A role
-// without the TEMPORARY privilege gets the diff the text comparison makes
-// and one warning, and no warning for YAML that is in sync.
+// spells constants and types another way than PostgreSQL prints them.
+// Every later diff has to be empty, also with --split and --unsafe --prune.
+// A role without the TEMPORARY privilege gets the diff the text comparison
+// makes and one warning, and no warning for YAML that is in sync.
 func TestDiffComparesExpressionsThroughServer(t *testing.T) {
 	dsn := os.Getenv("PGY_TEST_DSN")
 	if dsn == "" {
@@ -95,7 +95,12 @@ schema app:
     columns:
       id: {type: bigint}
       open: {type: tstzrange, nullable: true, default: "'[2020-1-1 00:00+00,)'"}
+      size: {type: "numeric(10)", nullable: true}
+      code: {type: "varchar( 5 )[]", nullable: true}
     primaryKey: [id]
+  view room_sizes:
+    query: select id, size, code from app.rooms
+    dependsOn: [table app.rooms]
 `,
 	})
 	cfg := &GlobalConfig{DSN: u.String(), SchemaRoot: schemas, Schemas: []string{"events.yml", "rooms.yml"},

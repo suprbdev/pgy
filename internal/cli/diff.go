@@ -39,7 +39,9 @@ Declared expressions (defaults, checks, index expressions and predicates,
 policies, triggers and the like) are compared as text, and through the server
 where the text differs or matches only because a cast or a schema was left
 out on one side. --strict-expressions, or policy.strict_expressions in the
-config, compares every one through the server.
+config, compares every one through the server. Declared types of columns,
+composite attributes and domains are compared through the server where the
+text differs (numeric(10) is the stored numeric(10,0)).
 
 With --buffer - the SQL is printed to stdout instead of written to the
 buffer file, and status messages go to stderr.
@@ -146,7 +148,7 @@ Exit codes:
                 probe := diff.ProbeExpressions
                 if strictExpressions || !cmd.Flags().Changed("strict-expressions") && cfg.Migrate.StrictExpressions { probe = diff.ProbeEveryExpression }
                 if err := probe(ctx, pool, live, compiled); err != nil && !noWarnings {
-                    fmt.Fprintf(os.Stderr, "warning: expressions were compared as text only, so one PostgreSQL stores the same way as the YAML may be reported as changed, and one that differs only in a cast or a schema as unchanged: %v\n", err)
+                    fmt.Fprintf(os.Stderr, "warning: expressions and types were compared as text only, so one PostgreSQL stores the same way as the YAML may be reported as changed, and an expression that differs only in a cast or a schema as unchanged: %v\n", err)
                 }
             }
             var steps []group.Step
