@@ -367,10 +367,69 @@ func maskQuoted(s string) (string, []string) {
 // rewritten by text. Routine bodies, comments and data rows are copied as
 // they are: bodies are stored as text, so one that names the new schema
 // really differs from the live one.
-func (rq *requalifier) database(d *schema.Database) *schema.Database {
-    out := reflect.New(reflect.TypeOf(*d))
-    rq.copyValue(out.Elem(), reflect.ValueOf(*d), false)
-    return out.Interface().(*schema.Database)
+func (rq *requalifier) database(d *schema.Database) *schema.Database { return requalified(rq, d) }
+
+// requalified returns a copy of v rewritten the way database rewrites a
+// whole schema.
+func requalified[T any](rq *requalifier, v *T) *T {
+    out := reflect.New(reflect.TypeOf(*v))
+    rq.copyValue(out.Elem(), reflect.ValueOf(*v), false)
+    return out.Interface().(*T)
+}
+
+// routinesAfterMoves returns live with each routine that desired declares
+// in the new spelling of a moving extension's objects (an argument type of
+// a moved extension qualified with its new schema, say) described as
+// PostgreSQL prints it once the extension has moved: keyed by the declared
+// signature, with the declared return type, argument defaults and
+// transform types wherever the declaration spelled the old way matches the
+// live ones. The plan then replaces or alters such a routine in place
+// instead of creating it a second time. live itself is returned when no
+// declaration needs it.
+func routinesAfterMoves(live *Live, desired *schema.Database) *Live {
+    rq := newRequalifier(live, desired)
+    if rq == nil { return live }
+    r := &renamer{l: live}
+    move := func(old, norm string) {
+        if r.l == live {
+            r.l = cloneLive(live)
+            r.l.MemberExtension, r.l.InitPrivs = cloneMap(live.MemberExtension, nil), cloneMap(live.InitPrivs, cloneACL)
+        }
+        moveKey(r.l.ExtensionMembers, "proc:"+old, "proc:"+norm)
+        moveKey(r.l.MemberExtension, "proc:"+old, "proc:"+norm)
+        moveKey(r.l.InitPrivs, "proc:"+old, "proc:"+norm)
+    }
+    for _, k := range sortedKeys(desired.Functions) {
+        f := desired.Functions[k]
+        if f == nil { continue }
+        name := schema.RoutineName(k)
+        norm, old := normalizeFunctionSignature(name+f.ArgsSig), normalizeFunctionSignature(rq.text(name+f.ArgsSig))
+        if old == norm || r.l.FunctionDefs[old] == nil || r.l.FunctionDefs[norm] != nil { continue }
+        move(old, norm)
+        r.moveFunction(old, norm, name+grantFuncArgs(f.ArgsSig))
+        lf, was := r.l.FunctionDefs[norm], requalified(rq, f)
+        if f.Returns != "" && !returnsChanged(was.Returns, lf.Returns) { lf.Returns = f.Returns }
+        if changed, removed := argDefaultsDiff(was.ArgsSig, lf.Args); lf.Args != "" && !changed && !removed { lf.Args = innerArgs(f.ArgsSig) }
+        if t := schema.RoutineTransform(f.Language, f.Transform); t != nil && !transformChanged(schema.RoutineTransform(was.Language, was.Transform), lf.Transform) { lf.Transform = t }
+    }
+    for _, k := range sortedKeys(desired.Procedures) {
+        p := desired.Procedures[k]
+        if p == nil { continue }
+        name := schema.RoutineName(k)
+        norm, old := normalizeFunctionSignature(name+p.ArgsSig), normalizeFunctionSignature(rq.text(name+p.ArgsSig))
+        if old == norm || r.l.ProcedureDefs[old] == nil || r.l.Procedures[norm] { continue }
+        move(old, norm)
+        r.moveProcedure(old, norm, name+grantFuncArgs(p.ArgsSig))
+        lp, was := r.l.ProcedureDefs[norm], requalified(rq, p)
+        if changed, removed := argDefaultsDiff(was.ArgsSig, lp.Args); lp.Args != "" && !changed && !removed { lp.Args = innerArgs(p.ArgsSig) }
+        if t := schema.RoutineTransform(p.Language, p.Transform); t != nil && !transformChanged(schema.RoutineTransform(was.Language, was.Transform), lp.Transform) { lp.Transform = t }
+    }
+    return r.l
+}
+
+// innerArgs returns an argument list without its enclosing parentheses.
+func innerArgs(args string) string {
+    return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(args), "("), ")")
 }
 
 func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {

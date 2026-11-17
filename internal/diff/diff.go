@@ -2750,7 +2750,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
-    live = live.scoped()
+    live = routinesAfterMoves(live.scoped(), desired)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))

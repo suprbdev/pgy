@@ -161,6 +161,61 @@ schema public:
 	}
 }
 
+func TestIntegrationExtensionMoveReplacesRequalifiedRoutines(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_move_routines")
+	if _, err := db.Exec(ctx, `
+		create extension citext schema public;
+		create schema app;
+		create table app.users (id int primary key, email citext not null);
+		create function app.by_email(p citext) returns integer language sql as $$select id from app.users where email = p$$;
+		create function app.norm(p citext default 'x'::citext) returns citext language sql as $$select p$$;
+		create procedure app.touch(p citext) language sql as $$select 1$$;`); err != nil {
+		t.Fatal(err)
+	}
+	const y = `
+extensions:
+  - {name: citext, schema: ext}
+schema app:
+  table users:
+    columns:
+      id: {type: integer, primaryKey: true}
+      email: {type: ext.citext}
+  function by_email(p ext.citext):
+    returns: integer
+    language: sql
+    body: select id from app.users where email = p limit 1
+  function norm(p ext.citext default 'x'::ext.citext):
+    returns: ext.citext
+    language: sql
+    stable: true
+    body: select p
+  procedure touch(p ext.citext):
+    language: sql
+    body: select 2
+`
+	opts := diff.Options{Unsafe: true, Prune: true}
+	plan := planExtensionsLive(t, db, y, opts)
+	want := []string{
+		`create schema if not exists "ext";`,
+		`alter extension "citext" set schema "ext";`,
+		`alter function "app"."norm"(p ext.citext) stable;`,
+		`create or replace function "app"."by_email"(p ext.citext) returns integer language sql as $$select id from app.users where email = p limit 1$$;`,
+		`create or replace procedure "app"."touch"(p ext.citext) language sql as $$select 2$$;`,
+	}
+	if got := strings.TrimSpace(diff.Render(plan)); got != strings.Join(want, "\n") {
+		t.Fatalf("the routines must be replaced in place after the move; got:\n%s", got)
+	}
+	for _, w := range plan.Warnings {
+		t.Errorf("unexpected warning: %s", w.Message)
+	}
+	applyPlan(t, db, plan)
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the moved database must diff clean:\n%s", sql)
+	}
+}
+
 func TestIntegrationExtensionCreateOrder(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_order")

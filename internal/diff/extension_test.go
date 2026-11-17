@@ -275,6 +275,70 @@ func TestExtensionMoveKeepsRealChanges(t *testing.T) {
 	}
 }
 
+func movedCitextFunctionLive() *Live {
+	live := movedCitextLive()
+	live.Functions["app.by_c(p citext)"] = true
+	live.FunctionDefs["app.by_c(p citext)"] = &LiveFunction{
+		Signature: "app.by_c(p citext)", Args: "p citext DEFAULT ''::citext", Returns: "citext", Language: "sql",
+		Body: "select p", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100,
+	}
+	live.FunctionGrants["app.by_c(p citext)"] = map[string]map[string]bool{"app_user": {"execute": true}}
+	live.Procedures["app.touch(p citext)"] = true
+	live.ProcedureDefs["app.touch(p citext)"] = &LiveProcedure{Signature: "app.touch(p citext)", Args: "p citext", Body: "select 1", Language: "sql", Security: "invoker"}
+	return live
+}
+
+func movedCitextFunctionDesired(body string) *schema.Database {
+	d := movedCitextDesired()
+	d.Functions = map[string]*schema.Function{"app.by_c(p ext.citext default ''::ext.citext)": {
+		Schema: "app", Name: "by_c", ArgsSig: "(p ext.citext default ''::ext.citext)", Returns: "ext.citext", Language: "sql", Body: body,
+		Grants: map[string][]string{"app_user": {"execute"}},
+	}}
+	d.Procedures = map[string]*schema.Procedure{"app.touch(p ext.citext)": {
+		Schema: "app", Name: "touch", ArgsSig: "(p ext.citext)", Language: "sql", Body: "select 1",
+	}}
+	return d
+}
+
+func TestExtensionMoveRequalifiedRoutineUnchanged(t *testing.T) {
+	p := Plan(movedCitextFunctionLive(), movedCitextFunctionDesired("select p"), true)
+	wantStatements(t, append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), []string{
+		`create schema if not exists "ext";`,
+		`alter extension "citext" set schema "ext";`,
+	})
+	if len(p.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", p.Warnings)
+	}
+}
+
+func TestExtensionMoveReplacesRequalifiedRoutine(t *testing.T) {
+	d := movedCitextFunctionDesired("select p limit 1")
+	d.Procedures["app.touch(p ext.citext)"].Body = "select 2"
+	for _, opts := range []Options{{}, {Unsafe: true}, {Unsafe: true, Prune: true}} {
+		p := PlanWith(movedCitextFunctionLive(), d, opts)
+		wantStatements(t, append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), []string{
+			`create schema if not exists "ext";`,
+			`alter extension "citext" set schema "ext";`,
+			`create or replace function "app"."by_c"(p ext.citext default ''::ext.citext) returns ext.citext language sql as $$select p limit 1$$;`,
+			`create or replace procedure "app"."touch"(p ext.citext) language sql as $$select 2$$;`,
+		})
+		if len(p.Warnings) != 0 {
+			t.Errorf("%+v: unexpected warnings: %v", opts, p.Warnings)
+		}
+	}
+}
+
+func TestExtensionMoveAltersRequalifiedRoutine(t *testing.T) {
+	d := movedCitextFunctionDesired("select p")
+	d.Functions["app.by_c(p ext.citext default ''::ext.citext)"].Volatility = "stable"
+	p := Plan(movedCitextFunctionLive(), d, true)
+	wantStatements(t, append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), []string{
+		`create schema if not exists "ext";`,
+		`alter extension "citext" set schema "ext";`,
+		`alter function "app"."by_c"(p ext.citext) stable;`,
+	})
+}
+
 func TestExtensionMoveWithoutMemberNamesReemits(t *testing.T) {
 	live := movedCitextLive()
 	live.ExtensionDefs["citext"].Members, live.ExtensionDefs["citext"].Operators = nil, nil
