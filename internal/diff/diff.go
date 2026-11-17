@@ -95,6 +95,17 @@ type Live struct{
     // DefaultTablespace is the database's default tablespace, which a
     // relation with no tablespace of its own is stored in; "" when unknown.
     DefaultTablespace string
+    // SearchPath lists the schemas on the search_path of the session that
+    // read the snapshot (current_schemas(false)); nil when unknown. The
+    // snapshot itself is read with search_path set to public, so its
+    // definitions do not depend on it. When they are compared with the
+    // YAML, the qualifier of a schema listed here is optional (see
+    // nameScope).
+    SearchPath []string
+    // scope is the name scope the function signatures keying the maps
+    // below are spelled in; nil means publicScope, as introspection keys
+    // them (see scoped).
+    scope *nameScope
     // Details is filled by IntrospectDetails (pgy pull) and nil otherwise.
     Details *LiveDetails
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
@@ -502,9 +513,6 @@ type LiveIndex struct {
 type LiveIndexOpclass struct {
     Name    string
     Default bool
-    // Visible is true when the operator class resolves by its bare name on
-    // the session's search_path, so an unqualified desired name matches it.
-    Visible bool
     // Collation is the key column's COLLATE when it differs from the
     // column's (or, for an expression, its type's) default; "" otherwise.
     Collation string
@@ -903,7 +911,6 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
-               pg_opclass_is_visible(op.oid),
                case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 and oty.typtype <> 'p' then oty.typcollation end, ity.typcollation)
                     then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                coalesce(ia.attstattarget::int, -1),
@@ -928,14 +935,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
             var schemaName, tableName, idxName, opcName, collation string
-            var opcDefault, visible bool
+            var opcDefault bool
             var target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &visible, &collation, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation, &target, &params); err != nil {
                 return err
             }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Visible: visible, Collation: collation, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -1094,7 +1101,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := aggRows.Scan(dest...); err != nil { return err }
             la.Options = map[string]string{}
             for i, o := range schema.AggregateOptions { la.Options[o[1]] = opts[i] }
-            l.AggregateDefs[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, name, args))] = la
+            l.AggregateDefs[publicScope.functionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, name, args))] = la
         }
         return nil
     })
@@ -1325,7 +1332,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             }
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
-                norm := normalizeFunctionSignature(key)
+                norm := publicScope.functionSignature(key)
                 l.Procedures[norm] = true
                 lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), Language: language, Transform: transform}
                 if secdef { lp.Security = "definer" }
@@ -1339,7 +1346,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             case "i": lf.Volatility = "immutable"
             case "s": lf.Volatility = "stable"
             }
-            l.FunctionDefs[normalizeFunctionSignature(key)] = lf
+            l.FunctionDefs[publicScope.functionSignature(key)] = lf
         }
         return nil
     })
@@ -1822,7 +1829,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := fgRows.Scan(&schemaName, &funcName, &args, &role, &priv, &aclNull, &isOwner); err != nil {
                 return err
             }
-            key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+            key := publicScope.functionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
             if aclNull || (role == "public" && priv == "execute") {
                 l.FunctionPublicExec[key] = true
             }
@@ -2056,7 +2063,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := fcRows.Scan(&schemaName, &funcName, &args, &comment); err != nil {
                 return err
             }
-            key := normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
+            key := publicScope.functionSignature(fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args))
             l.FunctionComments[key] = comment
         }
         return nil
@@ -2209,7 +2216,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := ownerRows.Scan(&key, &owner); err != nil {
                 return err
             }
-            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + publicScope.functionSignature(sig) }
             l.Owners[key] = owner
         }
         return nil
@@ -2309,7 +2316,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := extMemRows.Scan(&key, &extension); err != nil {
                 return err
             }
-            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
+            if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + publicScope.functionSignature(sig) }
             l.ExtensionMembers[key] = true
             l.MemberExtension[key] = extension
         }
@@ -2337,6 +2344,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     if err := batch.run(ctx, pool); err != nil { return nil, err }
+    l.SearchPath = batch.searchPath
     return l, nil
 }
 
@@ -2538,6 +2546,15 @@ func configClauses(desired map[string]string, live map[string]string) []string {
     return out
 }
 
+// setsSearchPath reports whether clause, one of configClauses' results, sets
+// search_path. ALTER DATABASE ... SET only reaches sessions that start
+// later, so the plan repeats such a clause as a statement of its own: the
+// rest of the migration, and the migrations that run after it on the same
+// connection, then resolve unqualified names on the new search_path.
+func setsSearchPath(clause string) bool {
+    return strings.HasPrefix(strings.ToLower(clause), "set search_path = ")
+}
+
 // functionAttrClauses returns ALTER FUNCTION action clauses for attribute
 // settings the YAML manages (non-empty volatility/security, non-nil
 // strict/leakproof/set) that differ from live. Used when the body is unchanged
@@ -2735,6 +2752,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    live = live.scoped()
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
@@ -2865,6 +2883,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
+        if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
     planLanguages(plan, live, desired, opts.PublicGrants)
     planWrappers(plan, live, desired, opts.PublicGrants)
@@ -3646,7 +3665,7 @@ func desiredDomainChecks(fq string, dm *schema.Domain) map[string]string {
 // altered.
 // domainTypeChanged reports whether a domain's declared base type differs
 // from the live one (empty when unknown), ignoring case, quotes, alias
-// spellings and a public or pg_catalog qualifier.
+// spellings and an optional (see nameScope) or pg_catalog qualifier.
 func domainTypeChanged(desired, live string) bool {
     if live == "" || desired == "" { return false }
     key := func(s string) string {
@@ -3742,12 +3761,13 @@ func typedTableStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool, wa
     return nil
 }
 
-// sameType compares two "schema.name" type names, ignoring quotes and
-// treating an unqualified name as public's.
+// sameType compares two "schema.name" type names, ignoring quotes and an
+// optional qualifier (see nameScope).
 func sameType(a, b string) bool {
+    sc := activeScope()
     norm := func(s string) string {
         s = strings.ReplaceAll(strings.TrimSpace(s), `"`, "")
-        if !strings.Contains(s, ".") { s = "public." + s }
+        if sch, name, ok := strings.Cut(s, "."); ok && sc.schemas[sch] { return name }
         return s
     }
     return norm(a) == norm(b)
@@ -4726,7 +4746,7 @@ func aggregateOptionsMatch(ag *schema.Aggregate, la *LiveAggregate, fn func(stri
             op := func(s string) string {
                 s = strings.TrimSpace(s)
                 if l := strings.ToLower(s); strings.HasPrefix(l, "operator(") && strings.HasSuffix(s, ")") { s = s[len("operator(") : len(s)-1] }
-                return strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "pg_catalog."), "public.")
+                return strings.TrimPrefix(activeScope().unqualifyFolded(strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), `"`, ""))), "pg_catalog.")
             }
             if op(want) != op(have) { return false }
         default:
@@ -4745,13 +4765,13 @@ func initCondMatches(want string, wantSet bool, have string, haveSet bool) bool 
     return want == have && (want != "" || !wantSet || haveSet)
 }
 
-// aggregateMatchesLive compares an aggregate's functions (ignoring public
+// aggregateMatchesLive compares an aggregate's functions (ignoring optional
 // and pg_catalog qualifiers), state type, initial condition and, when set,
 // parallel safety.
 func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
     fn := func(s string) string {
         s = strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(s), "()"), `"`, ""))
-        return strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog.")
+        return strings.TrimPrefix(activeScope().unqualifyFolded(s), "pg_catalog.")
     }
     return fn(ag.SFunc) == fn(la.SFunc) && normalizeColumnType(ag.SType) == normalizeColumnType(la.SType) &&
         fn(ag.FinalFunc) == fn(la.FinalFunc) && fn(ag.CombineFunc) == fn(la.CombineFunc) &&
@@ -6558,15 +6578,16 @@ var columnTypeAliases = [][2]string{
 // spellings (varchar(255)) and live format_type output (character varying(255)).
 // serial types normalize to their base integer type so a YAML `serial` column
 // never diffs against its live `integer` + nextval default form.
-func normalizeColumnType(t string) string { return memoized(&normalizeColumnTypeCache, t, normalizeColumnTypeUncached) }
+func normalizeColumnType(t string) string { return activeScope().columnType(t) }
 
-var normalizeColumnTypeCache sync.Map
+// columnType is normalizeColumnType in scope sc.
+func (sc *nameScope) columnType(t string) string { return memoized(&sc.columnTypes, t, sc.columnTypeUncached) }
 
-func normalizeColumnTypeUncached(t string) string {
+func (sc *nameScope) columnTypeUncached(t string) string {
     s := strings.ToLower(strings.TrimSpace(t))
     s = strings.ReplaceAll(s, `"`, "")
     s = strings.Join(strings.Fields(s), " ")
-    s = publicQualifierRe.ReplaceAllString(s, "$1")
+    s = sc.unqualifyFolded(s)
     // move an inline modifier past a with/without suffix so
     // "timestamp(6) with time zone" aliases like "timestamptz(6)"
     if i := strings.Index(s, "("); i >= 0 {
@@ -6598,7 +6619,6 @@ func normalizeColumnTypeUncached(t string) string {
 }
 
 var (
-    publicQualifierRe = regexp.MustCompile(`(^|[^a-z0-9_$.])public\.`)
     // PostgreSQL maps float(1..24) to real and bare float / float(25..53) to double precision.
     floatTypeRe    = regexp.MustCompile(`\bfloat(\((\d+)\))?($|[^a-z0-9_(])`)
     bareCharTypeRe = regexp.MustCompile(`\b(char|bit)\b\(?`)
@@ -6634,9 +6654,7 @@ func memoized(cache *sync.Map, s string, f func(string) string) string {
 // runs canonicalizeExpr (live defaults come back as 'x'::text, '-1'::integer
 // or nextval('s'::regclass)), lowercases everything outside single-quoted
 // strings, and collapses whitespace.
-func normalizeDefaultExpr(s string) string { return memoized(&normalizeDefaultExprCache, s, normalizeDefaultExprUncached) }
-
-var normalizeDefaultExprCache sync.Map
+func normalizeDefaultExpr(s string) string { return memoized(&activeScope().defaultExprs, s, normalizeDefaultExprUncached) }
 
 func normalizeDefaultExprUncached(s string) string {
     var b strings.Builder
@@ -6664,6 +6682,7 @@ func normalizeDefaultExprUncached(s string) string {
     out := strings.Join(strings.Fields(b.String()), " ")
     out = strings.ReplaceAll(out, " (", "(")
     out = strings.ReplaceAll(out, "nextval('public.", "nextval('")
+    for _, sch := range activeScope().path { out = strings.ReplaceAll(out, "nextval('"+sch+".", "nextval('") }
     return out
 }
 
@@ -6889,11 +6908,21 @@ func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string)
         constraintDefsEqual(pol.WithCheck, live.WithCheck)
 }
 
-// constraintDefsEqual compares two definitions with normalizeConstraintDef.
-// A string literal that either side marks as an object name ('seq'::regclass)
-// matches its public.-qualified spelling on the other side, where the cast
-// may be missing.
+// constraintDefsEqual compares a declared definition with a live one. Where
+// they differ as written, a declared OPERATOR(pg_catalog.op) or
+// OPERATOR(public.op) also matches the bare operator on the live side (see
+// bareVisibleOperators).
 func constraintDefsEqual(desired, live string) bool {
+    if constraintDefsMatch(desired, live) { return true }
+    bare := bareVisibleOperators(desired)
+    return bare != desired && constraintDefsMatch(bare, live)
+}
+
+// constraintDefsMatch compares two definitions with normalizeConstraintDef.
+// A string literal that either side marks as an object name ('seq'::regclass)
+// matches its qualified spelling on the other side, where the cast may be
+// missing, when the qualifier is optional (see nameScope).
+func constraintDefsMatch(desired, live string) bool {
     if normalizeConstraintDef(desired) == normalizeConstraintDef(live) { return true }
     names := objectLiteralNames(desired, live)
     return len(names) > 0 && normalizeConstraintDefWith(desired, names) == normalizeConstraintDefWith(live, names)
@@ -6972,23 +7001,22 @@ func canonicalTriggerEvents(events []string) []string {
 
 // normalizeConstraintDef canonicalizes a constraint definition for comparison
 // against pg_get_constraintdef() output: after canonicalizeExpr (IN/BETWEEN/
-// LIKE rewrites, cast removal), outside single-quoted strings it strips
-// double quotes, parentheses, whitespace, and "public." qualifiers, and
-// lowercases. String literals are kept as written, except that one naming a
-// database object loses its public. qualifier (see unqualifyObjectLiterals).
+// LIKE rewrites, cast removal, the qualifiers of the search_path's schemas),
+// outside single-quoted strings it strips double quotes, parentheses,
+// whitespace, and "public." qualifiers, and lowercases. String literals are
+// kept as written, except that one naming a database object loses an
+// optional qualifier (see unqualifyObjectLiterals).
 // A trailing NOT VALID is ignored: validating the constraint
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
-func normalizeConstraintDef(s string) string { return memoized(&normalizeConstraintDefCache, s, normalizeConstraintDefUncached) }
-
-var normalizeConstraintDefCache sync.Map
+func normalizeConstraintDef(s string) string { return memoized(&activeScope().constraintDefs, s, normalizeConstraintDefUncached) }
 
 func normalizeConstraintDefUncached(s string) string { return normalizeConstraintDefWith(s, nil) }
 
 // normalizeConstraintDefWith is normalizeConstraintDef for a definition in
 // which the string literals spelling an object name in names lose their
-// public. qualifier too.
+// optional qualifier too.
 func normalizeConstraintDefWith(s string, names map[string]bool) string {
     var b, seg strings.Builder
     flush := func() {
@@ -7282,22 +7310,18 @@ func opclassParamsEqual(want, live map[string]string) bool {
 }
 
 // opclassName makes operator class names comparable: case and quotes are
-// ignored, and so is a public or pg_catalog qualifier.
+// ignored, and so is an optional (see nameScope) or pg_catalog qualifier.
 func opclassName(s string) string {
     s = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(s), `"`, ""))
-    return strings.TrimPrefix(strings.TrimPrefix(s, "public."), "pg_catalog.")
+    return strings.TrimPrefix(activeScope().unqualifyFolded(s), "pg_catalog.")
 }
 
 // opclassMatches reports whether desired operator class name want names the
-// live one. An unqualified want also matches a live operator class from
-// another schema that is visible on the search_path, which is the one
-// CREATE INDEX would resolve it to.
+// live one. An unqualified want matches a live operator class from a schema
+// on the session's search_path, which is the one CREATE INDEX would resolve
+// it to.
 func opclassMatches(want string, live LiveIndexOpclass) bool {
-    w, l := opclassName(want), opclassName(live.Name)
-    if w == l { return true }
-    if !live.Visible || strings.Contains(w, ".") { return false }
-    i := strings.LastIndexByte(l, '.')
-    return i >= 0 && l[i+1:] == w
+    return opclassName(want) == opclassName(live.Name)
 }
 
 // indexColumnCollation returns the COLLATE for one index column entry, keyed
@@ -7360,7 +7384,10 @@ func renderExtension(ext *schema.Extension) string {
 // Removes default values and normalizes whitespace and type names
 // Input formats: "schema.func(args)" or "schema.func (args)"
 // Args may contain defaults like "key text, val jsonb default null"
-func normalizeFunctionSignature(sig string) string {
+func normalizeFunctionSignature(sig string) string { return activeScope().functionSignature(sig) }
+
+// functionSignature is normalizeFunctionSignature in scope sc.
+func (sc *nameScope) functionSignature(sig string) string {
     // Find the opening parenthesis
     parenIdx := strings.Index(sig, "(")
     if parenIdx < 0 {
@@ -7377,7 +7404,7 @@ func normalizeFunctionSignature(sig string) string {
     funcPart = strings.ToLower(strings.ReplaceAll(funcPart, " ", ""))
     if loc := orderByRe.FindStringIndex(argsPart); loc != nil {
         inner := func(args string) string {
-            n := normalizeFunctionSignature(funcPart + "(" + args + ")")
+            n := sc.functionSignature(funcPart + "(" + args + ")")
             return strings.TrimSuffix(strings.TrimPrefix(n, funcPart+"("), ")")
         }
         direct, ordered := inner(argsPart[:loc[0]]), inner(argsPart[loc[1]:])
@@ -7389,7 +7416,7 @@ func normalizeFunctionSignature(sig string) string {
     // Split by comma, but be careful of nested structures
     args := []string{}
     for _, a := range splitTopLevelQuotedParens(argsPart) {
-        if arg := normalizeArg(a); arg != "" { args = append(args, arg) }
+        if arg := sc.functionArg(a); arg != "" { args = append(args, arg) }
     }
 
     // Reconstruct normalized signature with consistent spacing
@@ -7424,16 +7451,16 @@ func splitTopLevelQuotedParens(s string) []string {
 // direct arguments from its aggregated ones.
 var orderByRe = regexp.MustCompile(`(?i)(?:^|\s)order\s+by\s+`)
 
-// normalizeArg removes default values from a function argument and normalizes types
+// functionArg removes default values from a function argument and normalizes types
 // e.g., "key text default null" -> "key text"
 // Format is typically: "param_name type_name" or "param_name type_name default value"
-func normalizeArg(arg string) string {
+func (sc *nameScope) functionArg(arg string) string {
     decl, _ := splitArgDefault(arg)
-    return normalizeArgNoDefault(decl)
+    return sc.functionArgNoDefault(decl)
 }
 
-// normalizeArgNoDefault normalizes an argument without default clause
-func normalizeArgNoDefault(arg string) string {
+// functionArgNoDefault normalizes an argument without default clause
+func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Format: "param_name type_name", "param_name schema.type_name", or an
     // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
     words := strings.Fields(arg)
@@ -7443,7 +7470,7 @@ func normalizeArgNoDefault(arg string) string {
     }
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
-        return normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
+        return sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
     }
 
     // Unnamed multi-word type: pg_get_function_identity_arguments prints
@@ -7451,7 +7478,7 @@ func normalizeArgNoDefault(arg string) string {
     // zone[]" must not be parsed as param "timestamp" + type "with time
     // zone[]" — it would never match the YAML's "timestamptz[]" spelling.
     if isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) {
-        return normalizeColumnType(arg)
+        return sc.columnType(arg)
     }
 
     // Parameter name (first word) - lowercase for comparison
@@ -7461,16 +7488,17 @@ func normalizeArgNoDefault(arg string) string {
     typeName := strings.ToLower(strings.Join(words[1:], " "))
 
     // "public" is the default schema: "public.my_type" and "my_type" are the
-    // same type. Introspection returns types on the search_path unqualified,
-    // so strip the qualifier before comparing. Other schemas stay qualified
-    // on both sides. Strip before the alias pass below so the substring
-    // replacements never see the qualifier.
+    // same type. Introspection returns public's types unqualified, so strip
+    // the qualifier before comparing; columnType does the same for the
+    // other schemas of sc. Schemas outside it stay qualified on both sides.
+    // Strip before the alias pass below so the substring replacements never
+    // see the qualifier.
     typeName = strings.TrimPrefix(typeName, "public.")
 
     // Canonicalize through the same alias table as column types so alias
     // spellings (timestamptz[]) and live canonical forms (timestamp with
     // time zone[]) compare equal instead of re-emitting the function forever.
-    typeName = normalizeColumnType(typeName)
+    typeName = sc.columnType(typeName)
 
     return paramName + " " + typeName
 }

@@ -373,6 +373,21 @@ func TestPlanHoistsExtensionsAndRoles(t *testing.T) {
     }
 }
 
+func TestPlanHoistsDatabaseSettings(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": "schema app:\n  table users:\n    columns:\n      email: {type: citext}\n",
+        "z.yml": "extensions:\n  - {name: citext, schema: extensions}\ndatabase:\n  set:\n    search_path: '\"$user\", public, extensions'\n",
+    })
+    steps := planFiles(t, nil, p("a.yml", "z.yml"), ModeFile, false)
+    if len(steps) != 1 || steps[0].Name != "a" { t.Fatalf("got %v", stepNames(steps)) }
+    sql := diff.Render(steps[0].Plan)
+    set, table := strings.Index(sql, "\nset search_path = \"$user\", public, extensions;\n"), strings.Index(sql, `create table if not exists "app"."users"`)
+    if set < 0 || table < set {
+        t.Fatalf("the database's search_path belongs in the first step, ahead of the tables that rely on it:\n%s", sql)
+    }
+    assertEmittedOnce(t, steps)
+}
+
 func TestPlanDefersSchemaGrantsUntilSchemaExists(t *testing.T) {
     _, p := writeSchemas(t, map[string]string{
         "access.yml": "roles:\n  reader: {}\nschema app:\n  comment: App objects.\n  grants:\n    reader: [usage]\n",

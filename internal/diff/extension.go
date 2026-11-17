@@ -286,11 +286,10 @@ func newRequalifier(live *Live, desired *schema.Database) *requalifier {
         from := le.Schema
         if le.MovedFrom != "" && le.Schema == ext.Schema { from = le.MovedFrom }
         if from == ext.Schema { continue }
-        schemaPattern := regexp.QuoteMeta(`"` + strings.ReplaceAll(ext.Schema, `"`, `""`) + `"`)
-        if plainIdentRe.MatchString(ext.Schema) { schemaPattern = `(?i:` + regexp.QuoteMeta(ext.Schema) + `)|` + schemaPattern }
+        pattern := schemaPattern(ext.Schema)
         rq.moves = append(rq.moves, extensionMove{from: from, to: ext.Schema, members: le.Members, operators: le.Operators})
-        rq.names = append(rq.names, regexp.MustCompile(`(^|[^\w$."])(`+schemaPattern+`)\.("(?:[^"]|"")+"|[A-Za-z_][\w$]*)`))
-        rq.ops = append(rq.ops, regexp.MustCompile(`(?i)(operator\s*\(\s*)(?:`+schemaPattern+`)(\s*\.\s*)([^\s()]+)(\s*\))`))
+        rq.names = append(rq.names, regexp.MustCompile(`(^|[^\w$."])(`+pattern+`)\.("(?:[^"]|"")+"|[A-Za-z_][\w$]*)`))
+        rq.ops = append(rq.ops, regexp.MustCompile(`(?i)(operator\s*\(\s*)(?:`+pattern+`)(\s*\.\s*)([^\s()]+)(\s*\))`))
     }
     if len(rq.moves) == 0 { return nil }
     return rq

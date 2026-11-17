@@ -111,13 +111,15 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         where (o.nsp = 0 or n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_')
         and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype in ('e', 'i'))
         order by 2, 1, 3`
-    if rows, err := pool.Query(ctx, unsupportedQ); err == nil {
+    unsupported := &queryBatch{}
+    unsupported.add(unsupportedQ, func(rows pgx.Rows) error {
         for rows.Next() {
             var o UnsupportedObject
             if rows.Scan(&o.Kind, &o.Schema, &o.Name, &o.Detail) == nil { d.Unsupported = append(d.Unsupported, o) }
         }
-        rows.Close()
-    }
+        return nil
+    })
+    _ = unsupported.run(ctx, pool)
     const nsFilter = `n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'`
     queries := []struct {
         sql  string
@@ -159,7 +161,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 r := &LiveRoutine{}
                 var identity string
                 if err := scan(&r.Schema, &r.Name, &identity, &r.Arguments, &r.Returns, &r.Language, &r.Procedure); err != nil { return err }
-                d.Routines[normalizeFunctionSignature(fmt.Sprintf("%s.%s(%s)", r.Schema, r.Name, identity))] = r
+                d.Routines[publicScope.functionSignature(fmt.Sprintf("%s.%s(%s)", r.Schema, r.Name, identity))] = r
                 return nil
             }},
         {`select distinct l.lanname from pg_transform t join pg_language l on l.oid = t.trflang`,
@@ -189,7 +191,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 var sig, dep string
                 if err := scan(&sig, &dep); err != nil { return err }
                 if l.ExtensionMembers[dependencyMemberKey(dep)] { return nil }
-                key := normalizeFunctionSignature(sig)
+                key := publicScope.functionSignature(sig)
                 if deps := d.RoutineDeps[key]; len(deps) == 0 || deps[len(deps)-1] != dep { d.RoutineDeps[key] = append(deps, dep) }
                 return nil
             }},
@@ -309,7 +311,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
 // RoutineDeps entry ("table x", "function x(args)", ...) names.
 func dependencyMemberKey(dep string) string {
     for _, kind := range []string{"function ", "procedure "} {
-        if sig, ok := strings.CutPrefix(dep, kind); ok { return "proc:" + normalizeFunctionSignature(sig) }
+        if sig, ok := strings.CutPrefix(dep, kind); ok { return "proc:" + publicScope.functionSignature(sig) }
     }
     for _, kind := range []string{"materialized view ", "view ", "sequence ", "table "} {
         if name, ok := strings.CutPrefix(dep, kind); ok { return "rel:" + name }
@@ -340,11 +342,16 @@ func parseDictOptions(s string) map[string]string {
 // can be sent to the server in one pipelined round trip.
 type queryBatch struct {
     sqls     []string
+    args     [][]any
     handlers []func(pgx.Rows) error
+    // searchPath is the session's search_path (see Live.SearchPath), which
+    // run reads before it pins the batch's own.
+    searchPath []string
 }
 
-func (b *queryBatch) add(sql string, handle func(pgx.Rows) error) {
+func (b *queryBatch) add(sql string, handle func(pgx.Rows) error, args ...any) {
     b.sqls = append(b.sqls, sql)
+    b.args = append(b.args, args)
     b.handlers = append(b.handlers, handle)
 }
 
@@ -353,17 +360,23 @@ func (b *queryBatch) add(sql string, handle func(pgx.Rows) error) {
 // transaction, so every query sees the same snapshot, with JIT compilation
 // off: catalog queries never gain from it, and on large catalogs their cost
 // estimates cross jit_above_cost and compiling doubles introspection time.
+// The transaction's search_path is pinned (see pinSearchPathQ), so what
+// the queries deparse does not depend on the session.
 func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
     batch := &pgx.Batch{}
     batch.Queue("begin isolation level repeatable read read only")
     batch.Queue("set local jit = off")
-    for _, q := range b.sqls { batch.Queue(q) }
+    batch.Queue(sessionSearchPathQ)
+    batch.Queue(pinSearchPathQ)
+    for i, q := range b.sqls { batch.Queue(q, b.args[i]...) }
     batch.Queue("commit")
     br := pool.SendBatch(ctx, batch)
     defer func() { _ = br.Close() }()
     for j := 0; j < 2; j++ {
         if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }
     }
+    if err := br.QueryRow().Scan(&b.searchPath); err != nil { return fmt.Errorf("introspection: %w", err) }
+    if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }
     for i, handle := range b.handlers {
         rows, err := br.Query()
         if err != nil { return fmt.Errorf("introspection query %d: %w", i+1, err) }

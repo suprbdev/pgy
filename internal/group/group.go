@@ -108,6 +108,7 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
         cur.Extensions = full.Extensions
         cur.Roles = full.Roles
         cur.DefaultPrivileges = full.DefaultPrivileges
+        cur.DatabaseSettings = full.DatabaseSettings
         cur.Languages, cur.ForeignDataWrappers = full.Languages, full.ForeignDataWrappers
         cur.EventTriggers, cur.Publications = nil, nil
         if i == len(ordered)-1 { cur.EventTriggers, cur.Publications = full.EventTriggers, full.Publications }
