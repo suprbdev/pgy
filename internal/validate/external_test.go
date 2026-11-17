@@ -26,6 +26,10 @@ schema public:
     columns:
       at: {type: timestamptz}
     inherits: [public._hyper_1_1_chunk]
+schema storage:
+  table objects:
+    policies:
+      avatars_read: {for: select, using: "bucket_id = 'avatars'"}
 schema auth:
   table users:
     triggers:
@@ -36,7 +40,7 @@ eventTriggers:
 
 func TestValidateExternalReferences(t *testing.T) {
 	p := write(t, t.TempDir(), "app.yml", externalReferencesYAML)
-	ext := &schema.External{Schemas: []string{"auth", "supabase_functions", "extensions"}, Relations: []string{"*._hyper_*_chunk"}}
+	ext := &schema.External{Schemas: []string{"auth", "storage", "supabase_functions", "extensions"}, Relations: []string{"*._hyper_*_chunk"}}
 	if issues := FilesWith([]string{p}, ext); len(issues) > 0 {
 		t.Errorf("references to external objects are not reported:\n%s", messages(issues))
 	}
@@ -48,6 +52,7 @@ func TestValidateExternalReferences(t *testing.T) {
 		`dependsOn "table auth.identities" matches nothing declared`,
 		"inherits public._hyper_1_1_chunk, which no schema file declares",
 		"has triggers but no columns",
+		"declares policies but not rowLevelSecurity: true",
 		"function extensions.pgrst_watch() is not declared in any schema file",
 	} {
 		if !strings.Contains(got, want) {

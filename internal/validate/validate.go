@@ -183,7 +183,7 @@ func Database(d *schema.Database) []Issue {
 		}
 		obj := "table " + fq
 		checkDeps(d, obj, t.DependsOn, add)
-		if keys := t.DefinitionKeys(); len(keys) > 0 && !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil && (t.Foreign == nil || t.Foreign.Server == "") && !(d.External.InSchema(fq) && slices.Equal(keys, []string{"triggers"})) {
+		if keys := t.DefinitionKeys(); len(keys) > 0 && !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil && (t.Foreign == nil || t.Foreign.Server == "") && (!d.External.InSchema(fq) || !slices.Equal(keys, []string{"triggers"})) {
 			add(Warning, obj, "has %s but no columns, so it is created as a table without columns; without those keys a declaration without columns, of, partitionOf or inherits manages only a table that already exists, such as one an extension owns", strings.Join(keys, ", "))
 		}
 		hasCols := t.PartitionOf == "" && (len(t.Columns) > 0 || d.Types[t.Of] != nil)
@@ -270,7 +270,7 @@ func Database(d *schema.Database) []Issue {
 				add(Error, obj, "column %s: identity columns must be smallint, integer or bigint, not %s", cn, c.Type)
 			}
 		}
-		if len(t.Policies) > 0 && (t.RowLevelSecurity == nil || !*t.RowLevelSecurity) && t.PartitionOf == "" {
+		if len(t.Policies) > 0 && (t.RowLevelSecurity == nil && !d.External.InSchema(fq) || t.RowLevelSecurity != nil && !*t.RowLevelSecurity) && t.PartitionOf == "" {
 			add(Warning, obj, "declares policies but not rowLevelSecurity: true; PostgreSQL ignores a table's policies until row-level security is enabled")
 		}
 		if t.PartitionBy != nil {
