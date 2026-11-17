@@ -148,7 +148,7 @@ func lockWarnings(live *Live, p *PlanDiff) []Warning {
 // same plan is not reported.
 func KeepExisting(ws []Warning, live *Live, desired *schema.Database) []Warning {
     if len(ws) == 0 { return ws }
-    renamed, _ := applyRenames(live, desired)
+    renamed, _ := applyRenames(live.scoped(), desired)
     out := []Warning{}
     for _, w := range ws {
         if w.Kind != "lock" || renamed != nil && (renamed.Tables[w.Table] != nil || renamed.MatViewTables[w.Table] != nil) { out = append(out, w) }

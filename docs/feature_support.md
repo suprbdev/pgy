@@ -63,6 +63,7 @@ Features necessary for scaling, multi-tenancy, and advanced security models.
 How pgy plans, reviews and applies changes safely.
 
 - [x] **Adopting a database** (`pgy pull` writes YAML that diffs clean against the source database and rebuilds it from scratch; `--data` includes table rows)
+- [x] **Search-path independent comparison** (the database is read with `search_path` pinned to `public`, so `pgy diff` gives the same plan and `pgy pull` the same YAML through every connection, whatever the role, database or DSN sets; the schema of anything in `public` or on the connection's `search_path` is optional in the YAML, `pgy pull` qualifies everything outside `public`, and a changed `database.set.search_path` is also set for the session that runs the migration)
 - [x] **Offline validation** (`pgy validate`: JSON Schema, unknown columns, unresolvable dependencies, cycles, invalid combinations; `pgy diff` repeats its errors as warnings)
 - [x] **Split migrations** (`diff --split` writes one migration per schema file or directory, ordered by dependencies, with cross-file references deferred to the group that can satisfy them)
 - [x] **Transaction-free migrations** (`-- pgy:no-transaction`; generated for `concurrently: true` indexes, including the `ON ONLY` + per-partition + `ATTACH` sequence on partitioned tables; interrupted builds are completed or rebuilt)

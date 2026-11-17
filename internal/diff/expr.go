@@ -32,6 +32,10 @@ var (
 //
 //   - pg_catalog. qualifiers are dropped: pg_catalog is always searched
 //     first, so PostgreSQL never prints them for a name it resolves there
+//   - the qualifiers of the schemas on the session's search_path (see
+//     nameScope) are dropped, and OPERATOR(schema.op) for one of them
+//     becomes op: PostgreSQL always prints both, and the YAML may leave
+//     them out
 //   - ::type casts are removed, including multi-word and modified types
 //     ('a'::character varying(10), x::timestamp(3) with time zone), and
 //     CAST(x AS type) becomes (x)
@@ -49,6 +53,7 @@ var (
 // Single-quoted string literals are never rewritten.
 func canonicalizeExpr(s string) string {
     masked, lits := maskStringLiterals(s)
+    masked = activeScope().unqualifySQL(masked)
     masked = exprCatalogRe.ReplaceAllString(masked, "$1")
     masked = rewriteCastCalls(masked)
     masked = exprCastRe.ReplaceAllString(masked, "")

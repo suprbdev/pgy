@@ -123,21 +123,19 @@ func excludeLive(def string, opclasses ...LiveIndexOpclass) *LiveTable {
 }
 
 func TestExcludeSpellingsMatchLive(t *testing.T) {
-	def := LiveIndexOpclass{Name: "gist_int4_ops", Default: true, Visible: true}
-	rng := LiveIndexOpclass{Name: "range_ops", Default: true, Visible: true}
+	def := LiveIndexOpclass{Name: "gist_int4_ops", Default: true}
+	rng := LiveIndexOpclass{Name: "range_ops", Default: true}
 	cases := []struct {
 		name string
 		ct   schema.Constraint
 		live *LiveTable
 	}{
 		{"no using is btree", schema.Constraint{Expression: "(room_id with =)"},
-			excludeLive("EXCLUDE USING btree (room_id WITH =)", LiveIndexOpclass{Name: "int4_ops", Default: true, Visible: true})},
+			excludeLive("EXCLUDE USING btree (room_id WITH =)", LiveIndexOpclass{Name: "int4_ops", Default: true})},
 		{"default opclass named", schema.Constraint{Expression: "using gist (room_id gist_int4_ops with =, during with &&)"},
 			excludeLive("EXCLUDE USING gist (room_id WITH =, during WITH &&)", def, rng)},
 		{"default opclass qualified", schema.Constraint{Expression: "using gist (room_id public.gist_int4_ops with =, during pg_catalog.range_ops with &&)"},
 			excludeLive("EXCLUDE USING gist (room_id WITH =, during WITH &&)", def, rng)},
-		{"default opclass in another schema", schema.Constraint{Expression: "using gist (room_id gist_int4_ops with =)"},
-			excludeLive("EXCLUDE USING gist (room_id WITH =)", LiveIndexOpclass{Name: "ext.gist_int4_ops", Default: true, Visible: true})},
 		{"catalog operator", schema.Constraint{Expression: "using gist (room_id with operator(pg_catalog.=), during with &&)"},
 			excludeLive("EXCLUDE USING gist (room_id WITH =, during WITH &&)", def, rng)},
 		{"qualified operator kept", schema.Constraint{Expression: "using gist (a with operator(ext.&&))"},
@@ -145,7 +143,7 @@ func TestExcludeSpellingsMatchLive(t *testing.T) {
 		{"case, spacing, where, deferral", schema.Constraint{Expression: "USING GIST ( room_id WITH = , during WITH && ) WHERE ( price > 2 )", InitiallyDeferred: true},
 			excludeLive("EXCLUDE USING gist (room_id WITH =, during WITH &&) WHERE ((price > (2)::numeric)) DEFERRABLE INITIALLY DEFERRED", def, rng)},
 		{"non-default opclass with parameters", schema.Constraint{Expression: "using gist (a gist__intbig_ops(siglen=32) with &&)"},
-			excludeLive("EXCLUDE USING gist (a gist__intbig_ops (siglen='32') WITH &&)", LiveIndexOpclass{Name: "gist__intbig_ops", Visible: true})},
+			excludeLive("EXCLUDE USING gist (a gist__intbig_ops (siglen='32') WITH &&)", LiveIndexOpclass{Name: "gist__intbig_ops"})},
 		{"expression key, include, storage", schema.Constraint{Expression: "using gist (lower(name) with =, (a + b) with =) include (c) with (fillfactor = 70)"},
 			excludeLive("EXCLUDE USING gist (lower(name) WITH =, ((a + b)) WITH =) INCLUDE (c) WITH (fillfactor='70')", def, def)},
 		{"no opclass data", schema.Constraint{Expression: "using gist (room_id with =)"},
@@ -160,8 +158,8 @@ func TestExcludeSpellingsMatchLive(t *testing.T) {
 }
 
 func TestExcludeChangeDetected(t *testing.T) {
-	def := LiveIndexOpclass{Name: "gist_int4_ops", Default: true, Visible: true}
-	trgm := LiveIndexOpclass{Name: "gist_trgm_ops", Visible: true}
+	def := LiveIndexOpclass{Name: "gist_int4_ops", Default: true}
+	trgm := LiveIndexOpclass{Name: "gist_trgm_ops"}
 	cases := []struct {
 		name string
 		ct   schema.Constraint

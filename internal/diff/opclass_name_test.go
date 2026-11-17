@@ -24,16 +24,17 @@ func TestIndexOpclassSchemaQualifiers(t *testing.T) {
 	}
 }
 
-func TestIndexOpclassVisibleOnSearchPath(t *testing.T) {
+func TestIndexOpclassOnSearchPath(t *testing.T) {
+	useSearchPath(t, "ext")
 	ix := &schema.Index{Name: "t_body", Columns: []string{"body"}, Using: "gin", Opclass: "gin_trgm_ops"}
-	if indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops", Visible: true}}) {
-		t.Error("an unqualified opclass must match a live one visible on the search_path")
+	if indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops"}}) {
+		t.Error("an unqualified opclass must match a live one in a schema on the search_path")
 	}
-	if !indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops2", Visible: true}}) {
-		t.Error("a visible opclass with another name must differ")
+	if !indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops2"}}) {
+		t.Error("an opclass on the search_path with another name must differ")
 	}
 	ix.Opclass = "other.gin_trgm_ops"
-	if !indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops", Visible: true}}) {
+	if !indexOpclassesDiffer(ix, []LiveIndexOpclass{{Name: "ext.gin_trgm_ops"}}) {
 		t.Error("a qualified opclass in another schema must differ")
 	}
 }

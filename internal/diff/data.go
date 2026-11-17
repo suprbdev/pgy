@@ -10,6 +10,7 @@ import (
     "strings"
     "time"
 
+    "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgconn"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/suprbdev/pgy/internal/schema"
@@ -103,18 +104,34 @@ var dataDeclaredColumnsQ = fmt.Sprintf(dataTypeChainQ, `
         from unnest($1::text[], $2::text[]) as c(name, typ)
         where to_regtype(c.typ) is not null`)
 
-func dataColumnTypes(ctx context.Context, pool *pgxpool.Pool, q string, args ...any) (map[string]dataColumn, error) {
-    rows, err := pool.Query(ctx, q, args...)
+// declaredDataColumnTypes runs dataDeclaredColumnsQ for the columns names
+// declared with the types typs. The type names are resolved on the
+// session's own search_path, as the migration will resolve them.
+func declaredDataColumnTypes(ctx context.Context, pool *pgxpool.Pool, names, typs []string) (map[string]dataColumn, error) {
+    rows, err := pool.Query(ctx, dataDeclaredColumnsQ, names, typs)
     if err != nil { return nil, err }
     defer rows.Close()
     out := map[string]dataColumn{}
+    return out, scanDataColumns(rows, out)
+}
+
+// liveDataColumnTypes runs dataLiveColumnsQ for table fq with the pinned
+// search_path, so the type names it returns are the same in every session.
+func liveDataColumnTypes(ctx context.Context, pool *pgxpool.Pool, fq string) (map[string]dataColumn, error) {
+    out := map[string]dataColumn{}
+    batch := &queryBatch{}
+    batch.add(dataLiveColumnsQ, func(rows pgx.Rows) error { return scanDataColumns(rows, out) }, pqIdent(fq))
+    return out, batch.run(ctx, pool)
+}
+
+func scanDataColumns(rows pgx.Rows, out map[string]dataColumn) error {
     for rows.Next() {
         var name string
         var c dataColumn
-        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json); err != nil { return nil, err }
+        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json); err != nil { return err }
         out[name] = c
     }
-    return out, rows.Err()
+    return rows.Err()
 }
 
 // dataColumnDefs renders cols as a column definition list for
@@ -167,7 +184,7 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
     for _, col := range sortedKeys(dataUsedColumns(key, dt.Data.Rows)) {
         if t := dataColumnType(dt, col); t != "" { names, typs = append(names, col), append(typs, t) }
     }
-    types, err := dataColumnTypes(ctx, pool, dataDeclaredColumnsQ, names, typs)
+    types, err := declaredDataColumnTypes(ctx, pool, names, typs)
     if err != nil || len(types) == 0 { return nil }
     rows, err := dataRowsJSON(dt.Data.Rows)
     if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
@@ -223,7 +240,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         if !hasColumns(lt, key) { continue }
         rows, err := dataRowsJSON(dt.Data.Rows)
         if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
-        types, err := dataColumnTypes(ctx, pool, dataLiveColumnsQ, pqIdent(fq))
+        types, err := liveDataColumnTypes(ctx, pool, fq)
         if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
         if !hasDataColumns(types, key) { continue }
         used := dataUsedColumns(key, dt.Data.Rows)
@@ -621,38 +638,38 @@ const dataTextColumnsQ = `
 // load back (see dataTextColumnsQ) is returned in its text form instead, or
 // as a list of its elements' text forms for an array.
 func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned bool) ([]map[string]any, error) {
-    tr, err := pool.Query(ctx, dataTextColumnsQ, pqIdent(fq))
-    if err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
     text := []string{}
-    for tr.Next() {
-        var name string
-        var elements bool
-        if err := tr.Scan(&name, &elements); err != nil {
-            tr.Close()
-            return nil, fmt.Errorf("data for %s: %w", fq, err)
+    columns := &queryBatch{}
+    columns.add(dataTextColumnsQ, func(tr pgx.Rows) error {
+        for tr.Next() {
+            var name string
+            var elements bool
+            if err := tr.Scan(&name, &elements); err != nil { return err }
+            cast := "::text"
+            if elements { cast = "::text[]" }
+            text = append(text, quoteString(name)+", pgy_row."+quoteIdent(name)+cast)
         }
-        cast := "::text"
-        if elements { cast = "::text[]" }
-        text = append(text, quoteString(name)+", pgy_row."+quoteIdent(name)+cast)
-    }
-    tr.Close()
-    if err := tr.Err(); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
+        return nil
+    }, pqIdent(fq))
+    if err := columns.run(ctx, pool); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
     row := "to_jsonb(pgy_row)"
     if len(text) > 0 { row = "(to_jsonb(pgy_row) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
-    rows, err := pool.Query(ctx, "select "+row+"::text from "+dataTarget(fq, partitioned)+" pgy_row")
-    if err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
-    defer rows.Close()
     out := []map[string]any{}
-    for rows.Next() {
-        var raw string
-        if err := rows.Scan(&raw); err != nil { return nil, err }
-        dec := json.NewDecoder(strings.NewReader(raw))
-        dec.UseNumber()
-        var m map[string]any
-        if err := dec.Decode(&m); err != nil { return nil, err }
-        out = append(out, m)
-    }
-    return out, rows.Err()
+    values := &queryBatch{}
+    values.add("select "+row+"::text from "+dataTarget(fq, partitioned)+" pgy_row", func(rows pgx.Rows) error {
+        for rows.Next() {
+            var raw string
+            if err := rows.Scan(&raw); err != nil { return err }
+            dec := json.NewDecoder(strings.NewReader(raw))
+            dec.UseNumber()
+            var m map[string]any
+            if err := dec.Decode(&m); err != nil { return err }
+            out = append(out, m)
+        }
+        return nil
+    })
+    if err := values.run(ctx, pool); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
+    return out, nil
 }
 
 // addsEnumLabels reports whether desired declares enum labels that live
