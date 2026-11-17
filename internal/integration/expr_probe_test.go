@@ -689,6 +689,83 @@ schema app:
 	}
 }
 
+// TestIntegrationProbeExpressionsRenames renames a table, a column, a
+// constraint, an index, a domain and a function whose definitions are
+// spelled another way than PostgreSQL prints them: the plan holds the
+// renames and nothing else.
+func TestIntegrationProbeExpressionsRenames(t *testing.T) {
+	pool, _ := exprProbeDatabase(t, "pgytest_expr_probe_renames", `
+schema app:
+  domain span:
+    type: interval
+    default: "'1 hour'"
+  function f(i interval default '1 hour'):
+    returns: int
+    language: sql
+    body: select 1
+  table old_t:
+    columns:
+      id: {type: bigint}
+      ttl: {type: interval, default: "'1 hour'"}
+      at: {type: date, nullable: true}
+    constraints:
+      c_ttl: {type: check, expression: "ttl > '0 seconds'"}
+      c_at: {type: check, expression: "at > '2020-1-1'"}
+    indexes:
+      i_at: {columns: [id], where: "at > '2020-1-1'"}
+    policies:
+      p: {using: "at > '2020-1-1' and old_t.ttl > '1 hour'"}
+`)
+	d := loadYAML(t, "app", `
+schema app:
+  domain span2:
+    renamedFrom: span
+    type: interval
+    default: "'1 hour'"
+  function f2(i interval default '1 hour'):
+    renamedFrom: f
+    returns: int
+    language: sql
+    body: select 1
+  table new_t:
+    renamedFrom: old_t
+    columns:
+      id: {type: bigint}
+      ttl: {type: interval, default: "'1 hour'"}
+      on_day: {type: date, nullable: true, renamedFrom: at}
+    constraints:
+      c_ttl2: {type: check, expression: "ttl > '0 seconds'", renamedFrom: c_ttl}
+      c_at: {type: check, expression: "on_day > '2020-1-1'"}
+    indexes:
+      i_day: {columns: [id], where: "on_day > '2020-1-1'", renamedFrom: i_at}
+    policies:
+      p: {using: "on_day > '2020-1-1' and new_t.ttl > '1 hour'"}
+`)
+	live := probed(t, pool, d)
+	for k, p := range live.ExprProbes {
+		if p.Err != "" {
+			t.Errorf("%s %s %s: %s", k.Kind, k.Object, k.Name, p.Err)
+		}
+	}
+	plan := diff.Plan(live, d, true)
+	want := []string{
+		`alter table "app"."old_t" rename to "new_t";`,
+		`alter domain "app"."span" rename to "span2";`,
+		`alter function "app"."f"(i interval) rename to "f2";`,
+		`alter table "app"."new_t" rename column "at" to "on_day";`,
+		`alter index "app"."i_at" rename to "i_day";`,
+		`alter table "app"."new_t" rename constraint "c_ttl" to "c_ttl2";`,
+	}
+	if !reflect.DeepEqual(plan.Creates, want) || len(plan.Alters)+len(plan.Drops)+len(plan.Concurrent) != 0 {
+		t.Fatalf("want the renames only, got:\n%s%s", diff.Render(plan), diff.RenderConcurrent(plan))
+	}
+	applyPlan(t, pool, plan)
+	again := diff.Plan(probed(t, pool, d), d, true)
+	if sql := diff.Render(again) + diff.RenderConcurrent(again); sql != "" {
+		t.Errorf("the renamed schema did not converge:\n%s", sql)
+	}
+}
+
 // TestIntegrationProbeExpressionsNames probes tables whose temporary copy
 // could capture a name: tables of one name in two schemas, a table named
 // like a type its check uses, policies that qualify columns with their own

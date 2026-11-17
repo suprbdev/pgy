@@ -81,6 +81,12 @@ type exprSlot interface {
 	spell(e *liveEdit)
 }
 
+// verbatim is embedded by the slots whose definition is compared exactly as
+// it is read back.
+type verbatim struct{}
+
+func (verbatim) canonical(parts []string) []string { return parts }
+
 // probeStmt is one statement of a probe. When Type is set it is a query
 // for a type name, which replaces the %s in SQL.
 type probeStmt struct {
@@ -97,6 +103,7 @@ type probeAttach struct {
 }
 
 type columnDefaultSlot struct {
+	verbatim
 	fq, cn string
 	c      *schema.Column
 	lc     *LiveColumn
@@ -109,7 +116,7 @@ func newColumnDefaultSlot(fq, cn string, c *schema.Column, lc *LiveColumn) exprS
 	if c.Identity != "" || lc.Identity != "" || c.Generated != "" || lc.Generated != "" {
 		return nil
 	}
-	return &columnDefaultSlot{fq, cn, c, lc}
+	return &columnDefaultSlot{fq: fq, cn: cn, c: c, lc: lc}
 }
 
 func (s *columnDefaultSlot) equal() bool      { return defaultsEqual(s.c.Default, s.lc.Default) }
@@ -118,7 +125,6 @@ func (s *columnDefaultSlot) live() []string   { return []string{s.lc.Default} }
 func (s *columnDefaultSlot) attach(target string, id int) probeAttach {
 	return attachDefault(target, id, s.cn, s.c.Default)
 }
-func (s *columnDefaultSlot) canonical(parts []string) []string { return parts }
 func (s *columnDefaultSlot) spell(e *liveEdit) {
 	if lc := e.table(s.fq).Columns[s.cn]; lc != nil {
 		lc.Default = s.c.Default
@@ -133,6 +139,7 @@ func attachDefault(target string, id int, column, expr string) probeAttach {
 }
 
 type generatedSlot struct {
+	verbatim
 	fq, cn string
 	c      *schema.Column
 	lc     *LiveColumn
@@ -142,7 +149,7 @@ func newGeneratedSlot(fq, cn string, c *schema.Column, lc *LiveColumn) exprSlot 
 	if c == nil || lc == nil || c.Generated == "" || lc.Generated == "" {
 		return nil
 	}
-	return &generatedSlot{fq, cn, c, lc}
+	return &generatedSlot{fq: fq, cn: cn, c: c, lc: lc}
 }
 
 func (s *generatedSlot) equal() bool      { return constraintDefsEqual(s.c.Generated, s.lc.Generated) }
@@ -156,7 +163,6 @@ func (s *generatedSlot) attach(target string, id int) probeAttach {
 		quoteString(pqIdent(target)), quoteString(s.cn))
 	return probeAttach{stmt: probeStmt{ID: id, SQL: sql, Type: typeQ}, kind: "default", name: name}
 }
-func (s *generatedSlot) canonical(parts []string) []string { return parts }
 func (s *generatedSlot) spell(e *liveEdit) {
 	if lc := e.table(s.fq).Columns[s.cn]; lc != nil {
 		lc.Generated = s.c.Generated
@@ -263,6 +269,7 @@ func unmaskStringLiterals(masked string, lits []string) string {
 }
 
 type indexSlot struct {
+	verbatim
 	fq, name string
 	matView  bool
 	ix       *schema.Index
@@ -291,7 +298,7 @@ func newIndexSlot(fq string, matView bool, ix *schema.Index, cols map[string]*sc
 	if !expression {
 		return nil
 	}
-	return &indexSlot{fq, name, matView, ix, cols, li}
+	return &indexSlot{fq: fq, name: name, matView: matView, ix: ix, cols: cols, li: li}
 }
 
 func (s *indexSlot) method() string {
@@ -332,18 +339,18 @@ func (s *indexSlot) attach(target string, id int) probeAttach {
 		kind: "index", name: name,
 	}
 }
-func (s *indexSlot) canonical(parts []string) []string { return parts }
 func (s *indexSlot) spell(e *liveEdit) {
-	lt := e.table(s.fq)
+	relation := e.table
 	if s.matView {
-		lt = e.matView(s.fq)
+		relation = e.matView
 	}
-	if li := lt.IndexDefs[s.name]; li != nil {
+	if li := relation(s.fq).IndexDefs[s.name]; li != nil {
 		li.Keys, li.Predicate = s.keys(), s.ix.Where
 	}
 }
 
 type policySlot struct {
+	verbatim
 	fq, name string
 	pol      *schema.Policy
 	lp       *LivePolicy
@@ -358,7 +365,7 @@ func newPolicySlot(fq string, pol *schema.Policy, lt *LiveTable) exprSlot {
 	if lp == nil || (pol.Using == "") != (lp.Using == "") || (pol.WithCheck == "") != (lp.WithCheck == "") || pol.Using+pol.WithCheck == "" {
 		return nil
 	}
-	return &policySlot{fq, name, pol, lp}
+	return &policySlot{fq: fq, name: name, pol: pol, lp: lp}
 }
 
 func (s *policySlot) equal() bool {
@@ -385,7 +392,6 @@ func (s *policySlot) attach(target string, id int) probeAttach {
 		kind: "policy", name: name,
 	}
 }
-func (s *policySlot) canonical(parts []string) []string { return parts }
 func (s *policySlot) spell(e *liveEdit) {
 	if lp := e.table(s.fq).Policies[s.name]; lp != nil {
 		lp.Using, lp.WithCheck = s.pol.Using, s.pol.WithCheck
@@ -393,6 +399,7 @@ func (s *policySlot) spell(e *liveEdit) {
 }
 
 type triggerSlot struct {
+	verbatim
 	fq, name string
 	tr       *schema.Trigger
 	lt       *LiveTable
@@ -406,7 +413,7 @@ func newTriggerSlot(fq string, tr *schema.Trigger, lt *LiveTable) exprSlot {
 	if lt.Triggers[name] == "" {
 		return nil
 	}
-	return &triggerSlot{fq, name, tr, lt}
+	return &triggerSlot{fq: fq, name: name, tr: tr, lt: lt}
 }
 
 func (s *triggerSlot) equal() bool      { return triggerDefsEqual(s.declared(), s.lt.Triggers[s.name]) }
@@ -415,10 +422,10 @@ func (s *triggerSlot) live() []string   { return []string{s.lt.Triggers[s.name]}
 func (s *triggerSlot) attach(target string, id int) probeAttach {
 	return probeAttach{stmt: probeStmt{ID: id, SQL: renderTrigger(target, s.tr)}, kind: "trigger", name: s.name}
 }
-func (s *triggerSlot) canonical(parts []string) []string { return parts }
-func (s *triggerSlot) spell(e *liveEdit)                 { e.table(s.fq).Triggers[s.name] = s.declared() }
+func (s *triggerSlot) spell(e *liveEdit) { e.table(s.fq).Triggers[s.name] = s.declared() }
 
 type viewDefaultSlot struct {
+	verbatim
 	fq, col    string
 	want, have string
 }
@@ -431,7 +438,7 @@ func newViewDefaultSlot(live *Live, fq, col string, vw *schema.View) exprSlot {
 	if want == "" || have == "" {
 		return nil
 	}
-	return &viewDefaultSlot{fq, col, want, have}
+	return &viewDefaultSlot{fq: fq, col: col, want: want, have: have}
 }
 
 func (s *viewDefaultSlot) equal() bool      { return defaultsEqual(s.want, s.have) }
@@ -440,10 +447,10 @@ func (s *viewDefaultSlot) live() []string   { return []string{s.have} }
 func (s *viewDefaultSlot) attach(target string, id int) probeAttach {
 	return attachDefault(target, id, s.col, s.want)
 }
-func (s *viewDefaultSlot) canonical(parts []string) []string { return parts }
-func (s *viewDefaultSlot) spell(e *liveEdit)                 { e.viewDefaults(s.fq)[s.col] = s.want }
+func (s *viewDefaultSlot) spell(e *liveEdit) { e.viewDefaults(s.fq)[s.col] = s.want }
 
 type domainDefaultSlot struct {
+	verbatim
 	fq string
 	dm *schema.Domain
 	ld *LiveDomain
@@ -453,7 +460,7 @@ func newDomainDefaultSlot(fq string, dm *schema.Domain, ld *LiveDomain) exprSlot
 	if dm == nil || ld == nil || dm.Default == "" || ld.Default == "" {
 		return nil
 	}
-	return &domainDefaultSlot{fq, dm, ld}
+	return &domainDefaultSlot{fq: fq, dm: dm, ld: ld}
 }
 
 func (s *domainDefaultSlot) equal() bool      { return defaultsEqual(s.dm.Default, s.ld.Default) }
@@ -466,8 +473,7 @@ func (s *domainDefaultSlot) attach(target string, id int) probeAttach {
 		kind: "domain default", name: name,
 	}
 }
-func (s *domainDefaultSlot) canonical(parts []string) []string { return parts }
-func (s *domainDefaultSlot) spell(e *liveEdit)                 { e.domain(s.fq).Default = s.dm.Default }
+func (s *domainDefaultSlot) spell(e *liveEdit) { e.domain(s.fq).Default = s.dm.Default }
 
 type domainCheckSlot struct {
 	fq, name string
@@ -512,6 +518,7 @@ func (s *domainCheckSlot) spell(e *liveEdit) {
 }
 
 type routineArgsSlot struct {
+	verbatim
 	procedure     bool
 	norm          string
 	args, returns string
@@ -580,7 +587,6 @@ func (s *routineArgsSlot) attach(_ string, id int) probeAttach {
 		kind: "arguments", name: name,
 	}
 }
-func (s *routineArgsSlot) canonical(parts []string) []string { return parts }
 func (s *routineArgsSlot) spell(e *liveEdit) {
 	args := strings.TrimSpace(s.args)
 	if strings.HasPrefix(args, "(") && strings.HasSuffix(args, ")") {
@@ -821,20 +827,54 @@ func (p *exprProbePlan) add(key ExprKey, slot exprSlot, relation int, target str
 	}
 }
 
-// relation adds a definition of the relation declared as fq, which is
-// source in the database.
-func (p *exprProbePlan) relation(fq, source string, key ExprKey, slot exprSlot) {
+// probeTarget is a relation whose definitions are probed: fq is its
+// declared name and source the name it has in the database. For a table,
+// table and live are its declaration and its live columns, which tell the
+// columns the plan renames.
+type probeTarget struct {
+	fq, source string
+	table      *schema.Table
+	live       *LiveTable
+}
+
+// columnRenames returns the statements that give the copy of t the names
+// the plan's column renames lead to (see renamer.tableParts), so that the
+// declared definitions find the columns they name.
+func (t probeTarget) columnRenames(target string) []probeStmt {
+	out := []probeStmt{}
+	if t.table == nil || t.live == nil {
+		return out
+	}
+	has := map[string]bool{}
+	for cn := range t.live.Columns {
+		has[cn] = true
+	}
+	for _, cn := range sortedKeys(t.table.Columns) {
+		c := t.table.Columns[cn]
+		if c == nil || c.RenamedFrom == "" || !has[c.RenamedFrom] || has[cn] {
+			continue
+		}
+		delete(has, c.RenamedFrom)
+		has[cn] = true
+		out = append(out, probeStmt{ID: -1, SQL: fmt.Sprintf("alter table %s rename column %s to %s", pqIdent(target), quoteIdent(c.RenamedFrom), quoteIdent(cn))})
+	}
+	return out
+}
+
+// relation adds a definition of relation t.
+func (p *exprProbePlan) relation(t probeTarget, key ExprKey, slot exprSlot) {
 	if slot == nil || slot.equal() {
 		return
 	}
-	sch, name := splitQualified(fq)
-	i, ok := p.relations[fq]
+	sch, name := splitQualified(t.fq)
+	target := "pg_temp." + name
+	i, ok := p.relations[t.fq]
 	if !ok {
 		i = len(p.spec.Relations)
-		p.relations[fq] = i
-		p.spec.Relations = append(p.spec.Relations, &probeRelation{Schema: sch, Name: name, Like: pqIdent(source), Temp: fmt.Sprintf("pgy_probe_t%d", i)})
+		p.relations[t.fq] = i
+		p.spec.Relations = append(p.spec.Relations, &probeRelation{Schema: sch, Name: name, Like: pqIdent(t.source), Temp: fmt.Sprintf("pgy_probe_t%d", i), Run: t.columnRenames(target)})
 	}
-	p.add(key, slot, i, "pg_temp."+name)
+	p.add(key, slot, i, target)
 }
 
 // domain adds a definition of the domain declared as fq, which is source
@@ -900,29 +940,30 @@ func collectExprProbes(live *Live, desired *schema.Database) *exprProbePlan {
 		if !ok {
 			continue
 		}
+		t := probeTarget{fq: fq, source: source, table: dt, live: scoped.Tables[source]}
 		for _, cn := range sortedKeys(dt.Columns) {
 			c, lc := dt.Columns[cn], lt.Columns[cn]
-			p.relation(fq, source, ExprKey{ExprDefault, fq, cn}, newColumnDefaultSlot(fq, cn, c, lc))
-			p.relation(fq, source, ExprKey{ExprGenerated, fq, cn}, newGeneratedSlot(fq, cn, c, lc))
+			p.relation(t, ExprKey{ExprDefault, fq, cn}, newColumnDefaultSlot(fq, cn, c, lc))
+			p.relation(t, ExprKey{ExprGenerated, fq, cn}, newGeneratedSlot(fq, cn, c, lc))
 		}
 		for _, ct := range dt.Constraints {
 			if ct != nil {
-				p.relation(fq, source, ExprKey{ExprConstraint, fq, truncateIdent(ct.Name)}, newConstraintSlot(fq, ct, lt))
+				p.relation(t, ExprKey{ExprConstraint, fq, truncateIdent(ct.Name)}, newConstraintSlot(fq, ct, lt))
 			}
 		}
 		for _, ix := range dt.Indexes {
 			if ix != nil && len(ix.Columns) > 0 {
-				p.relation(fq, source, ExprKey{ExprIndex, fq, LiveIndexName(fq, ix, lt.Indexes)}, newIndexSlot(fq, false, ix, dt.Columns, lt))
+				p.relation(t, ExprKey{ExprIndex, fq, LiveIndexName(fq, ix, lt.Indexes)}, newIndexSlot(fq, false, ix, dt.Columns, lt))
 			}
 		}
 		for _, pol := range dt.Policies {
 			if pol != nil {
-				p.relation(fq, source, ExprKey{ExprPolicy, fq, truncateIdent(pol.Name)}, newPolicySlot(fq, pol, lt))
+				p.relation(t, ExprKey{ExprPolicy, fq, truncateIdent(pol.Name)}, newPolicySlot(fq, pol, lt))
 			}
 		}
 		for _, tr := range dt.Triggers {
 			if tr != nil {
-				p.relation(fq, source, ExprKey{ExprTrigger, fq, truncateIdent(tr.Name)}, newTriggerSlot(fq, tr, lt))
+				p.relation(t, ExprKey{ExprTrigger, fq, truncateIdent(tr.Name)}, newTriggerSlot(fq, tr, lt))
 			}
 		}
 	}
@@ -940,7 +981,7 @@ func collectExprProbes(live *Live, desired *schema.Database) *exprProbePlan {
 			}
 			for _, ix := range vw.Indexes {
 				if ix != nil && len(ix.Columns) > 0 {
-					p.relation(fq, source, ExprKey{ExprIndex, fq, LiveIndexName(fq, ix, lt.Indexes)}, newIndexSlot(fq, true, ix, nil, lt))
+					p.relation(probeTarget{fq: fq, source: source}, ExprKey{ExprIndex, fq, LiveIndexName(fq, ix, lt.Indexes)}, newIndexSlot(fq, true, ix, nil, lt))
 				}
 			}
 			continue
@@ -949,7 +990,7 @@ func collectExprProbes(live *Live, desired *schema.Database) *exprProbePlan {
 			continue
 		}
 		for _, col := range sortedKeys(vw.ColumnDefaults) {
-			p.relation(fq, fq, ExprKey{ExprViewDefault, fq, col}, newViewDefaultSlot(renamed, fq, col, vw))
+			p.relation(probeTarget{fq: fq, source: fq}, ExprKey{ExprViewDefault, fq, col}, newViewDefaultSlot(renamed, fq, col, vw))
 		}
 	}
 
@@ -1221,11 +1262,12 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 // them, and deparsed on the pinned one (see pinSearchPathQ).
 //
 // The results go to live.ExprProbes, which planning applies (see
-// applyExprProbes). Nothing is sent to the server when every definition
-// matches as text. A server that can't run the probe, such as a read-only
-// standby or a role without the TEMPORARY privilege, leaves ExprProbes nil,
-// and every definition is compared as text; the error is returned for the
-// caller to report.
+// applyExprProbes): a probe can only take statements out of a plan, so a
+// caller whose plan reports nothing has no use for it. Nothing is sent to
+// the server when every definition matches as text. A server that can't
+// run the probe, such as a read-only standby or a role without the
+// TEMPORARY privilege, leaves ExprProbes nil, and every definition is
+// compared as text; the error is returned for the caller to report.
 func ProbeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
 	if live == nil || desired == nil || pool == nil || live.Offline {
 		return nil

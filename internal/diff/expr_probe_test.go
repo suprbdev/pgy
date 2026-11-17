@@ -282,6 +282,12 @@ func TestExprProbeKeepsLiveSnapshot(t *testing.T) {
 	if out.Tables["app.t"].Columns["id"] == live.Tables["app.t"].Columns["id"] {
 		t.Error("an edited table must not share its columns with the snapshot")
 	}
+	if len(out.Tables) != len(live.Tables) || len(out.MatViewTables) != len(live.MatViewTables) {
+		t.Errorf("the copy has the snapshot's relations and no others: tables %v, materialized views %v", sortedKeys(out.Tables), sortedKeys(out.MatViewTables))
+	}
+	if got := out.MatViewTables["app.mv"].IndexDefs["mv_part"].Predicate; got != "attrs @> 'kind=>widget'" {
+		t.Errorf("a materialized view's index takes the declared spelling, got %q", got)
+	}
 	if applyExprProbes(exprProbeLive(), desired) == nil || applyExprProbes(nil, desired) != nil {
 		t.Error("a snapshot without probes is returned as it is")
 	}
@@ -427,6 +433,15 @@ func TestExprProbeRenamedTableCopiesTheLiveOne(t *testing.T) {
 	delete(desired.Tables, "app.t")
 	renamed := *desired.Tables["app.t2"]
 	renamed.Name, renamed.RenamedFrom = "t2", "t"
+	renamed.Columns = map[string]*schema.Column{}
+	for cn, c := range desired.Tables["app.t2"].Columns {
+		renamed.Columns[cn] = c
+	}
+	shape := *renamed.Columns["c"]
+	shape.RenamedFrom = "c"
+	delete(renamed.Columns, "c")
+	renamed.Columns["shape"] = &shape
+	renamed.Constraints = []*schema.Constraint{{Name: "t_box", Type: "check", Expression: "shape <@ cube '(0, 0),(1, 1)'"}}
 	desired.Tables["app.t2"] = &renamed
 	plan := collectExprProbes(live, desired)
 	var rel *probeRelation
@@ -437,6 +452,9 @@ func TestExprProbeRenamedTableCopiesTheLiveOne(t *testing.T) {
 	}
 	if rel == nil || rel.Like != `"app"."t"` || rel.Schema != "app" {
 		t.Fatalf("a table the plan renames is copied from its current name under its new one, got %+v", plan.spec.Relations)
+	}
+	if first := rel.Run[0]; first.ID != -1 || first.SQL != `alter table "pg_temp"."t2" rename column "c" to "shape"` {
+		t.Errorf("the copy takes the plan's column renames before anything is attached, got %+v", first)
 	}
 	found := false
 	for _, r := range plan.requests {
