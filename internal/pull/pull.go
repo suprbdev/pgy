@@ -667,7 +667,7 @@ func (b *builder) textSearch() {
 		m := newMap()
 		add(m, "template", str(td.Template))
 		opts := flowMap()
-		for _, o := range sortedKeys(td.Options) {
+		for _, o := range inOrder(td.Options, td.OptionOrder) {
 			add(opts, o, str(td.Options[o]))
 		}
 		add(m, "options", opts)
@@ -848,7 +848,7 @@ func (b *builder) routines() {
 			if lp.Security == "definer" {
 				add(m, "security", str("definer"))
 			}
-			addSet(m, lp.Config, lp.Security == "definer")
+			addSet(m, lp.Config, lp.ConfigOrder, lp.Security == "definer")
 			add(m, "body", routineBody(lp.Body, lp.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(dependencies(deps)))
@@ -882,7 +882,7 @@ func (b *builder) routines() {
 			if lf.Rows != 0 && lf.Rows != 1000 {
 				add(m, "rows", floatNum(lf.Rows))
 			}
-			addSet(m, lf.Config, lf.Security == "definer")
+			addSet(m, lf.Config, lf.ConfigOrder, lf.Security == "definer")
 			add(m, "body", routineBody(lf.Body, lf.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(dependencies(deps)))
@@ -989,19 +989,33 @@ func kindOf(r *diff.LiveRoutine) string {
 	return "function"
 }
 
-// addSet writes a routine's settings. A SECURITY DEFINER routine without
-// any gets an empty map, so that one set on it later, such as a
-// search_path, is noticed and reset; elsewhere the key is left out and the
-// routine's settings are unmanaged.
-func addSet(m *node, config map[string]string, definer bool) {
+// addSet writes a routine's settings, those named in order first and in
+// that order. A SECURITY DEFINER routine without any gets an empty map, so
+// that one set on it later, such as a search_path, is noticed and reset;
+// elsewhere the key is left out and the routine's settings are unmanaged.
+func addSet(m *node, config map[string]string, order []string, definer bool) {
 	if len(config) == 0 && !definer {
 		return
 	}
 	set := newMap()
-	for _, k := range sortedKeys(config) {
+	for _, k := range inOrder(config, order) {
 		add(set, k, setting(k, config[k]))
 	}
 	add(m, "set", set)
+}
+
+// inOrder returns the keys of m, those named in order first and in that
+// order, then the others sorted.
+func inOrder(m map[string]string, order []string) []string {
+	out := make([]string, 0, len(m))
+	seen := map[string]bool{}
+	for _, k := range append(append([]string{}, order...), sortedKeys(m)...) {
+		if _, ok := m[k]; ok && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // setting is the YAML value of a stored setting of the parameter name. A

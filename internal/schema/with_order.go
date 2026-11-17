@@ -9,7 +9,8 @@ import (
 // fillWithOrderFromNode records the order in which the `schema <name>:`
 // blocks of root list the storage parameters (`with`) of tables, their
 // indexes, primary keys and constraints, and of materialized views and
-// their indexes.
+// their indexes, the options of text search dictionaries and the settings
+// (`set`) of functions and procedures.
 func fillWithOrderFromNode(root *yaml.Node, db *Database) {
 	if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
 		return
@@ -50,6 +51,25 @@ func fillWithOrderFromNode(root *yaml.Node, db *Database) {
 					namedWithOrders(mappingValue(def, "primaryKey"), func(_ string, order []string) {
 						t.PrimaryKeyWithOrder = order
 					})
+				}
+				continue
+			}
+			switch {
+			case strings.HasPrefix(key, "function "):
+				fn := parseFunction(schemaName, key, nil)
+				if f := db.Functions[FunctionKey(qualify(schemaName, fn.Name), fn.ArgsSig)]; f != nil {
+					f.SetOrder = keyOrder(mappingValue(def, "set"))
+				}
+				continue
+			case strings.HasPrefix(key, "procedure "):
+				pr := parseProcedure(schemaName, key, nil)
+				if p := db.Procedures[FunctionKey(qualify(schemaName, pr.Name), pr.ArgsSig)]; p != nil {
+					p.SetOrder = keyOrder(mappingValue(def, "set"))
+				}
+				continue
+			case strings.HasPrefix(key, "text search dictionary "):
+				if td := db.TSDictionaries[qualify(schemaName, parseTSDictionary(schemaName, key, nil).Name)]; td != nil {
+					td.OptionOrder = keyOrder(mappingValue(def, "options"))
 				}
 				continue
 			}

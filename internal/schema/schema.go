@@ -300,6 +300,10 @@ type TSDictionary struct {
     Name      string
     Template  string
     Options   map[string]string
+    // OptionOrder is the order of the Options keys: as the YAML lists them
+    // (filled from node tree), or as PostgreSQL stores them for a live
+    // dictionary.
+    OptionOrder []string `yaml:"-"`
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
 }
@@ -672,6 +676,7 @@ type Function struct {
     Cost *float64   // nil = unmanaged
     Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body string
     // BodySet reports a body key in the YAML, so that an empty body can be
     // told from a declaration without one (which manages only attributes).
@@ -737,6 +742,7 @@ type Procedure struct {
     Language string
     Security string // definer/invoker
     Set      map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body     string
     BodySet  bool `yaml:"-"` // a body key is present; see Function.BodySet
     Transform []string // TRANSFORM FOR TYPE types; see Function.Transform

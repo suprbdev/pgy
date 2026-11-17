@@ -295,7 +295,8 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             func(scan func(...any) error) error {
                 var key, tmpl, opts string
                 if err := scan(&key, &tmpl, &opts); err != nil { return err }
-                td := &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: parseDictOptions(opts)}
+                options, order := parseDictOptions(opts)
+                td := &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: options, OptionOrder: order}
                 d.TSDictionaries[key] = td
                 return nil
             }},
@@ -352,11 +353,13 @@ func dependencyMemberKey(dep string) string {
 }
 
 // parseDictOptions splits pg_ts_dict.dictinitoption ("language = 'english',
-// stopwords = 'english'") into name -> value, keeping the value as written.
-func parseDictOptions(s string) map[string]string {
-    if strings.TrimSpace(s) == "" { return nil }
+// stopwords = 'english'") into name -> value, keeping the value as written,
+// and returns the names in the order they are stored.
+func parseDictOptions(s string) (map[string]string, []string) {
+    if strings.TrimSpace(s) == "" { return nil, nil }
     masked, lits := maskStringLiterals(s)
     out := map[string]string{}
+    var order []string
     for _, part := range strings.Split(masked, ",") {
         k, v, ok := strings.Cut(part, "=")
         if !ok { continue }
@@ -366,8 +369,9 @@ func parseDictOptions(s string) map[string]string {
             return lits[i]
         })
         out[strings.TrimSpace(k)] = v
+        order = append(order, strings.TrimSpace(k))
     }
-    return out
+    return out, order
 }
 
 // queryBatch collects introspection queries and their row handlers so they

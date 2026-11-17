@@ -176,7 +176,7 @@ func keepLiveFunctionAttributes(f *schema.Function, lf *LiveFunction) *schema.Fu
 		out.Rows = ptr(lf.Rows)
 	}
 	if out.Set == nil {
-		out.Set = liveSettings(lf.Config)
+		out.Set, out.SetOrder = liveSettings(lf.Config), lf.ConfigOrder
 	}
 	return &out
 }
@@ -193,7 +193,7 @@ func keepLiveProcedureAttributes(p *schema.Procedure, lp *LiveProcedure) *schema
 		out.Security = lp.Security
 	}
 	if out.Set == nil {
-		out.Set = liveSettings(lp.Config)
+		out.Set, out.SetOrder = liveSettings(lp.Config), lp.ConfigOrder
 	}
 	return &out
 }

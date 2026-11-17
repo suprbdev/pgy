@@ -386,6 +386,7 @@ type LiveFunction struct{
     Cost       float64 // procost
     Rows       float64 // prorows (0 unless set-returning)
     Config     map[string]string // proconfig: lower-cased parameter name -> value
+    ConfigOrder []string // the Config names in proconfig order
     Returns    string // pg_get_function_result, e.g. "SETOF integer"; "" when unknown
     // SQLBody reports a SQL-standard body (BEGIN ATOMIC / RETURN); Body then
     // holds PostgreSQL's rewritten form, from pg_get_function_sqlbody.
@@ -400,6 +401,7 @@ type LiveProcedure struct{
     SQLBody  bool // SQL-standard body; see LiveFunction.SQLBody
     Security string // definer|invoker
     Config   map[string]string // proconfig: lower-cased parameter name -> value
+    ConfigOrder []string // the Config names in proconfig order
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
 }
@@ -1406,13 +1408,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if kind == "p" {
                 norm := publicScope.functionSignature(key)
                 l.Procedures[norm] = true
-                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), Language: language, Transform: transform}
+                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), ConfigOrder: proconfigNames(config), Language: language, Transform: transform}
                 if secdef { lp.Security = "definer" }
                 l.ProcedureDefs[norm] = lp
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs, Language: language, Transform: transform}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), ConfigOrder: proconfigNames(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs, Language: language, Transform: transform}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -1614,7 +1616,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for rows.Next() {
             var key, tmpl, opts string
             if err := rows.Scan(&key, &tmpl, &opts); err != nil { return err }
-            l.TSDictionaryDefs[key] = &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: parseDictOptions(opts)}
+            options, order := parseDictOptions(opts)
+            l.TSDictionaryDefs[key] = &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: options, OptionOrder: order}
         }
         return nil
     })
@@ -3114,13 +3117,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 f = keepLiveFunctionAttributes(f, r.function)
             }
             setClauses := ""
-            if len(f.Set) > 0 {
-                keys := make([]string, 0, len(f.Set))
-                for k := range f.Set { keys = append(keys, k) }
-                sort.Strings(keys)
-                for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
-                }
+            for _, k := range orderedKeys(f.Set, f.SetOrder) {
+                setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
             }
             attrs := []string{}
             if f.Security != "" { attrs = append(attrs, "security "+f.Security) }
@@ -3168,13 +3166,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 pr = keepLiveProcedureAttributes(pr, r.procedure)
             }
             setClauses := ""
-            if len(pr.Set) > 0 {
-                keys := make([]string, 0, len(pr.Set))
-                for k := range pr.Set { keys = append(keys, k) }
-                sort.Strings(keys)
-                for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
-                }
+            for _, k := range orderedKeys(pr.Set, pr.SetOrder) {
+                setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
             }
             attrsStr := ""
             if pr.Security != "" { attrsStr = " security " + pr.Security }
@@ -3211,7 +3204,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 continue
             }
             opts := []string{"template = " + td.Template}
-            for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+            for _, k := range orderedKeys(td.Options, td.OptionOrder) { opts = append(opts, k+" = "+td.Options[k]) }
             plan.Creates = append(plan.Creates, fmt.Sprintf("create text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
         case "tsconfig":
             tc := desired.TSConfigs[e.Key]
@@ -5040,12 +5033,12 @@ func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDic
     }
     if td.Options == nil { return nil, warn }
     opts := []string{}
-    for _, k := range sortedKeys(td.Options) {
+    for _, k := range orderedKeys(td.Options, td.OptionOrder) {
         if v, ok := ld.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(td.Options[k])) {
             opts = append(opts, k+" = "+td.Options[k])
         }
     }
-    for _, k := range sortedKeys(ld.Options) {
+    for _, k := range orderedKeys(ld.Options, ld.OptionOrder) {
         found := false
         for w := range td.Options { found = found || strings.EqualFold(w, k) }
         if !found { opts = append(opts, k) }
