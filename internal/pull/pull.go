@@ -564,8 +564,8 @@ func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
 		add(m, "grants", g)
 	}
 	addStr(m, "comment", comment)
-	if i := strings.LastIndexByte(ls.Owner, '.'); i > 0 {
-		add(m, "dependsOn", list([]string{"table " + ls.Owner[:i]}))
+	if strings.Count(ls.Owner, ".") >= 2 {
+		add(m, "dependsOn", list([]string{"table " + diff.ColumnRelation(ls.Owner)}))
 	}
 	add(blk, "sequence "+name, m)
 }
@@ -1185,11 +1185,11 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 				col += " nulls first"
 			}
 			cols[i] = col
-			if i < len(opcs) && !opcs[i].Default {
+			if i < len(opcs) && (!opcs[i].Default || len(opcs[i].Params) > 0) {
 				if perCol == nil {
 					perCol = flowMap()
 				}
-				add(perCol, col, str(opcs[i].Name))
+				add(perCol, col, str(opcs[i].Declaration()))
 			}
 			if i < len(opcs) && opcs[i].Collation != "" {
 				if colls == nil {

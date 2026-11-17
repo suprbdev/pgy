@@ -477,7 +477,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
     names, vals := make([]string, len(cols)), make([]string, len(cols))
     overriding := ""
     for i, cn := range cols {
-        names[i], vals[i] = pqIdent(cn), dataSQL(fq, dt, cn, row[cn])
+        names[i], vals[i] = quoteIdent(cn), dataSQL(fq, dt, cn, row[cn])
         if c := dt.Columns[cn]; c != nil && c.Identity == "always" { overriding = " overriding system value" }
     }
     return fmt.Sprintf("insert into %s (%s)%s values (%s);", pqIdent(fq), strings.Join(names, ", "), overriding, strings.Join(vals, ", "))
@@ -485,7 +485,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
 
 func dataKeyWhere(key []string, value func(string) string) string {
     conds := make([]string, len(key))
-    for i, k := range key { conds[i] = fmt.Sprintf("%s = %s", pqIdent(k), value(k)) }
+    for i, k := range key { conds[i] = fmt.Sprintf("%s = %s", quoteIdent(k), value(k)) }
     return strings.Join(conds, " and ")
 }
 
@@ -532,7 +532,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             for _, row := range dt.Data.Rows {
                 set := []string{}
                 for _, cn := range dataColumns(dt, row) {
-                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = excluded.%s", pqIdent(cn), pqIdent(cn))) }
+                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = excluded.%s", quoteIdent(cn), quoteIdent(cn))) }
                 }
                 stmt := strings.TrimSuffix(dataInsert(fq, dt, row), ";") + " on conflict (" + joinIdentList(key) + ") do "
                 if len(set) == 0 { stmt += "nothing;" } else { stmt += "update set " + strings.Join(set, ", ") + ";" }
@@ -549,7 +549,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 if i >= len(dt.Data.Rows) { continue }
                 row := dt.Data.Rows[i]
                 set := []string{}
-                for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
+                for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 if len(set) == 0 { continue }
                 writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
             }
