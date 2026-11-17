@@ -42,6 +42,17 @@ const initPrivsQ = `
     and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid) is not null
 `
 
+// extensionConfigQ lists the configuration tables of extensions
+// (pg_extension_config_dump) with the condition that selects the rows
+// pg_dump keeps of them, those an application added.
+const extensionConfigQ = `
+    select n.nspname || '.' || c.relname, coalesce(u.condition, '')
+    from pg_extension x
+    cross join lateral unnest(x.extconfig, x.extcondition) u(rel, condition)
+    join pg_class c on c.oid = u.rel and c.relkind in ('r', 'p')
+    join pg_namespace n on n.oid = c.relnamespace
+`
+
 func (l *Live) scanInitPrivs(rows pgx.Rows) error {
 	for rows.Next() {
 		var key, grantee, priv string

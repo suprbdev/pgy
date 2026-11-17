@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -214,8 +215,9 @@ func (b *builder) memberGrants(key, publicDefault string, current map[string]map
 }
 
 // memberTable declares a table of an extension without columns when its
-// privileges are no longer the ones the extension set or it has row level
-// security or policies, which pg_dump keeps of an extension's table too.
+// privileges are no longer the ones the extension set, it has row level
+// security or policies, or --data asks for the rows of a configuration
+// table, which is what pg_dump keeps of an extension's table.
 func (b *builder) memberTable(fq string, lt *diff.LiveTable) {
 	blk, name, ok := b.block(fq)
 	if !ok {
@@ -232,6 +234,7 @@ func (b *builder) memberTable(fq string, lt *diff.LiveTable) {
 		add(m, "forceRowLevelSecurity", boolean(true))
 	}
 	b.policies(m, lt)
+	b.memberData(m, fq, lt)
 	if len(b.live.ColumnGrants[fq]) > 0 {
 		b.warn("table %s belongs to an extension and has column privileges, which a table declared without columns cannot hold; they were left out", fq)
 	}
@@ -1517,6 +1520,43 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 // data emits the rows requested with Options.Data as a data: block, keyed
 // by the primary key and sorted by it. Generated columns are left out.
 func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
+	b.dataRows(t, fq, lt, false)
+}
+
+// memberData writes the rows of an extension's table that --data asks for:
+// those of a configuration table, as pg_dump keeps them (the caller reads
+// only the rows its condition selects), with the key that a table declared
+// without columns needs, and dependsOn for the configuration tables with
+// rows that its foreign keys reference, so the rows are inserted after
+// theirs. The rows of any other table of an extension are the extension's
+// and are left out, with a warning.
+func (b *builder) memberData(t *node, fq string, lt *diff.LiveTable) {
+	if _, ok := b.opts.Data[fq]; !ok {
+		return
+	}
+	if _, config := b.live.ExtensionConfig[fq]; !config {
+		b.warn("table %s belongs to an extension and is not one of its configuration tables, so its rows are the extension's and were not pulled", fq)
+		return
+	}
+	b.dataRows(t, fq, lt, true)
+	deps := []string{}
+	for _, name := range sortedKeys(lt.ConstraintDefs) {
+		m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+		if m == nil {
+			continue
+		}
+		ref := qualifyRef(strings.ReplaceAll(m[2], `"`, ""), fq)
+		_, config := b.live.ExtensionConfig[ref]
+		if _, rows := b.opts.Data[ref]; rows && config && ref != fq && !slices.Contains(deps, "table "+ref) {
+			deps = append(deps, "table "+ref)
+		}
+	}
+	if len(deps) > 0 {
+		add(t, "dependsOn", list(deps))
+	}
+}
+
+func (b *builder) dataRows(t *node, fq string, lt *diff.LiveTable, withKey bool) {
 	rows, ok := b.opts.Data[fq]
 	if !ok {
 		return
@@ -1535,7 +1575,11 @@ func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
 		}
 		return false
 	})
-	list := &node{Kind: yaml.SequenceNode}
+	d := newMap()
+	if withKey {
+		add(d, "key", list(key))
+	}
+	out := &node{Kind: yaml.SequenceNode}
 	for _, row := range sorted {
 		m := flowMap()
 		for _, cn := range b.d.ColumnOrder[fq] {
@@ -1547,10 +1591,9 @@ func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
 				add(m, cn, dataNode(v, lc.Type))
 			}
 		}
-		list.Content = append(list.Content, m)
+		out.Content = append(out.Content, m)
 	}
-	d := newMap()
-	add(d, "rows", list)
+	add(d, "rows", out)
 	add(t, "data", d)
 }
 

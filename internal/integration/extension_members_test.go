@@ -292,6 +292,96 @@ schema public:
 	}
 }
 
+func TestIntegrationExtensionViewRulesNotPruned(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_ext_view_rules")
+	if _, err := db.Exec(context.Background(), `
+		create extension hstore schema public;
+		create table public.store (id integer);
+		create view public.cols as select id from public.store;
+		create rule cols_insert as on insert to public.cols do instead insert into public.store values (new.id);
+		alter extension hstore add view public.cols;
+		create view public.mine as select id from public.store;
+		create rule mine_delete as on delete to public.mine do instead nothing;
+		grant select on public.cols, public.mine to public;`); err != nil {
+		t.Fatal(err)
+	}
+	y := `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table store:
+    columns:
+      id: {type: integer, nullable: true}
+  view cols:
+    grants: {public: [select]}
+  view mine:
+    grants: {public: [select]}
+`
+	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+		t.Errorf("rules of an extension's view and of a view declared without a query are never pruned, got:\n%s", sql)
+	}
+}
+
+// TestIntegrationExtensionConfigTableRows makes a configuration table by
+// hand, as pg_extension_config_dump does from an extension's script, since
+// none of PostgreSQL's own extensions has one.
+func TestIntegrationExtensionConfigTableRows(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_config_rows")
+	if _, err := db.Exec(ctx, `
+		create extension hstore schema public;
+		create table public.cfg (id integer primary key, name text);
+		insert into public.cfg values (1, 'shipped'), (2, 'shipped'), (100, 'mine');
+		alter extension hstore add table public.cfg;
+		update pg_extension set extconfig = array['public.cfg'::regclass::oid], extcondition = array['WHERE id >= 100'] where extname = 'hstore';`); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	if cond, ok := live.ExtensionConfig["public.cfg"]; !ok || cond != "WHERE id >= 100" {
+		t.Fatalf("ExtensionConfig = %v", live.ExtensionConfig)
+	}
+	rows, err := diff.TableRowsWhere(ctx, db, "public.cfg", false, live.ExtensionConfig["public.cfg"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := pull.Build(live, pull.Options{Single: true, Data: map[string][]map[string]any{"public.cfg": rows}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	if want := "table cfg:\n    data:\n      key: [id]\n      rows:\n        - {id: 100, name: mine}\n"; !strings.Contains(y, want) {
+		t.Errorf("pull --data writes the rows pg_dump keeps, want %q in:\n%s", want, y)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	planData := func(y string) string {
+		d, err := schema.LoadAndMerge([]string{writeYAML(t, y)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(diff.Render(diff.PlanWith(introspect(t, db, d), d, opts)))
+	}
+	if sql := planData(y); sql != "" {
+		t.Errorf("the pulled YAML must diff clean:\n%s", sql)
+	}
+
+	declared := `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table cfg:
+    data:
+      key: [id]
+      rows:
+        - {id: 101, name: added}
+`
+	sql := planData(declared)
+	if want := `insert into "public"."cfg" ("id", "name") values (101, 'added');` + "\n" + `delete from only "public"."cfg" where "id" = '100';`; sql != want {
+		t.Errorf("only the rows the condition selects are pruned, got:\n%s\nwant:\n%s", sql, want)
+	}
+}
+
 func TestIntegrationExtensionMemberOwnerChangeNotPulled(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()

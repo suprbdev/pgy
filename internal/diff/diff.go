@@ -178,6 +178,10 @@ type Live struct{
     // creates; a type declaration without a kind manages their owner,
     // privileges and comment.
     BaseTypes map[string]bool
+    // ExtensionConfig: the configuration tables of extensions
+    // (pg_extension.extconfig), "schema.table" -> the WHERE clause that
+    // selects the rows pg_dump keeps (extcondition), "" for all of them.
+    ExtensionConfig map[string]string
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
@@ -691,6 +695,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         InitPrivs: map[string]map[string]map[string]bool{},
         BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
+        ExtensionConfig: map[string]string{},
     }
     batch := &queryBatch{}
     
@@ -2325,6 +2330,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
     batch.add(initPrivsQ, l.scanInitPrivs)
+    batch.add(extensionConfigQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var table, condition string
+            if err := rows.Scan(&table, &condition); err != nil { return err }
+            l.ExtensionConfig[table] = condition
+        }
+        return nil
+    })
 
     ownedQ := `
         select n.nspname || '.' || s.relname

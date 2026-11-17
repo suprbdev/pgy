@@ -1,6 +1,7 @@
 package pull
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -180,5 +181,52 @@ func TestPullExtensionMembersUnchanged(t *testing.T) {
 	out, d, warns := buildSingle(t, live)
 	if len(d.Functions)+len(d.Views)+len(d.Types) != 0 || len(warns) != 0 {
 		t.Errorf("an extension's objects are not declared while their privileges are untouched:\n%s\nwarnings: %v", out, warns)
+	}
+}
+
+func TestPullExtensionConfigTableData(t *testing.T) {
+	live := memberLive()
+	live.Details.ColumnOrder = map[string][]string{}
+	member := func(fq string, cols ...string) *diff.LiveTable {
+		lt := &diff.LiveTable{Columns: map[string]*diff.LiveColumn{}, HasPK: true, ConstraintDefs: map[string]string{}, Constraints: map[string]bool{}}
+		for _, c := range cols {
+			lt.Columns[c] = &diff.LiveColumn{Type: "integer"}
+		}
+		live.Tables[fq] = lt
+		live.Details.ColumnOrder[fq] = cols
+		live.ExtensionMembers["rel:"+fq] = true
+		return lt
+	}
+	topo := member("public.topology", "id", "srid")
+	topo.ConstraintDefs["topology_pkey"] = "PRIMARY KEY (id)"
+	layer := member("public.layer", "topology_id", "layer_id")
+	layer.ConstraintDefs["layer_pkey"] = "PRIMARY KEY (topology_id, layer_id)"
+	layer.ConstraintDefs["layer_topology_id_fkey"] = "FOREIGN KEY (topology_id) REFERENCES topology(id)"
+	other := member("public.lookup", "id")
+	other.ConstraintDefs["lookup_pkey"] = "PRIMARY KEY (id)"
+	live.ExtensionConfig = map[string]string{"public.topology": "", "public.layer": ""}
+
+	res, err := Build(live, Options{Single: true, Data: map[string][]map[string]any{
+		"public.topology": {{"id": json.Number("1"), "srid": json.Number("4326")}},
+		"public.layer":    {},
+		"public.lookup":   {{"id": json.Number("1")}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(res.Files[0].Content)
+	for _, want := range []string{
+		"table topology:\n    data:\n      key: [id]\n      rows:\n        - {id: 1, srid: 4326}\n",
+		"table layer:\n    data:\n      key: [topology_id, layer_id]\n      rows: []\n    dependsOn: [table public.topology]\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "lookup") {
+		t.Errorf("the rows of a table that is not a configuration table are the extension's:\n%s", out)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "table public.lookup belongs to an extension and is not one of its configuration tables") {
+		t.Errorf("want a warning about public.lookup, got %v", res.Warnings)
 	}
 }

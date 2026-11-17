@@ -52,7 +52,7 @@ objects that belong to an extension are not.`,
                 fq := t
                 if !strings.Contains(fq, ".") { fq = "public." + fq }
                 if live.Tables[fq] == nil { return fmt.Errorf("--data %s: no such table", t) }
-                rows, err := diff.TableRows(ctx, pool, fq, live.Tables[fq].Partitioned)
+                rows, err := diff.TableRowsWhere(ctx, pool, fq, live.Tables[fq].Partitioned, live.ExtensionConfig[fq])
                 if err != nil { return err }
                 data[fq] = rows
             }

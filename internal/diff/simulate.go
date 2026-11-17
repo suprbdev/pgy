@@ -747,6 +747,7 @@ func cloneLive(l *Live) *Live {
         InitPrivs:          l.InitPrivs,
         BaseTypes:          cloneSet(l.BaseTypes),
         OwnedSequences:     cloneSet(l.OwnedSequences),
+        ExtensionConfig:    l.ExtensionConfig,
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),
         PartitionBounds:    cloneMap(l.PartitionBounds, nil),
         TableData:          cloneMap(l.TableData, func(d *LiveTableData) *LiveTableData { c := *d; return &c }),
