@@ -201,8 +201,10 @@ schema app:
 		`create schema if not exists "ext";`,
 		`alter extension "citext" set schema "ext";`,
 		`alter function "app"."norm"(p ext.citext) stable;`,
+		`set check_function_bodies = off;`,
 		`create or replace function "app"."by_email"(p ext.citext) returns integer language sql as $$select id from app.users where email = p limit 1$$;`,
 		`create or replace procedure "app"."touch"(p ext.citext) language sql as $$select 2$$;`,
+		`reset check_function_bodies;`,
 	}
 	if got := strings.TrimSpace(diff.Render(plan)); got != strings.Join(want, "\n") {
 		t.Fatalf("the routines must be replaced in place after the move; got:\n%s", got)
