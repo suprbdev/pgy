@@ -27,6 +27,10 @@ type Live struct{
     Extensions map[string]bool
     // ExtensionDefs: extension name -> installed schema/version
     ExtensionDefs map[string]*LiveExtension
+    // AvailableExtensions: the extensions the server can install, by name.
+    // nil when unknown: no connection, or IntrospectExtensions found
+    // nothing to look up.
+    AvailableExtensions map[string]*AvailableExtension
     Views      map[string]bool
     MatViews   map[string]bool
     // ViewOptions: "schema.view" -> reloptions (security_invoker, security_barrier, check_option)
@@ -259,6 +263,32 @@ type LiveExtension struct {
     // DefaultComment is the comment the extension's control file gives it,
     // which CREATE EXTENSION sets.
     DefaultComment string
+    // DefaultVersion is the version CREATE EXTENSION installs on this
+    // server; "" when unknown.
+    DefaultVersion string
+    // Requires lists the installed extensions this one depends on, sorted.
+    Requires []string
+    // UpdateTargets holds the versions ALTER EXTENSION ... UPDATE TO can
+    // reach from Version; nil when unknown.
+    UpdateTargets map[string]bool
+    // MovedFrom is the schema a simulated ALTER EXTENSION ... SET SCHEMA
+    // moved the extension out of, while the other live definitions still
+    // spell its objects the old way; "" otherwise.
+    MovedFrom string
+    // Members holds the unqualified names of the types, routines,
+    // relations, operator classes and text search objects the extension
+    // owns, and Operators those of its operators. Both are nil until
+    // IntrospectExtensions loads them for an extension that has to move.
+    Members   map[string]bool
+    Operators map[string]bool
+}
+
+// AvailableExtension is an extension the server can install: its default
+// version and, for every version it can install or update to, the
+// extensions that version requires.
+type AvailableExtension struct {
+    DefaultVersion string
+    Requires       map[string][]string
 }
 
 type LiveFunction struct{
@@ -1545,19 +1575,23 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     extQ := `
         select e.extname, n.nspname, e.extversion, e.extrelocatable,
                coalesce(obj_description(e.oid, 'pg_extension'), ''),
-               coalesce((select a.comment from pg_available_extensions a where a.name = e.extname), '')
+               coalesce(a.comment, ''), coalesce(a.default_version, ''),
+               array(select r.extname::text from pg_depend d join pg_extension r on r.oid = d.refobjid
+                     where d.classid = 'pg_extension'::regclass and d.objid = e.oid
+                     and d.refclassid = 'pg_extension'::regclass order by 1)
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
+        left join pg_available_extensions a on a.name = e.extname
     `
     batch.add(extQ, func(extRows pgx.Rows) error {
         for extRows.Next() {
-            var extName, extSchema, extVersion, comment, defaultComment string
-            var relocatable bool
-            if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable, &comment, &defaultComment); err != nil {
+            var extName string
+            le := &LiveExtension{}
+            if err := extRows.Scan(&extName, &le.Schema, &le.Version, &le.Relocatable, &le.Comment, &le.DefaultComment, &le.DefaultVersion, &le.Requires); err != nil {
                 return err
             }
             l.Extensions[extName] = true
-            l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable, Comment: comment, DefaultComment: defaultComment}
+            l.ExtensionDefs[extName] = le
         }
         return nil
     })
@@ -2493,6 +2527,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 
 // PlanWith diffs desired against live with the given options.
 func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
+    return withoutMoveEchoes(planWith(live, desired, opts), live, desired, opts)
+}
+
+// planWith is PlanWith before withoutMoveEchoes drops the statements that
+// only echo an extension's move to another schema.
+func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
@@ -2593,7 +2633,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
     for s := range neededSchemas {
-        if s == "public" { continue } // public schema always exists
+        if s == "public" || systemSchema(s) { continue }
         schemaNames = append(schemaNames, s)
     }
     sort.Strings(schemaNames)
@@ -2605,9 +2645,6 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, renames...)
     
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
-    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
-        plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
-    }
     for _, role := range sortedKeys(desired.DatabaseRoleSettings) {
         prefix := "alter role " + strings.ReplaceAll(grantRole(role), "%", "%%") + " in database %I "
         for _, c := range configClauses(desired.DatabaseRoleSettings[role], live.DatabaseRoleConfig[resolveRole(role, live.CurrentUser)]) {
@@ -2616,20 +2653,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
-    extNames := make([]string, 0, len(desired.Extensions))
-    for _, ext := range desired.Extensions {
-        if ext != nil && ext.Name != "" { extNames = append(extNames, ext.Name) }
-    }
-    sort.Strings(extNames)
-    for _, extName := range extNames {
-        ext := findExtension(desired, extName)
-        if ext == nil { continue }
-        if live.Extensions[ext.Name] {
-            plan.Alters = append(plan.Alters, extensionAlterStmts(ext, live.ExtensionDefs[ext.Name])...)
-            continue
-        }
-        plan.Creates = append(plan.Creates, renderExtension(ext))
-        if ext.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment))) }
+    planExtensions(plan, live, desired)
+    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
+        plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
     }
     planServers(plan, live, desired)
     
@@ -6904,33 +6930,6 @@ func renderExtension(ext *schema.Extension) string {
     if ext.Version != "" { stmt += " version " + quoteString(ext.Version) }
     if ext.Cascade { stmt += " cascade" }
     return stmt + ";"
-}
-
-// extensionAlterStmts moves a live extension to its declared schema (when it
-// is relocatable; others cannot be moved and are left alone) and updates it
-// to its declared version. Unset schema/version are unmanaged.
-func extensionAlterStmts(ext *schema.Extension, le *LiveExtension) []string {
-    if le == nil { return nil }
-    out := []string{}
-    if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
-        out = append(out, fmt.Sprintf("alter extension %s set schema %s;", pqIdent(ext.Name), pqIdent(ext.Schema)))
-    }
-    if ext.Version != "" && ext.Version != le.Version {
-        out = append(out, fmt.Sprintf("alter extension %s update to %s;", pqIdent(ext.Name), quoteString(ext.Version)))
-    }
-    if ext.Comment != "" && ext.Comment != le.Comment {
-        out = append(out, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment)))
-    }
-    return out
-}
-
-func findExtension(db *schema.Database, name string) *schema.Extension {
-    for _, ext := range db.Extensions {
-        if ext != nil && ext.Name == name {
-            return ext
-        }
-    }
-    return nil
 }
 
 // normalizeFunctionSignature normalizes function signatures for comparison

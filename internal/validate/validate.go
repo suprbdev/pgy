@@ -73,6 +73,7 @@ func Files(paths []string) []Issue {
 		obj  any
 	}
 	owners := map[string][]owner{}
+	extensions := map[string][]owner{}
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -109,21 +110,31 @@ func Files(paths []string) []Issue {
 		for k, obj := range singleOwnerObjects(d) {
 			owners[k] = append(owners[k], owner{p, obj})
 		}
-	}
-	for _, k := range sortedKeys(owners) {
-		decls := owners[k]
-		differ := false
-		for _, o := range decls[1:] {
-			if !reflect.DeepEqual(o.obj, decls[0].obj) {
-				differ = true
+		for _, ext := range d.Extensions {
+			if ext != nil {
+				extensions["extension "+ext.Name] = append(extensions["extension "+ext.Name], owner{p, ext})
 			}
 		}
-		if differ {
-			files := make([]string, len(decls))
-			for i, o := range decls {
-				files[i] = o.file
+	}
+	for _, group := range []struct {
+		decls map[string][]owner
+		rule  string
+	}{{owners, "the last file wins"}, {extensions, "the first declaration wins"}} {
+		for _, k := range sortedKeys(group.decls) {
+			decls := group.decls[k]
+			differ := false
+			for _, o := range decls[1:] {
+				if !reflect.DeepEqual(o.obj, decls[0].obj) {
+					differ = true
+				}
 			}
-			issues = append(issues, Issue{Severity: Warning, Object: k, Message: fmt.Sprintf("declared differently in %s; the last file wins", strings.Join(files, ", "))})
+			if differ {
+				files := make([]string, len(decls))
+				for i, o := range decls {
+					files[i] = o.file
+				}
+				issues = append(issues, Issue{Severity: Warning, Object: k, Message: fmt.Sprintf("declared differently in %s; %s", strings.Join(files, ", "), group.rule)})
+			}
 		}
 	}
 	issues = append(issues, Database(schema.Merge(dbs))...)

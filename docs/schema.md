@@ -202,7 +202,8 @@ the same table is declared in more than one file:
 - **`dependsOn`** entries are appended (duplicates ignored).
 - **`grants`, `policies`, `comment`**, and partition settings from a later
   file replace the earlier values when present.
-- **Extensions** are deduplicated by name.
+- **Extensions** are deduplicated by name, and the first declaration wins.
+  `pgy validate` warns when two declarations of one extension differ.
 - **Types, functions, procedures, views, sequences, and domains** are keyed by
   name; a later declaration replaces an earlier one.
 
@@ -262,11 +263,11 @@ extensions: [pg_trgm, pgcrypto]
 |----------|------|-------------|
 | `name` | string | Extension name |
 | `ifNotExists` | boolean | Adds `IF NOT EXISTS` to the SQL statement |
-| `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing. A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged |
-| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged |
+| `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
+| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
 | `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
+| `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
 
 ```yaml
 extensions:
@@ -275,6 +276,14 @@ extensions:
     schema: extensions
     version: "1.6"
 ```
+
+Extension statements come right after `CREATE SCHEMA`, before every object that could use the extension, and in requirement order: an extension is created after the declared extensions it requires. With a connection pgy reads the requirements from the server (`pg_available_extension_versions`); `diff --from-empty` knows those between PostgreSQL's own extensions (`earthdistance` needs `cube`, each transform such as `hstore_plperl` needs its language and its type) and otherwise follows `dependsOn: [extension <name>]`, which `pgy pull` writes for every extension that requires another.
+
+With a connection, `pgy diff` also warns about an extension the server does not offer, a `version` it cannot install, and a `version` the installed one has no update path to. The last case is left out of the plan, since PostgreSQL cannot downgrade an extension.
+
+Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
+
+Extensions are never dropped by pgy, not even with `--unsafe --prune`: remove one with a hand-written migration.
 
 ## Database Settings
 
@@ -291,6 +300,8 @@ database:
 ```
 
 `roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
+
+Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. PostgreSQL lets only superusers set such a parameter in a session that has not loaded the extension's library. A migration that creates the extension has loaded it; a later migration run by a non-superuser that changes the setting has not, and fails with `permission denied to set parameter` unless it first calls one of the extension's functions (for example a hand-added `select show_limit();` for `pg_trgm`).
 
 ## Tables
 
