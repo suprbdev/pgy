@@ -207,6 +207,9 @@ func TestSearchPathNames(t *testing.T) {
 	if !tsTemplatesEqual("ext.unaccent", "unaccent") {
 		t.Error("a text search template on the search_path must match its bare name")
 	}
+	if transformChanged([]string{"hstore"}, []string{"ext.hstore"}) || !transformChanged([]string{"hstore"}, []string{"other.hstore"}) {
+		t.Error("a transform type on the search_path must match its qualified name, and no other schema's")
+	}
 }
 
 func TestSearchPathExclusionConstraints(t *testing.T) {
