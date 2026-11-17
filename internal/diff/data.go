@@ -282,7 +282,12 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
     return nil
 }
 
-// IntrospectData compares the data rows declared in desired with the rows
+// IntrospectData is IntrospectDataWith without --unsafe.
+func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
+    return IntrospectDataWith(ctx, pool, l, desired, Options{})
+}
+
+// IntrospectDataWith compares the data rows declared in desired with the rows
 // of the live tables they belong to and records the result in
 // l.TableData. PostgreSQL does the comparison: each declared row is turned
 // into a record of the columns it uses with jsonb_to_record, so values are
@@ -293,15 +298,17 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
 // is written differently (a citext key in another case) is reported as
 // changed, and two declared rows with equal keys are an error, as is a key
 // column whose type has no default btree operator class (see
-// dataKeyTypeError). A column whose type the plan changes is compared in
-// its declared type (without its type modifier), so rows that only fit the
-// new type are found; when that type does not exist yet or the column is a
-// key column, the table is skipped. Tables whose key columns do not exist
-// yet (they are renamed or added by the plan) are skipped too, as are
-// tables whose rows use enum labels the plan has yet to add, and skipped
-// tables get upserts. The rows of tables that do not exist yet are only
-// checked (see checkNewTableData).
-func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
+// dataKeyTypeError). Columns are compared in their live types, except that
+// with opts.Unsafe, under which the plan changes the type of a column whose
+// declared type differs from the live one, such a column is compared in its
+// declared type (without its type modifier), so rows that only fit the new
+// type are found; when that type does not exist yet or the column is a key
+// column, the table is skipped. Tables whose key columns do not exist yet
+// (they are renamed or added by the plan) are skipped too, as are tables
+// whose rows use enum labels the plan has yet to add, and skipped tables
+// get upserts. The rows of tables that do not exist yet are only checked
+// (see checkNewTableData).
+func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database, opts Options) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
     if rq := newRequalifier(l, desired); rq != nil { desired = rq.database(desired) }
@@ -331,7 +338,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         }
         names, typs := []string{}, []string{}
         for _, col := range sortedKeys(used) {
-            if dc, lc := dt.Columns[col], lt.Columns[col]; dc != nil && lc != nil && dc.Type != "" && sc.columnType(dc.Type) != sc.columnType(lc.Type) {
+            if dc, lc := dt.Columns[col], lt.Columns[col]; opts.Unsafe && dc != nil && lc != nil && dc.Type != "" && sc.columnType(dc.Type) != sc.columnType(lc.Type) {
                 names, typs = append(names, col), append(typs, dc.Type)
             }
         }

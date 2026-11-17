@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/suprbdev/pgy/internal/diff"
 )
 
@@ -87,21 +88,61 @@ schema SCH:
         - {id: 1, code: V_CODE, price: V_PRICE}
 `
 
+// planDataWith plans y (with SCH replaced by sch) against pool the way pgy
+// diff does with opts, data rows included.
+func planDataWith(t *testing.T, pool *pgxpool.Pool, sch, y string, opts diff.Options) (*diff.PlanDiff, error) {
+	t.Helper()
+	ctx := context.Background()
+	d := loadSpellingYAML(t, strings.ReplaceAll(y, "SCH", sch))
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := diff.IntrospectDataWith(ctx, pool, live, d, opts); err != nil {
+		return nil, err
+	}
+	return diff.PlanWith(live, d, opts), nil
+}
+
+// convergeDataWith applies the plan planDataWith makes and fails unless the
+// next one is empty. It returns the SQL it applied.
+func convergeDataWith(t *testing.T, pool *pgxpool.Pool, sch, y string, opts diff.Options) string {
+	t.Helper()
+	p, err := planDataWith(t, pool, sch, y, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyPlan(t, pool, p)
+	again, err := planDataWith(t, pool, sch, y, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql := diff.Render(again); sql != "" {
+		t.Fatalf("plan did not converge:\n%s\nafter applying:\n%s", sql, diff.Render(p))
+	}
+	return diff.Render(p)
+}
+
 // TestIntegrationDataTypeChange changes column types in the same plan as
-// data rows that only fit the new types: the rows are compared in the
-// declared types and written after the change, and a changed key column
-// type gets an upsert.
+// data rows that only fit the new types: with --unsafe, which changes the
+// types, the rows are compared in the declared types and written after the
+// change, and a changed key column type gets an upsert. Without it the
+// types stay, and such a row is an error in the diff.
 func TestIntegrationDataTypeChange(t *testing.T) {
 	pool := connect(t)
 	sch := freshSchema(t, pool)
 	opts := diff.Options{Unsafe: true, Prune: true}
 	yaml := func(pairs ...string) string { return strings.NewReplacer(pairs...).Replace(dataTypeChange) }
-	convergeYAMLWith(t, pool, sch, yaml("T_ID", "int", "T_CODE", "varchar(3)", "T_PRICE", `"numeric(6,2)"`, "V_CODE", "abc", "V_PRICE", `"1.25"`), opts)
-	applied := convergeYAMLWith(t, pool, sch, yaml("T_ID", "int", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "abcde", "V_PRICE", `"1.0005"`), opts)
+	convergeDataWith(t, pool, sch, yaml("T_ID", "int", "T_CODE", "varchar(3)", "T_PRICE", `"numeric(6,2)"`, "V_CODE", "abc", "V_PRICE", `"1.25"`), opts)
+	wider := yaml("T_ID", "int", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "abcde", "V_PRICE", `"1.0005"`)
+	if _, err := planDataWith(t, pool, sch, wider, diff.Options{}); err == nil || !strings.Contains(err.Error(), "value too long for type character varying(3)") {
+		t.Errorf("without --unsafe the rows are compared in the live types, got %v", err)
+	}
+	applied := convergeDataWith(t, pool, sch, wider, opts)
 	if !strings.Contains(applied, `update only "`+sch+`"."t" set "code" = 'abcde', "price" = '1.0005' where "id" = 1;`) {
 		t.Errorf("want an update after the type change, got:\n%s", applied)
 	}
-	applied = convergeYAMLWith(t, pool, sch, yaml("T_ID", "bigint", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "xyz", "V_PRICE", `"2"`), opts)
+	applied = convergeDataWith(t, pool, sch, yaml("T_ID", "bigint", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "xyz", "V_PRICE", `"2"`), opts)
 	if !strings.Contains(applied, `on conflict ("id") do update set "code" = excluded."code", "price" = excluded."price";`) {
 		t.Errorf("want an upsert when the key column's type changes, got:\n%s", applied)
 	}
@@ -136,18 +177,19 @@ schema app:
       rows:
         - {code: a, name: A}
 `)
+	opts := diff.Options{Unsafe: true, Prune: true}
 	plan := func() *diff.PlanDiff {
 		live, err := diff.Introspect(ctx, db)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := diff.IntrospectExtensions(ctx, db, live, d, diff.Options{}); err != nil {
+		if err := diff.IntrospectExtensions(ctx, db, live, d, opts); err != nil {
 			t.Fatal(err)
 		}
-		if err := diff.IntrospectData(ctx, db, live, d); err != nil {
+		if err := diff.IntrospectDataWith(ctx, db, live, d, opts); err != nil {
 			t.Fatal(err)
 		}
-		return diff.PlanWith(live, d, diff.Options{Unsafe: true, Prune: true})
+		return diff.PlanWith(live, d, opts)
 	}
 	p := plan()
 	if sql := strings.TrimSpace(diff.Render(p)); sql != "create schema if not exists \"ext\";\nalter extension \"citext\" set schema \"ext\";" {
