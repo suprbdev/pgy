@@ -164,7 +164,7 @@ policy:
   concurrent_indexes: true              # indexes added to existing tables must set concurrently: true
 ```
 
-The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked. `concurrent_indexes` needs the database, so only `pgy diff` checks it.
+The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked. Neither rule checks a declaration of an object pgy never creates (a function or procedure without `body`, a view without `query`, a type without `type`), which is how [objects an extension owns](docs/schema.md#objects-an-extension-owns) are declared, and `require_owners` does not check the `sequence` block of a serial or identity column, which always has its table's owner. `pgy pull --owners` leaves out owners that are the connecting role; with `require_owners` set, it writes the owner of every object of the kinds the rule lists, the connecting role included, so that pulled YAML passes the rule. `concurrent_indexes` needs the database, so only `pgy diff` checks it.
 
 Two more `policy:` settings change what pgy does rather than adding checks:
 

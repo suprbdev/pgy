@@ -32,6 +32,10 @@ type Options struct {
 	MigrationsTable string
 	// Owners emits owner: for objects not owned by the connecting role.
 	Owners bool
+	// OwnerKinds lists object kinds, named as the policy kinds
+	// (validate.PolicyKinds), whose owner Owners emits also when it is the
+	// connecting role, as policy.require_owners asks.
+	OwnerKinds map[string]bool
 	// Roles emits the cluster's non-system roles.
 	Roles bool
 	// Data holds rows (from diff.TableRows) to emit as data: blocks, keyed
@@ -401,11 +405,16 @@ func (b *builder) memberType(k string) {
 	}
 }
 
-func (b *builder) owner(m *node, key string) {
-	if !b.opts.Owners {
-		return
-	}
-	if o := b.live.Owners[key]; o != "" && o != b.live.CurrentUser {
+// owner adds the owner of the object with Live.Owners key key, of policy
+// kind kind, to m (see addOwner).
+func (b *builder) owner(m *node, kind, key string) {
+	b.addOwner(m, kind, b.live.Owners[key])
+}
+
+// addOwner adds owner: o to m with Options.Owners, unless o is the
+// connecting role and Options.OwnerKinds does not list kind.
+func (b *builder) addOwner(m *node, kind, o string) {
+	if b.opts.Owners && o != "" && (o != b.live.CurrentUser || b.opts.OwnerKinds[kind]) {
 		add(m, "owner", str(o))
 	}
 }
@@ -417,7 +426,7 @@ func (b *builder) schemas() {
 			continue
 		}
 		blk := newMap()
-		b.owner(blk, "schema:"+s)
+		b.owner(blk, "schemas", "schema:"+s)
 		if c := b.live.SchemaComments[s]; c != "" && (s != "public" || c != "standard public schema") {
 			add(blk, "comment", str(c))
 		}
@@ -551,7 +560,7 @@ func (b *builder) types() {
 			add(t, "revokePublic", boolean(true))
 		}
 		addStr(t, "comment", b.live.TypeComments[k])
-		b.owner(t, "type:"+k)
+		b.owner(t, "types", "type:"+k)
 		add(blk, "type "+name, t)
 	}
 	for _, k := range sortedKeys(b.live.BaseTypes) {
@@ -612,7 +621,7 @@ func (b *builder) domains() {
 			add(m, "revokePublic", boolean(true))
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
-		b.owner(m, "type:"+k)
+		b.owner(m, "domains", "type:"+k)
 		add(blk, "domain "+name, m)
 	}
 }
@@ -773,7 +782,7 @@ func (b *builder) sequences() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
-		b.owner(m, "rel:"+k)
+		b.owner(m, "sequences", "rel:"+k)
 		add(blk, "sequence "+name, m)
 	}
 }
@@ -880,7 +889,7 @@ func (b *builder) routines() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
-		b.owner(m, "proc:"+norm)
+		b.owner(m, kindOf(r)+"s", "proc:"+norm)
 		add(blk, key, m)
 	}
 }
@@ -962,7 +971,7 @@ func (b *builder) aggregates() {
 			}
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
-		b.owner(m, "proc:"+norm)
+		b.owner(m, "aggregates", "proc:"+norm)
 		add(blk, "aggregate "+short+args, m)
 	}
 }
@@ -1084,7 +1093,7 @@ func (b *builder) tables() {
 			add(t, "grants", g)
 		}
 		addStr(t, "comment", b.live.RelComments[fq])
-		b.owner(t, "rel:"+fq)
+		b.owner(t, "tables", "rel:"+fq)
 		key := "table "
 		if lt.Foreign != nil {
 			key = "foreign table "
@@ -1115,9 +1124,7 @@ func (b *builder) servers() *node {
 		addStr(s, "type", ls.Type)
 		addStr(s, "version", ls.Version)
 		add(s, "options", stringsNode(ls.Options))
-		if b.opts.Owners && ls.Owner != b.live.CurrentUser {
-			addStr(s, "owner", ls.Owner)
-		}
+		b.addOwner(s, "servers", ls.Owner)
 		if g := grantsNode(ls.Grants); g != nil {
 			add(s, "grants", g)
 		}
@@ -1960,7 +1967,7 @@ func (b *builder) views() {
 			}
 			add(m, "columnDefaults", dm)
 		}
-		b.owner(m, "rel:"+k)
+		b.owner(m, "views", "rel:"+k)
 		add(blk, key, m)
 	}
 }

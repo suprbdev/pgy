@@ -31,7 +31,11 @@ func (p Policy) Empty() bool {
 }
 
 // CheckPolicy returns a warning for each object in d that breaks a rule
-// policy enables.
+// policy enables. require_grants and require_owners leave out declarations
+// of objects pgy never creates (a function or procedure without a body, a
+// view without a query, a type without a kind), which is how the objects
+// an extension owns are declared, and require_owners the sequences of
+// serial and identity columns, which have the owner of their table.
 func CheckPolicy(d *schema.Database, p Policy) []Issue {
 	issues := []Issue{}
 	warn := func(obj, format string, args ...any) {
@@ -56,7 +60,7 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 		}
 	}
 	for _, k := range sortedKeys(d.Views) {
-		if v := d.Views[k]; v != nil {
+		if v := d.Views[k]; v != nil && strings.TrimSpace(v.Query) != "" {
 			note("views", k, v.Grants != nil, v.Owner)
 		}
 	}
@@ -66,17 +70,17 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 		}
 	}
 	for _, k := range sortedKeys(d.Functions) {
-		if f := d.Functions[k]; f != nil {
+		if f := d.Functions[k]; f != nil && f.HasBody() {
 			note("functions", k, f.Grants != nil, f.Owner)
 		}
 	}
 	for _, k := range sortedKeys(d.Procedures) {
-		if pr := d.Procedures[k]; pr != nil {
+		if pr := d.Procedures[k]; pr != nil && pr.HasBody() {
 			note("procedures", k, pr.Grants != nil, pr.Owner)
 		}
 	}
 	for _, k := range sortedKeys(d.Types) {
-		if td := d.Types[k]; td != nil {
+		if td := d.Types[k]; td != nil && td.Kind != "" {
 			note("types", k, td.Grants != nil, td.Owner)
 		}
 	}
@@ -94,13 +98,14 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 		_, grants := d.SchemaGrants[s]
 		objects = append(objects, object{"schemas", s, grants, d.SchemaOwners[s]})
 	}
+	columnSeqs := d.ColumnSequences()
 	singular := map[string]string{"schemas": "schema", "tables": "table", "views": "view", "sequences": "sequence", "functions": "function", "procedures": "procedure", "types": "type", "domains": "domain", "servers": "server"}
 	for _, o := range objects {
 		obj := singular[o.kind] + " " + o.key
 		if p.RequireGrants[o.kind] && !o.grants {
 			warn(obj, "%s must declare a grants block (require_grants)", o.kind)
 		}
-		if p.RequireOwners[o.kind] && o.owner == "" {
+		if p.RequireOwners[o.kind] && o.owner == "" && (o.kind != "sequences" || columnSeqs[o.key] == "") {
 			warn(obj, "%s must declare an owner (require_owners)", o.kind)
 		}
 	}

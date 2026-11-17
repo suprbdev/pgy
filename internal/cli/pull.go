@@ -62,7 +62,7 @@ objects that belong to an extension are not.`,
                 if err != nil { return err }
                 data[fq] = rows
             }
-            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == "", Data: data})
+            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, OwnerKinds: cfg.Policy.RequireOwners, Roles: roles, Single: out == "", Data: data})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
             strict := &strictFindings{}
@@ -91,7 +91,7 @@ objects that belong to an extension are not.`,
     c.Flags().StringArrayVar(&schemas, "schema", nil, "Only pull these schemas (repeatable or comma-separated; default: all)")
     c.Flags().StringArrayVar(&excluded, "exclude-schema", nil, "Leave these schemas out (repeatable or comma-separated)")
     c.Flags().BoolVar(&settings, "database-settings", false, "Also write the database's settings when --schema or --exclude-schema limits the pull")
-    c.Flags().BoolVar(&owners, "owners", false, "Emit owner: for objects not owned by the connecting role")
+    c.Flags().BoolVar(&owners, "owners", false, "Emit owner: for objects not owned by the connecting role, and for every object of the kinds the config's policy.require_owners lists")
     c.Flags().BoolVar(&roles, "roles", false, "Emit the cluster's roles")
     c.Flags().BoolVar(&force, "force", false, "Overwrite existing files in --out")
     c.Flags().StringArrayVar(&dataTables, "data", nil, "Also pull the rows of these tables (schema.table, repeatable or comma-separated; quote mixed-case names as \"Schema\".\"Table\" or write them as is) as data: blocks")

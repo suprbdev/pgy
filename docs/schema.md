@@ -1616,7 +1616,7 @@ Behavior:
 
 ### Ownership
 
-Schemas (in the `schema <name>:` block or `schemas:` map entry), tables, views, materialized views, sequences, functions, procedures, types and domains accept `owner: <role>`. A differing live owner emits `ALTER ... OWNER TO`, before any grants. Omitted = unmanaged.
+Schemas (in the `schema <name>:` block or `schemas:` map entry), tables, views, materialized views, sequences, functions, procedures, types and domains accept `owner: <role>`. A differing live owner emits `ALTER ... OWNER TO`, before any grants. Omitted = unmanaged. The sequence of a serial or identity column always has its table's owner and takes no `owner`. `pgy pull --owners` writes the owners that are not the connecting role, and every owner of the kinds a `policy.require_owners` rule lists (see the [README](../README.md#strict-mode)).
 
 ```yaml
 schema app:

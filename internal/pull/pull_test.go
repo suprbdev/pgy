@@ -102,6 +102,40 @@ func TestBuildIdentitySequenceGrants(t *testing.T) {
 	}
 }
 
+func TestBuildOwnerKinds(t *testing.T) {
+	live := &diff.Live{
+		CurrentUser: "app",
+		Schemas:     map[string]bool{"app": true},
+		Tables: map[string]*diff.LiveTable{
+			"app.mine":   {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+			"app.theirs": {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+		},
+		Owners:  map[string]string{"schema:app": "app", "rel:app.mine": "app", "rel:app.theirs": "other"},
+		Details: &diff.LiveDetails{ColumnOrder: map[string][]string{"app.mine": {"id"}, "app.theirs": {"id"}}},
+	}
+	build := func(opts Options) string {
+		t.Helper()
+		opts.Single = true
+		res, err := Build(live, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(res.Files[0].Content)
+	}
+	got := build(Options{Owners: true})
+	if strings.Count(got, "owner:") != 1 || !strings.Contains(got, "owner: other") {
+		t.Errorf("without OwnerKinds only owners other than the connecting role are written:\n%s", got)
+	}
+	got = build(Options{Owners: true, OwnerKinds: map[string]bool{"tables": true}})
+	mine := got[strings.Index(got, "table mine:"):strings.Index(got, "table theirs:")]
+	if !strings.Contains(mine, "owner: app") || strings.Count(got, "owner: app") != 1 {
+		t.Errorf("OwnerKinds tables writes the connecting role on tables only:\n%s", got)
+	}
+	if got := build(Options{OwnerKinds: map[string]bool{"tables": true}}); strings.Contains(got, "owner:") {
+		t.Errorf("OwnerKinds writes nothing without Owners:\n%s", got)
+	}
+}
+
 func TestBuildNotNullName(t *testing.T) {
 	lt := &diff.LiveTable{Columns: map[string]*diff.LiveColumn{
 		"id":      {Type: "integer", NotNullName: "t_id_not_null"},
