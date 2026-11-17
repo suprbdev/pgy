@@ -186,6 +186,8 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		grant execute on function each(hstore) to "APP";
 		revoke usage on type citext from public;
 		grant usage on type hstore to "APP";
+		revoke execute on function min(citext) from public;
+		grant execute on function max(citext) to "APP";
 		create view slow as select queryid, calls from pg_stat_statements;
 		create function sha(x text) returns bytea language sql immutable return ext.digest(x, 'sha256');`)); err != nil {
 		t.Fatal(err)
@@ -201,6 +203,8 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		"view pg_stat_statements:\n    grants: {public: [insert, select]}\n",
 		"type citext:\n    revokePublic: true\n",
 		"type hstore:\n    grants: {" + app + ": [usage]}\n",
+		"aggregate min(citext):\n    revokePublic: true\n",
+		"aggregate max(citext):\n    grants: {" + app + ": [execute]}\n",
 	} {
 		if !strings.Contains(y, want) {
 			t.Errorf("missing %q in the pulled YAML:\n%s", want, y)
@@ -216,6 +220,75 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		if got[object] != acl {
 			t.Errorf("%s: ACL %q was rebuilt as %q\n%s", object, acl, got[object], y)
 		}
+	}
+}
+
+func TestIntegrationExtensionTablesAndSequences(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_ext_member_tables")
+	if _, err := db.Exec(ctx, strings.NewReplacer("APP", app).Replace(`
+		create extension hstore schema public;
+		create table public.cfg (id integer primary key, name text check (name <> ''));
+		create sequence public.cfg_seq;
+		create rule cfg_keep as on delete to public.cfg do instead nothing;
+		alter extension hstore add table public.cfg;
+		alter extension hstore add sequence public.cfg_seq;
+		create index cfg_name on public.cfg (name);
+		grant select, insert on public.cfg to "APP";
+		grant usage on sequence public.cfg_seq to "APP";`)); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	res, err := pull.Build(live, pull.Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	for _, want := range []string{
+		"table cfg:\n    grants: {" + app + ": [insert, select]}\n",
+		"sequence cfg_seq:\n    grants: {" + app + ": [usage]}\n",
+	} {
+		if !strings.Contains(y, want) {
+			t.Errorf("missing %q in the pulled YAML:\n%s", want, y)
+		}
+	}
+	for _, w := range res.Warnings {
+		t.Errorf("unexpected pull warning: %s", w)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the pulled YAML must diff clean, without touching the table's columns, keys, rule or index:\n%s\n%s", sql, y)
+	}
+
+	changed := strings.NewReplacer("APP", app).Replace(`
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table cfg:
+    grants: {APP: [select]}
+    comment: settings
+  sequence cfg_seq:
+    grants: {APP: [usage, select]}
+`)
+	plan := planExtensionsLive(t, db, changed, opts)
+	sql := diff.Render(plan)
+	for _, want := range []string{
+		`revoke insert on table "public"."cfg" from "` + app + `";`,
+		`grant select on sequence "public"."cfg_seq" to "` + app + `";`,
+		`comment on table "public"."cfg" is 'settings';`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "drop") || strings.Contains(sql, "alter table \"public\".\"cfg\" add") {
+		t.Errorf("an extension's table is never altered or pruned:\n%s", sql)
+	}
+	applyPlan(t, db, plan)
+	if sql := diff.Render(planExtensionsLive(t, db, changed, opts)); sql != "" {
+		t.Errorf("one migration must converge, got:\n%s", sql)
 	}
 }
 

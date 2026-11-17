@@ -291,8 +291,16 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for k, ag := range desired.Aggregates {
-        if ag == nil || ag.SFunc == "" { continue }
+        if ag == nil { continue }
         norm := normalizeFunctionSignature(schema.RoutineName(k) + aggregateArgs(ag.ArgsSig))
+        if ag.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], ag.Grants) }
+        if ag.RevokePublic {
+            out.FunctionPublicExec[norm] = false
+        } else if out.AggregateDefs[norm] == nil && !ag.AttributeOnly() {
+            out.FunctionPublicExec[norm] = true
+        }
+        if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
+        if ag.SFunc == "" { continue }
         parallel := ag.Parallel
         if parallel == "" { parallel = "unsafe" }
         opts := map[string]string{}
@@ -311,7 +319,6 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         _, minitcond := ag.Options["minitcond"]
         out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, HasInitCond: ag.HasInitCond(), HasMInitCond: minitcond, CombineFunc: ag.CombineFunc, Parallel: parallel, Options: opts}
         out.FunctionDefs[norm] = &LiveFunction{Signature: schema.RoutineName(k) + aggregateArgs(ag.ArgsSig), Kind: "a"}
-        if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
     }
 
     for k, vw := range desired.Views {

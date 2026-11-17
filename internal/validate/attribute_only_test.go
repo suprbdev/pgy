@@ -64,3 +64,54 @@ schema app:
 		}
 	}
 }
+
+func TestValidateExtensionTablesSequencesAggregates(t *testing.T) {
+	p := write(t, t.TempDir(), "ok.yml", `
+extensions:
+  - {name: postgis, schema: public}
+roles:
+  app: {}
+schema public:
+  table spatial_ref_sys:
+    grants: {app: [select, insert]}
+    comment: spatial reference systems
+    data:
+      key: [srid]
+      rows:
+        - {srid: 990001, auth_name: local}
+  sequence topology_seq:
+    grants: {app: [usage]}
+  aggregate st_union(geometry):
+    revokePublic: true
+    grants: {app: [execute]}
+  aggregate percentile(float8 order by anyelement):
+    grants: {app: [execute]}
+`)
+	if issues := Files([]string{p}); len(issues) > 0 {
+		t.Errorf("declarations that manage an extension's table, sequence and aggregate are valid:\n%s", messages(issues))
+	}
+}
+
+func TestValidateExtensionTablesSequencesAggregatesIncomplete(t *testing.T) {
+	p := write(t, t.TempDir(), "bad.yml", `
+schema app:
+  table events:
+    clusterOn: events_idx
+  table config:
+    data:
+      rows:
+        - {id: 1}
+  aggregate half(integer):
+    finalfunc: f
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"table app.events: has clusterOn but no columns, so it is created as a table without columns",
+		"table app.config: data needs data.key on a table declared without columns",
+		"aggregate half(integer): property 'sfunc' is required, if 'finalfunc' property exists",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

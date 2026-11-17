@@ -338,6 +338,17 @@ type Sequence struct {
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
+// DeclaresOptions reports whether sq sets any option of CREATE SEQUENCE
+// (as, increment, minValue, maxValue, start, cache, cycle, unlogged,
+// ownedBy). A sequence declared without options is created with
+// PostgreSQL's defaults when it doesn't exist, after the extensions, so the
+// declaration can also manage the privileges, owner and comment of one an
+// extension owns.
+func (sq *Sequence) DeclaresOptions() bool {
+    return sq.As != "" || sq.Increment != "" || sq.MinValue != "" || sq.MaxValue != "" || sq.Start != "" || sq.Cache != "" ||
+        sq.Cycle != nil || sq.Unlogged != nil || sq.OwnedBy != ""
+}
+
 // Domain is a CREATE DOMAIN declaration: a named base type with optional
 // default, NOT NULL, and CHECK constraint (which sees the value as VALUE).
 type Domain struct {
@@ -363,6 +374,10 @@ type Domain struct {
 type Table struct {
     Name    string             `yaml:"name"`
     Columns map[string]*Column `yaml:"columns"`
+    // ColumnsSet reports a columns key in the YAML, so that a table
+    // declared with an empty column list can be told from one declared
+    // without (see AttributeOnly).
+    ColumnsSet bool            `yaml:"-"`
     Foreign *ForeignTable      `yaml:"-"` // set for `foreign table <name>:` declarations
     PrimaryKey []string        `yaml:"-"`
     Of             string      `yaml:"-"` // composite type of a typed table (CREATE TABLE ... OF); its columns come from the type
@@ -400,6 +415,36 @@ type Table struct {
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// AttributeOnly reports whether t declares nothing that defines a table:
+// no columns key, of, partitionOf, inherits or server, and none of the keys
+// that need columns (primary key, indexes, constraints, triggers, storage
+// and so on). Such a declaration never creates, alters or drops the table:
+// it manages the privileges, owner, comment, row level security, policies
+// and rows of one that already exists, such as one an extension owns.
+func (t *Table) AttributeOnly() bool {
+    return !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil &&
+        (t.Foreign == nil || t.Foreign.Server == "" && t.Foreign.Options == nil) && len(t.DefinitionKeys()) == 0
+}
+
+// DefinitionKeys returns the YAML keys t sets that only a table pgy
+// creates can have, in a fixed order.
+func (t *Table) DefinitionKeys() []string {
+    out := []string{}
+    for _, k := range []struct {
+        key string
+        set bool
+    }{
+        {"primaryKey", len(t.PrimaryKey) > 0}, {"indexes", len(t.Indexes) > 0}, {"foreignKeys", len(t.ForeignKeys) > 0},
+        {"constraints", len(t.Constraints) > 0}, {"triggers", len(t.Triggers) > 0}, {"rules", len(t.Rules) > 0},
+        {"statistics", len(t.Statistics) > 0}, {"partitionBy", t.PartitionBy != nil}, {"forValues", t.Partition != nil},
+        {"unlogged", t.Unlogged != nil}, {"with", t.With != nil}, {"tablespace", t.Tablespace != ""},
+        {"replicaIdentity", t.ReplicaIdentity != ""}, {"clusterOn", t.ClusterOn != ""}, {"renamedFrom", t.RenamedFrom != ""},
+    } {
+        if k.set { out = append(out, k.key) }
+    }
+    return out
 }
 
 // PartitionBy declares a table's partitioning strategy (PARTITION BY).
@@ -648,6 +693,16 @@ type Aggregate struct {
     DependsOn   []string `yaml:"dependsOn"`
     Comment     string
     Owner       string
+    Grants      map[string][]string // role -> privileges (execute); nil = unmanaged
+    RevokePublic bool               // revoke PUBLIC's default EXECUTE
+}
+
+// AttributeOnly reports whether ag declares none of the options of CREATE
+// AGGREGATE. Such a declaration never creates the aggregate: it manages the
+// privileges, owner and comment of one that already exists, such as one an
+// extension owns.
+func (ag *Aggregate) AttributeOnly() bool {
+    return ag.SFunc == "" && ag.SType == "" && ag.FinalFunc == "" && ag.CombineFunc == "" && !ag.HasInitCond() && ag.Parallel == "" && len(ag.Options) == 0
 }
 
 // AggregateOptions maps the YAML keys of the optional CREATE AGGREGATE
@@ -771,6 +826,7 @@ func Merge(dbs []*Database) *Database {
                 for cn, c := range t.Columns {
                     existing.Columns[cn] = c
                 }
+                existing.ColumnsSet = existing.ColumnsSet || t.ColumnsSet
                 if t.Grants != nil {
                     existing.Grants = t.Grants
                 }
@@ -1167,7 +1223,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             t := &Table{Name: fq, Columns: map[string]*Column{}}
             if m, ok := tv.(map[string]any); ok {
                 if cRaw, ok := m["columns"]; ok {
-                    t.Columns = parseColumns(cRaw)
+                    t.Columns, t.ColumnsSet = parseColumns(cRaw), true
                 }
                 if pkRaw, ok := m["primaryKey"]; ok {
                     t.parsePrimaryKey(pkRaw)
@@ -1226,7 +1282,8 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 schemaName = sc
             }
             fq := qualify(schemaName, name)
-            t := &Table{Name: fq, Columns: parseColumns(m["columns"]) }
+            _, columnsSet := m["columns"]
+            t := &Table{Name: fq, Columns: parseColumns(m["columns"]), ColumnsSet: columnsSet}
             if pkRaw, ok := m["primaryKey"]; ok {
                 t.parsePrimaryKey(pkRaw)
             }
@@ -1295,7 +1352,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                     if o, ok := inner["options"].(map[string]any); ok { t.Foreign.Options = stringMap(o) }
                 }
                 if cRaw, ok := inner["columns"]; ok {
-                    t.Columns = parseColumns(cRaw)
+                    t.Columns, t.ColumnsSet = parseColumns(cRaw), true
                 }
                 if pkRaw, ok := inner["primaryKey"]; ok {
                     t.parsePrimaryKey(pkRaw)
@@ -2062,6 +2119,8 @@ func parseAggregate(schemaName, key string, body any) *Aggregate {
     if dep, ok := m["dependsOn"]; ok { ag.DependsOn = parseStringListFromNode(dep) }
     ag.Comment = str("comment")
     ag.Owner = str("owner")
+    if g, ok := m["grants"]; ok { ag.Grants = parseGrants(g) }
+    if b, ok := m["revokePublic"].(bool); ok { ag.RevokePublic = b }
     return ag
 }
 

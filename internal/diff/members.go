@@ -246,13 +246,15 @@ func membersPending(live *Live, stmts []string) bool {
 
 // resolveAttributeOnly lines up the declarations of desired that manage an
 // object pgy doesn't create (a function or procedure without a body, a view
-// without a query, a type without a kind) with the live objects they are
-// about. A routine declared in another spelling than the live one (argument
-// types only, other argument names) is rewritten to the live signature, so
-// that everything compared by signature finds it. A declaration whose
-// object doesn't exist is emptied, with a warning, unless pending says an
-// extension of this plan may still create it. desired itself is not
-// modified.
+// without a query, a type without a kind, a table without columns, an
+// aggregate without sfunc and stype) with the live objects they are about.
+// A routine declared in another spelling than the live one (argument types
+// only, other argument names) is rewritten to the live signature, so that
+// everything compared by signature finds it. A declaration whose object
+// doesn't exist is emptied, with a warning, unless pending says an
+// extension of this plan may still create it. A table declared with columns
+// that an extension owns is cut down to what an attribute-only declaration
+// manages, with a warning. desired itself is not modified.
 func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*schema.Database, []Warning) {
 	if live == nil || desired == nil {
 		return desired, nil
@@ -263,7 +265,11 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 		warns = append(warns, Warning{Message: fmt.Sprintf(format, args...)})
 	}
 	missing := func(kind, name, lacks string) {
-		warn("%s %s has no %s, so it only manages a %s that already exists (one an extension owns, for example), but the database has no such %s and this plan creates or updates no extension; nothing is planned for it", kind, name, lacks, kind, kind)
+		article := "a"
+		if strings.ContainsRune("aeiou", rune(kind[0])) {
+			article = "an"
+		}
+		warn("%s %s has no %s, so it only manages %s %s that already exists (one an extension owns, for example), but the database has no such %s and this plan creates or updates no extension; nothing is planned for it", kind, name, lacks, article, kind, kind)
 	}
 
 	liveFuncs := normalizedLiveFunctions(live)
@@ -385,7 +391,57 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 	if desired.Types != nil {
 		out.Types = types
 	}
+
+	tables := cloneMap(desired.Tables, nil)
+	for _, k := range sortedKeys(desired.Tables) {
+		dt := desired.Tables[k]
+		switch {
+		case dt == nil:
+		case !dt.AttributeOnly() && live.Tables[k] != nil && live.ExtensionMembers["rel:"+k]:
+			warn("table %s belongs to extension %s, which defines its columns, keys and indexes, so pgy manages only its privileges, owner, comment, row level security, policies and rows; declare it without columns", k, live.MemberExtension["rel:"+k])
+			tables[k] = memberTable(dt)
+		case !dt.AttributeOnly() || live.Tables[k] != nil || pending:
+		default:
+			missing("table", k, "columns")
+			tables[k] = &schema.Table{Name: dt.Name}
+		}
+	}
+	if desired.Tables != nil {
+		out.Tables = tables
+	}
+
+	aggregates := cloneMap(desired.Aggregates, nil)
+	for _, k := range sortedKeys(desired.Aggregates) {
+		ag := desired.Aggregates[k]
+		if ag == nil || !ag.AttributeOnly() || pending {
+			continue
+		}
+		name := schema.RoutineName(k)
+		if live.AggregateDefs[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))] != nil {
+			continue
+		}
+		missing("aggregate", name+ag.ArgsSig, "sfunc and stype")
+		aggregates[k] = &schema.Aggregate{Schema: ag.Schema, Name: ag.Name, ArgsSig: ag.ArgsSig}
+	}
+	if desired.Aggregates != nil {
+		out.Aggregates = aggregates
+	}
 	return &out, warns
+}
+
+// memberTable returns the part of dt that applies to a table an extension
+// owns: everything an attribute-only declaration manages (see
+// schema.Table.AttributeOnly).
+func memberTable(dt *schema.Table) *schema.Table {
+	out := &schema.Table{Name: dt.Name, Grants: dt.Grants, Owner: dt.Owner, Comment: dt.Comment, DependsOn: dt.DependsOn,
+		RowLevelSecurity: dt.RowLevelSecurity, ForceRowLevelSecurity: dt.ForceRowLevelSecurity, Policies: dt.Policies, Data: dt.Data}
+	if dt.Foreign != nil {
+		out.Foreign = &schema.ForeignTable{}
+	}
+	if out.Data != nil && len(out.Data.Key) == 0 {
+		out.Data = &schema.TableData{Key: dt.DataKey(), Rows: dt.Data.Rows}
+	}
+	return out
 }
 
 // signatureArgs returns the parenthesized argument list of a routine

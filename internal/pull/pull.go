@@ -71,7 +71,6 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.aggregates()
 	b.tables()
 	b.views()
-	b.undeclaredMemberGrants()
 
 	single := newMap()
 	emit := func(name string, doc *node) error {
@@ -214,29 +213,47 @@ func (b *builder) memberGrants(key, publicDefault string, current map[string]map
 	return m
 }
 
-// undeclaredMemberGrants warns about the tables, sequences and aggregates of
-// extensions whose privileges changed: pgy has no declaration that manages
-// an object of those kinds without creating it.
-func (b *builder) undeclaredMemberGrants() {
-	report := func(kind, key, name, publicDefault string, current map[string]map[string]bool) {
-		if b.wantSchema(schemaOf(name)) && b.memberGrants(key, publicDefault, current) != nil {
-			b.warn("%s %s belongs to an extension and its privileges are no longer the ones the extension set; pgy cannot declare them and they were left out", kind, name)
-		}
+// memberTable declares a table of an extension without columns when its
+// privileges are no longer the ones the extension set or it has row level
+// security or policies, which pg_dump keeps of an extension's table too.
+func (b *builder) memberTable(fq string, lt *diff.LiveTable) {
+	blk, name, ok := b.block(fq)
+	if !ok {
+		return
 	}
-	for _, k := range sortedKeys(b.live.Tables) {
-		kind := "table"
-		if lt := b.live.Tables[k]; lt != nil && lt.Foreign != nil {
-			kind = "foreign table"
-		}
-		report(kind, "rel:"+k, k, "", b.live.TableGrants[k])
+	m := b.memberGrants("rel:"+fq, "", b.live.TableGrants[fq])
+	if m == nil {
+		m = newMap()
 	}
-	for _, k := range sortedKeys(b.live.Sequences) {
-		report("sequence", "rel:"+k, k, "", b.live.TableGrants[k])
+	if lt.RLSEnabled {
+		add(m, "rowLevelSecurity", boolean(true))
 	}
-	for _, norm := range sortedKeys(b.live.AggregateDefs) {
-		if lf := b.live.FunctionDefs[norm]; lf != nil {
-			report("aggregate", "proc:"+norm, lf.Signature, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm]))
-		}
+	if lt.RLSForced {
+		add(m, "forceRowLevelSecurity", boolean(true))
+	}
+	b.policies(m, lt)
+	if len(b.live.ColumnGrants[fq]) > 0 {
+		b.warn("table %s belongs to an extension and has column privileges, which a table declared without columns cannot hold; they were left out", fq)
+	}
+	if len(m.Content) == 0 {
+		return
+	}
+	key := "table "
+	if lt.Foreign != nil {
+		key = "foreign table "
+	}
+	add(blk, key+name, m)
+}
+
+// memberSequence declares a sequence of an extension without options when
+// its privileges changed.
+func (b *builder) memberSequence(k string) {
+	blk, name, ok := b.block(k)
+	if !ok {
+		return
+	}
+	if m := b.memberGrants("rel:"+k, "", b.live.TableGrants[k]); m != nil {
+		add(blk, "sequence "+name, m)
 	}
 }
 
@@ -608,7 +625,11 @@ func identityOptionsNode(fq, cn string, lc *diff.LiveColumn) *node {
 func (b *builder) sequences() {
 	for _, k := range sortedKeys(b.live.Sequences) {
 		ls := b.live.SequenceDefs[k]
-		if ls == nil || b.member("rel", k) {
+		if ls == nil {
+			continue
+		}
+		if b.member("rel", k) {
+			b.memberSequence(k)
 			continue
 		}
 		if b.serialSeqs[k] {
@@ -794,7 +815,7 @@ func (b *builder) aggregates() {
 	for _, norm := range sortedKeys(b.live.AggregateDefs) {
 		la := b.live.AggregateDefs[norm]
 		lf := b.live.FunctionDefs[norm]
-		if lf == nil || b.member("proc", norm) {
+		if lf == nil {
 			continue
 		}
 		name := aggregateArgKeywordRe.ReplaceAllStringFunc(lf.Signature, strings.ToLower)
@@ -807,6 +828,12 @@ func (b *builder) aggregates() {
 		}
 		blk, short, ok := b.block(name)
 		if !ok {
+			continue
+		}
+		if b.member("proc", norm) {
+			if m := b.memberGrants("proc:"+norm, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm])); m != nil {
+				add(blk, "aggregate "+short+args, m)
+			}
 			continue
 		}
 		m := newMap()
@@ -842,6 +869,12 @@ func (b *builder) aggregates() {
 			default:
 				addStr(m, o[0], v)
 			}
+		}
+		if !b.live.FunctionPublicExec[norm] {
+			add(m, "revokePublic", boolean(true))
+		}
+		if g := b.grantsFor(b.live.FunctionGrants[norm], name, "functions"); g != nil {
+			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "proc:"+norm)
@@ -881,7 +914,11 @@ func setting(name, value string) *node {
 func (b *builder) tables() {
 	for _, fq := range sortedKeys(b.live.Tables) {
 		lt := b.live.Tables[fq]
-		if lt == nil || fq == b.opts.MigrationsTable || b.member("rel", fq) {
+		if lt == nil || fq == b.opts.MigrationsTable {
+			continue
+		}
+		if b.member("rel", fq) {
+			b.memberTable(fq, lt)
 			continue
 		}
 		blk, name, ok := b.block(fq)

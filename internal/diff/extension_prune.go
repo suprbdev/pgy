@@ -164,6 +164,12 @@ func declaredMembers(live *Live, desired *schema.Database) map[string][]string {
 			add("proc:"+normalizeFunctionSignature(name+p.ArgsSig), "procedure "+name+p.ArgsSig)
 		}
 	}
+	for _, k := range sortedKeys(desired.Aggregates) {
+		if ag := desired.Aggregates[k]; ag != nil {
+			name := schema.RoutineName(k)
+			add("proc:"+normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig)), "aggregate "+name+ag.ArgsSig)
+		}
+	}
 	for _, k := range sortedKeys(desired.Tables) {
 		add("rel:"+k, "table "+k)
 	}

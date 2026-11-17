@@ -49,7 +49,8 @@ type Options struct {
 // no longer declares. Only schemas that contain at least one desired object
 // are considered, and extension members, partitions, inherited constraints,
 // triggers and indexes, constraint-backed indexes, primary keys, sequences
-// owned by a column and pgy's migrations table are never dropped.
+// owned by a column and pgy's migrations table are never dropped, nor is
+// anything on a table declared without columns.
 //
 // early holds the drops that must precede column drops (triggers,
 // constraints, indexes, views); late holds the drops of objects other
@@ -66,7 +67,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
+        if dt == nil || lt == nil || dt.AttributeOnly() || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {

@@ -3146,7 +3146,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         case "table":
             // Handle tables in dependency order
             dt, ok := desired.Tables[e.Key]
-            if !ok || dt == nil { continue }
+            if !ok || dt == nil || dt.AttributeOnly() { continue }
             fq := e.Key
             lt := live.Tables[fq]
             if lt == nil {
@@ -5361,8 +5361,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         var revoked map[string]map[string]bool
         if dt.Grants != nil {
             liveG := live.TableGrants[k]
-            if live.Tables[k] == nil { liveG = created(k, "tables") }
             desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
+            if live.Tables[k] == nil {
+                liveG = created(k, "tables")
+                if dt.AttributeOnly() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
@@ -5381,8 +5384,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
             liveG := live.TableGrants[k]
-            if !live.Sequences[k] { liveG = created(k, "sequences") }
             desiredG := resolveGrantRoles(sq.Grants, live.CurrentUser)
+            if !live.Sequences[k] {
+                liveG = created(k, "sequences")
+                if !sq.DeclaresOptions() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("sequence "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, sq.Owner), covers(true, desiredG)))
         }
@@ -5482,7 +5488,43 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
         }
     }
+
+    for _, k := range sortedKeys(desired.Aggregates) {
+        ag := desired.Aggregates[k]
+        if ag == nil { continue }
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + aggregateArgs(ag.ArgsSig))
+        target := "function " + pqIdent(name) + aggregateGrantArgs(ag.ArgsSig)
+        desiredG := resolveGrantRoles(ag.Grants, live.CurrentUser)
+        exists := live.AggregateDefs[norm] != nil
+        defaultExec := !exists || live.FunctionPublicExec[norm]
+        if ag.RevokePublic && (ag.Grants == nil || !covers(false, desiredG)) && defaultExec {
+            revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
+        }
+        if ag.Grants != nil {
+            liveG := withPublicDefault(live.FunctionGrants[norm], "execute", defaultExec)
+            if !exists {
+                liveG = withPublicDefault(created(name, "functions"), "execute", true)
+                if ag.AttributeOnly() { liveG = pendingGrants(created(name, "functions"), desiredG) }
+            }
+            liveG = member("proc:"+norm, "execute", liveG, desiredG)
+            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), covers(false, desiredG)))
+        }
+    }
     return append(revokes, grants...), warns
+}
+
+// aggregateGrantArgs returns the argument types of an aggregate declared
+// with args as GRANT ... ON FUNCTION takes them: (*) as (), and the direct
+// and aggregated arguments of an ordered-set aggregate as one list.
+func aggregateGrantArgs(args string) string {
+    inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(aggregateArgs(args)), "("), ")"))
+    if loc := orderByRe.FindStringIndex(inner); loc != nil {
+        direct, aggregated := strings.TrimSpace(inner[:loc[0]]), strings.TrimSpace(inner[loc[1]:])
+        inner = aggregated
+        if direct != "" { inner = direct + ", " + aggregated }
+    }
+    return grantFuncArgs("(" + inner + ")")
 }
 
 // withPublicDefault returns liveG with PUBLIC holding priv when present

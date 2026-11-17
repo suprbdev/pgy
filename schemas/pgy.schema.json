@@ -375,11 +375,12 @@
       "additionalProperties": false
     },
     "table": {
+      "description": "Body of a `table <name>:` declaration. Without columns, of, partitionOf and inherits the declaration creates nothing: it manages the privileges, owner, comment, row level security, policies and rows of a table that already exists, such as one an extension owns, and its keys, indexes, constraints, triggers and storage are left alone.",
       "type": "object",
       "properties": {
         "data": {
           "type": "object",
-          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted; required on a table declared without columns).",
           "properties": {
             "key": { "$ref": "#/definitions/stringList" },
             "rows": { "type": "array", "items": { "type": "object" } }
@@ -484,7 +485,7 @@
       "properties": {
         "data": {
           "type": "object",
-          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted; required on a table declared without columns).",
           "properties": {
             "key": { "$ref": "#/definitions/stringList" },
             "rows": { "type": "array", "items": { "type": "object" } }
@@ -1106,7 +1107,7 @@
       "additionalProperties": false
     },
     "sequence": {
-      "description": "Body of a `sequence <name>:` declaration.",
+      "description": "Body of a `sequence <name>:` declaration. Without options (as, increment, minValue, maxValue, start, cache, cycle, unlogged, ownedBy) the sequence is created with PostgreSQL's defaults when it doesn't exist, after the extensions, so the declaration can also manage the privileges, owner and comment of a sequence an extension owns.",
       "type": "object",
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
@@ -1173,7 +1174,7 @@
       "additionalProperties": false
     },
     "aggregate": {
-      "description": "Body of an `aggregate <name>(args):` declaration (CREATE OR REPLACE AGGREGATE). Use (*) for count(*)-style aggregates.",
+      "description": "Body of an `aggregate <name>(args):` declaration (CREATE OR REPLACE AGGREGATE). Use (*) for count(*)-style aggregates. Without sfunc and stype the declaration creates nothing: it manages the privileges, owner and comment of an aggregate that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "sfunc": { "type": "string", "minLength": 1, "description": "State transition function." },
@@ -1199,9 +1200,16 @@
         "hypothetical": { "type": "boolean", "description": "HYPOTHETICAL: an ordered-set aggregate whose direct arguments are matched to the aggregated ones, as rank and dense_rank are (the args must use ORDER BY)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
-        "owner": { "type": "string" }
+        "owner": { "type": "string" },
+        "grants": { "$ref": "#/definitions/grants", "description": "Role -> privileges (execute), granted ON FUNCTION." },
+        "revokePublic": { "type": "boolean", "description": "Revoke PUBLIC's default EXECUTE." }
       },
-      "required": ["sfunc", "stype"],
+      "dependencies": {
+        "sfunc": ["stype"], "stype": ["sfunc"], "finalfunc": ["sfunc"], "combinefunc": ["sfunc"], "initcond": ["sfunc"], "parallel": ["sfunc"],
+        "sspace": ["sfunc"], "finalfuncExtra": ["sfunc"], "finalfuncModify": ["sfunc"], "serialfunc": ["sfunc"], "deserialfunc": ["sfunc"],
+        "msfunc": ["sfunc"], "minvfunc": ["sfunc"], "mstype": ["sfunc"], "msspace": ["sfunc"], "mfinalfunc": ["sfunc"], "mfinalfuncExtra": ["sfunc"],
+        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "hypothetical": ["sfunc"]
+      },
       "additionalProperties": false
     },
     "collation": {
