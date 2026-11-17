@@ -464,6 +464,7 @@
           "description": "UNLOGGED table (not WAL-logged, emptied after a crash). Changing it on a live table rewrites it and requires --unsafe."
         },
         "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table (a partitioned table: the default for new partitions); the tablespace must exist. Absent = unmanaged." },
+        "validate": { "type": "string", "enum": ["immediate", "later"], "description": "How check constraints, foreign keys and (PostgreSQL 18+) NOT NULL added to this table once it exists are validated: later (default) adds them NOT VALID and validates them in the no-transaction migration; immediate adds them validated in one step, under the stronger lock, for tables that refuse VALIDATE CONSTRAINT. A constraint's or column's own validate overrides it." },
         "accessMethod": { "type": "string", "minLength": 1, "description": "Table access method (CREATE TABLE ... USING), e.g. heap or columnar. Changing it on a live table rewrites it (ALTER TABLE ... SET ACCESS METHOD) and requires --unsafe; on a partitioned table (PostgreSQL 17+) it sets the method of new partitions. Absent = unmanaged." },
         "with": {
           "type": "object",
@@ -560,6 +561,7 @@
         "unlogged": { "type": "boolean" },
         "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table; absent = unmanaged." },
         "accessMethod": { "type": "string", "minLength": 1, "description": "Table access method (USING); absent = unmanaged." },
+        "validate": { "type": "string", "enum": ["immediate", "later"] },
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
@@ -615,6 +617,11 @@
           "type": "boolean",
           "description": "Keep the column's NOT NULL constraint NOT VALID, so existing rows aren't checked and pgy diff never validates it. PostgreSQL 18+."
         },
+        "validate": {
+          "type": "string",
+          "enum": ["immediate", "later"],
+          "description": "How NOT NULL on an existing column is validated on PostgreSQL 18+: later (default) adds it NOT VALID and validates it in the no-transaction migration; immediate uses SET NOT NULL, which scans the table under ACCESS EXCLUSIVE. Absent = the table's validate."
+        },
         "notNullName": {
           "type": "string",
           "minLength": 1,
@@ -651,6 +658,7 @@
         "generated": { "type": "string", "minLength": 1 },
         "virtual": { "type": "boolean" },
         "notValid": { "type": "boolean" },
+        "validate": { "type": "string", "enum": ["immediate", "later"] },
         "notNullName": { "type": "string", "minLength": 1 },
         "collate": { "type": "string", "minLength": 1 },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"] },
@@ -745,6 +753,7 @@
         "deferrable": { "type": "boolean" },
         "initiallyDeferred": { "type": "boolean", "description": "Implies deferrable." },
         "notValid": { "type": "boolean", "description": "Add the constraint NOT VALID: existing rows are not checked." },
+        "validate": { "type": "string", "enum": ["immediate", "later"], "description": "How the key is validated when added to an existing table: later (default) adds it NOT VALID and validates it in the no-transaction migration; immediate adds it validated in one step, under the stronger lock of ADD CONSTRAINT. Absent = the table's validate." },
         "enforced": { "type": "boolean", "description": "false: NOT ENFORCED (PostgreSQL 18+). Default true." },
         "comment": {
           "type": "string",
@@ -851,6 +860,7 @@
         "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
         "noInherit": { "type": "boolean", "description": "Check only: NO INHERIT." },
         "notValid": { "type": "boolean", "description": "Check only: add NOT VALID (existing rows are not checked)." },
+        "validate": { "type": "string", "enum": ["immediate", "later"], "description": "Check only: how it is validated when added to an existing table: later (default) adds it NOT VALID and validates it in the no-transaction migration; immediate adds it validated in one step, under ACCESS EXCLUSIVE. Absent = the table's validate." },
         "enforced": { "type": "boolean", "description": "Check only: false emits NOT ENFORCED (PostgreSQL 18+). Default true." },
         "comment": { "type": "string", "description": "COMMENT ON CONSTRAINT text (diffed against live)." }
       },

@@ -401,7 +401,30 @@ type Table struct {
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
     AccessMethod string           `yaml:"-"` // USING: table access method; "" = unmanaged
+    Validate    string            `yaml:"-"` // how check constraints, foreign keys and NOT NULL added to the existing table are validated: ValidateImmediate or ValidateLater; "" = ValidateLater
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// Values of the validate key of tables, check constraints, foreign keys and
+// columns: how a constraint added to a table that already exists is
+// validated.
+const (
+    // ValidateLater adds the constraint NOT VALID and validates it in the
+    // no-transaction migration, which doesn't block writes. The default.
+    ValidateLater = "later"
+    // ValidateImmediate adds the constraint validated in one step, which
+    // checks the existing rows under the stronger lock of ADD CONSTRAINT
+    // (SET NOT NULL for a column), for tables that refuse VALIDATE
+    // CONSTRAINT.
+    ValidateImmediate = "immediate"
+)
+
+// ValidatesImmediately reports whether a constraint with validate value own
+// on table t is added validated in one step: own, or else t's validate, is
+// ValidateImmediate.
+func ValidatesImmediately(t *Table, own string) bool {
+    if own == "" && t != nil { own = t.Validate }
+    return own == ValidateImmediate
 }
 
 // PartitionBy declares a table's partitioning strategy (PARTITION BY).
@@ -446,6 +469,7 @@ type Constraint struct {
     InitiallyDeferred bool     // unique/exclude; implies Deferrable
     NoInherit         bool     // check: NO INHERIT
     NotValid          bool     // check: added NOT VALID (existing rows not checked)
+    Validate          string   // check: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotEnforced       bool     // check: NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string   // empty means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -464,6 +488,7 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    Validate string `yaml:"validate"` // NOT NULL on an existing column: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
@@ -507,6 +532,7 @@ type ForeignKey struct {
     Deferrable        bool
     InitiallyDeferred bool   // implies Deferrable
     NotValid          bool   // added NOT VALID (existing rows not checked)
+    Validate          string // ValidateImmediate or ValidateLater; "" = the table's Validate
     NotEnforced       bool   // NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string // empty means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -817,6 +843,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.AccessMethod != "" {
                     existing.AccessMethod = t.AccessMethod
+                }
+                if t.Validate != "" {
+                    existing.Validate = t.Validate
                 }
                 if t.Foreign != nil {
                     existing.Foreign = t.Foreign
@@ -1452,6 +1481,7 @@ func parseColumnSpec(spec any) *Column {
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
@@ -1720,6 +1750,7 @@ func parseForeignKeys(v any) []*ForeignKey {
                 if b, ok := dm["deferrable"].(bool); ok { fk.Deferrable = b }
                 if b, ok := dm["initiallyDeferred"].(bool); ok { fk.InitiallyDeferred = b }
                 if b, ok := dm["notValid"].(bool); ok { fk.NotValid = b }
+                if v, ok := dm["validate"].(string); ok { fk.Validate = strings.ToLower(strings.TrimSpace(v)) }
                 if b, ok := dm["enforced"].(bool); ok { fk.NotEnforced = !b }
                 if cm, ok := dm["comment"].(string); ok { fk.Comment = cm }
             }
@@ -1840,6 +1871,7 @@ func parseConstraints(v any) []*Constraint {
                 if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
                 if b, ok := dm["notValid"].(bool); ok { c.NotValid = b }
+                if v, ok := dm["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
                 if b, ok := dm["enforced"].(bool); ok { c.NotEnforced = !b }
                 if cm, ok := dm["comment"].(string); ok { c.Comment = cm }
             }
@@ -1852,12 +1884,13 @@ func parseConstraints(v any) []*Constraint {
 
 // parseTablePartitioning fills partitioning properties from a table's YAML map:
 // `partitionBy` (parent), `partitionOf` + `forValues`/`default` (child).
-// parseTableStorage fills a table's unlogged flag, tablespace, access method
-// and `with` storage parameters from its YAML map.
+// parseTableStorage fills a table's unlogged flag, tablespace, access method,
+// `with` storage parameters and validate mode from its YAML map.
 func parseTableStorage(t *Table, m map[string]any) {
     if b, ok := m["unlogged"].(bool); ok { t.Unlogged = &b }
     if ts, ok := m["tablespace"].(string); ok { t.Tablespace = strings.TrimSpace(ts) }
     if am, ok := m["accessMethod"].(string); ok { t.AccessMethod = strings.TrimSpace(am) }
+    if v, ok := m["validate"].(string); ok { t.Validate = strings.ToLower(strings.TrimSpace(v)) }
     if w, ok := m["with"].(map[string]any); ok {
         t.With = map[string]string{}
         for k, v := range w { t.With[k] = scalarToString(v) }

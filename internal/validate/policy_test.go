@@ -431,6 +431,36 @@ schema app:
 	}
 }
 
+func TestValidateImmediateWithNotValid(t *testing.T) {
+	path := write(t, t.TempDir(), "v.yml", `
+schema app:
+  table t:
+    validate: immediate
+    columns:
+      id: {type: int, primaryKey: true}
+      a: {type: int, notValid: true, validate: immediate}
+      b: {type: int, notValid: true}
+    foreignKeys:
+      t_a_fkey: {columns: [a], references: {table: app.t, columns: [id]}, notValid: true, validate: immediate}
+    constraints:
+      t_a_check: {type: check, expression: a > 0, notValid: true, validate: immediate}
+      t_b_check: {type: check, expression: b > 0, notValid: true}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"constraint t_a_check sets both notValid: true and validate: immediate",
+		"foreign key t_a_fkey sets both notValid: true and validate: immediate",
+		"column a sets both notValid: true and validate: immediate",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "t_b_check") || strings.Contains(got, "column b ") {
+		t.Errorf("notValid overrides the table's validate without an error:\n%s", got)
+	}
+}
+
 func TestValidateAccessMethods(t *testing.T) {
 	path := write(t, t.TempDir(), "am.yml", `
 servers:

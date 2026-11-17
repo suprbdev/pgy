@@ -476,6 +476,7 @@ Database settings are applied after the extensions are created, so a setting an 
 | `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
 | `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
+| `validate` | string | `immediate` or `later`: how making an existing column NOT NULL is validated on PostgreSQL 18+. `later` (the default) adds the constraint `NOT VALID` and validates it in the no-transaction migration; `immediate` uses `SET NOT NULL`, which scans the table under `ACCESS EXCLUSIVE`. See [Validating constraints in one step](#validating-constraints-in-one-step). Omitted = the table's `validate` |
 | `notNullName` | string | Name of the column's NOT NULL constraint (PostgreSQL 18+, which records one per NOT NULL column). Used when the table or the column is created and when an existing column becomes NOT NULL; a live constraint with another name is renamed in place with `ALTER TABLE ... RENAME CONSTRAINT`. Omitted = unmanaged: a new constraint gets PostgreSQL's `<table>_<column>_not_null`, and `pgy pull` writes the key only for a name that differs from that. Before PostgreSQL 18 the key is ignored and `pgy diff` warns. It applies to columns a table or foreign table declares with a type; a partition or inheritance child takes the name from its parent |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
@@ -677,11 +678,25 @@ foreignKeys:
     deferrable: true    # optional DEFERRABLE
     initiallyDeferred: true   # optional DEFERRABLE INITIALLY DEFERRED (implies deferrable)
     notValid: true      # optional: add NOT VALID, existing rows are not checked
+    validate: immediate # optional: add it validated in one step (default later)
     enforced: false     # optional: NOT ENFORCED (PostgreSQL 18+)
     comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
 
 `no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. A foreign key or check added to a table that already exists is added `NOT VALID` in the main migration and validated with `ALTER TABLE ... VALIDATE CONSTRAINT` in the no-transaction migration that `pgy commit` writes after it. Validation checks the existing rows without blocking reads or writes, while new rows are checked from the start. If existing rows violate the constraint, that migration fails, the constraint stays `NOT VALID` and `pgy diff` emits the pending `VALIDATE` until it succeeds. `notValid: true` leaves the constraint unvalidated instead; removing it later validates it the same way. Before PostgreSQL 18, a NOT VALID foreign key can't be added to a partitioned table: it is added validated, with a lock warning, and with `notValid: true` `pgy diff` emits nothing and prints a warning unless the table is new in the same migration. This applies to check constraints too, which have no such restriction. A constraint validated outside pgy while the YAML still says `notValid: true` is not treated as a change.
+
+#### Validating constraints in one step
+
+Some tables refuse `VALIDATE CONSTRAINT` while they accept an `ADD CONSTRAINT` that checks the rows itself: a TimescaleDB hypertable with columnstore enabled rejects it (`operation not supported on hypertables that have columnstore enabled`), so the no-transaction migration fails on every attempt. `validate: immediate` on a check constraint, a foreign key or a column (for its NOT NULL on PostgreSQL 18), or on the table for all of them, adds the constraint validated in the main migration instead: `ADD CONSTRAINT` without `NOT VALID`, or `SET NOT NULL`. That checks the existing rows under the stronger lock of those statements (`ACCESS EXCLUSIVE` for a check and `SET NOT NULL`; a foreign key blocks writes to both tables), so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). A constraint that exists `NOT VALID` is dropped and added again validated in the same migration, and a `NOT VALID` NOT NULL is validated by `SET NOT NULL`. `validate: later`, the default, keeps the two steps; on a constraint or column it overrides the table's `immediate`. `notValid: true` still leaves a constraint unvalidated, and `pgy validate` rejects it together with `validate: immediate` on the same constraint. If a `VALIDATE` migration has already failed, it was never recorded: delete that file before you commit the new diff, or `pgy migrate` keeps running it first.
+
+```yaml
+schema app:
+  table conditions:
+    validate: immediate       # every check, foreign key and NOT NULL added to it from now on
+    constraints:
+      hum_check: {type: check, expression: humidity >= 0}
+      temp_check: {type: check, expression: temperature > -100, validate: later}
+```
 
 ### Triggers
 
@@ -785,6 +800,7 @@ constraints:
     initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
     noInherit: true             # check: NO INHERIT
     notValid: true              # check: add NOT VALID, existing rows are not checked
+    validate: immediate         # check: add it validated in one step (default later)
     enforced: false             # check: NOT ENFORCED (PostgreSQL 18+)
 ```
 

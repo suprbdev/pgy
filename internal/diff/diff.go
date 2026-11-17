@@ -3311,7 +3311,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                             plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(lc.NotNullName), quoteIdent(name)))
                             if pending != "" { pending = name }
                         }
-                        if pending != "" && !c.Nullable && !c.NotValid {
+                        if pending != "" && !c.Nullable && !c.NotValid && schema.ValidatesImmediately(dt, c.Validate) {
+                            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s alter column %s set not null;", pqIdent(fq), quoteIdent(cn)))
+                        } else if pending != "" && !c.Nullable && !c.NotValid {
                             plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
                         }
                     }
@@ -4345,8 +4347,8 @@ func hasForeignPartition(live *Live, fq string) bool {
 // no-transaction migration, which scans under SHARE UPDATE EXCLUSIVE. It
 // returns "" when SET NOT NULL is used: before PostgreSQL 18, on primary
 // key, identity and generated columns, on foreign tables and partitions,
-// and when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip
-// the scan.
+// when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip the
+// scan, and when the column or its table asks for validate: immediate.
 // notValidNotNullStmt adds column cn's NOT NULL constraint NOT VALID, under
 // its declared name or PostgreSQL's default one, for a column declared
 // notValid.
@@ -4360,7 +4362,7 @@ func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *Li
         return ""
     case c.PrimaryKey, pkCols[cn], c.Identity != "", c.Generated != "", isSerialType(c.Type):
         return ""
-    case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn):
+    case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn), schema.ValidatesImmediately(dt, c.Validate):
         return ""
     }
     return notNullConstraintName(fq, cn, c)
@@ -5815,7 +5817,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(fkName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(fkName), def)
         partitionedBefore18 := dt.PartitionBy != nil && live.ServerVersion > 0 && live.ServerVersion < 180000
-        split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18
+        immediate := schema.ValidatesImmediately(dt, fk.Validate)
+        split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18 && !immediate
         if split {
             c := *fk
             c.NotValid = true
@@ -5827,6 +5830,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
+            case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef) && immediate:
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             }
@@ -5948,7 +5953,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         ctName := truncateIdent(ct.Name)
         validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(ctName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(ctName), def)
-        split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced
+        immediate := schema.ValidatesImmediately(dt, ct.Validate)
+        split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced && !immediate
         if split {
             c := *ct
             c.NotValid = true
@@ -5960,6 +5966,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
+            case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef) && immediate:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
