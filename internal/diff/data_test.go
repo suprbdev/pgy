@@ -77,12 +77,54 @@ func TestDataFromSnapshot(t *testing.T) {
 	}
 }
 
-func TestDataSQLRoutesMapsThroughPopulateRecord(t *testing.T) {
-	if got := dataSQL("app.t", nil, "p", map[string]any{"a": 1}); got != `(jsonb_populate_record(null::"app"."t", '{"p":{"a":1}}'::jsonb))."p"` {
-		t.Errorf("got %s", got)
+func TestDataSQLConvertsMapsToTheColumnType(t *testing.T) {
+	dt := &schema.Table{Columns: map[string]*schema.Column{"p": {Type: "app.pair"}, "ps": {Type: "app.pair[]"}, "inherited": {}}}
+	for _, c := range []struct {
+		col  string
+		v    any
+		want string
+	}{
+		{"p", map[string]any{"a": 1}, `(select v from jsonb_to_record('{"v":{"a":1}}'::jsonb) as x(v app.pair))`},
+		{"ps", []any{map[string]any{"a": 1}}, `(select v from jsonb_to_record('{"v":[{"a":1}]}'::jsonb) as x(v app.pair[]))`},
+		{"inherited", map[string]any{"a": 1}, `(jsonb_populate_record((select row(x.*)::"app"."t" from (select (null::"app"."t").*) x), '{"inherited":{"a":1}}'::jsonb))."inherited"`},
+		{"p", "(1,x)", `'(1,x)'`},
+		{"n", 5, "5"},
+	} {
+		if got := dataSQL("app.t", dt, c.col, c.v); got != c.want {
+			t.Errorf("dataSQL(%s, %v) = %s, want %s", c.col, c.v, got, c.want)
+		}
 	}
-	if got := dataSQL("app.t", nil, "n", 5); got != "5" {
-		t.Errorf("scalars stay literals, got %s", got)
+	if got := dataSQL("app.t", nil, "p", map[string]any{"a": 1}); !strings.HasPrefix(got, "(jsonb_populate_record((select row(x.*)") {
+		t.Errorf("an undeclared column goes through the table's row type, got %s", got)
+	}
+}
+
+func TestDataChangedKeyIsRewritten(t *testing.T) {
+	live := Simulate(emptyLive(), dataDB())
+	live.TableData["app.plan"] = &LiveTableData{Changed: map[int][]string{0: {"code"}, 1: {"code", "name"}}}
+	p := PlanWith(live, dataDB(), Options{})
+	for _, want := range []string{
+		`update only "app"."plan" set "code" = 'free' where "code" = 'free';`,
+		`update only "app"."plan" set "code" = 'pro', "name" = 'Pro' where "code" = 'pro';`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %q in\n%s", want, Render(p))
+		}
+	}
+}
+
+func TestDataMapHint(t *testing.T) {
+	types := map[string]dataColumn{"attrs": {typ: "hstore"}, "meta": {typ: "jsonb", json: true}, "pairs": {typ: "app.pair[]", json: true}}
+	ok := []map[string]any{{"attrs": `"a"=>"1"`, "meta": map[string]any{"a": 1}, "pairs": []any{map[string]any{"a": 1}}, "unknown": map[string]any{}}}
+	if hint := dataMapHint(ok, types); hint != "" {
+		t.Errorf("no hint expected, got %q", hint)
+	}
+	bad := append(ok, map[string]any{"attrs": map[string]any{"a": "1"}})
+	if hint := dataMapHint(bad, types); !strings.Contains(hint, "row 2 gives column attrs a map") || !strings.Contains(hint, "hstore") {
+		t.Errorf("hint = %q", hint)
+	}
+	if hint := dataMapHint([]map[string]any{{"attrs": []any{map[string]any{"a": "1"}}}}, types); !strings.Contains(hint, "row 1 gives column attrs a map") {
+		t.Errorf("a map inside a list counts, got %q", hint)
 	}
 }
 
@@ -105,9 +147,12 @@ func TestDataJSONColumnValues(t *testing.T) {
 		v    any
 		want string
 	}{
-		{"j", []any{}, `(jsonb_populate_record(null::"app"."t", '{"j":[]}'::jsonb))."j"`},
-		{"j", "just a string", `(jsonb_populate_record(null::"app"."t", '{"j":"just a string"}'::jsonb))."j"`},
-		{"js", 123, `(jsonb_populate_record(null::"app"."t", '{"js":123}'::jsonb))."js"`},
+		{"j", []any{}, `'[]'::jsonb`},
+		{"j", "just a string", `'"just a string"'::jsonb`},
+		{"j", map[string]any{"it's": []any{1, nil}}, `'{"it''s":[1,null]}'::jsonb`},
+		{"j", nil, `null`},
+		{"js", 123, `'123'::jsonb::json`},
+		{"js", nil, `null`},
 		{"arr", []any{}, `'{}'`},
 	} {
 		if got := dataSQL("app.t", dt, c.col, c.v); got != c.want {
