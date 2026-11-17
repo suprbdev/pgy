@@ -6562,8 +6562,18 @@ func renderStorageParams(with map[string]string) string {
     for k := range with { keys = append(keys, k) }
     sort.Strings(keys)
     parts := make([]string, len(keys))
-    for i, k := range keys { parts[i] = k + " = " + with[k] }
+    for i, k := range keys { parts[i] = k + " = " + storageParamValue(with[k]) }
     return " with (" + strings.Join(parts, ", ") + ")"
+}
+
+// storageParamValue renders the value of a storage parameter for WITH (...)
+// or SET (...): a number, a lower-case word or an SQL-quoted value as it is,
+// anything else as a string literal, since PostgreSQL folds an unquoted
+// word to lower case and accepts any value as a string.
+func storageParamValue(v string) string {
+    v = strings.TrimSpace(v)
+    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) { return v }
+    return quoteString(v)
 }
 
 // columnStorageStmts emits newColumnStmts for every column a newly created
@@ -6660,7 +6670,7 @@ func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) [
         if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
         lv, ok := live[strings.ToLower(k)]
         if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(with[k])) {
-            set = append(set, k+" = "+with[k])
+            set = append(set, k+" = "+storageParamValue(with[k]))
         }
     }
     for _, k := range sortedKeys(live) {
@@ -7281,7 +7291,7 @@ func renderIndexTail(ix *schema.Index) string {
         for k := range ix.With { keys = append(keys, k) }
         sort.Strings(keys)
         parts := make([]string, 0, len(keys))
-        for _, k := range keys { parts = append(parts, k+" = "+ix.With[k]) }
+        for _, k := range keys { parts = append(parts, k+" = "+storageParamValue(ix.With[k])) }
         out += " with (" + strings.Join(parts, ", ") + ")"
     }
     if ix.Tablespace != "" { out += " tablespace " + quoteIdent(ix.Tablespace) }
@@ -7351,7 +7361,7 @@ func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) [
     for _, k := range sortedKeys(want) {
         keys[strings.ToLower(k)] = true
         if lv, ok := li.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(want[k])) {
-            set = append(set, k+" = "+want[k])
+            set = append(set, k+" = "+storageParamValue(want[k]))
         }
     }
     for _, k := range sortedKeys(li.Options) {
