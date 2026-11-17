@@ -322,10 +322,14 @@ type LiveExtension struct {
     MovedFrom string
     // Members holds the unqualified names of the types, routines,
     // relations, operator classes and text search objects the extension
-    // owns, and Operators those of its operators. Both are nil until
-    // IntrospectExtensions loads them for an extension that has to move.
+    // owns, and Operators those of its operators. Builtins holds the names
+    // of its routines that pg_catalog has a routine of too, so that an
+    // unqualified call may well mean the built-in one. All three are nil
+    // until IntrospectExtensions loads them for an extension that has to
+    // move.
     Members   map[string]bool
     Operators map[string]bool
+    Builtins  map[string]bool
     // Created marks an extension that an earlier step of the same plan
     // creates (see Simulate), so the snapshot doesn't have its objects.
     Created bool
@@ -2777,7 +2781,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
-    live = live.scoped()
+    live = routinesAfterMoves(live.scoped(), desired)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))

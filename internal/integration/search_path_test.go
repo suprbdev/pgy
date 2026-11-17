@@ -250,6 +250,27 @@ func TestIntegrationDatabaseSearchPathReachesMigration(t *testing.T) {
 	requireNoChanges(t, "new session", again)
 }
 
+// TestIntegrationPgCatalogTypesConverge declares built-in types with their
+// pg_catalog qualifier in columns and routine arguments.
+func TestIntegrationPgCatalogTypesConverge(t *testing.T) {
+	assertYAMLIdempotent(t, map[string]string{"pg_catalog_types": `
+schema SCH:
+  table t:
+    columns:
+      id: {type: pg_catalog.int4, primaryKey: true}
+      name: {type: 'pg_catalog."varchar"(20)', nullable: true}
+      doc: {type: pg_catalog.jsonb, nullable: true}
+      tags: {type: 'pg_catalog.text[]', nullable: true}
+  function f(a pg_catalog.int4, b pg_catalog.text, c pg_catalog."varchar", d pg_catalog.jsonb):
+    returns: pg_catalog.int4
+    language: sql
+    body: select a
+  procedure p(a pg_catalog.int8):
+    language: sql
+    body: select 1
+`})
+}
+
 // TestIntegrationPullSearchPathIndependent pulls a database whose
 // search_path lists an application schema and an extension schema, through
 // that search_path and through others. The YAML must be the same every

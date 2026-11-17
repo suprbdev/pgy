@@ -161,6 +161,107 @@ schema public:
 	}
 }
 
+func TestIntegrationExtensionMoveReplacesRequalifiedRoutines(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_move_routines")
+	if _, err := db.Exec(ctx, `
+		create extension citext schema public;
+		create schema app;
+		create table app.users (id int primary key, email citext not null);
+		create function app.by_email(p citext) returns integer language sql as $$select id from app.users where email = p$$;
+		create function app.norm(p citext default 'x'::citext) returns citext language sql as $$select p$$;
+		create procedure app.touch(p citext) language sql as $$select 1$$;`); err != nil {
+		t.Fatal(err)
+	}
+	const y = `
+extensions:
+  - {name: citext, schema: ext}
+schema app:
+  table users:
+    columns:
+      id: {type: integer, primaryKey: true}
+      email: {type: ext.citext}
+  function by_email(p ext.citext):
+    returns: integer
+    language: sql
+    body: select id from app.users where email = p limit 1
+  function norm(p ext.citext default 'x'::ext.citext):
+    returns: ext.citext
+    language: sql
+    stable: true
+    body: select p
+  procedure touch(p ext.citext):
+    language: sql
+    body: select 2
+`
+	opts := diff.Options{Unsafe: true, Prune: true}
+	plan := planExtensionsLive(t, db, y, opts)
+	want := []string{
+		`create schema if not exists "ext";`,
+		`alter extension "citext" set schema "ext";`,
+		`alter function "app"."norm"(p ext.citext) stable;`,
+		`create or replace function "app"."by_email"(p ext.citext) returns integer language sql as $$select id from app.users where email = p limit 1$$;`,
+		`create or replace procedure "app"."touch"(p ext.citext) language sql as $$select 2$$;`,
+	}
+	if got := strings.TrimSpace(diff.Render(plan)); got != strings.Join(want, "\n") {
+		t.Fatalf("the routines must be replaced in place after the move; got:\n%s", got)
+	}
+	for _, w := range plan.Warnings {
+		t.Errorf("unexpected warning: %s", w.Message)
+	}
+	applyPlan(t, db, plan)
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the moved database must diff clean:\n%s", sql)
+	}
+}
+
+func TestIntegrationExtensionMoveOffSearchPathWarns(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_move_off_path")
+	if _, err := db.Exec(ctx, `
+		create extension citext schema public;
+		create extension "uuid-ossp" schema public;
+		create extension pgcrypto schema public;
+		create schema app;
+		create table app.users (id uuid primary key default uuid_generate_v4(), token uuid not null default gen_random_uuid(), email citext not null);
+		create function app.norm(e citext) returns text language sql as $$select lower(e::text)$$;`); err != nil {
+		t.Fatal(err)
+	}
+	const y = `
+extensions:
+  - {name: citext, schema: ext}
+  - {name: uuid-ossp, schema: ext}
+  - {name: pgcrypto, schema: ext}
+schema app:
+  table users:
+    columns:
+      id: {type: uuid, primaryKey: true, default: uuid_generate_v4()}
+      token: {type: uuid, default: gen_random_uuid()}
+      email: {type: citext}
+  function norm(e citext):
+    returns: text
+    language: sql
+    body: select lower(e::text)
+`
+	plan := planExtensionsLive(t, db, y, diff.Options{Unsafe: true})
+	msgs := []string{}
+	for _, w := range plan.Warnings {
+		msgs = append(msgs, w.Message)
+	}
+	want := []string{
+		"extension citext moves to schema ext, which is not on the search_path, while the YAML still names its objects without a schema in column app.users.email, function app.norm(e citext); those names will not resolve once it has moved, so qualify them with the schema",
+		"extension uuid-ossp moves to schema ext, which is not on the search_path, while the YAML still names its objects without a schema in column app.users.id; those names will not resolve once it has moved, so qualify them with the schema",
+	}
+	if strings.Join(msgs, "\n") != strings.Join(want, "\n") {
+		t.Errorf("want the warnings\n%s\ngot\n%s", strings.Join(want, "\n"), strings.Join(msgs, "\n"))
+	}
+	if !strings.Contains(diff.Render(plan), `alter extension "citext" set schema "ext";`) {
+		t.Errorf("the extension still moves:\n%s", diff.Render(plan))
+	}
+}
+
 func TestIntegrationExtensionCreateOrder(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_order")
@@ -209,18 +310,19 @@ func TestIntegrationExtensionServerChecks(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
 	db := freshDatabase(t, admin, "pgytest_ext_checks")
-	if _, err := db.Exec(ctx, `create extension hstore version '1.5' schema public`); err != nil {
+	if _, err := db.Exec(ctx, `create extension hstore version '1.5' schema public; create extension pg_trgm schema public`); err != nil {
 		t.Fatal(err)
 	}
 	plan := planExtensionsLive(t, db, `
 extensions:
   - {name: hstore, schema: public, version: "1.4"}
+  - {name: pg_trgm, schema: public, version: "9.9"}
   - {name: citext, schema: public, version: "9.9"}
   - {name: pgy_no_such_extension, schema: public}
 `, diff.Options{Unsafe: true})
 	sql := diff.Render(plan)
-	if strings.Contains(sql, `alter extension "hstore"`) {
-		t.Errorf("a downgrade must not be planned:\n%s", sql)
+	if strings.Contains(sql, `alter extension "hstore"`) || strings.Contains(sql, `alter extension "pg_trgm"`) {
+		t.Errorf("a downgrade or an update to a missing version must not be planned:\n%s", sql)
 	}
 	msgs := []string{}
 	for _, w := range plan.Warnings {
@@ -228,13 +330,17 @@ extensions:
 	}
 	all := strings.Join(msgs, "\n")
 	for _, want := range []string{
-		"extension hstore: PostgreSQL has no update path from the installed version 1.5 to 1.4",
+		"extension hstore: PostgreSQL has no update path from the installed version 1.5 to 1.4 (an extension cannot be downgraded)",
+		"extension pg_trgm: version 9.9 is not available on this server (available: ",
 		"extension citext: version 9.9 is not available on this server (available: ",
 		"extension pgy_no_such_extension is not available on this server",
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing warning %q in:\n%s", want, all)
 		}
+	}
+	if strings.Count(all, "cannot be downgraded") != 1 {
+		t.Errorf("only the downgrade says so:\n%s", all)
 	}
 	plan = planExtensionsLive(t, db, "extensions:\n  - {name: hstore, schema: public, version: \"1.6\"}\n", diff.Options{})
 	if got := strings.TrimSpace(diff.Render(plan)); got != `alter extension "hstore" update to '1.6';` || len(plan.Warnings) != 0 {
