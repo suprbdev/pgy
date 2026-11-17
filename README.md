@@ -144,7 +144,7 @@ ci:
 |------|---------|
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
-| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column; an extension `--prune` would drop is kept because objects still use it; an extension update may be rejected because views, materialized views or SQL-standard routine bodies use the extension (see [Updating extensions](docs/schema.md#updating-extensions)) |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column and can't be dropped and added again; a column is not dropped because objects the plan keeps still use it; an extension `--prune` would drop is kept because objects still use it; an extension update may be rejected because views, materialized views or SQL-standard routine bodies use the extension (see [Updating extensions](docs/schema.md#updating-extensions)) |
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
@@ -196,7 +196,7 @@ policy:
 
 ### Unsafe changes and pruning
 
-Without flags, `pgy diff` only adds and adjusts. It creates missing objects, adds columns, constraints and indexes, and changes defaults, comments, grants and similar settings. Changes that can fail on existing data or lose it need `--unsafe`. That covers column type changes, dropped columns, and redefined constraints and indexes, which are dropped and recreated.
+Without flags, `pgy diff` only adds and adjusts. It creates missing objects, adds columns, constraints and indexes, and changes defaults, comments, grants and similar settings. Changes that can fail on existing data or lose it need `--unsafe`. That covers column type changes, dropped columns, and redefined constraints and indexes, which are dropped and recreated. A column that a view, materialized view, trigger, rule, policy or generated column still uses once the plan has run is not dropped: PostgreSQL would reject the drop, so `pgy diff` warns (kind `dependents`), naming what uses it, and says whether `--prune` drops those first.
 
 Without `--unsafe`, `pgy diff` still plans those changes to report them: each statement it left out gets a `needs --unsafe, so it was left out` warning (the first 20 are printed; `--json` lists them all with kind `unsafe`), so a YAML change never goes unnoticed. `ci.fail_on: [unsafe]` makes `--strict` fail on them.
 

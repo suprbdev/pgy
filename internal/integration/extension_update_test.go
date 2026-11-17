@@ -54,7 +54,8 @@ func TestIntegrationExtensionUpdateRecreatesDependentViews(t *testing.T) {
 		comment on view app.slow is 'slow statements';
 		comment on column app.top.calls is 'how often';
 		alter view app.top alter column calls set default 0;
-		grant select on app.top to "`+reader+`";`); err != nil {
+		grant select on app.top to "`+reader+`";
+		grant update (calls) on app.top to "`+reader+`";`); err != nil {
 		t.Fatal(err)
 	}
 	const y = `
@@ -123,18 +124,19 @@ schema app:
 		t.Errorf("want version 1.10, got %s", v)
 	}
 	var comment, colComment, colDefault string
-	var granted, trigger, rule bool
+	var granted, colGranted, trigger, rule bool
 	if err := db.QueryRow(ctx, `
 		select coalesce(obj_description('app.slow'::regclass, 'pg_class'), ''),
 		       coalesce(col_description('app.top'::regclass, 2), ''),
 		       coalesce((select pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d where d.adrelid = 'app.top'::regclass and d.adnum = 2), ''),
 		       has_table_privilege($1, 'app.top'::regclass, 'select'),
+		       has_column_privilege($1, 'app.top'::regclass, 'calls', 'update'),
 		       exists (select 1 from pg_trigger where tgrelid = 'app.slow'::regclass and tgname = 'slow_ins'),
-		       exists (select 1 from pg_rewrite where ev_class = 'app.slow'::regclass and rulename = 'slow_del')`, reader).Scan(&comment, &colComment, &colDefault, &granted, &trigger, &rule); err != nil {
+		       exists (select 1 from pg_rewrite where ev_class = 'app.slow'::regclass and rulename = 'slow_del')`, reader).Scan(&comment, &colComment, &colDefault, &granted, &colGranted, &trigger, &rule); err != nil {
 		t.Fatal(err)
 	}
-	if comment != "slow statements" || colComment != "how often" || colDefault != "0" || !granted || !trigger || !rule {
-		t.Errorf("after recreation: comment %q, column comment %q, column default %q, grant %v, trigger %v, rule %v", comment, colComment, colDefault, granted, trigger, rule)
+	if comment != "slow statements" || colComment != "how often" || colDefault != "0" || !granted || !colGranted || !trigger || !rule {
+		t.Errorf("after recreation: comment %q, column comment %q, column default %q, grant %v, column grant %v, trigger %v, rule %v", comment, colComment, colDefault, granted, colGranted, trigger, rule)
 	}
 	if sql := diff.Render(planExtensionsLive(t, db, updated, all)); sql != "" {
 		t.Errorf("second diff must be clean:\n%s", sql)
