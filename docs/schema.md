@@ -10,6 +10,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Format 1: `schema <name>:` blocks (recommended)](#format-1-schema-name-blocks-recommended)
   - [Format 2: `tables:` map](#format-2-tables-map)
   - [Format 3: `tables:` list](#format-3-tables-list)
+  - [Names](#names)
 - [Merging across files](#merging-across-files)
 - [Extensions](#extensions)
 - [Database Settings](#database-settings)
@@ -188,6 +189,15 @@ tables:
         type: text
         nullable: true
 ```
+
+### Names
+
+Names are written unquoted and pgy quotes them in SQL, so `Order Items`, `user` or `a.b` need no SQL quotes in YAML.
+
+- **A key is always a name.** YAML reads an unquoted `2024`, `1.5`, `true`, `null` or `~` as a number, a boolean or null. pgy takes such a key as the text you wrote: `2024: {type: numeric}` declares the column `2024`, and `null: "NULL"` under a foreign table's `options` is file_fdw's `null` option. Quoting them (`"2024":`) is equivalent, and is what `pgy pull` writes so that other YAML tools read the file the same way.
+- **In a list of names**, such as `primaryKey: [id, 2024]` or an enum's `labels: [1, 2]`, such an entry is taken as a name too. YAML has already normalised a number by then (`1.0` becomes `1`, `0x10` becomes `16`), and the JSON Schema asks for strings there, so quote these: `primaryKey: [id, "2024"]`.
+- **Column, attribute, constraint, index, trigger, rule, policy and statistics names may contain dots**: `a.b: {type: integer}` is the column `"a.b"`. A sequence's `ownedBy` is read as `schema.table.column` (or `table.column`), with everything after the table being the column.
+- **Table, view, type, function and other schema-level names cannot contain a dot.** In those a dot separates the schema from the name: `table x.y:` inside `schema app:` declares table `y` in schema `x`.
 
 ## Merging across files
 

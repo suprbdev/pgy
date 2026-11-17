@@ -51,7 +51,7 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
 
     byRelation := map[string][]ColumnDependent{}
     for col, deps := range live.ColumnDependents {
-        rel := col[:strings.LastIndexByte(col, '.')]
+        rel := ColumnRelation(col)
         byRelation[rel] = append(byRelation[rel], deps...)
     }
     dropped := map[string]bool{}
