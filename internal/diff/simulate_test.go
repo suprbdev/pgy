@@ -142,3 +142,59 @@ func TestSimulateFunctionAndProcedureSetConverge(t *testing.T) {
         t.Fatalf("expected simulated SET/RESET to converge, got:\n%s", Render(p))
     }
 }
+
+func TestSimulateFunctionArgumentDefaultConverges(t *testing.T) {
+    for _, c := range []struct {
+        name, liveArgs, args string
+        unsafe               bool
+    }{
+        {"changed", "a integer DEFAULT 1", "(a int default 2)", false},
+        {"added", "a integer", "(a int default 3)", false},
+        {"removed", "a integer DEFAULT 1", "(a int)", true},
+    } {
+        norm := normalizeFunctionSignature("app.f(a int)")
+        live := emptyLive()
+        live.Functions["app.f(a integer)"] = true
+        live.FunctionDefs[norm] = &LiveFunction{Signature: "app.f(a integer)", Args: c.liveArgs, Kind: "f",
+            Body: "select a", Returns: "integer", Language: "sql", Volatility: "stable", Security: "invoker", Parallel: "safe", Cost: 5}
+        d := &schema.Database{Functions: map[string]*schema.Function{
+            "app.f" + c.args: {Schema: "app", Name: "f", ArgsSig: c.args, Returns: "int", Language: "sql", Body: "select a"},
+        }}
+        if p := Plan(live, d, c.unsafe); planSize(p) == 0 {
+            t.Fatalf("%s: the argument default has to be planned", c.name)
+        }
+        sim := Simulate(live, d)
+        if p := Plan(sim, d, c.unsafe); planSize(p) != 0 {
+            t.Errorf("%s: a plan after the simulated one must be empty, got:\n%s", c.name, Render(p))
+        }
+        lf := sim.FunctionDefs[norm]
+        switch {
+        case lf == nil:
+            t.Errorf("%s: the function must be simulated", c.name)
+        case c.unsafe && (lf.Volatility != "volatile" || lf.Parallel != "unsafe" || lf.Cost != 100):
+            t.Errorf("%s: DROP and CREATE reset the attributes the YAML leaves out, got %+v", c.name, lf)
+        case !c.unsafe && (lf.Volatility != "stable" || lf.Parallel != "safe" || lf.Cost != 5):
+            t.Errorf("%s: CREATE OR REPLACE keeps the attributes the YAML leaves out, got %+v", c.name, lf)
+        }
+    }
+}
+
+func TestSimulateProcedureArgumentDefaultConverges(t *testing.T) {
+    norm := normalizeFunctionSignature("app.p(a int)")
+    live := emptyLive()
+    live.Procedures[norm] = true
+    live.ProcedureDefs[norm] = &LiveProcedure{Signature: "app.p(a integer)", Args: "a integer DEFAULT 1", Body: "select a", Language: "sql", Security: "definer"}
+    d := &schema.Database{Procedures: map[string]*schema.Procedure{
+        "app.p(a int default 2)": {Schema: "app", Name: "p", ArgsSig: "(a int default 2)", Language: "sql", Body: "select a"},
+    }}
+    if p := Plan(live, d, false); planSize(p) == 0 {
+        t.Fatal("the argument default has to be planned")
+    }
+    sim := Simulate(live, d)
+    if p := Plan(sim, d, false); planSize(p) != 0 {
+        t.Errorf("a plan after the simulated one must be empty, got:\n%s", Render(p))
+    }
+    if lp := sim.ProcedureDefs[norm]; lp == nil || lp.Args != "a int default 2" || lp.Security != "definer" {
+        t.Errorf("CREATE OR REPLACE sets the arguments and keeps the security the YAML leaves out, got %+v", lp)
+    }
+}

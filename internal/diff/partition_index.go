@@ -37,14 +37,6 @@ func PartitionIndexName(partition string, li *LiveIndex, opclasses []LiveIndexOp
 	return chooseObjectName(rel, indexNameAddition(indexColumnNames(names)), "idx")
 }
 
-// identName returns the name an identifier, double-quoted or not, stands for.
-func identName(s string) string {
-	if isQuotedWith(s, '"') {
-		return unquote(s, '"')
-	}
-	return s
-}
-
 // indexColumnNames numbers repeated index column names as PostgreSQL's
 // ChooseIndexColumnNames does: expr, expr1, expr2.
 func indexColumnNames(names []string) []string {

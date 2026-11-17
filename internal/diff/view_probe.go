@@ -5,7 +5,6 @@ import (
     "fmt"
     "strings"
 
-    "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
 
     "github.com/suprbdev/pgy/internal/schema"
@@ -66,10 +65,9 @@ $f$`
 // printed with the pinned one. A query that names the objects of an
 // extension the plan moves to another schema is probed in the schema they
 // are still in. The
-// results go to live.ViewProbes, and the live views that depend on each
-// probed view to live.ViewDependents. A server that can't run the probe,
-// such as a read-only standby, leaves both empty, and views stay
-// create-only; the error is returned for the caller to report.
+// results go to live.ViewProbes. A server that can't run the probe, such as
+// a read-only standby, leaves it empty, and views stay create-only; the
+// error is returned for the caller to report.
 func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
     if live == nil || desired == nil || pool == nil { return nil }
     keys, queries, schemas, names := []string{}, []string{}, []string{}, []string{}
@@ -88,7 +86,6 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
     workers := min(viewProbeWorkers, (len(keys)+viewProbeChunk-1)/viewProbeChunk)
     type result struct {
         probes map[string]*ViewProbe
-        deps   map[string][]string
         err    error
     }
     results := make(chan result, workers)
@@ -98,20 +95,19 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
             for i := w; i < len(keys); i += workers {
                 ck, cq, cs, cn = append(ck, keys[i]), append(cq, queries[i]), append(cs, schemas[i]), append(cn, names[i])
             }
-            probes, deps, err := probeViewChunk(ctx, pool, ck, cq, cs, cn, w == 0)
-            results <- result{probes, deps, err}
+            probes, err := probeViewChunk(ctx, pool, ck, cq, cs, cn)
+            results <- result{probes, err}
         }(w)
     }
-    probes, deps := map[string]*ViewProbe{}, map[string][]string{}
+    probes := map[string]*ViewProbe{}
     var firstErr error
     for w := 0; w < workers; w++ {
         r := <-results
         if r.err != nil && firstErr == nil { firstErr = r.err }
         for k, p := range r.probes { probes[k] = p }
-        for k, d := range r.deps { deps[k] = d }
     }
     if firstErr != nil { return firstErr }
-    live.ViewProbes, live.ViewDependents = probes, deps
+    live.ViewProbes = probes
     return nil
 }
 
@@ -124,12 +120,12 @@ const (
 )
 
 // probeViewChunk probes the given views in a transaction of its own, which
-// it always rolls back, and with withDeps also returns the views' dependents.
-func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, schemas, names []string, withDeps bool) (map[string]*ViewProbe, map[string][]string, error) {
+// it always rolls back.
+func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, schemas, names []string) (map[string]*ViewProbe, error) {
     tx, err := pool.Begin(ctx)
-    if err != nil { return nil, nil, err }
+    if err != nil { return nil, err }
     defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-    if _, err := tx.Exec(ctx, viewProbeFuncs); err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
+    if _, err := tx.Exec(ctx, viewProbeFuncs); err != nil { return nil, fmt.Errorf("view probe: %w", err) }
     rows, err := tx.Query(ctx, `
         select t.k, d.def, d.cols, d.err, l.def, l.cols
         from unnest($1::text[], $2::text[], $3::text[], $4::text[]) with ordinality t(k, q, s, n, i)
@@ -138,7 +134,7 @@ func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, sche
         cross join lateral pg_temp.pgy_viewdef(t.q) d
         cross join lateral pg_temp.pgy_deparse(c.oid) l
         order by t.i`, keys, queries, schemas, names)
-    if err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
+    if err != nil { return nil, fmt.Errorf("view probe: %w", err) }
     probes := map[string]*ViewProbe{}
     for rows.Next() {
         var k string
@@ -147,7 +143,7 @@ func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, sche
         p := &ViewProbe{}
         if err := rows.Scan(&k, &def, &cols, &errText, &p.LiveDef, &p.LiveCols); err != nil {
             rows.Close()
-            return nil, nil, fmt.Errorf("view probe: %w", err)
+            return nil, fmt.Errorf("view probe: %w", err)
         }
         if def != nil { p.DesiredDef = *def }
         if errText != nil { p.Err = *errText }
@@ -155,33 +151,6 @@ func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, sche
         probes[k] = p
     }
     rows.Close()
-    if err := rows.Err(); err != nil { return nil, nil, fmt.Errorf("view probe: %w", err) }
-    if !withDeps { return probes, nil, nil }
-    deps, err := viewDependents(ctx, tx)
-    return probes, deps, err
-}
-
-// viewDependents returns, for each view and materialized view, the views
-// and materialized views that select from it directly.
-func viewDependents(ctx context.Context, tx pgx.Tx) (map[string][]string, error) {
-    rows, err := tx.Query(ctx, `
-        select distinct rn.nspname || '.' || r.relname, vn.nspname || '.' || v.relname
-        from pg_depend d
-        join pg_rewrite rw on d.classid = 'pg_rewrite'::regclass and rw.oid = d.objid
-        join pg_class v on v.oid = rw.ev_class
-        join pg_namespace vn on vn.oid = v.relnamespace
-        join pg_class r on r.oid = d.refobjid
-        join pg_namespace rn on rn.oid = r.relnamespace
-        where d.refclassid = 'pg_class'::regclass and d.deptype = 'n'
-        and v.oid <> r.oid and v.relkind in ('v', 'm') and r.relkind in ('v', 'm')
-        order by 1, 2`)
-    if err != nil { return nil, fmt.Errorf("view dependents: %w", err) }
-    defer rows.Close()
-    out := map[string][]string{}
-    for rows.Next() {
-        var ref, dep string
-        if err := rows.Scan(&ref, &dep); err != nil { return nil, err }
-        out[ref] = append(out[ref], dep)
-    }
-    return out, rows.Err()
+    if err := rows.Err(); err != nil { return nil, fmt.Errorf("view probe: %w", err) }
+    return probes, nil
 }

@@ -34,22 +34,6 @@ func (b *builder) languages() *node {
 	return out
 }
 
-// withoutRole returns acl without the entry of role. The initial ACL of an
-// extension's object lists the role that owned it then, which stops being a
-// grantee, not a grantee that lost its privileges, once the owner changes.
-func withoutRole(acl map[string]map[string]bool, role string) map[string]map[string]bool {
-	if _, ok := acl[role]; !ok {
-		return acl
-	}
-	out := make(map[string]map[string]bool, len(acl))
-	for r, privs := range acl {
-		if r != role {
-			out[r] = privs
-		}
-	}
-	return out
-}
-
 // wrappers renders the foreign-data wrappers. One that no extension owns is
 // written in full, with an empty handler or validator where it has none, so
 // that one set later is noticed. Of an extension's wrapper only what is no
@@ -67,7 +51,7 @@ func (b *builder) wrappers() *node {
 		grants, owner := lw.Grants, b.live.CurrentUser
 		initial, owned := b.live.InitialGrants("fdw:"+name, "")
 		if owned {
-			grants, owner = diff.GrantChanges(lw.Grants, withoutRole(initial, lw.ExtensionOwner)), lw.ExtensionOwner
+			grants, owner = diff.GrantChanges(lw.Grants, initial), lw.ExtensionOwner
 			if len(lw.Options) > 0 {
 				add(w, "options", stringsNode(lw.Options))
 			}
