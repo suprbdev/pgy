@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -63,6 +64,74 @@ func TestIntegrationColumnTypeChangeRecreatesDependents(t *testing.T) {
 	}
 	if typ != "bigint" || comment != "unmanaged comment" || colComment != "plus one" || !granted {
 		t.Errorf("after recreation: type %s, comment %q, column comment %q, public select %v", typ, comment, colComment, granted)
+	}
+}
+
+func TestIntegrationRecreatedViewsRestoreUnmanaged(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	reader := freshRole(t, pool, "reader")
+	y := `
+schema SCH:
+  function noop():
+    returns: trigger
+    language: plpgsql
+    body: begin return null; end
+  table t:
+    columns: {id: {type: int, primaryKey: true}, b: {type: %s, nullable: true}}
+  view v:
+    query: select id, b from SCH.t
+  view x:
+    query: %s
+`
+	convergeYAML(t, pool, sch, fmt.Sprintf(y, "int", "select id from SCH.t"))
+	if _, err := pool.Exec(ctx, strings.NewReplacer("READER", reader, "SCH", sch).Replace(`
+		grant select (b) on SCH.v to "READER";
+		create trigger v_ins instead of insert on SCH.v for each row execute function SCH.noop();
+		comment on trigger v_ins on SCH.v is 'unmanaged trigger';
+		create rule v_del as on delete to SCH.v do instead nothing;
+		comment on view SCH.x is 'unmanaged comment';
+		grant select on SCH.x to "READER";
+		alter view SCH.x set (security_barrier = true);`)); err != nil {
+		t.Fatal(err)
+	}
+	d, err := schema.LoadAndMerge([]string{writeYAML(t, strings.ReplaceAll(fmt.Sprintf(y, "bigint", "select id::text as id from SCH.t"), "SCH", sch))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := func() *diff.Live {
+		live := introspect(t, pool, d)
+		if err := diff.ProbeViews(ctx, pool, live, d); err != nil {
+			t.Fatal(err)
+		}
+		return live
+	}
+	p := diff.Plan(probed(), d, true)
+	sql := diff.Render(p)
+	for _, want := range []string{`drop view "` + sch + `"."v";`, `drop view if exists "` + sch + `"."x";`} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in:\n%s", want, sql)
+		}
+	}
+	applyPlan(t, pool, p)
+	if again := diff.Plan(probed(), d, true); diff.Render(again) != "" {
+		t.Fatalf("plan did not converge:\n%s", diff.Render(again))
+	}
+	var colGranted, granted, rule bool
+	var trigger, comment, options string
+	if err := pool.QueryRow(ctx, `
+		select has_column_privilege($1, $2::regclass, 'b', 'select'),
+		       coalesce((select obj_description(oid, 'pg_trigger') from pg_trigger where tgrelid = $2::regclass and tgname = 'v_ins'), 'missing'),
+		       exists (select 1 from pg_rewrite where ev_class = $2::regclass and rulename = 'v_del'),
+		       coalesce(obj_description($3::regclass, 'pg_class'), ''),
+		       has_table_privilege($1, $3::regclass, 'select'),
+		       coalesce(array_to_string((select reloptions from pg_class where oid = $3::regclass), ','), '')`,
+		reader, sch+".v", sch+".x").Scan(&colGranted, &trigger, &rule, &comment, &granted, &options); err != nil {
+		t.Fatal(err)
+	}
+	if !colGranted || trigger != "unmanaged trigger" || !rule || comment != "unmanaged comment" || !granted || options != "security_barrier=true" {
+		t.Errorf("after recreation: v column grant %v, trigger %q, rule %v; x comment %q, grant %v, options %q", colGranted, trigger, rule, comment, granted, options)
 	}
 }
 

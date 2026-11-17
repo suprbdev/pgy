@@ -21,6 +21,8 @@ import (
 func applyRenames(live *Live, desired *schema.Database) (*Live, []string) {
     if live == nil || desired == nil || !hasRenames(desired) { return live, nil }
     r := &renamer{l: cloneLive(live)}
+    r.l.ColumnDependents = cloneMap(live.ColumnDependents, func(ds []ColumnDependent) []ColumnDependent { return append([]ColumnDependent(nil), ds...) })
+    r.l.ViewDependents = cloneMap(live.ViewDependents, func(vs []string) []string { return append([]string(nil), vs...) })
     r.wrappers(desired)
     r.servers(desired)
     r.relations(desired)
@@ -187,6 +189,7 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.MatViews, old, new)
     moveKey(l.ViewOptions, old, new)
     moveKey(l.ViewColumnComments, old, new)
+    moveKey(l.ViewColumnDefaults, old, new)
     moveKey(l.MatViewTables, old, new)
     moveKey(l.ViewTables, old, new)
     moveKey(l.Sequences, old, new)
@@ -198,6 +201,7 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.Owners, "rel:"+old, "rel:"+new)
     moveKey(l.Partitions, old, new)
     moveKey(l.TableData, old, new)
+    r.moveDependents(old, new)
     for _, t := range l.Tables {
         if i := indexOf(t.Inherits, old); i >= 0 {
             t.Inherits = append([]string(nil), t.Inherits...)
@@ -223,6 +227,44 @@ func (r *renamer) moveRelation(old, new string) {
     for _, t := range r.allTables() {
         for n, def := range t.ConstraintDefs { t.ConstraintDefs[n] = fk.ReplaceAllLiteralString(def, "REFERENCES "+printedRelation(new)+"(") }
         for n, def := range t.Triggers { t.Triggers[n] = on.ReplaceAllLiteralString(def, " ON "+printedRelation(new)+" ") }
+    }
+}
+
+// moveDependents renames relation old to new in ColumnDependents, both in
+// the column keys and in the dependents, and in ViewDependents.
+func (r *renamer) moveDependents(old, new string) {
+    l := r.l
+    rename := func(s string) string {
+        if s == old { return new }
+        return s
+    }
+    deps := make(map[string][]ColumnDependent, len(l.ColumnDependents))
+    for col, ds := range l.ColumnDependents {
+        if strings.HasPrefix(col, old+".") { col = new + col[len(old):] }
+        for i := range ds {
+            if ds[i].Kind == "view" || ds[i].Kind == "matview" { ds[i].Name = rename(ds[i].Name) }
+            ds[i].Table = rename(ds[i].Table)
+        }
+        deps[col] = ds
+    }
+    l.ColumnDependents = deps
+    views := make(map[string][]string, len(l.ViewDependents))
+    for v, ws := range l.ViewDependents {
+        for i := range ws { ws[i] = rename(ws[i]) }
+        views[rename(v)] = ws
+    }
+    l.ViewDependents = views
+}
+
+// moveColumnDependents renames column old of relation fq to new in
+// ColumnDependents: the column's key, and the generated column itself when
+// it is one that uses another column.
+func (r *renamer) moveColumnDependents(fq, old, new string) {
+    moveKey(r.l.ColumnDependents, fq+"."+old, fq+"."+new)
+    for _, ds := range r.l.ColumnDependents {
+        for i := range ds {
+            if ds[i].Kind == "generated" && ds[i].Table == fq && ds[i].Name == old { ds[i].Name = new }
+        }
     }
 }
 
@@ -401,6 +443,7 @@ func (r *renamer) tableParts(d *schema.Database) {
             r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename column %s to %s;", pqIdent(k), quoteIdent(c.RenamedFrom), quoteIdent(cn)))
             moveKey(lt.Columns, c.RenamedFrom, cn)
             if g := r.l.ColumnGrants[k]; g != nil { moveKey(g, c.RenamedFrom, cn) }
+            r.moveColumnDependents(k, c.RenamedFrom, cn)
             r.rewriteColumnRefs(k, lt, c.RenamedFrom, cn)
         }
         r.renameIndexes(k, lt, dt.Indexes)
