@@ -76,7 +76,7 @@ That URL always serves the latest release's schema. To match an older pgy you ru
 }
 ```
 
-The schema validates property names and value types (catching typos like `funtion get():` or `using: btre`), enforces enums (index methods, trigger timing/events, volatility, partition strategies), and documents every property on hover. One limitation: the editor cannot autocomplete the dynamic header keys themselves (`table <name>:`, `function <name>(args):`) since those are pattern-matched, but everything inside their bodies completes normally.
+The schema validates property names and value types (catching typos like `funtion get():` or `uniqe: true`), enforces enums (trigger timing/events, volatility, partition strategies), and documents every property on hover. One limitation: the editor cannot autocomplete the dynamic header keys themselves (`table <name>:`, `function <name>(args):`) since those are pattern-matched, but everything inside their bodies completes normally.
 
 The schema is kept in sync with the parser by `internal/schema/jsonschema_test.go`, which validates `examples/schema.yml` and format fixtures against it as part of `make test`.
 
@@ -435,11 +435,11 @@ indexes:
   <index_name>:
     columns: [col1, col2]
     unique: true            # optional, default false
-    using: gist             # optional index method: btree (default) | gist | gin | brin | hash | spgist
+    using: gist             # optional index method: btree (default) | gist | gin | brin | hash | spgist, or one an extension adds (bloom)
     where: deleted_at is null   # optional partial index predicate
     opclass: gin_trgm_ops   # optional operator class applied to every column
     opclasses:              # optional per-column operator classes (override opclass)
-      col1: gin_trgm_ops
+      col1: gist_trgm_ops(siglen=32)   # operator class parameters go in parentheses
     include: [col3]         # optional INCLUDE (non-key) columns for index-only scans
     nullsNotDistinct: true  # optional, unique indexes: NULLs compare equal (PostgreSQL 15+)
     concurrently: true      # optional: on an existing table, build without blocking writes
@@ -455,11 +455,15 @@ If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from
 
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
 
+Operator class parameters are written after the name, as in `CREATE INDEX`: `opclass: gist_trgm_ops(siglen=32)`, or per column `opclasses: {path: gist_ltree_ops(siglen=100), tags: gist__int_ops(numranges=100)}`. They are compared with the live index column by name and value, so spacing, quotes and the order of several parameters don't matter, and `pgy pull` writes them, including those of a default operator class (`tsvector_ops(siglen=100)`). A changed parameter is a changed index. An entry without parameters means the operator class defaults, so an index that has them in the database and not in the YAML is reported as changed.
+
+`using` takes any index access method the database has. The built-in ones need nothing else; one that an extension adds, such as `bloom`, needs the extension under `extensions:`. Its options go in `with` (`using: bloom`, `with: {length: 80, col1: 2}`).
+
 `collations` gives index columns a `COLLATE`, keyed like `opclasses`: `collations: {name: C}` emits `("name" collate "C")`, the usual way to let `LIKE 'abc%'` use an index on a column whose collation isn't `C`. It is compared with the live index, so a changed collation rebuilds the index under `--unsafe`.
 
 `statisticsTargets` sets how much `ANALYZE` samples for an expression column, also keyed by the columns entry: `statisticsTargets: {lower(email): 500}` emits `ALTER INDEX ... ALTER COLUMN 1 SET STATISTICS 500` (the column's position in `columns`). `-1` restores the default. It is diffed against live and changed in place, without a rebuild. PostgreSQL only allows it on expressions, so `pgy validate` rejects a plain column; give that column a `statisticsTarget` instead. On a partitioned table's index, PostgreSQL applies it to the partitions' indexes too.
 
-Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with`, operator classes and collations. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
+Existing indexes are matched by name and their definitions compared against the live catalog: uniqueness, method, key columns or expressions and their sort order, `include`, `where`, `nullsNotDistinct`, `with`, operator classes with their parameters, and collations. A changed index is dropped and recreated in the same migration; since rebuilding can be slow and briefly leaves queries without the index, this requires `--unsafe`. Without `--unsafe`, a changed index emits no SQL.
 
 `concurrently: true` makes an index added to (or, under `--unsafe`, rebuilt on) an existing table use `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY`, which do not block writes but cannot run inside a transaction. `pgy diff` puts these statements in a separate `concurrent` buffer section that starts with `-- pgy:no-transaction`, and `pgy commit` writes it as its own migration after the main one. Indexes on tables created by the same plan are built normally. PostgreSQL cannot build an index concurrently on a partitioned table, so for an existing one pgy creates the index `ON ONLY` the parent, builds it `CONCURRENTLY` on each partition (recursing into sub-partitioned ones), and attaches the partition indexes, which makes the parent index valid. All of that goes in the no-transaction section. Every statement can be rerun. If a build is interrupted and leaves an index invalid, the next `pgy diff` finishes the partitioned sequence, or drops and rebuilds a plain concurrent index.
 

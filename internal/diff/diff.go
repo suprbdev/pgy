@@ -446,7 +446,27 @@ type LiveIndexOpclass struct {
     Collation string
     // StatisticsTarget is the index column's attstattarget; -1 = default.
     StatisticsTarget int
+    // Params holds the operator class parameters of the key column as
+    // name=value entries in catalog order: gist_trgm_ops(siglen=32) gives
+    // "siglen=32".
+    Params []string
 }
+
+// Declaration returns the operator class as an index's opclass entry spells
+// it: its name, followed by its parameters in parentheses when it has any
+// ("gist_trgm_ops(siglen=32)"). Parameters keep their catalog order.
+func (o LiveIndexOpclass) Declaration() string {
+    if len(o.Params) == 0 { return o.Name }
+    parts := make([]string, 0, len(o.Params))
+    for _, p := range o.Params {
+        k, v, _ := strings.Cut(p, "=")
+        if !opclassParamBareRe.MatchString(v) { v = quoteString(v) }
+        parts = append(parts, k+"="+v)
+    }
+    return o.Name + "(" + strings.Join(parts, ", ") + ")"
+}
+
+var opclassParamBareRe = regexp.MustCompile(`^[A-Za-z0-9_.+-]+$`)
 
 // LivePolicy is a policy as it exists in the live database. Cmd/Roles/Using/
 // WithCheck mirror the CREATE POLICY clauses so a redefined policy can be
@@ -806,15 +826,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     // flagged so a desired index without an explicit opclass matches. An
     // expression key's default collation is that of the opclass input type
     // when the opclass stores another type (gin_trgm_ops indexes text but
-    // stores int4), else that of the stored type.
+    // stores int4), else that of the stored type. A polymorphic input type
+    // (array_ops takes anyarray) has no collation of its own, so the stored
+    // type decides there too. Operator class parameters are the index
+    // column's attoptions.
     opcQ := `
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
                pg_opclass_is_visible(op.oid),
-               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 then oty.typcollation end, ity.typcollation)
+               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 and oty.typtype <> 'p' then oty.typcollation end, ity.typcollation)
                     then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
-               coalesce(ia.attstattarget::int, -1)
+               coalesce(ia.attstattarget::int, -1),
+               coalesce(ia.attoptions, '{}'::text[])
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         join pg_class t on t.oid = x.indrelid
@@ -837,11 +861,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, idxName, opcName, collation string
             var opcDefault, visible bool
             var target int
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &visible, &collation, &target); err != nil {
+            var params []string
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &visible, &collation, &target, &params); err != nil {
                 return err
             }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Visible: visible, Collation: collation, StatisticsTarget: target})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Visible: visible, Collation: collation, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -6898,21 +6923,66 @@ func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
 
 // indexOpclassesDiffer reports whether the desired index's operator classes
 // disagree with the live index's. A desired column with no explicit opclass
-// matches any default opclass. A key-column count mismatch means the index
-// changed in ways beyond opclasses (out of scope here), so it is not treated
-// as an opclass change.
+// matches any default opclass. Operator class parameters must be the same
+// set on both sides. A key-column count mismatch means the index changed in
+// ways beyond opclasses (out of scope here), so it is not treated as an
+// opclass change.
 func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
     if len(ix.Columns) != len(live) { return false }
     for i, c := range ix.Columns {
-        oc := indexColumnOpclass(ix, c)
+        oc, params := splitOpclass(indexColumnOpclass(ix, c))
         if oc == "" {
             if !live[i].Default { return true }
         } else if !opclassMatches(oc, live[i]) {
             return true
         }
-        if collationName(indexColumnCollation(ix, c)) != collationName(live[i].Collation) { return true }
+        if !opclassParamsEqual(params, parseProconfig(live[i].Params)) { return true }
+        want := collationName(indexColumnCollation(ix, c))
+        if base, _ := splitIndexOrdering(c); want == "default" && live[i].Collation == "" && isIndexExpression(base) { want = "" }
+        if want != collationName(live[i].Collation) { return true }
     }
     return false
+}
+
+// splitOpclass separates an operator class reference into its name and its
+// parameters: `gist_trgm_ops (siglen = '32')` gives gist_trgm_ops and
+// {siglen: 32}. Parameter names are lower-cased and the quotes around values
+// are dropped.
+func splitOpclass(s string) (string, map[string]string) {
+    s = strings.TrimSpace(s)
+    open := -1
+    quoted := false
+    for i, r := range s {
+        if r == '"' { quoted = !quoted }
+        if r == '(' && !quoted { open = i; break }
+    }
+    if open < 0 || !strings.HasSuffix(s, ")") { return s, nil }
+    params := map[string]string{}
+    for _, p := range splitTopLevelQuotedParens(s[open+1:len(s)-1]) {
+        k, v, ok := strings.Cut(p, "=")
+        if !ok { continue }
+        v = strings.TrimSpace(v)
+        if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' { v = strings.ReplaceAll(v[1:len(v)-1], "''", "'") }
+        params[strings.ToLower(strings.Trim(strings.TrimSpace(k), `"`))] = v
+    }
+    return strings.TrimSpace(s[:open]), params
+}
+
+// opclassParamsEqual compares declared operator class parameters with a live
+// index column's. Numbers are compared by value and everything else without
+// regard to case, as PostgreSQL reads them.
+func opclassParamsEqual(want, live map[string]string) bool {
+    if len(want) != len(live) { return false }
+    for k, v := range want {
+        lv, ok := live[k]
+        if !ok { return false }
+        if a, err := strconv.ParseFloat(v, 64); err == nil {
+            if b, err := strconv.ParseFloat(lv, 64); err == nil && a == b { continue }
+            return false
+        }
+        if !strings.EqualFold(v, lv) { return false }
+    }
+    return true
 }
 
 // opclassName makes operator class names comparable: case and quotes are

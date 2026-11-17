@@ -611,9 +611,11 @@
         "columns": { "$ref": "#/definitions/columnRefs" },
         "unique": { "type": "boolean" },
         "using": {
-          "type": "string",
-          "enum": ["btree", "gist", "gin", "brin", "hash", "spgist"],
-          "description": "Index access method (default btree)."
+          "anyOf": [
+            { "enum": ["btree", "gist", "gin", "brin", "hash", "spgist"] },
+            { "type": "string", "minLength": 1 }
+          ],
+          "description": "Index access method (default btree). Any access method the database has is accepted, including ones an extension adds (e.g. bloom)."
         },
         "where": {
           "type": "string",
@@ -621,13 +623,13 @@
         },
         "opclass": {
           "type": "string",
-          "description": "Operator class applied to every column (e.g. gin_trgm_ops)."
+          "description": "Operator class applied to every column (e.g. gin_trgm_ops), with its parameters in parentheses when it takes any (e.g. gist_trgm_ops(siglen=32))."
         },
         "collations": { "type": "object", "description": "Per-column COLLATE, keyed by the columns entry (e.g. {name: C}).", "additionalProperties": { "type": "string", "minLength": 1 } },
         "statisticsTargets": { "type": "object", "description": "Per-expression statistics target (ALTER INDEX ... ALTER COLUMN n SET STATISTICS), keyed by the columns entry (e.g. {lower(email): 500}); -1 restores the default. PostgreSQL only allows expression columns.", "additionalProperties": { "type": "integer", "minimum": -1 } },
         "opclasses": {
           "type": "object",
-          "description": "Per-column operator class overrides; keys match entries in columns.",
+          "description": "Per-column operator class overrides; keys match entries in columns. Parameters go in parentheses after the name (e.g. {name: gist_trgm_ops(siglen=32)}).",
           "additionalProperties": { "type": "string" }
         },
         "include": {
