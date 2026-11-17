@@ -84,7 +84,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         declKey := make([]string, len(key))
         textKey := make([]string, len(key))
         for i, k := range key {
-            q := pqIdent(k)
+            q := quoteIdent(k)
             join[i] = fmt.Sprintf("pgy_row.%s = (r.v).%s", q, q)
             liveKey[i] = "pgy_row." + q
             declKey[i] = "(jsonb_populate_record(null::" + tbl + ", e.j))." + q
@@ -93,10 +93,10 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         diffQ := `
             with d as (select e.j, e.i - 1 as i from jsonb_array_elements($1::jsonb) with ordinality e(j, i)),
                  r as (select d.i, d.j, jsonb_populate_record(null::` + tbl + `, d.j) as v from d)
-            select r.i, pgy_row.` + pqIdent(key[0]) + ` is null,
+            select r.i, pgy_row.` + quoteIdent(key[0]) + ` is null,
                    coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k), '{}')
             from r left join ` + from + ` pgy_row on ` + strings.Join(join, " and ") + `
-            where pgy_row.` + pqIdent(key[0]) + ` is null
+            where pgy_row.` + quoteIdent(key[0]) + ` is null
                or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k)`
         ld := &LiveTableData{Changed: map[int][]string{}}
         missing := map[int]bool{}
@@ -234,7 +234,7 @@ func arrayLiteral(list []any) string {
 func dataSQL(fq string, dt *schema.Table, col string, v any) string {
     if !containsMap(v) && !isJSONColumn(dt, col) { return sqlValue(v) }
     b, _ := json.Marshal(map[string]any{col: dataValue(v)})
-    return fmt.Sprintf("(jsonb_populate_record(null::%s, %s::jsonb)).%s", pqIdent(fq), quoteString(string(b)), pqIdent(col))
+    return fmt.Sprintf("(jsonb_populate_record(null::%s, %s::jsonb)).%s", pqIdent(fq), quoteString(string(b)), quoteIdent(col))
 }
 
 // isJSONColumn reports whether dt declares col as json or jsonb, whose YAML
@@ -281,7 +281,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
     names, vals := make([]string, len(cols)), make([]string, len(cols))
     overriding := ""
     for i, cn := range cols {
-        names[i], vals[i] = pqIdent(cn), dataSQL(fq, dt, cn, row[cn])
+        names[i], vals[i] = quoteIdent(cn), dataSQL(fq, dt, cn, row[cn])
         if c := dt.Columns[cn]; c != nil && c.Identity == "always" { overriding = " overriding system value" }
     }
     return fmt.Sprintf("insert into %s (%s)%s values (%s);", pqIdent(fq), strings.Join(names, ", "), overriding, strings.Join(vals, ", "))
@@ -289,7 +289,7 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
 
 func dataKeyWhere(key []string, value func(string) string) string {
     conds := make([]string, len(key))
-    for i, k := range key { conds[i] = fmt.Sprintf("%s = %s", pqIdent(k), value(k)) }
+    for i, k := range key { conds[i] = fmt.Sprintf("%s = %s", quoteIdent(k), value(k)) }
     return strings.Join(conds, " and ")
 }
 
@@ -334,7 +334,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             for _, row := range dt.Data.Rows {
                 set := []string{}
                 for _, cn := range dataColumns(dt, row) {
-                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = excluded.%s", pqIdent(cn), pqIdent(cn))) }
+                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = excluded.%s", quoteIdent(cn), quoteIdent(cn))) }
                 }
                 stmt := strings.TrimSuffix(dataInsert(fq, dt, row), ";") + " on conflict (" + joinIdentList(key) + ") do "
                 if len(set) == 0 { stmt += "nothing;" } else { stmt += "update set " + strings.Join(set, ", ") + ";" }
@@ -352,7 +352,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 row := dt.Data.Rows[i]
                 set := []string{}
                 for _, cn := range ld.Changed[i] {
-                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", pqIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
+                    if indexOf(key, cn) < 0 { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 }
                 if len(set) == 0 { continue }
                 writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))

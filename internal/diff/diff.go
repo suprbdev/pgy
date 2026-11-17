@@ -2415,14 +2415,14 @@ func compositeAlterStmts(fq string, td *schema.TypeDef, live, liveColl map[strin
         lt, exists := live[n]
         switch {
         case !exists:
-            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s%s", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n), tail))
+            out = append(out, fmt.Sprintf("alter type %s add attribute %s %s%s", pqIdent(fq), quoteIdent(n), t+attributeCollate(td, n), tail))
         case unsafe && (normalizeColumnType(t) != normalizeColumnType(lt) || collationName(td.AttributeCollations[n]) != collationName(liveColl[n])):
-            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s%s", pqIdent(fq), pqIdent(n), t+attributeCollate(td, n), tail))
+            out = append(out, fmt.Sprintf("alter type %s alter attribute %s type %s%s", pqIdent(fq), quoteIdent(n), t+attributeCollate(td, n), tail))
         }
     }
     if unsafe {
         for _, n := range sortedKeys(live) {
-            if _, ok := td.Attributes[n]; !ok { out = append(out, fmt.Sprintf("alter type %s drop attribute %s%s", pqIdent(fq), pqIdent(n), tail)) }
+            if _, ok := td.Attributes[n]; !ok { out = append(out, fmt.Sprintf("alter type %s drop attribute %s%s", pqIdent(fq), quoteIdent(n), tail)) }
         }
     }
     return out
@@ -2624,7 +2624,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     sort.Strings(schemaNames)
     for _, schemaName := range schemaNames {
         if !live.Schemas[schemaName] {
-            plan.Creates = append(plan.Creates, fmt.Sprintf("create schema if not exists %s;", pqIdent(schemaName)))
+            plan.Creates = append(plan.Creates, fmt.Sprintf("create schema if not exists %s;", quoteIdent(schemaName)))
         }
     }
     plan.Creates = append(plan.Creates, renames...)
@@ -2654,7 +2654,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             continue
         }
         plan.Creates = append(plan.Creates, renderExtension(ext))
-        if ext.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment))) }
+        if ext.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", quoteIdent(ext.Name), quoteString(ext.Comment))) }
     }
     planServers(plan, live, desired)
     
@@ -2697,14 +2697,14 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 emitted := map[string]bool{}
                 for _, an := range td.AttributeOrder {
                     if at, ok := td.Attributes[an]; ok && !emitted[an] {
-                        attrs = append(attrs, fmt.Sprintf("%s %s%s", pqIdent(an), at, attributeCollate(td, an)))
+                        attrs = append(attrs, fmt.Sprintf("%s %s%s", quoteIdent(an), at, attributeCollate(td, an)))
                         emitted[an] = true
                     }
                 }
                 keys := make([]string, 0, len(td.Attributes))
                 for k := range td.Attributes { if !emitted[k] { keys = append(keys, k) } }
                 sort.Strings(keys)
-                for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s%s", pqIdent(an), td.Attributes[an], attributeCollate(td, an))) }
+                for _, an := range keys { attrs = append(attrs, fmt.Sprintf("%s %s%s", quoteIdent(an), td.Attributes[an], attributeCollate(td, an))) }
                 plan.Creates = append(plan.Creates, fmt.Sprintf("create type %s as (%s);", pqIdent(e.Key), strings.Join(attrs, ", ")))
             case "range":
                 if td.Range == nil || td.Range.Subtype == "" { continue }
@@ -2883,7 +2883,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, col := range sortedKeys(vw.ColumnDefaults) {
                     want := vw.ColumnDefaults[col]
                     if have, ok := live.ViewColumnDefaults[e.Key][col]; live.Views[e.Key] && ok && defaultsEqual(want, have) { continue }
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(e.Key), pqIdent(col), want))
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(e.Key), quoteIdent(col), want))
                 }
             }
         case "table":
@@ -3010,7 +3010,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         continue
                     }
                     if name := notNullNotValidName(fq, cn, c, lc, lt, dt, pkCols, live.ServerVersion); name != "" {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), pqIdent(cn)))
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), quoteIdent(cn)))
                         if !c.NotValid { plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name))) }
                         enforced := *lc
                         enforced.Nullable = false
@@ -3047,7 +3047,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                     sort.Strings(dropCols)
                     for _, cn := range dropCols {
-                        plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), pqIdent(cn)))
+                        plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), quoteIdent(cn)))
                     }
                 }
             }
@@ -3422,10 +3422,10 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
     if dm.NotNull != ld.NotNull {
         if dm.NotNull { out = append(out, target+" set not null;") } else { out = append(out, target+" drop not null;") }
     } else if dm.NotNull && dm.NotNullName != "" && ld.NotNullName != "" && dm.NotNullName != ld.NotNullName {
-        out = append(out, fmt.Sprintf("%s rename constraint %s to %s;", target, pqIdent(ld.NotNullName), pqIdent(dm.NotNullName)))
+        out = append(out, fmt.Sprintf("%s rename constraint %s to %s;", target, quoteIdent(ld.NotNullName), quoteIdent(dm.NotNullName)))
     }
     want := desiredDomainChecks(fq, dm)
-    drop := func(name string) string { return fmt.Sprintf("%s drop constraint %s;", target, pqIdent(name)) }
+    drop := func(name string) string { return fmt.Sprintf("%s drop constraint %s;", target, quoteIdent(name)) }
     if unsafe {
         for _, name := range sortedKeys(ld.Checks) {
             if _, ok := want[name]; ok { continue }
@@ -3433,7 +3433,7 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
         }
     }
     for _, name := range sortedKeys(want) {
-        add := fmt.Sprintf("%s add constraint %s check (%s);", target, pqIdent(name), want[name])
+        add := fmt.Sprintf("%s add constraint %s check (%s);", target, quoteIdent(name), want[name])
         liveDef, exists := ld.Checks[name]
         switch {
         case !exists:
@@ -3463,7 +3463,7 @@ func partitionKeyExpr(s string) string {
     if strings.ContainsAny(s, "() ,+-/*") {
         return "(" + s + ")"
     }
-    return pqIdent(s)
+    return quoteIdent(s)
 }
 
 // inheritedColumn reports whether c, declared on dt, sets what dt keeps of
@@ -3521,7 +3521,7 @@ func typedTableUses(live *Live, fq string) bool {
 // target and n_distinct. Settings left out are unmanaged, so the parent's
 // copies stay. lc is the live column, nil for a table this plan creates.
 func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []string {
-    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
     if lc == nil { lc = &LiveColumn{Nullable: true} }
     out := []string{}
     if c.Default != "" && !defaultsEqual(c.Default, lc.Default) {
@@ -3707,7 +3707,7 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
             cp.GeneratedColumns = ""
             p = &cp
         }
-        ident := pqIdent(truncateIdent(name))
+        ident := quoteIdent(truncateIdent(name))
         lp := live.Publications[truncateIdent(name)]
         if lp != nil && lp.AllTables != p.AllTables {
             if !opts.Unsafe { continue }
@@ -3740,7 +3740,7 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
                 }
                 if len(lp.Schemas) > 0 {
                     schemas := make([]string, len(lp.Schemas))
-                    for i, s := range lp.Schemas { schemas[i] = pqIdent(s) }
+                    for i, s := range lp.Schemas { schemas[i] = quoteIdent(s) }
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
                 }
             }
@@ -3757,7 +3757,7 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
     }
     if !opts.Unsafe || !opts.Prune { return }
     for _, name := range sortedKeys(live.Publications) {
-        if desired.Publications[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", pqIdent(name))) }
+        if desired.Publications[name] == nil { plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name))) }
     }
 }
 
@@ -3771,7 +3771,7 @@ func publicationMembers(p *schema.Publication) string {
         if t.Where != "" { entry += " where (" + t.Where + ")" }
         parts = append(parts, entry)
     }
-    for _, s := range p.Schemas { parts = append(parts, "tables in schema "+pqIdent(s)) }
+    for _, s := range p.Schemas { parts = append(parts, "tables in schema "+quoteIdent(s)) }
     return strings.Join(parts, ", ")
 }
 
@@ -3830,7 +3830,7 @@ func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opt
     for _, name := range sortedKeys(desired.EventTriggers) {
         et := desired.EventTriggers[name]
         if et == nil || et.Event == "" || et.Function == "" { continue }
-        ident := pqIdent(truncateIdent(name))
+        ident := quoteIdent(truncateIdent(name))
         create := fmt.Sprintf("create event trigger %s on %s", ident, strings.ToLower(et.Event))
         if len(et.Tags) > 0 {
             tags := make([]string, len(et.Tags))
@@ -3859,7 +3859,7 @@ func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opt
     if !opts.Unsafe || !opts.Prune { return }
     for _, name := range sortedKeys(live.EventTriggers) {
         if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil { continue }
-        plan.Drops = append(plan.Drops, fmt.Sprintf("drop event trigger %s;", pqIdent(name)))
+        plan.Drops = append(plan.Drops, fmt.Sprintf("drop event trigger %s;", quoteIdent(name)))
     }
 }
 
@@ -3937,7 +3937,7 @@ func foreignTableAlterStmts(fq string, dt *schema.Table, lt *LiveTable, warn fun
         c, lc := dt.Columns[cn], lt.Columns[cn]
         if c == nil || lc == nil { continue }
         if clause := fdwOptionsAlter(c.FDWOptions, lc.FDWOptions); clause != "" {
-            out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), pqIdent(cn), clause))
+            out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), quoteIdent(cn), clause))
         }
     }
     return out
@@ -3994,7 +3994,7 @@ func hasForeignPartition(live *Live, fq string) bool {
 // PostgreSQL's default name, for a column declared notValid.
 func notValidNotNullStmt(fq, cn string) string {
     _, table := splitQualified(fq)
-    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(makeObjectName(table+"_"+cn, "not_null")), pqIdent(cn))
+    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(makeObjectName(table+"_"+cn, "not_null")), quoteIdent(cn))
 }
 
 func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
@@ -4065,9 +4065,9 @@ func serialConversionStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []st
     nsp, table := splitQualified(fq)
     seq := nsp + "." + makeObjectName(table+"_"+cn, "seq")
     return []string{
-        fmt.Sprintf("create sequence if not exists %s as %s owned by %s.%s;", pqIdent(seq), seqType, pqIdent(fq), pqIdent(cn)),
-        fmt.Sprintf("select setval(%s, (select coalesce(max(%s), 0) + 1 from %s), false);", quoteString(pqIdent(seq)), pqIdent(cn), pqIdent(fq)),
-        fmt.Sprintf("alter table %s alter column %s set default nextval(%s::regclass);", pqIdent(fq), pqIdent(cn), quoteString(pqIdent(seq))),
+        fmt.Sprintf("create sequence if not exists %s as %s owned by %s.%s;", pqIdent(seq), seqType, pqIdent(fq), quoteIdent(cn)),
+        fmt.Sprintf("select setval(%s, (select coalesce(max(%s), 0) + 1 from %s), false);", quoteString(pqIdent(seq)), quoteIdent(cn), pqIdent(fq)),
+        fmt.Sprintf("alter table %s alter column %s set default nextval(%s::regclass);", pqIdent(fq), quoteIdent(cn), quoteString(pqIdent(seq))),
     }
 }
 
@@ -4544,24 +4544,25 @@ func renderDomain(fq string, dm *schema.Domain) string {
     parts := []string{"create domain", pqIdent(fq), "as", dm.Type}
     if dm.Collate != "" { parts = append(parts, "collate "+collationIdent(dm.Collate)) }
     if dm.Default != "" { parts = append(parts, "default "+dm.Default) }
-    if dm.NotNull && dm.NotNullName != "" { parts = append(parts, "constraint "+pqIdent(dm.NotNullName)) }
+    if dm.NotNull && dm.NotNullName != "" { parts = append(parts, "constraint "+quoteIdent(dm.NotNullName)) }
     if dm.NotNull { parts = append(parts, "not null") }
     if dm.Check != "" {
-        if dm.ConstraintName != "" { parts = append(parts, "constraint "+pqIdent(dm.ConstraintName)) }
+        if dm.ConstraintName != "" { parts = append(parts, "constraint "+quoteIdent(dm.ConstraintName)) }
         parts = append(parts, fmt.Sprintf("check (%s)", dm.Check))
     }
     for _, n := range sortedKeys(dm.Checks) {
-        if dm.Checks[n] != "" { parts = append(parts, fmt.Sprintf("constraint %s check (%s)", pqIdent(n), dm.Checks[n])) }
+        if dm.Checks[n] != "" { parts = append(parts, fmt.Sprintf("constraint %s check (%s)", quoteIdent(n), dm.Checks[n])) }
     }
     return strings.Join(parts, " ") + ";"
 }
 
 // ownedByIdent quotes sequence seq's table.column (or schema.table.column)
-// OWNED BY target, schema-qualified.
+// OWNED BY target, schema-qualified. Everything after the table is the
+// column name, which may itself contain dots.
 func ownedByIdent(seq, s string) string {
     if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
-    parts := strings.Split(qualifyOwnedBy(seq, s), ".")
-    for i := range parts { parts[i] = `"` + parts[i] + `"` }
+    parts := strings.SplitN(qualifyOwnedBy(seq, s), ".", 3)
+    for i := range parts { parts[i] = quoteIdent(parts[i]) }
     return strings.Join(parts, ".")
 }
 
@@ -4579,7 +4580,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     for s := range desired.SchemaComments { schemaNames = append(schemaNames, s) }
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
-        comment("schema "+pqIdent(s), desired.SchemaComments[s], live.SchemaComments[s])
+        comment("schema "+quoteIdent(s), desired.SchemaComments[s], live.SchemaComments[s])
     }
 
     roleNames := make([]string, 0, len(desired.Roles))
@@ -4653,7 +4654,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if lt := live.Tables[k]; lt != nil {
                 if lc := lt.Columns[cn]; lc != nil { have = lc.Comment }
             }
-            comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(cn)), c.Comment, have)
+            comment(fmt.Sprintf("column %s.%s", pqIdent(k), quoteIdent(cn)), c.Comment, have)
         }
         lt := live.Tables[k]
         if dt.PrimaryKeyComment != "" {
@@ -4663,21 +4664,21 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
                 if name == "" { name = ln }
             }
             if name == "" { name = DefaultPrimaryKeyName(k) }
-            comment(fmt.Sprintf("constraint %s on %s", pqIdent(name), pqIdent(k)), dt.PrimaryKeyComment, have)
+            comment(fmt.Sprintf("constraint %s on %s", quoteIdent(name), pqIdent(k)), dt.PrimaryKeyComment, have)
         }
         for _, fk := range dt.ForeignKeys {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
             have := ""
             if lt != nil && !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe) { have = lt.ConstraintComments[fkName] }
-            comment(fmt.Sprintf("constraint %s on %s", pqIdent(fkName), pqIdent(k)), fk.Comment, have)
+            comment(fmt.Sprintf("constraint %s on %s", quoteIdent(fkName), pqIdent(k)), fk.Comment, have)
         }
         for _, ct := range dt.Constraints {
             if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
             name := truncateIdent(ct.Name)
             have := ""
             if lt != nil && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct)) { have = lt.ConstraintComments[name] }
-            comment(fmt.Sprintf("constraint %s on %s", pqIdent(name), pqIdent(k)), ct.Comment, have)
+            comment(fmt.Sprintf("constraint %s on %s", quoteIdent(name), pqIdent(k)), ct.Comment, have)
         }
         for _, tr := range dt.Triggers {
             if tr == nil || tr.Comment == "" || tr.Procedure == "" { continue }
@@ -4686,7 +4687,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if lt != nil {
                 if def, ok := lt.Triggers[name]; ok && (def == "" || triggerDefsEqual(renderTrigger(k, tr), def)) { have = lt.TriggerComments[name] }
             }
-            comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
+            comment(fmt.Sprintf("trigger %s on %s", quoteIdent(name), pqIdent(k)), tr.Comment, have)
         }
         for _, r := range dt.Rules {
             if r == nil || r.Comment == "" || r.Do == "" { continue }
@@ -4695,7 +4696,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if lt != nil {
                 if lr := lt.Rules[name]; lr != nil && !r.Replace && ruleMatchesLive(r, lr) { have = lt.RuleComments[name] }
             }
-            comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
+            comment(fmt.Sprintf("rule %s on %s", quoteIdent(name), pqIdent(k)), r.Comment, have)
         }
         for _, st := range dt.Statistics {
             if st == nil || st.Comment == "" || len(st.Columns) == 0 { continue }
@@ -4713,7 +4714,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if lt != nil {
                 if lp := lt.Policies[name]; lp != nil && policyMatchesLive(pol, lp, live.CurrentUser) { have = lt.PolicyComments[name] }
             }
-            comment(fmt.Sprintf("policy %s on %s", pqIdent(name), pqIdent(k)), pol.Comment, have)
+            comment(fmt.Sprintf("policy %s on %s", quoteIdent(name), pqIdent(k)), pol.Comment, have)
         }
     }
 
@@ -4727,7 +4728,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
         if vw.Materialized { kind = "materialized view " }
         comment(kind+pqIdent(k), vw.Comment, live.RelComments[k])
         for _, col := range sortedKeys(vw.ColumnComments) {
-            comment(fmt.Sprintf("column %s.%s", pqIdent(k), pqIdent(col)), vw.ColumnComments[col], live.ViewColumnComments[k][col])
+            comment(fmt.Sprintf("column %s.%s", pqIdent(k), quoteIdent(col)), vw.ColumnComments[col], live.ViewColumnComments[k][col])
         }
         if vt := live.ViewTables[k]; !vw.Materialized {
             for _, tr := range vw.Triggers {
@@ -4737,7 +4738,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
                 if vt != nil {
                     if def, ok := vt.Triggers[name]; ok && (def == "" || triggerDefsEqual(renderTrigger(k, tr), def)) { have = vt.TriggerComments[name] }
                 }
-                comment(fmt.Sprintf("trigger %s on %s", pqIdent(name), pqIdent(k)), tr.Comment, have)
+                comment(fmt.Sprintf("trigger %s on %s", quoteIdent(name), pqIdent(k)), tr.Comment, have)
             }
         }
         if vt := live.ViewTables[k]; !vw.Materialized {
@@ -4748,7 +4749,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
                 if vt != nil {
                     if lr := vt.Rules[name]; lr != nil && !r.Replace && ruleMatchesLive(r, lr) { have = vt.RuleComments[name] }
                 }
-                comment(fmt.Sprintf("rule %s on %s", pqIdent(name), pqIdent(k)), r.Comment, have)
+                comment(fmt.Sprintf("rule %s on %s", quoteIdent(name), pqIdent(k)), r.Comment, have)
             }
         }
     }
@@ -4811,7 +4812,7 @@ func planOwners(live *Live, desired *schema.Database) []string {
         out = append(out, fmt.Sprintf("alter %s %s owner to %s;", kind, target, grantRole(want)))
     }
     for _, s := range sortedKeys(desired.SchemaOwners) {
-        owner("schema", pqIdent(s), desired.SchemaOwners[s], "schema:"+s)
+        owner("schema", quoteIdent(s), desired.SchemaOwners[s], "schema:"+s)
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil { owner("type", pqIdent(k), td.Owner, "type:"+k) }
@@ -4879,7 +4880,7 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
                 }
                 prefix := "alter default privileges"
                 if dp.ForRole != "" { prefix += " for role " + grantRole(dp.ForRole) }
-                if nsp != "" { prefix += " in schema " + pqIdent(nsp) }
+                if nsp != "" { prefix += " in schema " + quoteIdent(nsp) }
                 want, have := map[string][]string{}, map[string]map[string]bool{}
                 for _, grantee := range sortedKeys(dp.Grants[kind]) {
                     r := grantKey(grantee, live.CurrentUser)
@@ -4980,7 +4981,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
         desiredG := resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser)
-        addFor(desiredG)(ownedGrantDiff("schema "+pqIdent(s), desiredG, live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
+        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -5232,7 +5233,7 @@ func withoutPrivileges(liveG map[string]map[string]bool, revoked map[string]map[
 // grant select ("email") on table "s"."t" to "role";
 func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool, coversPublic bool) (revokes, grants []string) {
     target := "table " + pqIdent(tableKey)
-    colIdent := pqIdent(col)
+    colIdent := quoteIdent(col)
     return roleGrantStmtsCovering(desired, liveG, func(privs []string) string {
         parts := make([]string, len(privs))
         for i, p := range privs { parts[i] = p + " (" + colIdent + ")" }
@@ -5400,20 +5401,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         def := renderFKDef(fk)
         fkName := truncateIdent(fk.Name)
-        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(fkName))
-        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), def)
+        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(fkName))
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(fkName), def)
         partitionedBefore18 := dt.PartitionBy != nil && live.ServerVersion > 0 && live.ServerVersion < 180000
         split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18
         if split {
             c := *fk
             c.NotValid = true
-            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(fkName), renderFKDef(&c))
+            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(fkName), renderFKDef(&c))
         }
         if liveConstraints[fkName] {
             liveDef, ok := liveConstraintDefs[fkName]
             switch {
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
-                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(fkName)), stmt)
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
@@ -5444,13 +5445,13 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         how := " index"
         if concurrent { how = " index concurrently" }
         elems, tail := renderIndexElems(ix, dt.Columns), renderIndexTail(ix)
-        stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, pqIdent(name), pqIdent(fq), using, elems, tail)
+        stmt := fmt.Sprintf("create%s%s if not exists %s on %s%s(%s)%s;", uniq, how, quoteIdent(name), pqIdent(fq), using, elems, tail)
         build := func(idx, table string, only, conc bool) string {
             h, o := " index", ""
             if conc { h = " index concurrently" }
             if only { o = "only " }
             _, bare := splitQualified(idx)
-            return fmt.Sprintf("create%s%s if not exists %s on %s%s%s(%s)%s;", uniq, h, pqIdent(bare), o, pqIdent(table), using, elems, tail)
+            return fmt.Sprintf("create%s%s if not exists %s on %s%s%s(%s)%s;", uniq, h, quoteIdent(bare), o, pqIdent(table), using, elems, tail)
         }
         idxFq := schemaPrefixOf(fq) + name
         indexComment := func(built bool) []string {
@@ -5536,19 +5537,19 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         def := renderConstraintDef(ct)
         if def == "" { continue }
         ctName := truncateIdent(ct.Name)
-        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), pqIdent(ctName))
-        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), def)
+        validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(ctName))
+        stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(ctName), def)
         split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced
         if split {
             c := *ct
             c.NotValid = true
-            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), pqIdent(ctName), renderConstraintDef(&c))
+            stmt = fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(ctName), renderConstraintDef(&c))
         }
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
             switch {
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
-                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(ctName)), stmt)
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
@@ -5574,7 +5575,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     for _, cn := range uniqueCols {
         name := LiveUniqueKeyName(fq, cn, liveConstraints)
         if liveConstraints[name] { continue }
-        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), pqIdent(name), pqIdent(cn)))
+        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s unique (%s);", pqIdent(fq), quoteIdent(name), quoteIdent(cn)))
     }
 
     // Triggers (deferred: emitted after all table and function creates).
@@ -5595,7 +5596,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                 if s := triggerEnableStmt(fq, trName, tr.Enabled, liveEnabled); s != "" { *deferredTriggers = append(*deferredTriggers, s) }
                 continue
             }
-            *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", pqIdent(trName), pqIdent(fq)))
+            *deferredTriggers = append(*deferredTriggers, fmt.Sprintf("drop trigger %s on %s;", quoteIdent(trName), pqIdent(fq)))
         }
         *deferredTriggers = append(*deferredTriggers, stmt)
         if s := triggerEnableStmt(fq, trName, tr.Enabled, liveEnabled); s != "" { *deferredTriggers = append(*deferredTriggers, s) }
@@ -5642,7 +5643,7 @@ func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Co
     items := make([]string, len(st.Columns))
     for i, c := range st.Columns {
         c = strings.TrimSpace(c)
-        if isIndexExpression(c) && cols[c] == nil { items[i] = "(" + c + ")" } else { items[i] = pqIdent(c) }
+        if isIndexExpression(c) && cols[c] == nil { items[i] = "(" + c + ")" } else { items[i] = quoteIdent(c) }
     }
     return fmt.Sprintf("create statistics %s%s on %s from %s;", pqIdent(schemaPrefixOf(fq)+truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
 }
@@ -5682,7 +5683,7 @@ func replicaIdentityStmt(fq string, dt *schema.Table, lt *LiveTable) string {
     if lt != nil && lt.ReplicaIdentity != "" { have = lt.ReplicaIdentity }
     if want == have { return "" }
     clause := want
-    if idx, ok := strings.CutPrefix(want, "index "); ok { clause = "using index " + pqIdent(truncateIdent(idx)) }
+    if idx, ok := strings.CutPrefix(want, "index "); ok { clause = "using index " + quoteIdent(truncateIdent(idx)) }
     return fmt.Sprintf("alter table %s replica identity %s;", pqIdent(fq), clause)
 }
 
@@ -5735,7 +5736,7 @@ func clusterOnStmt(fq string, dt *schema.Table, lt *LiveTable) string {
         return fmt.Sprintf("alter table %s set without cluster;", pqIdent(fq))
     }
     if truncateIdent(want) == have { return "" }
-    return fmt.Sprintf("alter table %s cluster on %s;", pqIdent(fq), pqIdent(truncateIdent(want)))
+    return fmt.Sprintf("alter table %s cluster on %s;", pqIdent(fq), quoteIdent(truncateIdent(want)))
 }
 
 func schemaPrefixOf(fq string) string {
@@ -5766,7 +5767,7 @@ func splitTopLevel(s string) []string {
 
 // renderRule renders CREATE OR REPLACE RULE for a table or view rule.
 func renderRule(fq string, r *schema.Rule) string {
-    stmt := fmt.Sprintf("create or replace rule %s as on %s to %s", pqIdent(truncateIdent(r.Name)), strings.ToLower(r.Event), pqIdent(fq))
+    stmt := fmt.Sprintf("create or replace rule %s as on %s to %s", quoteIdent(truncateIdent(r.Name)), strings.ToLower(r.Event), pqIdent(fq))
     if r.Where != "" { stmt += " where " + r.Where }
     stmt += " do "
     if r.Instead { stmt += "instead " }
@@ -5785,7 +5786,7 @@ func triggerEnableStmt(fq, name, want, have string) string {
     if want == "" || want == have { return "" }
     action := map[string]string{"origin": "enable", "disabled": "disable", "replica": "enable replica", "always": "enable always"}[want]
     if action == "" { return "" }
-    return fmt.Sprintf("alter table %s %s trigger %s;", pqIdent(fq), action, pqIdent(name))
+    return fmt.Sprintf("alter table %s %s trigger %s;", pqIdent(fq), action, quoteIdent(name))
 }
 
 // renderTrigger renders a table trigger's CREATE [CONSTRAINT] TRIGGER statement.
@@ -5802,16 +5803,16 @@ func renderTrigger(fq string, tr *schema.Trigger) string {
         } else if tr.Deferrable {
             deferral = " deferrable"
         }
-        return fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", pqIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
+        return fmt.Sprintf("create constraint trigger %s AFTER %s on %s%s for each row%s execute procedure %s;", quoteIdent(trName), events, pqIdent(fq), deferral, when, tr.Procedure)
     }
     level := strings.ToLower(strings.TrimSpace(tr.Level))
     if level == "" { level = "statement" }
     if strings.EqualFold(strings.Join(strings.Fields(tr.Timing), " "), "instead of") { level = "row" }
     referencing := ""
-    if tr.OldTable != "" { referencing += " old table as " + pqIdent(tr.OldTable) }
-    if tr.NewTable != "" { referencing += " new table as " + pqIdent(tr.NewTable) }
+    if tr.OldTable != "" { referencing += " old table as " + quoteIdent(tr.OldTable) }
+    if tr.NewTable != "" { referencing += " new table as " + quoteIdent(tr.NewTable) }
     if referencing != "" { referencing = " referencing" + referencing }
-    return fmt.Sprintf("create trigger %s %s %s on %s%s for each %s%s execute procedure %s;", pqIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), referencing, level, when, tr.Procedure)
+    return fmt.Sprintf("create trigger %s %s %s on %s%s for each %s%s execute procedure %s;", quoteIdent(trName), strings.ToUpper(tr.Timing), events, pqIdent(fq), referencing, level, when, tr.Procedure)
 }
 
 // planPolicies emits ENABLE/DISABLE ROW LEVEL SECURITY and policy create/drop
@@ -5863,9 +5864,9 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             desiredPolicies[polName] = true
             if lp := livePolicies[polName]; lp != nil {
                 if policyMatchesLive(pol, lp, live.CurrentUser) { continue }
-                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", pqIdent(polName), pqIdent(fq)))
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", quoteIdent(polName), pqIdent(fq)))
             }
-            stmt := fmt.Sprintf("create policy %s on %s", pqIdent(polName), pqIdent(fq))
+            stmt := fmt.Sprintf("create policy %s on %s", quoteIdent(polName), pqIdent(fq))
             if pol.As == "restrictive" { stmt += " as restrictive" }
             if pol.For != "" { stmt += " for " + strings.ToLower(pol.For) }
             switch {
@@ -5887,7 +5888,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             }
             sort.Strings(removed)
             for _, name := range removed {
-                plan.Drops = append(plan.Drops, fmt.Sprintf("drop policy %s on %s;", pqIdent(name), pqIdent(fq)))
+                plan.Drops = append(plan.Drops, fmt.Sprintf("drop policy %s on %s;", quoteIdent(name), pqIdent(fq)))
             }
         }
     }
@@ -5930,7 +5931,7 @@ func RenderMain(p *PlanDiff) string {
 // and implicit NOT NULL.
 func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
     out := []string{}
-    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
 
     typeChanged := c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type)
     collateChanged := c.Collate != "" && collationName(c.Collate) != lc.Collation
@@ -6110,9 +6111,9 @@ func columnStorageStmts(fq string, dt *schema.Table) []string {
 // STATISTICS, attribute options and a foreign table column's options.
 func newColumnStmts(fq, cn string, c *schema.Column) []string {
     out := []string{}
-    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
+    target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
     if clause := fdwOptionsAlter(c.FDWOptions, nil); clause != "" {
-        out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), pqIdent(cn), clause))
+        out = append(out, fmt.Sprintf("alter foreign table %s alter column %s %s;", pqIdent(fq), quoteIdent(cn), clause))
     }
     if c.Storage != "" { out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage)) }
     if c.StatisticsTarget != nil && *c.StatisticsTarget >= 0 {
@@ -6366,11 +6367,11 @@ func constraintColumns(cols []string) string {
         lc := strings.ToLower(strings.TrimSpace(c))
         switch {
         case strings.HasSuffix(lc, " without overlaps"):
-            parts = append(parts, pqIdent(constraintColumnName(c))+" without overlaps")
+            parts = append(parts, quoteIdent(constraintColumnName(c))+" without overlaps")
         case strings.HasPrefix(lc, "period "):
-            parts = append(parts, "period "+pqIdent(constraintColumnName(c)))
+            parts = append(parts, "period "+quoteIdent(constraintColumnName(c)))
         default:
-            parts = append(parts, pqIdent(constraintColumnName(c)))
+            parts = append(parts, quoteIdent(constraintColumnName(c)))
         }
     }
     return strings.Join(parts, ", ")
@@ -6593,7 +6594,7 @@ func renderTriggerEvents(events []string) string {
         cols := []string{}
         for _, c := range splitTopLevel(e[len("update of "):]) {
             c = strings.TrimSpace(c)
-            if !strings.HasPrefix(c, `"`) && !simpleIdentRe.MatchString(c) { c = pqIdent(c) }
+            if !strings.HasPrefix(c, `"`) && !simpleIdentRe.MatchString(c) { c = quoteIdent(c) }
             cols = append(cols, c)
         }
         out = append(out, "UPDATE OF "+strings.Join(cols, ", "))
@@ -6688,7 +6689,7 @@ func isCastTypeChar(r rune) bool {
 }
 
 func renderColumn(name string, c *schema.Column) string {
-    parts := []string{pqIdent(name), c.Type}
+    parts := []string{quoteIdent(name), c.Type}
     if c.Compression != "" && c.Compression != "default" { parts = append(parts, "compression "+c.Compression) }
     if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
     if !c.Nullable && !c.NotValid { parts = append(parts, "not null") }
@@ -6756,7 +6757,7 @@ func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
     parts := make([]string, 0, len(ix.Columns))
     for _, c := range ix.Columns {
         base, ordering := splitIndexOrdering(c)
-        elem := pqIdent(base)
+        elem := quoteIdent(base)
         if isIndexExpression(base) && cols[base] == nil { elem = "(" + base + ")" }
         if coll := indexColumnCollation(ix, c); coll != "" { elem += " collate " + collationIdent(coll) }
         if oc := indexColumnOpclass(ix, c); oc != "" { elem += " " + oc }
@@ -6982,7 +6983,7 @@ func isIndexExpression(s string) bool {
 func joinIdentList(cols []string) string {
     parts := make([]string, 0, len(cols))
     for _, c := range cols {
-        if quotedIdentRe.MatchString(c) { parts = append(parts, c) } else { parts = append(parts, pqIdent(c)) }
+        if quotedIdentRe.MatchString(c) { parts = append(parts, c) } else { parts = append(parts, quoteIdent(c)) }
     }
     return strings.Join(parts, ", ")
 }
@@ -6996,8 +6997,8 @@ func quoteString(s string) string {
 func renderExtension(ext *schema.Extension) string {
     stmt := "create extension "
     if ext.IfNotExists { stmt += "if not exists " }
-    stmt += pqIdent(ext.Name)
-    if ext.Schema != "" { stmt += " schema " + pqIdent(ext.Schema) }
+    stmt += quoteIdent(ext.Name)
+    if ext.Schema != "" { stmt += " schema " + quoteIdent(ext.Schema) }
     if ext.Version != "" { stmt += " version " + quoteString(ext.Version) }
     if ext.Cascade { stmt += " cascade" }
     return stmt + ";"
@@ -7010,13 +7011,13 @@ func extensionAlterStmts(ext *schema.Extension, le *LiveExtension) []string {
     if le == nil { return nil }
     out := []string{}
     if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
-        out = append(out, fmt.Sprintf("alter extension %s set schema %s;", pqIdent(ext.Name), pqIdent(ext.Schema)))
+        out = append(out, fmt.Sprintf("alter extension %s set schema %s;", quoteIdent(ext.Name), quoteIdent(ext.Schema)))
     }
     if ext.Version != "" && ext.Version != le.Version {
-        out = append(out, fmt.Sprintf("alter extension %s update to %s;", pqIdent(ext.Name), quoteString(ext.Version)))
+        out = append(out, fmt.Sprintf("alter extension %s update to %s;", quoteIdent(ext.Name), quoteString(ext.Version)))
     }
     if ext.Comment != "" && ext.Comment != le.Comment {
-        out = append(out, fmt.Sprintf("comment on extension %s is %s;", pqIdent(ext.Name), quoteString(ext.Comment)))
+        out = append(out, fmt.Sprintf("comment on extension %s is %s;", quoteIdent(ext.Name), quoteString(ext.Comment)))
     }
     return out
 }
