@@ -121,13 +121,13 @@ func TestValidateLanguageNeedsGrants(t *testing.T) {
 func TestValidateWrapperAndLanguagePrivilegesAreUsage(t *testing.T) {
 	p := write(t, t.TempDir(), "grants.yml", `
 languages:
-  plpgsql: {grants: {app_dev: [all], lead: [usage with grant option], public: []}}
+  plpgsql: {grants: {app_dev: [create], lead: [usage with grant option], public: []}}
 foreignDataWrappers:
   pg2: {grants: {app_owner: [select], lead: [USAGE]}}
 `)
 	got := messages(Files([]string{p}))
 	for _, want := range []string{
-		"error: language plpgsql: grants all to app_dev; write usage",
+		"error: language plpgsql: grants create to app_dev; write usage",
 		"error: foreign-data wrapper pg2: grants select to app_owner; write usage",
 	} {
 		if !strings.Contains(got, want) {
@@ -136,5 +136,17 @@ foreignDataWrappers:
 	}
 	if strings.Contains(got, "lead") || strings.Contains(got, "public") {
 		t.Errorf("usage, with or without the grant option, and an empty list are fine, got:\n%s", got)
+	}
+}
+
+func TestValidateWrapperAndLanguageAcceptAll(t *testing.T) {
+	p := write(t, t.TempDir(), "grants.yml", `
+languages:
+  plpgsql: {grants: {app_dev: [all], lead: [all privileges with grant option]}}
+foreignDataWrappers:
+  pg2: {grants: {app_owner: [ALL PRIVILEGES], lead: [all with grant option]}}
+`)
+	if got := messages(Files([]string{p})); strings.Contains(got, "grants") {
+		t.Errorf("all stands for usage on languages and wrappers, got:\n%s", got)
 	}
 }

@@ -238,6 +238,19 @@ func TestAggregateGrantsOnCreatedAggregate(t *testing.T) {
 	)
 }
 
+func TestAggregateGrantsAllExpanded(t *testing.T) {
+	live := memberLive()
+	live.ServerVersion = 180000
+	norm := addMemberAggregate(live, "public.st_union(geometry)")
+	live.FunctionGrants[norm] = map[string]map[string]bool{"app": {"execute": true}}
+	d := &schema.Database{Aggregates: map[string]*schema.Aggregate{
+		"public.st_union(geometry)": {Schema: "public", Name: "st_union", ArgsSig: "(geometry)", Grants: map[string][]string{"app": {"all"}}},
+	}}
+	if sql, _ := planSQL(t, live, d, Options{}); sql != "" {
+		t.Errorf("all on an aggregate is execute, got:\n%s", sql)
+	}
+}
+
 func TestAggregateGrantArgs(t *testing.T) {
 	for in, want := range map[string]string{
 		"(*)":                          "()",

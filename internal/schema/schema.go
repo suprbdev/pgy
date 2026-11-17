@@ -1177,7 +1177,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     // Handle keys like "schema public:" blocks
     for k, v := range root {
         if strings.HasPrefix(k, "schema ") {
-            schemaName := strings.TrimSpace(strings.TrimPrefix(k, "schema "))
+            schemaName := bareName(strings.TrimSpace(strings.TrimPrefix(k, "schema ")))
             mergeSchemaBlock(out, schemaName, v)
             // fill column order from node if available
             fillColumnOrderFromNode(node, out, schemaName)
@@ -1281,6 +1281,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 t.Data = parseTableData(m["data"])
                 parseTableStorage(t, m)
             }
+            t.RenamedFrom = qualifyQuoted(defaultSchema, t.RenamedFrom)
             db.Tables[fq] = t
         }
     case []any:
@@ -1339,6 +1340,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             parseTablePartitioning(t, schemaName, m)
             t.Data = parseTableData(m["data"])
             parseTableStorage(t, m)
+            t.RenamedFrom = qualifyQuoted(schemaName, t.RenamedFrom)
             db.Tables[fq] = t
         }
     }
@@ -1413,55 +1415,72 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 t.Data = parseTableData(inner["data"])
                 parseTableStorage(t, inner)
             }
+            t.RenamedFrom = qualifyQuoted(schemaName, t.RenamedFrom)
             db.Tables[fq] = t
         } else if strings.HasPrefix(key, "function ") {
             fn := parseFunction(schemaName, key, body)
             if fn != nil {
-                db.Functions[FunctionKey(qualify(schemaName, fn.Name), fn.ArgsSig)] = fn
+                full := qualify(schemaName, fn.Name)
+                fn.Name, fn.RenamedFrom = bareName(fn.Name), qualifyQuoted(schemaName, fn.RenamedFrom)
+                db.Functions[FunctionKey(full, fn.ArgsSig)] = fn
             }
         } else if strings.HasPrefix(key, "procedure ") {
             pr := parseProcedure(schemaName, key, body)
             if pr != nil {
-                db.Procedures[FunctionKey(qualify(schemaName, pr.Name), pr.ArgsSig)] = pr
+                full := qualify(schemaName, pr.Name)
+                pr.Name, pr.RenamedFrom = bareName(pr.Name), qualifyQuoted(schemaName, pr.RenamedFrom)
+                db.Procedures[FunctionKey(full, pr.ArgsSig)] = pr
             }
         } else if strings.HasPrefix(key, "aggregate ") {
             if ag := parseAggregate(schemaName, key, body); ag != nil {
-                db.Aggregates[FunctionKey(qualify(schemaName, ag.Name), ag.ArgsSig)] = ag
+                full := qualify(schemaName, ag.Name)
+                ag.Name = bareName(ag.Name)
+                db.Aggregates[FunctionKey(full, ag.ArgsSig)] = ag
             }
         } else if strings.HasPrefix(key, "type ") {
             td := parseType(schemaName, key, body)
             if td != nil {
                 full := qualify(schemaName, td.Name)
+                td.Name, td.RenamedFrom = bareName(td.Name), qualifyQuoted(schemaName, td.RenamedFrom)
                 db.Types[full] = td
             }
         } else if strings.HasPrefix(key, "view ") || strings.HasPrefix(key, "materialized view ") {
             vw := parseView(schemaName, key, body)
             if vw != nil {
                 full := qualify(schemaName, vw.Name)
+                vw.Name, vw.RenamedFrom = bareName(vw.Name), qualifyQuoted(schemaName, vw.RenamedFrom)
                 db.Views[full] = vw
             }
         } else if strings.HasPrefix(key, "sequence ") {
             sq := parseSequence(schemaName, key, body)
             if sq != nil {
                 full := qualify(schemaName, sq.Name)
+                sq.Name, sq.RenamedFrom = bareName(sq.Name), qualifyQuoted(schemaName, sq.RenamedFrom)
                 db.Sequences[full] = sq
             }
         } else if strings.HasPrefix(key, "text search configuration ") {
             if c := parseTSConfig(schemaName, key, body); c != nil {
-                db.TSConfigs[qualify(schemaName, c.Name)] = c
+                full := qualify(schemaName, c.Name)
+                c.Name = bareName(c.Name)
+                db.TSConfigs[full] = c
             }
         } else if strings.HasPrefix(key, "text search dictionary ") {
             if d := parseTSDictionary(schemaName, key, body); d != nil {
-                db.TSDictionaries[qualify(schemaName, d.Name)] = d
+                full := qualify(schemaName, d.Name)
+                d.Name = bareName(d.Name)
+                db.TSDictionaries[full] = d
             }
         } else if strings.HasPrefix(key, "collation ") {
             if co := parseCollation(schemaName, key, body); co != nil {
-                db.Collations[qualify(schemaName, co.Name)] = co
+                full := qualify(schemaName, co.Name)
+                co.Name = bareName(co.Name)
+                db.Collations[full] = co
             }
         } else if strings.HasPrefix(key, "domain ") {
             dm := parseDomain(schemaName, key, body)
             if dm != nil {
                 full := qualify(schemaName, dm.Name)
+                dm.Name, dm.RenamedFrom = bareName(dm.Name), qualifyQuoted(schemaName, dm.RenamedFrom)
                 db.Domains[full] = dm
             }
         } else if key == "grants" {
@@ -1694,11 +1713,121 @@ func parseGrants(v any) map[string][]string {
 // Table.RowLevelSecurity where nil means unmanaged.
 func BoolPtr(b bool) *bool { return &b }
 
+// qualify returns the model key, schema.name, of a name written in YAML for
+// an object of schemaName ("" for public). A name with a dot is taken as
+// schema-qualified, unless the object's name is in double quotes (see
+// SplitName): "x.y" and app."x.y" both name the object x.y.
 func qualify(schemaName, tableName string) string {
     if tableName == "" { return tableName }
-    if strings.Contains(tableName, ".") { return tableName }
     if schemaName == "" { schemaName = "public" }
+    if parts, ok := SplitName(tableName); ok && len(parts) <= 2 {
+        if len(parts) == 2 { return parts[0] + "." + parts[1] }
+        return schemaName + "." + parts[0]
+    }
+    if strings.Contains(tableName, ".") { return tableName }
     return schemaName + "." + tableName
+}
+
+// SplitName splits a name written in YAML at the dots between its parts
+// (schema, object, column), reading a part in double quotes as one name,
+// dots included, with "" standing for a double quote: app."x.y" is
+// [app x.y]. ok is false when name has no double quote, in which case each
+// place keeps its own rule for its dots, or when it is not a dot-separated
+// list of names.
+func SplitName(name string) (parts []string, ok bool) {
+    s := strings.TrimSpace(name)
+    if !strings.Contains(s, `"`) { return nil, false }
+    for {
+        var part string
+        if strings.HasPrefix(s, `"`) {
+            var b strings.Builder
+            i, closed := 1, false
+            for i < len(s) && !closed {
+                switch {
+                case s[i] != '"':
+                    b.WriteByte(s[i])
+                    i++
+                case i+1 < len(s) && s[i+1] == '"':
+                    b.WriteByte('"')
+                    i += 2
+                default:
+                    closed = true
+                    i++
+                }
+            }
+            if !closed || b.Len() == 0 { return nil, false }
+            part, s = b.String(), s[i:]
+        } else {
+            i := strings.IndexByte(s, '.')
+            if i < 0 { i = len(s) }
+            part, s = s[:i], s[i:]
+            if part == "" || strings.Contains(part, `"`) { return nil, false }
+        }
+        parts = append(parts, part)
+        if s == "" { return parts, true }
+        if s[0] != '.' { return nil, false }
+        s = s[1:]
+    }
+}
+
+// QuoteName returns an object's name as YAML has to write it where a dot
+// separates a schema from it: in double quotes, with "" for a double quote,
+// when it contains a dot or a double quote, and as it is otherwise.
+// SplitName and the YAML keys of schema blocks read it back.
+func QuoteName(name string) string {
+    if !strings.ContainsAny(name, `."`) { return name }
+    return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// QualifiedName writes the model key fq (schema.name) as a reference in
+// YAML, its name quoted where QuoteName quotes it: app."x.y".
+func QualifiedName(fq string) string {
+    s, name, ok := strings.Cut(fq, ".")
+    if !ok { return QuoteName(fq) }
+    return s + "." + QuoteName(name)
+}
+
+// bareName returns name without the double quotes it is written in, as
+// SplitName reads a single quoted name, or as it is.
+func bareName(name string) string {
+    if parts, ok := SplitName(name); ok && len(parts) == 1 { return parts[0] }
+    return name
+}
+
+// qualifyQuoted returns a reference written with double quotes (see
+// SplitName) as the model key it names, in schemaName when it has no
+// schema, so that the places that read references keep their rule for
+// dots in the others. Anything else is returned as it is.
+func qualifyQuoted(schemaName, ref string) string {
+    if !strings.Contains(ref, `"`) { return ref }
+    return qualify(schemaName, ref)
+}
+
+// OwnedByParts returns the schema, table and column a sequence's ownedBy
+// names. seq is the sequence's key, whose schema an unqualified table.column
+// is in. Parts in double quotes are read with SplitName; otherwise a single
+// dot separates table and column, and with more dots the first separates
+// the schema and everything after the table is the column. ok is false for
+// none and for a value that names no column.
+func OwnedByParts(seq, ownedBy string) (schemaName, table, column string, ok bool) {
+    s := strings.TrimSpace(ownedBy)
+    if s == "" || strings.EqualFold(s, "none") { return "", "", "", false }
+    seqSchema, _, _ := strings.Cut(seq, ".")
+    parts, quoted := SplitName(s)
+    if !quoted {
+        if strings.Count(s, ".") == 1 {
+            parts = strings.SplitN(s, ".", 2)
+        } else {
+            parts = strings.SplitN(s, ".", 3)
+        }
+    }
+    switch len(parts) {
+    case 2:
+        return seqSchema, parts[0], parts[1], true
+    case 3:
+        return parts[0], parts[1], parts[2], true
+    }
+    return "", "", "", false
 }
 
 // parseStringListFromNode reads a list of names. An entry YAML resolved to
@@ -1775,7 +1904,7 @@ func parseForeignKeys(v any) []*ForeignKey {
                 fk.Columns = parseStringListFromNode(dm["columns"])
                 if v, ok := dm["renamedFrom"].(string); ok { fk.RenamedFrom = strings.TrimSpace(v) }
                 if ref, ok := dm["references"].(map[string]any); ok {
-                    if t, ok := ref["table"].(string); ok { fk.RefTable = t }
+                    if t, ok := ref["table"].(string); ok { fk.RefTable = qualifyQuoted("", t) }
                     fk.RefColumns = parseStringListFromNode(ref["columns"])
                 }
                 if od, ok := dm["onDelete"].(string); ok { fk.OnDelete = od }
@@ -2049,7 +2178,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     // key format: "function <name>(args):"
     nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "function "))
     fn := &Function{Schema: schemaName}
-    if i := strings.Index(nameAndSig, "("); i >= 0 {
+    if i := argsStart(nameAndSig); i >= 0 {
         fn.Name = strings.TrimSpace(nameAndSig[:i])
         fn.ArgsSig = strings.TrimSuffix(strings.TrimSpace(nameAndSig[i:]), ":")
     } else {
@@ -2103,7 +2232,7 @@ func parseTransform(v any) []string {
 func parseAggregate(schemaName, key string, body any) *Aggregate {
     nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "aggregate "))
     ag := &Aggregate{Schema: schemaName, ArgsSig: "(*)"}
-    if i := strings.Index(nameAndSig, "("); i >= 0 {
+    if i := argsStart(nameAndSig); i >= 0 {
         ag.Name = strings.TrimSpace(nameAndSig[:i])
         ag.ArgsSig = strings.TrimSpace(nameAndSig[i:])
     } else {
@@ -2140,7 +2269,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
     // key format: "procedure <name>(args):"
     nameAndSig := strings.TrimSpace(strings.TrimPrefix(key, "procedure "))
     pr := &Procedure{Schema: schemaName}
-    if i := strings.Index(nameAndSig, "("); i >= 0 {
+    if i := argsStart(nameAndSig); i >= 0 {
         pr.Name = strings.TrimSpace(nameAndSig[:i])
         pr.ArgsSig = strings.TrimSuffix(strings.TrimSpace(nameAndSig[i:]), ":")
     } else {
@@ -2230,7 +2359,7 @@ func fillColumnOrderFromNode(root *yaml.Node, db *Database, schemaName string) {
     for i := 0; i+1 < len(top.Content); i += 2 {
         k := top.Content[i]
         v := top.Content[i+1]
-        if k.Value == ("schema " + schemaName) && v.Kind == yaml.MappingNode {
+        if name, ok := strings.CutPrefix(k.Value, "schema "); ok && bareName(strings.TrimSpace(name)) == schemaName && v.Kind == yaml.MappingNode {
             // inside schema mapping, find table blocks
             for j := 0; j+1 < len(v.Content); j += 2 {
                 tk := v.Content[j]
@@ -2646,7 +2775,17 @@ func ResolveDependencyKeys(raw string, d *Database) []string {
 func resolveRoutine[T any](ref string, m map[string]T) []string {
     ref = strings.TrimSpace(ref)
     name, args := ref, ""
-    if i := strings.IndexByte(ref, '('); i >= 0 { name, args = strings.TrimSpace(ref[:i]), ref[i:] }
+    if i := argsStart(ref); i >= 0 { name, args = strings.TrimSpace(ref[:i]), ref[i:] }
+    if parts, ok := SplitName(name); ok && len(parts) <= 2 {
+        name = strings.Join(parts, ".")
+        if len(parts) == 1 { return resolveRoutineName(name, args, m, true) }
+    }
+    return resolveRoutineName(name, args, m, false)
+}
+
+// resolveRoutineName is resolveRoutine for a name already read: schema.name,
+// or a name alone when bare is set or it has no dot.
+func resolveRoutineName[T any](name, args string, m map[string]T, bare bool) []string {
     match := func(want func(string) bool) []string {
         out := []string{}
         for k := range m {
@@ -2655,11 +2794,12 @@ func resolveRoutine[T any](ref string, m map[string]T) []string {
         sort.Strings(out)
         return out
     }
-    keys := match(func(n string) bool { return n == name })
-    if len(keys) == 0 && !strings.Contains(name, ".") {
+    var keys []string
+    if !bare { keys = match(func(n string) bool { return n == name }) }
+    if len(keys) == 0 && (bare || !strings.Contains(name, ".")) {
         keys = match(func(n string) bool { return n == "public."+name })
         if len(keys) == 0 {
-            keys = match(func(n string) bool { return strings.HasSuffix(n, "."+name) })
+            keys = match(func(n string) bool { _, rest, _ := strings.Cut(n, "."); return rest == name })
         }
     }
     if args != "" {
@@ -2683,6 +2823,22 @@ func FunctionKey(qualifiedName, argsSig string) string {
 func RoutineName(key string) string {
     if i := strings.IndexByte(key, '('); i >= 0 { return key[:i] }
     return key
+}
+
+// argsStart returns the index of the parenthesis that opens the argument
+// list in a routine's name and arguments, outside the double quotes of a
+// quoted name, or -1.
+func argsStart(nameAndSig string) int {
+    quoted := false
+    for i := 0; i < len(nameAndSig); i++ {
+        switch c := nameAndSig[i]; {
+        case c == '"':
+            quoted = !quoted
+        case c == '(' && !quoted:
+            return i
+        }
+    }
+    return -1
 }
 
 var (
@@ -2923,7 +3079,7 @@ func fillFDWScalarsFromNode(root *yaml.Node, db *Database) {
         }
         schemaName, ok := strings.CutPrefix(key, "schema ")
         if !ok { continue }
-        schemaName = strings.TrimSpace(schemaName)
+        schemaName = bareName(strings.TrimSpace(schemaName))
         for j := 0; j+1 < len(body.Content); j += 2 {
             tname, foreign := tableKey(body.Content[j].Value)
             def := resolveAlias(body.Content[j+1])

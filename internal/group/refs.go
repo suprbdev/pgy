@@ -152,15 +152,10 @@ func qualifyPublic(name string) string {
     return "public." + name
 }
 
-func ownedByTable(s string) string {
-    parts := strings.Split(strings.TrimSpace(s), ".")
-    switch len(parts) {
-    case 2:
-        return "public." + parts[0]
-    case 3:
-        return parts[0] + "." + parts[1]
-    }
-    return ""
+func ownedByTable(seq, s string) string {
+    schemaName, table, _, ok := schema.OwnedByParts(seq, s)
+    if !ok { return "" }
+    return schemaName + "." + table
 }
 
 type index struct {
@@ -172,7 +167,7 @@ func newIndex(full *schema.Database) *index {
     ix := &index{full: full, byName: map[string][]ref{}}
     for _, r := range declared(full) {
         name := strings.ToLower(schema.RoutineName(r.key))
-        if i := strings.LastIndexByte(name, '.'); i >= 0 { name = name[i+1:] }
+        if i := strings.IndexByte(name, '.'); i >= 0 { name = name[i+1:] }
         ix.byName[name] = append(ix.byName[name], r)
     }
     return ix
@@ -208,7 +203,7 @@ func (ix *index) match(t token, kinds []string) []ref {
         if !containsKind(kinds, r.kind) { continue }
         if t.qual != "" {
             schemaName := strings.ToLower(schema.RoutineName(r.key))
-            if i := strings.LastIndexByte(schemaName, '.'); i >= 0 { schemaName = schemaName[:i] }
+            if i := strings.IndexByte(schemaName, '.'); i >= 0 { schemaName = schemaName[:i] }
             if schemaName != t.qual { continue }
         }
         out = append(out, r)
