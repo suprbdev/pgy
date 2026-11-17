@@ -30,7 +30,7 @@ func main() {
         if code, ok := cli.AsExitCode(err); ok {
             os.Exit(code)
         }
-        fmt.Fprintf(os.Stderr, "error: %v\n", err)
+        fmt.Fprintf(os.Stderr, "error: %v%s\n", err, cli.ErrorDetail(err))
         os.Exit(1)
     }
 }
