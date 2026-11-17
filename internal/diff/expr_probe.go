@@ -45,12 +45,18 @@ type ExprKey struct {
 }
 
 // ExprProbe is what PostgreSQL made of one declared definition that the
-// text comparison takes for different from the live one (see
+// text comparison takes for different from the live one, or for the same
+// only by dropping a cast or a schema from one side (see
 // ProbeExpressions).
 type ExprProbe struct {
 	// Declared is the definition that was probed. The result applies to
 	// that definition only.
 	Declared string
+	// Live is the live definition it was compared with, laid out like
+	// Parts. That the two differ applies to that live definition only, and
+	// not, for instance, to a later step of a split plan, which sees the
+	// declared definition in place.
+	Live []string
 	// Parts is the definition as PostgreSQL deparses it, with the function
 	// Introspect reads the live one with: one element, except for an index
 	// (its key columns, then its predicate) and a policy (USING, then WITH
@@ -68,6 +74,10 @@ type ExprProbe struct {
 type exprSlot interface {
 	// equal is the text comparison's verdict.
 	equal() bool
+	// dropped tells, when equal holds, how what the text comparison
+	// dropped from the declared definition differs from what it dropped
+	// from the live one.
+	dropped() exprDropDiff
 	// declared identifies the declared definition (see ExprProbe.Declared).
 	declared() string
 	// live returns the live definition laid out like ExprProbe.Parts.
@@ -81,6 +91,27 @@ type exprSlot interface {
 	canonical(parts []string) []string
 	// spell gives the live snapshot the declared spelling.
 	spell(e *liveEdit)
+	// differ marks the definition as changed in the live snapshot, for a
+	// probe that read parts, laid out like live, back from the declared
+	// definition.
+	differ(e *liveEdit, parts []string)
+}
+
+// exprChanged marks a live definition that the probe read back different
+// from the declared one although the text comparison takes the two for the
+// same. It is an SQL comment, which no normalisation removes and
+// PostgreSQL never prints, so every comparison of the edited snapshot finds
+// the definition changed.
+const exprChanged = " /*\u2260*/"
+
+// markChanged returns def with exprChanged added before a trailing NOT
+// VALID, which stays where the comparisons look for it.
+func markChanged(def string) string {
+	if liveNotValid(def) {
+		t := strings.TrimSpace(def)
+		return t[:len(t)-len(notValidSuffix)] + exprChanged + notValidSuffix
+	}
+	return def + exprChanged
 }
 
 // verbatim is embedded by the slots whose definition is compared exactly as
@@ -132,6 +163,12 @@ func (s *columnDefaultSlot) spell(e *liveEdit) {
 		lc.Default = s.c.Default
 	}
 }
+func (s *columnDefaultSlot) dropped() exprDropDiff { return defaultsDropped(s.c.Default, s.lc.Default) }
+func (s *columnDefaultSlot) differ(e *liveEdit, _ []string) {
+	if lc := e.table(s.fq).Columns[s.cn]; lc != nil {
+		lc.Default = markChanged(lc.Default)
+	}
+}
 
 func attachDefault(target string, id int, column, expr string) probeAttach {
 	return probeAttach{
@@ -168,6 +205,14 @@ func (s *generatedSlot) attach(target string, id int) probeAttach {
 func (s *generatedSlot) spell(e *liveEdit) {
 	if lc := e.table(s.fq).Columns[s.cn]; lc != nil {
 		lc.Generated = s.c.Generated
+	}
+}
+func (s *generatedSlot) dropped() exprDropDiff {
+	return constraintDefsDropped(s.c.Generated, s.lc.Generated)
+}
+func (s *generatedSlot) differ(e *liveEdit, _ []string) {
+	if lc := e.table(s.fq).Columns[s.cn]; lc != nil {
+		lc.Generated = markChanged(lc.Generated)
 	}
 }
 
@@ -245,6 +290,11 @@ func (s *constraintSlot) spell(e *liveEdit) {
 	}
 	e.table(s.fq).ConstraintDefs[s.name] = def
 }
+func (s *constraintSlot) dropped() exprDropDiff { return constraintDropped(s.lt, s.name, s.ct) }
+func (s *constraintSlot) differ(e *liveEdit, _ []string) {
+	t := e.table(s.fq)
+	t.ConstraintDefs[s.name] = markChanged(t.ConstraintDefs[s.name])
+}
 
 var excludeTablespaceClauseRe = regexp.MustCompile(`(?i)\s+using\s+index\s+tablespace\s+(?:"(?:[^"]|"")+"|[\w$]+)`)
 
@@ -282,7 +332,7 @@ type indexSlot struct {
 // newIndexSlot returns the slot of an index whose key expressions or
 // predicate PostgreSQL may print another way than the YAML writes them: an
 // index with the same number of keys live, a predicate on both sides or on
-// neither, and at least one expression.
+// neither, and at least one expression, on either side.
 func newIndexSlot(fq string, matView bool, ix *schema.Index, cols map[string]*schema.Column, lt *LiveTable) exprSlot {
 	if ix == nil || lt == nil || len(ix.Columns) == 0 {
 		return nil
@@ -293,9 +343,9 @@ func newIndexSlot(fq string, matView bool, ix *schema.Index, cols map[string]*sc
 		return nil
 	}
 	expression := ix.Where != ""
-	for _, c := range ix.Columns {
+	for i, c := range ix.Columns {
 		base, _ := splitIndexOrdering(c)
-		expression = expression || isIndexExpression(base) && cols[base] == nil
+		expression = expression || isIndexExpression(base) && cols[base] == nil || !quotedIdentRe.MatchString(li.Keys[i]) && isIndexExpression(li.Keys[i])
 	}
 	if !expression {
 		return nil
@@ -350,6 +400,40 @@ func (s *indexSlot) spell(e *liveEdit) {
 		li.Keys, li.Predicate = s.keys(), s.ix.Where
 	}
 }
+func (s *indexSlot) dropped() exprDropDiff {
+	out := exprDropDiff{}
+	for i, base := range s.keys() {
+		out.add(constraintDefsDropped(base, s.li.Keys[i]))
+	}
+	out.add(constraintDefsDropped(s.ix.Where, s.li.Predicate))
+	return out
+}
+func (s *indexSlot) differ(e *liveEdit, parts []string) {
+	relation := e.table
+	if s.matView {
+		relation = e.matView
+	}
+	li := relation(s.fq).IndexDefs[s.name]
+	if li == nil {
+		return
+	}
+	li.Keys = slices.Clone(li.Keys)
+	live, marked := s.live(), false
+	for i := range live {
+		if i < len(parts) && parts[i] == live[i] {
+			continue
+		}
+		if i < len(li.Keys) {
+			li.Keys[i] += exprChanged
+		} else {
+			li.Predicate += exprChanged
+		}
+		marked = true
+	}
+	if !marked && len(li.Keys) > 0 {
+		li.Keys[0] += exprChanged
+	}
+}
 
 type policySlot struct {
 	verbatim
@@ -399,6 +483,22 @@ func (s *policySlot) spell(e *liveEdit) {
 		lp.Using, lp.WithCheck = s.pol.Using, s.pol.WithCheck
 	}
 }
+func (s *policySlot) dropped() exprDropDiff {
+	out := constraintDefsDropped(s.pol.Using, s.lp.Using)
+	out.add(constraintDefsDropped(s.pol.WithCheck, s.lp.WithCheck))
+	return out
+}
+func (s *policySlot) differ(e *liveEdit, parts []string) {
+	lp := e.table(s.fq).Policies[s.name]
+	if lp == nil {
+		return
+	}
+	if len(parts) == 2 && parts[0] == s.lp.Using {
+		lp.WithCheck += exprChanged
+		return
+	}
+	lp.Using += exprChanged
+}
 
 type triggerSlot struct {
 	verbatim
@@ -425,6 +525,18 @@ func (s *triggerSlot) attach(target string, id int) probeAttach {
 	return probeAttach{stmt: probeStmt{ID: id, SQL: renderTrigger(target, s.tr)}, kind: "trigger", name: s.name}
 }
 func (s *triggerSlot) spell(e *liveEdit) { e.table(s.fq).Triggers[s.name] = s.declared() }
+func (s *triggerSlot) dropped() exprDropDiff {
+	return triggerDefsDropped(s.declared(), s.lt.Triggers[s.name])
+}
+func (s *triggerSlot) differ(e *liveEdit, _ []string) {
+	t := e.table(s.fq)
+	def := t.Triggers[s.name]
+	if head, _, ok := splitTriggerCall(def); ok {
+		t.Triggers[s.name] = head + strings.TrimSpace(exprChanged) + " " + def[len(head):]
+		return
+	}
+	t.Triggers[s.name] = def + exprChanged
+}
 
 type viewDefaultSlot struct {
 	verbatim
@@ -449,7 +561,11 @@ func (s *viewDefaultSlot) live() []string   { return []string{s.have} }
 func (s *viewDefaultSlot) attach(target string, id int) probeAttach {
 	return attachDefault(target, id, s.col, s.want)
 }
-func (s *viewDefaultSlot) spell(e *liveEdit) { e.viewDefaults(s.fq)[s.col] = s.want }
+func (s *viewDefaultSlot) spell(e *liveEdit)     { e.viewDefaults(s.fq)[s.col] = s.want }
+func (s *viewDefaultSlot) dropped() exprDropDiff { return defaultsDropped(s.want, s.have) }
+func (s *viewDefaultSlot) differ(e *liveEdit, _ []string) {
+	e.viewDefaults(s.fq)[s.col] += exprChanged
+}
 
 type domainDefaultSlot struct {
 	verbatim
@@ -476,6 +592,10 @@ func (s *domainDefaultSlot) attach(target string, id int) probeAttach {
 	}
 }
 func (s *domainDefaultSlot) spell(e *liveEdit) { e.domain(s.fq).Default = s.dm.Default }
+func (s *domainDefaultSlot) dropped() exprDropDiff {
+	return defaultsDropped(s.dm.Default, s.ld.Default)
+}
+func (s *domainDefaultSlot) differ(e *liveEdit, _ []string) { e.domain(s.fq).Default += exprChanged }
 
 type domainCheckSlot struct {
 	fq, name string
@@ -517,6 +637,13 @@ func (s *domainCheckSlot) spell(e *liveEdit) {
 		def += notValidSuffix
 	}
 	e.domain(s.fq).Checks[s.name] = def
+}
+func (s *domainCheckSlot) dropped() exprDropDiff {
+	return constraintDefsDropped(s.declared(), s.ld.Checks[s.name])
+}
+func (s *domainCheckSlot) differ(e *liveEdit, _ []string) {
+	d := e.domain(s.fq)
+	d.Checks[s.name] = markChanged(d.Checks[s.name])
 }
 
 type routineArgsSlot struct {
@@ -598,6 +725,35 @@ func (s *routineArgsSlot) spell(e *liveEdit) {
 		e.procedure(s.norm).Args = args
 	} else {
 		e.function(s.norm).Args = args
+	}
+}
+func (s *routineArgsSlot) dropped() exprDropDiff {
+	out := exprDropDiff{}
+	d, l := argDefaults(s.args), argDefaults(s.liveArgs)
+	if len(d) != len(l) {
+		return out
+	}
+	for i := range d {
+		if d[i] != "" && l[i] != "" && d[i] != l[i] {
+			out.add(defaultsDropped(d[i], l[i]))
+		}
+	}
+	return out
+}
+
+// differ marks every live argument default, which makes the plan replace
+// the routine.
+func (s *routineArgsSlot) differ(e *liveEdit, _ []string) {
+	args := splitTopLevelQuotedParens(s.liveArgs)
+	for i, a := range args {
+		if _, def := splitArgDefault(a); def != "" {
+			args[i] = strings.TrimRight(a, " \t\r\n") + exprChanged
+		}
+	}
+	if s.procedure {
+		e.procedure(s.norm).Args = strings.Join(args, ",")
+	} else {
+		e.function(s.norm).Args = strings.Join(args, ",")
 	}
 }
 
@@ -728,14 +884,28 @@ func (e *liveEdit) procedure(norm string) *LiveProcedure {
 	return editable(e, "procedure", norm, &e.live().ProcedureDefs, func(p *LiveProcedure) *LiveProcedure { c := *p; return &c })
 }
 
-// applyExprProbes returns live with the declared spelling in place of each
-// live definition that live.ExprProbes shows PostgreSQL stores the declared
-// one as: the probe deparsed the declared definition to exactly the live
-// text. The comparisons of the plan then find the two equal. A definition
-// the probe deparsed to something else, couldn't attach, or didn't cover
-// keeps its live text, and is compared as text. live itself is not
+// applyExprProbes returns live with the server's verdict on each definition
+// of live.ExprProbes. Where the probe deparsed the declared definition to
+// exactly the live text, the live definition takes the declared spelling,
+// so the comparisons of the plan find the two equal. Where it deparsed it to
+// something else although the text comparison takes the two for the same,
+// the live definition is marked changed (see exprChanged), so they find
+// the two different. A definition the probe couldn't attach or didn't
+// cover keeps its live text, and is compared as text. live itself is not
 // modified.
 func applyExprProbes(live *Live, desired *schema.Database) *Live {
+	return applyExprProbesAs(live, desired, false)
+}
+
+// simulateExprProbes is applyExprProbes for Simulate, whose snapshot has
+// the declared definitions in place: one the probe found different from
+// the live one takes the declared spelling as well, since the plan that
+// Simulate stands for replaced it.
+func simulateExprProbes(live *Live, desired *schema.Database) *Live {
+	return applyExprProbesAs(live, desired, true)
+}
+
+func applyExprProbesAs(live *Live, desired *schema.Database, simulated bool) *Live {
 	if live == nil || desired == nil || len(live.ExprProbes) == 0 {
 		return live
 	}
@@ -745,10 +915,19 @@ func applyExprProbes(live *Live, desired *schema.Database) *Live {
 			continue
 		}
 		s := resolveExprSlot(live, desired, key)
-		if s == nil || s.declared() != p.Declared || !slices.Equal(s.live(), s.canonical(p.Parts)) {
+		if s == nil || s.declared() != p.Declared {
 			continue
 		}
-		s.spell(e)
+		switch parts, live := s.canonical(p.Parts), s.live(); {
+		case slices.Equal(live, parts):
+			s.spell(e)
+		case slices.Equal(live, p.Live) && s.equal():
+			if simulated {
+				s.spell(e)
+			} else {
+				s.differ(e, parts)
+			}
+		}
 	}
 	return e.result()
 }
@@ -823,6 +1002,20 @@ type exprProbePlan struct {
 	requests  []*probeRequest
 	relations map[string]int
 	domains   map[string]string
+	// all probes every definition considered.
+	all bool
+	// pending holds the definitions the text comparison takes for the
+	// same as the live ones only by dropping the schema of a name from one
+	// side, which matters only when pg_catalog has an object of the name
+	// too (see resolve).
+	pending []pendingProbe
+}
+
+// pendingProbe is a definition that waits on names, and the function that
+// adds it.
+type pendingProbe struct {
+	names []string
+	add   func()
 }
 
 func (p *exprProbePlan) add(key ExprKey, slot exprSlot, relation int, target string) {
@@ -870,11 +1063,53 @@ func (t probeTarget) columnRenames(target string) []probeStmt {
 	return out
 }
 
-// relation adds a definition of relation t.
-func (p *exprProbePlan) relation(t probeTarget, key ExprKey, slot exprSlot) {
-	if slot == nil || slot.equal() {
+// consider adds a definition with add when the text comparison takes it
+// for different from the live one, when it takes the two for the same only
+// by dropping a cast from one side (see exprDropDiff.casts), or when every
+// definition is probed. One it takes for the same only by dropping a schema
+// from one side waits in pending.
+func (p *exprProbePlan) consider(slot exprSlot, add func()) {
+	if p.all || !slot.equal() {
+		add()
 		return
 	}
+	switch d := slot.dropped(); {
+	case d.casts:
+		add()
+	case len(d.names) > 0:
+		p.pending = append(p.pending, pendingProbe{names: d.names, add: add})
+	}
+}
+
+// pendingNames returns the names the pending definitions wait on, sorted.
+func (p *exprProbePlan) pendingNames() []string {
+	out := []string{}
+	for _, q := range p.pending {
+		out = append(out, q.names...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// resolve adds the pending definitions that wait on a name in shared, and
+// drops the others.
+func (p *exprProbePlan) resolve(shared map[string]bool) {
+	for _, q := range p.pending {
+		if slices.ContainsFunc(q.names, func(n string) bool { return shared[n] }) {
+			q.add()
+		}
+	}
+	p.pending = nil
+}
+
+// relation considers a definition of relation t.
+func (p *exprProbePlan) relation(t probeTarget, key ExprKey, slot exprSlot) {
+	if slot != nil {
+		p.consider(slot, func() { p.addRelation(t, key, slot) })
+	}
+}
+
+func (p *exprProbePlan) addRelation(t probeTarget, key ExprKey, slot exprSlot) {
 	sch, name := splitQualified(t.fq)
 	target := "pg_temp." + name
 	i, ok := p.relations[t.fq]
@@ -886,13 +1121,16 @@ func (p *exprProbePlan) relation(t probeTarget, key ExprKey, slot exprSlot) {
 	p.add(key, slot, i, target)
 }
 
-// domain adds a definition of the domain declared as fq, which is source
-// in the database. The first one creates the probe's domain over the same
-// base type.
+// domain considers a definition of the domain declared as fq, which is
+// source in the database. The first one added creates the probe's domain
+// over the same base type.
 func (p *exprProbePlan) domain(fq, source string, key ExprKey, slot exprSlot) {
-	if slot == nil || slot.equal() {
-		return
+	if slot != nil {
+		p.consider(slot, func() { p.addDomain(fq, source, key, slot) })
 	}
+}
+
+func (p *exprProbePlan) addDomain(fq, source string, key ExprKey, slot exprSlot) {
 	target, ok := p.domains[fq]
 	if !ok {
 		target = fmt.Sprintf("pg_temp.pgy_probe_d%d", len(p.domains))
@@ -908,13 +1146,12 @@ func (p *exprProbePlan) domain(fq, source string, key ExprKey, slot exprSlot) {
 	p.add(key, slot, -1, target)
 }
 
-// routine adds the arguments of a function or procedure, which are probed
-// on a temporary routine of their own.
+// routine considers the arguments of a function or procedure, which are
+// probed on a temporary routine of their own.
 func (p *exprProbePlan) routine(key ExprKey, slot exprSlot) {
-	if slot == nil || slot.equal() {
-		return
+	if slot != nil {
+		p.consider(slot, func() { p.add(key, slot, -1, "") })
 	}
-	p.add(key, slot, -1, "")
 }
 
 // renameSourceOf returns the name fq has in the database before the plan's
@@ -932,10 +1169,12 @@ func renameSourceOf(fq, renamedFrom string, exists func(string) bool) (string, b
 }
 
 // collectExprProbes finds the declared definitions that have a live
-// counterpart the text comparison takes for different. live is the
-// snapshot as introspected.
-func collectExprProbes(live *Live, desired *schema.Database) *exprProbePlan {
-	p := &exprProbePlan{relations: map[string]int{}, domains: map[string]string{}}
+// counterpart the text comparison takes for different, or for the same
+// only by dropping something from one side (see exprProbePlan.consider),
+// or, with all, every declared definition that has a live counterpart.
+// live is the snapshot as introspected.
+func collectExprProbes(live *Live, desired *schema.Database, all bool) *exprProbePlan {
+	p := &exprProbePlan{relations: map[string]int{}, domains: map[string]string{}, all: all}
 	p.spec.Relations, p.spec.Run = []*probeRelation{}, []probeStmt{}
 	scoped := live.scoped()
 	renamed, _ := applyRenames(scoped, desired)
@@ -1047,7 +1286,7 @@ func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
 	}
 	out := make(map[ExprKey]*ExprProbe, len(p.requests))
 	for id, r := range p.requests {
-		probe := &ExprProbe{Declared: r.slot.declared()}
+		probe := &ExprProbe{Declared: r.slot.declared(), Live: r.slot.live()}
 		out[r.key] = probe
 		defs := global
 		if r.relation >= 0 {
@@ -1206,6 +1445,36 @@ begin
 end
 $f$`}
 
+// catalogSharedNamesQ returns which of the names in $1 are the names of a
+// function, an operator or a text search configuration both in pg_catalog
+// and in another schema, where a schema qualifier decides which one an
+// expression means.
+const catalogSharedNamesQ = `
+    select coalesce(array_agg(distinct c.name), '{}') from (
+        select p.proname::text as name from pg_proc p join pg_proc o on o.proname = p.proname and o.pronamespace <> p.pronamespace
+        where p.pronamespace = 'pg_catalog'::regnamespace and p.proname = any($1::text[])
+        union all
+        select p.oprname::text from pg_operator p join pg_operator o on o.oprname = p.oprname and o.oprnamespace <> p.oprnamespace
+        where p.oprnamespace = 'pg_catalog'::regnamespace and p.oprname = any($1::text[])
+        union all
+        select p.cfgname::text from pg_ts_config p join pg_ts_config o on o.cfgname = p.cfgname and o.cfgnamespace <> p.cfgnamespace
+        where p.cfgnamespace = 'pg_catalog'::regnamespace and p.cfgname = any($1::text[])
+    ) c`
+
+// catalogSharedNames returns which of names pg_catalog shares
+// with another schema (see catalogSharedNamesQ).
+func catalogSharedNames(ctx context.Context, pool *pgxpool.Pool, names []string) (map[string]bool, error) {
+	var shared []string
+	if err := pool.QueryRow(ctx, catalogSharedNamesQ, names).Scan(&shared); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(shared))
+	for _, n := range shared {
+		out[n] = true
+	}
+	return out, nil
+}
+
 // exprProbeWorkers is how many connections runExprProbes splits the
 // relations across, and exprProbeChunk the fewest relations worth a
 // connection of their own; copying one takes about a millisecond.
@@ -1321,6 +1590,17 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 // it stores (a constant into its type's output form, a function-style cast
 // into a cast), which no text comparison can follow for every type.
 //
+// It also lets PostgreSQL decide on the definitions that match as text
+// only because the text comparison dropped something that can change their
+// meaning from one side and not from the other (see exprDrops): a cast of
+// something other than a constant (an index on email::text against one on
+// the citext column email), or the schema of a function, operator or text
+// search configuration that pg_catalog has too (public.gen_random_uuid()
+// against core's gen_random_uuid()). For the second, one query asks the
+// server which of the names pg_catalog shares with another schema. YAML
+// spelled as pgy pull writes it drops the same from both sides, and costs
+// nothing.
+//
 // In one transaction that is always rolled back, each affected table,
 // view or materialized view is copied into a temporary table LIKE it,
 // which takes an ACCESS SHARE lock and copies columns only; the declared
@@ -1332,17 +1612,38 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 // them, and deparsed on the pinned one (see pinSearchPathQ).
 //
 // The results go to live.ExprProbes, which planning applies (see
-// applyExprProbes): a probe can only take statements out of a plan, so a
-// caller whose plan reports nothing has no use for it. Nothing is sent to
-// the server when every definition matches as text. A server that can't
+// applyExprProbes): a probe takes the statements for a definition spelled
+// another way out of the plan, and adds those for a definition that only
+// looked the same. Nothing is sent to the server when every definition
+// matches as text, dropping the same from both sides. A server that can't
 // run the probe, such as a read-only standby or a role without the
 // TEMPORARY privilege, leaves ExprProbes nil, and every definition is
 // compared as text; the error is returned for the caller to report.
 func ProbeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
+	return probeExpressions(ctx, pool, live, desired, false)
+}
+
+// ProbeEveryExpression is ProbeExpressions for every declared definition
+// of the kinds it covers that has a live counterpart, also those that
+// match as text. It catches what the text comparison hides without
+// dropping a cast or a schema, such as other parentheses (a + b * c
+// against (a + b) * c), at the cost of copying every table concerned.
+func ProbeEveryExpression(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
+	return probeExpressions(ctx, pool, live, desired, true)
+}
+
+func probeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database, all bool) error {
 	if live == nil || desired == nil || pool == nil || live.Offline {
 		return nil
 	}
-	plan := collectExprProbes(live, desired)
+	plan := collectExprProbes(live, desired, all)
+	if len(plan.pending) > 0 {
+		shared, err := catalogSharedNames(ctx, pool, plan.pendingNames())
+		if err != nil {
+			return fmt.Errorf("expression probe: %w", err)
+		}
+		plan.resolve(shared)
+	}
 	if len(plan.requests) == 0 {
 		return nil
 	}

@@ -166,17 +166,19 @@ policy:
 
 The kinds for `require_grants` and `require_owners` are `schemas`, `tables`, `views`, `sequences`, `functions`, `procedures`, `types`, `domains` and `servers`; partitions inherit their parent's rules and aren't checked. `concurrent_indexes` needs the database, so only `pgy diff` checks it.
 
-Two more `policy:` settings change what pgy does rather than adding checks:
+Some more `policy:` settings change what pgy does rather than adding checks:
 
 ```yaml
 policy:
   public_grants: authoritative   # or explicit; the default is by_kind
   lock_timeout: 5s               # pgy migrate's default --lock-timeout
   statement_timeout: 1min        # pgy migrate's default --statement-timeout
+  strict_expressions: true       # pgy diff --strict-expressions on every diff
 ```
 
 - **`public_grants`** sets which grants blocks cover PUBLIC. `by_kind`, the default, covers it where PostgreSQL gives PUBLIC nothing by default (see [grants](docs/schema.md#grants)). `authoritative` covers it in every grants block, so PostgreSQL's default `EXECUTE` on routines and `USAGE` on types, domains and the `public` schema are revoked unless the block lists `public`. `explicit` covers it only in blocks that list `public`.
 - **`lock_timeout`** and **`statement_timeout`** set the timeouts `pgy migrate` uses unless its `--lock-timeout` and `--statement-timeout` flags are given.
+- **`strict_expressions`** makes every `pgy diff` compare all declared expressions through the server, as `--strict-expressions` does (see [How expressions are compared](docs/schema.md#how-expressions-are-compared)). `--strict-expressions=false` turns it off for one run.
 
 ## Commands
 
@@ -184,7 +186,7 @@ policy:
 |---------|--------------|
 | `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, procedural languages and transforms that no extension owns, and changed privileges on an extension's tables, sequences and aggregates. Functions, views, types, languages and foreign-data wrappers of an extension are written when their privileges changed (see [Objects an extension owns](docs/schema.md#objects-an-extension-owns)). |
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations, and warnings such as policies on a table without row-level security. Exits 1 on errors. |
-| `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
+| `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty] [--strict-expressions]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. `--strict-expressions` compares every declared expression through the server, not only those the text comparison can't settle, which takes longer (see [How expressions are compared](docs/schema.md#how-expressions-are-compared)). Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
 | `pgy commit NAME` | Turns the buffer into `migrations/NNNN_NAME.sql` with a checksum header. Some changes add files around it: `NNNN_NAME_enum_values.sql` before it for new enum labels, and `NNNN_NAME_concurrent.sql` after it for statements that must run outside a transaction. A split buffer writes several groups. Warns when a schema file changed after `pgy diff` wrote the buffer. |
 | `pgy migrate [--dry-run] [--until N] [--limit N] [--lock-timeout D] [--statement-timeout D] [--retries N] [--retry-wait D]` | Applies pending migrations in order, each in its own transaction, after verifying checksums. `--retries` retries a migration that failed to get a lock. |

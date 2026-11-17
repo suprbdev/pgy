@@ -51,12 +51,17 @@ var (
 //     are unquoted
 //
 // Single-quoted string literals are never rewritten.
-func canonicalizeExpr(s string) string {
+func canonicalizeExpr(s string) string { return canonicalizeExprNoting(s, nil) }
+
+// canonicalizeExprNoting is canonicalizeExpr that also notes in d, when it
+// is not nil, the casts and schema qualifiers it removes (see exprDrops).
+func canonicalizeExprNoting(s string, d *exprDrops) string {
     masked, lits := maskStringLiterals(s)
-    masked = activeScope().unqualifySQL(masked)
-    masked = exprCatalogRe.ReplaceAllString(masked, "$1")
-    masked = rewriteCastCalls(masked)
-    masked = exprCastRe.ReplaceAllString(masked, "")
+    r := newDropRecorder(d, lits)
+    masked = r.unqualifyPath(activeScope(), masked)
+    masked = r.replace(exprCatalogRe, masked, "$1", (*dropRecorder).qualifierAt)
+    masked = rewriteCastCalls(masked, r.castCall())
+    masked = r.replace(exprCastRe, masked, "", (*dropRecorder).castAt)
     masked = strings.ReplaceAll(masked, "!=", "<>")
     masked = maskPositionIn(masked)
     masked = exprNotInListRe.ReplaceAllStringFunc(masked, func(m string) string {
@@ -74,7 +79,7 @@ func canonicalizeExpr(s string) string {
         if sm[1] != "" { op = "!" + op }
         return op
     })
-    masked = exprTypedLiteralRe.ReplaceAllString(masked, "$1")
+    masked = r.replace(exprTypedLiteralRe, masked, "$1", (*dropRecorder).typedLiteralAt)
     masked = strings.ReplaceAll(masked, "\x01", "in")
     return exprPlaceholderRe.ReplaceAllStringFunc(masked, func(m string) string {
         i, _ := strconv.Atoi(exprPlaceholderRe.FindStringSubmatch(m)[1])
@@ -88,8 +93,9 @@ func canonicalizeExpr(s string) string {
 
 // rewriteCastCalls replaces each CAST(x AS type) in s, whose string
 // literals are already masked, with (x), which is what x::type becomes once
-// casts are removed. Nested calls are rewritten from the outside in.
-func rewriteCastCalls(s string) string {
+// casts are removed. Nested calls are rewritten from the outside in. note,
+// when not nil, is given x and type of each.
+func rewriteCastCalls(s string, note func(operand, typ string)) string {
     for start := 0; ; {
         i := strings.Index(strings.ToLower(s[start:]), "cast")
         if i < 0 { return s }
@@ -110,6 +116,7 @@ func rewriteCastCalls(s string) string {
             }
         }
         if end < 0 || as < 0 { continue }
+        if note != nil { note(s[j+1:as], strings.TrimSpace(s[as+3:end])) }
         s = s[:i] + "(" + strings.TrimSpace(s[j+1:as]) + ")" + s[end+1:]
         start = i
     }

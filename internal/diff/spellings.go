@@ -55,8 +55,8 @@ func objectLiteralNames(defs ...string) map[string]bool {
 // leaves the cast out (to_tsvector('public.cfg', body)), so such a literal
 // is only known to be an object name from the other side of the comparison.
 // Other literals keep the qualifier: there 'public.x' and 'x' are different
-// values.
-func unqualifyObjectLiterals(s string, names map[string]bool) string {
+// values. d, when not nil, notes each qualifier dropped.
+func unqualifyObjectLiterals(s string, names map[string]bool, d *exprDrops) string {
 	sc := activeScope()
 	if !sc.mentions(s) {
 		return s
@@ -67,6 +67,9 @@ func unqualifyObjectLiterals(s string, names map[string]bool) string {
 	for i, lit := range lits {
 		name, ok := sc.unqualifyLiteral(lit[1 : len(lit)-1])
 		if ok && (marked[i] || names[name]) {
+			if d != nil {
+				d.qualifiers = append(d.qualifiers, qualifiedName{identName(lit[1 : len(lit)-2-len(name)]), name})
+			}
 			lits[i] = "'" + name + "'"
 			changed = true
 		}
@@ -339,9 +342,10 @@ var (
 // Introspection searches both schemas, so PostgreSQL prints an operator it
 // finds there without them. It prints the qualified form only when the bare
 // operator resolves to another one, which is why a live definition keeps it.
-func bareVisibleOperators(s string) string {
+// d, when not nil, notes each qualifier dropped.
+func bareVisibleOperators(s string, d *exprDrops) string {
 	masked, lits := maskStringLiterals(s)
-	bare := visibleOperatorRe.ReplaceAllString(masked, "$1")
+	bare := newDropRecorder(d, lits).replace(visibleOperatorRe, masked, "$1", (*dropRecorder).operatorAt)
 	if bare == masked {
 		return s
 	}
