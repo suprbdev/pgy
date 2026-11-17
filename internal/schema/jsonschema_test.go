@@ -148,8 +148,8 @@ func TestJSONSchemaRejectsInvalid(t *testing.T) {
         "tabels:\n  users:\n    columns: {id: {type: uuid}}\n",
         // typo in column property
         "schema public:\n  table t:\n    columns:\n      id: {type: uuid, primarykey: true}\n",
-        // bad index method
-        "schema public:\n  table t:\n    columns: {id: {type: uuid}}\n    indexes:\n      i: {columns: [id], using: btre}\n",
+        // empty index method
+        "schema public:\n  table t:\n    columns: {id: {type: uuid}}\n    indexes:\n      i: {columns: [id], using: \"\"}\n",
         // column missing type
         "schema public:\n  table t:\n    columns:\n      id: {primaryKey: true}\n",
         // bad trigger timing
