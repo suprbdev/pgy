@@ -110,7 +110,7 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 			if !strings.EqualFold(security, "definer") {
 				return
 			}
-			if strings.TrimSpace(set["search_path"]) == "" {
+			if _, ok := set["search_path"]; !ok {
 				warn(obj, "SECURITY DEFINER routines must set search_path, so callers can't redirect the names they use (security_definer: hardened)")
 			}
 			publicExec := !revokePublic
