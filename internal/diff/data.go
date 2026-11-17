@@ -539,14 +539,16 @@ func arrayCastType(typ string) string {
 // dataSQL renders column col's value for table fq. Every value of a json or
 // jsonb column is a JSON document (a list or string is not an array or text
 // literal) and is written as a jsonb literal, cast on to json where the
-// column is json. A non-empty list for a column declared as an array is an
-// ARRAY[...] of its elements' literals cast to that array type (see
+// column is json. A non-empty list for a column declared as an array is
+// array[...] of its elements' literals cast to that array type (see
 // arrayConstructor), which unlike an array literal does not depend on the
-// element type's delimiter (; for box). Other values containing a map
-// (composite types and their arrays) are converted by jsonb_to_record to the
-// column's declared type, the conversion the comparison uses; a column the
-// YAML gives no type (an inherited or partition column) is converted through
-// the table's row type instead. Anything else is a plain literal.
+// element type's delimiter (; for box). Other lists with a declared type (for
+// a type whose input reads [1, 2, 3], or a domain over an array type) and
+// values containing a map (composite types and their arrays) are converted
+// by jsonb_to_record to the column's declared type, the conversion the
+// comparison uses; a map for a column the YAML gives no type (an inherited
+// or partition column) is converted through the table's row type instead.
+// Anything else is a plain literal.
 func dataSQL(fq string, dt *schema.Table, col string, v any) string {
     typ := dataColumnType(dt, col)
     if kind := jsonTypeKind(typ); kind != "" {
@@ -555,10 +557,12 @@ func dataSQL(fq string, dt *schema.Table, col string, v any) string {
         if kind == "json" { return quoteString(string(b)) + "::jsonb::json" }
         return quoteString(string(b)) + "::jsonb"
     }
-    if list, ok := v.([]any); ok && len(list) > 0 && typ != "" && !containsMap(v) && isArrayTypeName(typ) {
+    list, isList := v.([]any)
+    if isList && typ != "" && !containsMap(v) && isArrayTypeName(typ) {
+        if len(list) == 0 { return sqlValue(v) }
         return arrayConstructor(list) + "::" + arrayCastType(typ)
     }
-    if !containsMap(v) { return sqlValue(v) }
+    if !containsMap(v) && (!isList || typ == "") { return sqlValue(v) }
     if typ != "" {
         b, _ := json.Marshal(map[string]any{"v": dataValue(v)})
         return fmt.Sprintf("(select v from jsonb_to_record(%s::jsonb) as x(v %s))", quoteString(string(b)), typ)

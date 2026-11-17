@@ -53,3 +53,22 @@ func TestIsArrayTypeName(t *testing.T) {
 		}
 	}
 }
+
+func TestDataListForNonArrayColumn(t *testing.T) {
+	dt := &schema.Table{Columns: map[string]*schema.Column{"r": {Type: "int4range"}, "emb": {Type: "vector(3)"}, "tags": {Type: "app.tag_list"}, "inherited": {}}}
+	for _, c := range []struct {
+		col  string
+		v    any
+		want string
+	}{
+		{"r", []any{1, 3}, `(select v from jsonb_to_record('{"v":[1,3]}'::jsonb) as x(v int4range))`},
+		{"emb", []any{1, 2.5, 3}, `(select v from jsonb_to_record('{"v":[1,2.5,3]}'::jsonb) as x(v vector(3)))`},
+		{"tags", []any{}, `(select v from jsonb_to_record('{"v":[]}'::jsonb) as x(v app.tag_list))`},
+		{"emb", "[1,2,3]", `'[1,2,3]'`},
+		{"inherited", []any{"a"}, `'{"a"}'`},
+	} {
+		if got := dataSQL("app.t", dt, c.col, c.v); got != c.want {
+			t.Errorf("dataSQL(%s, %v) = %s, want %s", c.col, c.v, got, c.want)
+		}
+	}
+}

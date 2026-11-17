@@ -29,6 +29,39 @@ schema SCH:
         - {id: 2, boxes: BOXES2, grid: [], codes: [x], short: [xyz]}
 `
 
+const dataListsForOtherTypes = `
+schema SCH:
+  domain ints:
+    type: "int[]"
+    check: "cardinality(VALUE) < 4"
+  table t:
+    dependsOn: [domain SCH.ints]
+    columns:
+      id: {type: int, primaryKey: true}
+      r: {type: int4range, nullable: true}
+      n: {type: SCH.ints, nullable: true}
+    data:
+      rows:
+        - {id: 1, r: [1, 3], n: [1, 2]}
+        - {id: 2, r: R2, n: []}
+`
+
+// TestIntegrationDataListsForOtherTypes gives lists to columns that are not
+// declared as arrays: a type whose input reads the JSON text of the list (a
+// range reads [1, 3]) and a domain over an array type. They are written
+// through the conversion that compares them.
+func TestIntegrationDataListsForOtherTypes(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	opts := diff.Options{Unsafe: true, Prune: true}
+	convergeYAMLWith(t, pool, sch, strings.ReplaceAll(dataListsForOtherTypes, "R2", "[2, 4]"), opts)
+	convergeYAMLWith(t, pool, sch, strings.ReplaceAll(dataListsForOtherTypes, "R2", "[2, 5]"), opts)
+	got := rowTexts(t, pool, fmt.Sprintf(`select concat_ws(' ', id, r, n) from %q.t order by id`, sch))
+	if want := []string{"1 [1,4) {1,2}", "2 [2,6) {}"}; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("rows = %q, want %q", got, want)
+	}
+}
+
 // TestIntegrationDataArrays writes data rows with lists for array columns
 // whose element type does not use a comma between elements (box uses ;),
 // multidimensional arrays with nulls, arrays of a domain and arrays whose
