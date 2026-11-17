@@ -11,6 +11,7 @@ import (
 func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live.scoped())
     if desired == nil { return out }
+    desired = withUnmovedExtensions(out, desired)
     out, _ = applyRenames(out, desired)
     out = applyExprProbes(out, desired)
     if desired.DatabaseSettings != nil { out.DatabaseConfig = simulateConfig(desired.DatabaseSettings) }

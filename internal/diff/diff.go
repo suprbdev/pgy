@@ -322,8 +322,8 @@ type LiveExtension struct {
     // owns, and Operators those of its operators. Builtins holds the names
     // of its routines that pg_catalog has a routine of too, so that an
     // unqualified call may well mean the built-in one. All three are nil
-    // until IntrospectExtensions loads them for an extension that has to
-    // move.
+    // until IntrospectExtensions loads them for an extension declared in
+    // another schema.
     Members   map[string]bool
     Operators map[string]bool
     Builtins  map[string]bool
@@ -346,10 +346,12 @@ type LiveExtension struct {
 
 // AvailableExtension is an extension the server can install: its default
 // version and, for every version it can install or update to, the
-// extensions that version requires.
+// extensions that version requires, and for the versions whose control
+// file names the schema they have to be installed in, that schema.
 type AvailableExtension struct {
     DefaultVersion string
     Requires       map[string][]string
+    Schemas        map[string]string
 }
 
 type LiveFunction struct{
@@ -2754,6 +2756,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
