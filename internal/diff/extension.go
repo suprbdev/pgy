@@ -92,7 +92,8 @@ func orderedExtensions(live *Live, desired *schema.Database) []*schema.Extension
 // ones, in requirement order. Both go to plan.Creates, ahead of every
 // object that may use the extension. A relocatable extension is moved to
 // its declared schema; others cannot be moved and are left alone. Unset
-// schema, version and comment are unmanaged.
+// schema, version and comment are unmanaged. Dropping undeclared
+// extensions is part of pruning; see planExtensionDrops.
 func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     warn := func(format string, args ...any) {
         plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})
@@ -156,16 +157,17 @@ func sortedVersions(m map[string][]string) []string {
     return out
 }
 
-// IntrospectExtensions loads what planning the declared extensions needs
-// beyond Introspect, and only when it is needed: the server's available
+// IntrospectExtensions loads what planning the extensions needs beyond
+// Introspect, and only when it is needed: the server's available
 // extensions and their requirements when one has to be created or updated,
-// the update paths of the installed ones when a version differs, and the
-// member names of extensions that have to move to another schema. Without
-// it the plan is still valid: statements are ordered by dependsOn and the
-// requirements of PostgreSQL's own extensions, nothing is checked against
-// the server, and objects that follow a moved extension are compared in
-// their old spelling.
-func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
+// the update paths of the installed ones when a version differs, the
+// member names of extensions that have to move to another schema, and the
+// objects that use an extension opts lets pruning drop. Without it the plan
+// is still valid: statements are ordered by dependsOn and the requirements
+// of PostgreSQL's own extensions, nothing is checked against the server,
+// objects that follow a moved extension are compared in their old
+// spelling, and DROP EXTENSION is planned without looking for dependents.
+func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database, opts Options) error {
     if live == nil || desired == nil || pool == nil { return nil }
     create, update := false, false
     moving := []string{}
@@ -181,7 +183,8 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
             if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable { moving = append(moving, quoteString(ext.Name)) }
         }
     }
-    if !create && !update && len(moving) == 0 { return nil }
+    prunable := sortedKeys(prunableExtensions(live, desired, opts))
+    if !create && !update && len(moving) == 0 && len(prunable) == 0 { return nil }
     batch := &queryBatch{}
     if create || update {
         available := map[string]*AvailableExtension{}
@@ -250,6 +253,7 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
             return nil
         })
     }
+    if len(prunable) > 0 { queryExtensionDependents(batch, live, prunable) }
     return batch.run(ctx, pool)
 }
 

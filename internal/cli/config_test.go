@@ -103,6 +103,28 @@ func TestConfigInvalidYAML(t *testing.T) {
     }
 }
 
+func TestConfigPruneKeepExtensions(t *testing.T) {
+    dir := t.TempDir()
+    writeFile(t, filepath.Join(dir, "pgy.yaml"), "prune:\n  keep_extensions: [pg_stat_statements, \" postgis \"]\n")
+    fc, _, err := loadFileConfig(dir, "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    keep, err := resolvePrune(fc.Prune)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if strings.Join(keep, ",") != "pg_stat_statements,postgis" {
+        t.Errorf("keep_extensions = %v", keep)
+    }
+    if keep, err := resolvePrune(nil); err != nil || len(keep) != 0 {
+        t.Errorf("no prune block: %v, %v", keep, err)
+    }
+    if _, err := resolvePrune(&PruneConfig{KeepExtensions: []string{"citext", " "}}); err == nil || !strings.Contains(err.Error(), "prune.keep_extensions") {
+        t.Errorf("an empty name must be rejected, got %v", err)
+    }
+}
+
 func TestDiscoverSchemasSkipsConfigAndDotfiles(t *testing.T) {
     dir := t.TempDir()
     for _, f := range []string{"a.yml", "sub/b.yaml", ".golangci.yml", "sub/.pgy.yml", "sub/pgy.yaml", "custom.yml", ".github/workflows/ci.yml", "node_modules/x/y.yml", "notes.txt"} {

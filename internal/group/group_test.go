@@ -580,6 +580,33 @@ func TestPlanUnsafeDropsOnlyInFinalStep(t *testing.T) {
     }
 }
 
+func TestPlanPrunesExtensionsInFinalStep(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": "extensions: [citext]\ntables:\n  a:\n    columns:\n      id: {type: int}\n",
+        "b.yml": "tables:\n  b:\n    columns:\n      id: {type: int}\n      a_id: {type: int, nullable: true, references: {table: a, columns: [id]}}\n",
+    })
+    live := &diff.Live{
+        Extensions: map[string]bool{"citext": true, "hstore": true, "pg_trgm": true},
+        ExtensionDefs: map[string]*diff.LiveExtension{
+            "citext": {Schema: "public"},
+            "hstore": {Schema: "public", Dependents: []diff.ExtensionDependent{}},
+            "pg_trgm": {Schema: "public", Dependents: []diff.ExtensionDependent{{Description: "index other.t_trgm"}}},
+        },
+    }
+    paths := p("a.yml", "b.yml")
+    groups, err := Split(paths, ModeFile)
+    if err != nil { t.Fatal(err) }
+    steps, err := Plan(live, paths, groups, diff.Options{Unsafe: true, Prune: true})
+    if err != nil { t.Fatal(err) }
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"a", "b"}) { t.Fatalf("got %v", got) }
+    if sql := stepSQL(t, steps, "a"); strings.Contains(sql, "drop extension") { t.Fatalf("drops belong to the final step:\n%s", sql) }
+    last := steps[1].Plan
+    if len(last.Drops) != 1 || last.Drops[0] != `drop extension "hstore";` { t.Fatalf("drops of the final step: %v", last.Drops) }
+    warned := false
+    for _, w := range last.Warnings { warned = warned || strings.Contains(w.Message, "extension pg_trgm is not listed under extensions") }
+    if !warned { t.Fatalf("the extension still in use must be reported: %v", last.Warnings) }
+}
+
 func TestRenderParseRoundTrip(t *testing.T) {
     steps := []Step{
         {Name: "modules/core/user", Plan: &diff.PlanDiff{Creates: []string{"create table a (id int);"}}},

@@ -30,8 +30,13 @@ type Options struct {
     // Prune, together with Unsafe, drops objects the desired schema no
     // longer declares: tables, views, materialized views, functions,
     // procedures, sequences, domains and types in managed schemas, and
-    // triggers, constraints and indexes on declared tables. See planPrune.
+    // triggers, constraints and indexes on declared tables (see planPrune),
+    // and the extensions a present extensions block leaves out (see
+    // planExtensionDrops).
     Prune bool
+    // KeepExtensions names extensions Prune never drops
+    // (prune.keep_extensions).
+    KeepExtensions []string
     // PublicGrants sets which grants blocks cover PUBLIC
     // (policy.public_grants); see planGrantsWarned.
     PublicGrants PublicGrants
