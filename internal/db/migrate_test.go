@@ -130,3 +130,16 @@ func TestHasNoTransactionDirective(t *testing.T) {
 		}
 	}
 }
+
+func TestHasNewSessionDirective(t *testing.T) {
+	cases := map[string]bool{
+		"-- pgy 1.0\n-- checksum x\n\n-- pgy:new-session\nalter extension e update to '2';\n": true,
+		"-- pgy:no-transaction\nselect 1;\n":                                                  false,
+		"select 1;\n-- pgy:new-session\n":                                                     false,
+	}
+	for sql, want := range cases {
+		if got := HasNewSessionDirective(sql); got != want {
+			t.Errorf("HasNewSessionDirective(%q) = %v, want %v", sql, got, want)
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
     "strings"
     "time"
 
+    "github.com/jackc/pgx/v5"
+    "github.com/jackc/pgx/v5/pgconn"
     "github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,6 +41,7 @@ type Migration struct {
     StatementTimeout string // transaction-local statement_timeout; empty = server default
     RecordIn         string // "schema.table" migrations table to record the migration in; empty = not recorded
     NoTransaction    bool   // run statements one by one outside a transaction (see NoTransactionDirective)
+    NewSession       bool   // run each statement first thing on a connection of its own, outside a transaction (see NewSessionDirective)
 }
 
 // NoTransactionDirective, as a comment line before a migration's first
@@ -46,12 +49,25 @@ type Migration struct {
 // as CREATE INDEX CONCURRENTLY require.
 const NoTransactionDirective = "-- pgy:no-transaction"
 
+// NewSessionDirective, as a comment line before a migration's first
+// statement, makes migrate run each of its statements outside a transaction
+// as the first statement of a connection opened for it. Some extensions
+// (TimescaleDB) refuse ALTER EXTENSION ... UPDATE in a session that has run
+// any other statement, since that loads the old version of their library.
+const NewSessionDirective = "-- pgy:new-session"
+
 // HasNoTransactionDirective reports whether the comment lines leading a
 // migration contain NoTransactionDirective.
-func HasNoTransactionDirective(sql string) bool {
+func HasNoTransactionDirective(sql string) bool { return hasDirective(sql, NoTransactionDirective) }
+
+// HasNewSessionDirective reports whether the comment lines leading a
+// migration contain NewSessionDirective.
+func HasNewSessionDirective(sql string) bool { return hasDirective(sql, NewSessionDirective) }
+
+func hasDirective(sql, directive string) bool {
     for _, ln := range strings.Split(sql, "\n") {
         t := strings.TrimSpace(ln)
-        if t == NoTransactionDirective { return true }
+        if t == directive { return true }
         if t != "" && !strings.HasPrefix(t, "--") { return false }
     }
     return false
@@ -63,6 +79,7 @@ func HasNoTransactionDirective(sql string) bool {
 // can never be applied without being recorded (or vice versa). Recording
 // fails if the version parsed from Name is already taken.
 func ApplyMigration(ctx context.Context, pool *PoolShim, m Migration) error {
+    if m.NewSession { return applyInNewSessions(ctx, pool, m) }
     if m.NoTransaction { return applyWithoutTransaction(ctx, pool, m) }
     tx, err := pool.Begin(ctx)
     if err != nil { return err }
@@ -78,13 +95,7 @@ func ApplyMigration(ctx context.Context, pool *PoolShim, m Migration) error {
         if strings.TrimSpace(stmt) == "" { continue }
         if _, err := tx.Exec(ctx, stmt); err != nil { return err }
     }
-    if m.RecordIn != "" {
-        schema, table, _ := strings.Cut(m.RecordIn, ".")
-        q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1, $2, $3, now())", pqIdent(schema), pqIdent(table))
-        if _, err := tx.Exec(ctx, q, MigrationVersion(m.Name), m.Name, m.Checksum); err != nil {
-            return fmt.Errorf("record %s: %w", m.Name, err)
-        }
-    }
+    if err := record(ctx, tx, m); err != nil { return err }
     return tx.Commit(ctx)
 }
 
@@ -103,21 +114,63 @@ func applyWithoutTransaction(ctx context.Context, pool *PoolShim, m Migration) e
         }
         defer func(name string) { _, _ = conn.Exec(context.WithoutCancel(ctx), "reset "+name) }(setting[0])
     }
-    stmts := []string{}
-    for _, stmt := range SplitSQLStatements(m.SQL) {
-        if strings.TrimSpace(stmt) != "" { stmts = append(stmts, stmt) }
-    }
+    stmts := migrationStatements(m.SQL)
     for i, stmt := range stmts {
         if _, err := conn.Exec(ctx, stmt); err != nil {
             return fmt.Errorf("statement %d of %d failed; this migration runs without a transaction, so statements before it stay applied: %w", i+1, len(stmts), err)
         }
     }
-    if m.RecordIn != "" {
-        schema, table, _ := strings.Cut(m.RecordIn, ".")
-        q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1, $2, $3, now())", pqIdent(schema), pqIdent(table))
-        if _, err := conn.Exec(ctx, q, MigrationVersion(m.Name), m.Name, m.Checksum); err != nil {
-            return fmt.Errorf("record %s: %w", m.Name, err)
+    return record(ctx, conn, m)
+}
+
+// applyInNewSessions runs each statement of a new-session migration on a
+// connection opened for it and closed after it, with the timeouts passed
+// as connection parameters so that no other statement precedes it, and
+// records the migration once every statement succeeded. A failure leaves
+// the earlier statements applied. An extension update can make the
+// sessions that loaded the extension's old library fail (TimescaleDB ends
+// them), so the migration is recorded on the last statement's connection
+// and the pool's connections are replaced afterwards.
+func applyInNewSessions(ctx context.Context, pool *PoolShim, m Migration) error {
+    defer pool.Reset()
+    stmts := migrationStatements(m.SQL)
+    if len(stmts) == 0 { return record(ctx, pool, m) }
+    cfg := pool.Config().ConnConfig.Copy()
+    if cfg.RuntimeParams == nil { cfg.RuntimeParams = map[string]string{} }
+    for _, setting := range [][2]string{{"lock_timeout", m.LockTimeout}, {"statement_timeout", m.StatementTimeout}} {
+        if setting[1] != "" { cfg.RuntimeParams[setting[0]] = setting[1] }
+    }
+    for i, stmt := range stmts {
+        conn, err := pgx.ConnectConfig(ctx, cfg)
+        if err != nil { return err }
+        if _, err = conn.Exec(ctx, stmt); err != nil {
+            err = fmt.Errorf("statement %d of %d failed; each statement of this migration runs in a session of its own, so statements before it stay applied: %w", i+1, len(stmts), err)
+        } else if i == len(stmts)-1 {
+            err = record(ctx, conn, m)
         }
+        _ = conn.Close(context.WithoutCancel(ctx))
+        if err != nil { return err }
+    }
+    return nil
+}
+
+func migrationStatements(sql string) []string {
+    stmts := []string{}
+    for _, stmt := range SplitSQLStatements(sql) {
+        if strings.TrimSpace(stmt) != "" { stmts = append(stmts, stmt) }
+    }
+    return stmts
+}
+
+// record inserts m into the migrations table it names, if any.
+func record(ctx context.Context, conn interface {
+    Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, m Migration) error {
+    if m.RecordIn == "" { return nil }
+    schema, table, _ := strings.Cut(m.RecordIn, ".")
+    q := fmt.Sprintf("insert into %s.%s(version, name, checksum, applied_at) values($1, $2, $3, now())", pqIdent(schema), pqIdent(table))
+    if _, err := conn.Exec(ctx, q, MigrationVersion(m.Name), m.Name, m.Checksum); err != nil {
+        return fmt.Errorf("record %s: %w", m.Name, err)
     }
     return nil
 }

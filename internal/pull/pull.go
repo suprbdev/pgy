@@ -143,6 +143,15 @@ func (b *builder) warn(format string, args ...any) {
 	b.res.Warnings = append(b.res.Warnings, fmt.Sprintf(format, args...))
 }
 
+// accessMethod writes the access method of a table or materialized view
+// unless it is the session's default_table_access_method, which CREATE
+// TABLE without USING picks.
+func (b *builder) accessMethod(m *node, lt *diff.LiveTable) {
+	if lt.AccessMethod != "" && lt.AccessMethod != b.live.DefaultAccessMethod {
+		add(m, "accessMethod", str(lt.AccessMethod))
+	}
+}
+
 func (b *builder) wantSchema(s string) bool {
 	if slices.Contains(b.opts.ExcludeSchemas, s) {
 		return false
@@ -1135,6 +1144,7 @@ func (b *builder) tables() {
 		}
 		if lt.Foreign == nil {
 			addStr(t, "tablespace", lt.Tablespace)
+			b.accessMethod(t, lt)
 		}
 		b.data(t, fq, lt)
 		b.indexes(t, fq, lt)
@@ -2045,6 +2055,7 @@ func (b *builder) views() {
 					add(m, "with", storageParams(lt.Options, lt.OptionOrder))
 				}
 				addStr(m, "tablespace", lt.Tablespace)
+				b.accessMethod(m, lt)
 				b.indexes(m, k, lt)
 			}
 		} else {

@@ -666,7 +666,7 @@ func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opt
     if rq == nil { return plan }
     before := planWith(live, rq.database(desired), opts)
     want, left := map[string]int{}, 0
-    for _, sec := range [][]string{before.Prelude, before.Creates, before.Alters, before.Drops, before.Concurrent} {
+    for _, sec := range [][]string{before.ExtensionUpdates, before.Prelude, before.Creates, before.Alters, before.Drops, before.Concurrent} {
         for _, s := range sec {
             want[s]++
             left++
@@ -678,6 +678,7 @@ func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opt
         dst *[]string
         got []string
     }{
+        {&out.ExtensionUpdates, plan.ExtensionUpdates},
         {&out.Prelude, plan.Prelude},
         {&out.Creates, plan.Creates},
         {&out.Alters, plan.Alters},

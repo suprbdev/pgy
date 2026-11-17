@@ -354,6 +354,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
                 lt.Tablespace = vw.Tablespace
             }
+            if vw.AccessMethod != "" {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                lt.AccessMethod = vw.AccessMethod
+            }
             if len(vw.Indexes) > 0 {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
@@ -659,6 +664,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         for k, v := range dt.With { lt.Options[strings.ToLower(k)] = v }
     }
     if dt.Tablespace != "" { lt.Tablespace = dt.Tablespace }
+    if dt.AccessMethod != "" { lt.AccessMethod = dt.AccessMethod }
     if dt.Grants != nil { out.TableGrants[fq] = simulateGrants(out.TableGrants[fq], dt.Grants) }
     if dt.Comment != "" { out.RelComments[fq] = dt.Comment }
 }
@@ -742,6 +748,7 @@ func cloneLive(l *Live) *Live {
         ServerVersion:      l.ServerVersion,
         Offline:            l.Offline,
         DefaultTablespace:  l.DefaultTablespace,
+        DefaultAccessMethod: l.DefaultAccessMethod,
         SearchPath:         l.SearchPath,
         scope:              l.scope,
         ViewProbes:         cloneMap(l.ViewProbes, nil),

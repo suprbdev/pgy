@@ -431,7 +431,7 @@ func mergeGroups(groups []Group, members []int) Group {
 // hasStatements reports whether p has any SQL to run. A step without any
 // only carries warnings, and Render leaves it out.
 func hasStatements(p *diff.PlanDiff) bool {
-    return len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0
+    return len(p.ExtensionUpdates)+len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0
 }
 
 // withoutReplace returns rules with replace cleared on those that before,

@@ -376,6 +376,8 @@ Raising `version:` emits `ALTER EXTENSION ... UPDATE TO`. Many update scripts dr
 - **Views the YAML doesn't declare** can't be recreated, so they stay and are reported too. With `--unsafe --prune`, a view or materialized view that pruning drops anyway is dropped before the update instead of after it.
 - **Views that something of the above uses** stay as well, since dropping them would fail: a view a materialized view selects from, or one that a policy, a column of its row type or a SQL-standard body refers to. The warning names what holds them back.
 
+Some extensions accept `ALTER EXTENSION ... UPDATE` only as the first statement of a session: TimescaleDB loads its library on the first statement a session runs and then refuses to update (`cannot be updated after the old version has already been loaded`). So an update that needs nothing else in the plan to run first goes in a buffer section of its own, `extension_updates`, which starts with `-- pgy:new-session`. `pgy commit` writes it to a `NNNN_<name>_extension_updates.sql` migration numbered before the rest, and `pgy migrate` runs each of its statements on a new connection, as that connection's first statement, outside a transaction (`--lock-timeout` and `--statement-timeout` are passed as connection parameters). It records the migration once every statement succeeded. Rerunning an update that already took effect only prints a notice, so a migration that failed half way can be run again. Afterwards `pgy migrate` replaces its other connections, since TimescaleDB ends the sessions that loaded the old version. An update stays in the main migration, after what it needs, when the new version requires an extension the same migration creates, or when the plan drops views that use the extension (see above): the drops, the update and the views' recreation must share a transaction. An extension that wants the update first in a session rejects it there, so run that update without `--unsafe` first, which keeps the views and gives the update a migration of its own.
+
 An extension that none of these use is updated with the single statement. Other users of an extension's objects, such as a column default that calls `uuid_generate_v4()`, an index with `gin_trgm_ops` or a trigger on an extension's function, are not looked at: update scripts rarely replace what those use, and if one does, PostgreSQL's error names them.
 
 With `--split`, extensions are updated in the first migration, where only the views of the first group count as declared.
@@ -518,6 +520,7 @@ A table declared without `columns`, `of`, `partitionOf` and `inherits` (nor the 
 | `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
 | `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
+| `validate` | string | `immediate` or `later`: how making an existing column NOT NULL is validated on PostgreSQL 18+. `later` (the default) adds the constraint `NOT VALID` and validates it in the no-transaction migration; `immediate` uses `SET NOT NULL`, which scans the table under `ACCESS EXCLUSIVE`. See [Validating constraints in one step](#validating-constraints-in-one-step). Omitted = the table's `validate` |
 | `notNullName` | string | Name of the column's NOT NULL constraint (PostgreSQL 18+, which records one per NOT NULL column). Used when the table or the column is created and when an existing column becomes NOT NULL; a live constraint with another name is renamed in place with `ALTER TABLE ... RENAME CONSTRAINT`. Omitted = unmanaged: a new constraint gets PostgreSQL's `<table>_<column>_not_null`, and `pgy pull` writes the key only for a name that differs from that. Before PostgreSQL 18 the key is ignored and `pgy diff` warns. It applies to columns a table or foreign table declares with a type; a partition or inheritance child takes the name from its parent |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
@@ -549,6 +552,7 @@ schema public:
   table events_log:
     unlogged: true              # UNLOGGED: no WAL, emptied after a crash
     tablespace: fast_ssd        # TABLESPACE (created outside pgy)
+    accessMethod: heap          # USING: table access method
     with:                       # storage parameters
       fillfactor: 80
       autovacuum_vacuum_scale_factor: 0.05
@@ -562,11 +566,17 @@ schema public:
         collate: C
 ```
 
-`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. A value that is not a number or a lower-case word is passed as a string literal, so its case and punctuation reach PostgreSQL as written (`tokenizer: TokenBigram` becomes `tokenizer = 'TokenBigram'`); a value already in single quotes is passed as it is. This applies to every `with` (tables, materialized views, indexes and key constraints), and so does the order: the parameters are emitted in the order a `schema <name>:` block lists them (other YAML layouts sort them by name), and `pgy pull` writes them in the order PostgreSQL stores them, so a rebuilt database lists them as the original does. The comparison with the database ignores the order. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
+`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. A value that is not a number or a lower-case word is passed as a string literal, so its case and punctuation reach PostgreSQL as written (`tokenizer: TokenBigram` becomes `tokenizer = 'TokenBigram'`), and so is a word PostgreSQL would read as a type name or reject, such as `time`, `int` or `values`; a value already in single quotes is passed as it is. This applies to every `with` (tables, materialized views, indexes and key constraints), and so does the order: the parameters are emitted in the order a `schema <name>:` block lists them (other YAML layouts sort them by name), and `pgy pull` writes them in the order PostgreSQL stores them, so a rebuilt database lists them as the original does. The comparison with the database ignores the order. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
+
+A parameter with a namespace other than `toast` (`tsdb.hypertable`, `timescaledb.continuous`) is create-time only. PostgreSQL never keeps such a parameter, so when `CREATE TABLE` or `CREATE MATERIALIZED VIEW` accepts one, an extension took it while the relation was created: TimescaleDB turns `with: {tsdb.hypertable: true, tsdb.partition_column: time, tsdb.chunk_interval: 1 day}` into a hypertable. pgy passes it to `CREATE` and afterwards compares it only while the live relation's `reloptions` show it, so it is not emitted again. Changing it, or adding it to a table that already exists, does nothing; use the extension's own functions in a hand-written migration for that. Values are quoted like any other parameter's (`1 day` becomes `'1 day'`). A materialized view declared with such a parameter that the database has as a plain view, because the extension made it one (a TimescaleDB continuous aggregate), counts as created: its query and storage are left alone, and its `comment`, `columnComments`, `grants` and `owner` are managed on the view.
 
 #### Tablespaces
 
 `tablespace:` puts a table, partition, materialized view, index, or the index of a primary key, unique or exclusion constraint in a tablespace that already exists; pgy doesn't create tablespaces. New objects get `TABLESPACE` (or `USING INDEX TABLESPACE`). An existing one in another tablespace is moved with `ALTER ... SET TABLESPACE`, which rewrites it under an `ACCESS EXCLUSIVE` lock, so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). An index with `concurrently: true` moves with `REINDEX (TABLESPACE ...) INDEX CONCURRENTLY` in the no-transaction migration instead, without blocking writes. On a partitioned table or index, `SET TABLESPACE` only sets the default for new partitions, so it has no warning. `tablespace: pg_default` moves an object back; a relation in the database's default tablespace matches its name. Without the key, the tablespace is unmanaged. `pgy pull` writes it for every relation stored outside the database default.
+
+#### Access methods
+
+`accessMethod:` names the table access method of a table, partition, partitioned table or materialized view, such as `columnar` from Citus. It is compared with the live `pg_class.relam`. New relations get `USING`, and an existing table or materialized view with another access method is changed with `ALTER ... SET ACCESS METHOD`, which rewrites it and its indexes under an `ACCESS EXCLUSIVE` lock. So that needs `--unsafe` and gets a lock warning (and `--strict` fails on it by default). On a partitioned table it only sets the access method that partitions created later get, which needs neither. PostgreSQL keeps an access method for a partitioned table from version 17 on; before that the key is ignored there with a warning, so declare it on the partitions. Foreign tables and plain views have no storage, so `pgy validate` rejects the key on them. Without the key, the access method is unmanaged. `pgy pull` writes it for every relation whose access method is not the session's `default_table_access_method`.
 
 #### Replica identity and extended statistics
 
@@ -731,11 +741,25 @@ foreignKeys:
     deferrable: true    # optional DEFERRABLE
     initiallyDeferred: true   # optional DEFERRABLE INITIALLY DEFERRED (implies deferrable)
     notValid: true      # optional: add NOT VALID, existing rows are not checked
+    validate: immediate # optional: add it validated in one step (default later)
     enforced: false     # optional: NOT ENFORCED (PostgreSQL 18+)
     comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
 
 `no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. A foreign key or check added to a table that already exists is added `NOT VALID` in the main migration and validated with `ALTER TABLE ... VALIDATE CONSTRAINT` in the no-transaction migration that `pgy commit` writes after it. Validation checks the existing rows without blocking reads or writes, while new rows are checked from the start. If existing rows violate the constraint, that migration fails, the constraint stays `NOT VALID` and `pgy diff` emits the pending `VALIDATE` until it succeeds. `notValid: true` leaves the constraint unvalidated instead; removing it later validates it the same way. Before PostgreSQL 18, a NOT VALID foreign key can't be added to a partitioned table: it is added validated, with a lock warning, and with `notValid: true` `pgy diff` emits nothing and prints a warning unless the table is new in the same migration. This applies to check constraints too, which have no such restriction. A constraint validated outside pgy while the YAML still says `notValid: true` is not treated as a change.
+
+#### Validating constraints in one step
+
+Some tables refuse `VALIDATE CONSTRAINT` while they accept an `ADD CONSTRAINT` that checks the rows itself: a TimescaleDB hypertable with columnstore enabled rejects it (`operation not supported on hypertables that have columnstore enabled`), so the no-transaction migration fails on every attempt. `validate: immediate` on a check constraint, a foreign key or a column (for its NOT NULL on PostgreSQL 18), or on the table for all of them, adds the constraint validated in the main migration instead: `ADD CONSTRAINT` without `NOT VALID`, or `SET NOT NULL`. That checks the existing rows under the stronger lock of those statements (`ACCESS EXCLUSIVE` for a check and `SET NOT NULL`; a foreign key blocks writes to both tables), so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). A constraint that exists `NOT VALID` is dropped and added again validated in the same migration, and a `NOT VALID` NOT NULL is validated by `SET NOT NULL`. `validate: later`, the default, keeps the two steps; on a constraint or column it overrides the table's `immediate`. `notValid: true` still leaves a constraint unvalidated, and `pgy validate` rejects it together with `validate: immediate` on the same constraint. If a `VALIDATE` migration has already failed, it was never recorded: delete that file before you commit the new diff, or `pgy migrate` keeps running it first.
+
+```yaml
+schema app:
+  table conditions:
+    validate: immediate       # every check, foreign key and NOT NULL added to it from now on
+    constraints:
+      hum_check: {type: check, expression: humidity >= 0}
+      temp_check: {type: check, expression: temperature > -100, validate: later}
+```
 
 ### Triggers
 
@@ -839,6 +863,7 @@ constraints:
     initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
     noInherit: true             # check: NO INHERIT
     notValid: true              # check: add NOT VALID, existing rows are not checked
+    validate: immediate         # check: add it validated in one step (default later)
     enforced: false             # check: NOT ENFORCED (PostgreSQL 18+)
 ```
 
@@ -1135,6 +1160,8 @@ schema public:
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
 | `with` | map | Materialized views only. Storage parameters, authoritative when present. Omitted = unmanaged |
+| `tablespace` | string | Materialized views only. See [Tablespaces](#tablespaces). Omitted = unmanaged |
+| `accessMethod` | string | Materialized views only. Table access method (`USING`); changing it rewrites the view and needs `--unsafe`. See [Access methods](#access-methods). Omitted = unmanaged |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
