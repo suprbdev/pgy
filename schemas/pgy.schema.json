@@ -464,6 +464,7 @@
           "description": "UNLOGGED table (not WAL-logged, emptied after a crash). Changing it on a live table rewrites it and requires --unsafe."
         },
         "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table (a partitioned table: the default for new partitions); the tablespace must exist. Absent = unmanaged." },
+        "accessMethod": { "type": "string", "minLength": 1, "description": "Table access method (CREATE TABLE ... USING), e.g. heap or columnar. Changing it on a live table rewrites it (ALTER TABLE ... SET ACCESS METHOD) and requires --unsafe; on a partitioned table (PostgreSQL 17+) it sets the method of new partitions. Absent = unmanaged." },
         "with": {
           "type": "object",
           "description": "Storage parameters, e.g. {fillfactor: 70, autovacuum_vacuum_scale_factor: 0.05}. When present, live parameters not listed are reset.",
@@ -558,6 +559,7 @@
         "default": { "type": "boolean" },
         "unlogged": { "type": "boolean" },
         "tablespace": { "type": "string", "minLength": 1, "description": "TABLESPACE for the table; absent = unmanaged." },
+        "accessMethod": { "type": "string", "minLength": 1, "description": "Table access method (USING); absent = unmanaged." },
         "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } }
       },
       "required": ["name"],
@@ -1055,6 +1057,7 @@
         "checkOption": { "type": "string", "enum": ["local", "cascaded", "none"], "description": "Views: WITH CHECK OPTION level; none removes it." },
         "withData": { "type": "boolean", "description": "Materialized views: false creates WITH NO DATA (populate later with REFRESH)." },
         "tablespace": { "type": "string", "minLength": 1, "description": "Materialized views: TABLESPACE; absent = unmanaged." },
+        "accessMethod": { "type": "string", "minLength": 1, "description": "Materialized views: table access method (USING); changing it rewrites the view (SET ACCESS METHOD) and requires --unsafe. Absent = unmanaged." },
         "with": {
           "type": "object",
           "description": "Materialized views: storage parameters (WITH (...), e.g. fillfactor, autovacuum_enabled, toast.autovacuum_enabled). Authoritative when present: unlisted parameters are reset.",
@@ -1097,6 +1100,7 @@
         "checkOption": ["query"],
         "withData": ["query"],
         "tablespace": ["query"],
+        "accessMethod": ["query"],
         "with": ["query"],
         "indexes": ["query"],
         "triggers": ["query"],

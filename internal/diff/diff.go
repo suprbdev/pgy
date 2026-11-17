@@ -99,6 +99,10 @@ type Live struct{
     // DefaultTablespace is the database's default tablespace, which a
     // relation with no tablespace of its own is stored in; "" when unknown.
     DefaultTablespace string
+    // DefaultAccessMethod is default_table_access_method in the session
+    // that read the snapshot, which CREATE TABLE without USING uses; ""
+    // when unknown.
+    DefaultAccessMethod string
     // SearchPath lists the schemas on the search_path of the session that
     // read the snapshot (current_schemas(false)); nil when unknown. The
     // snapshot itself is read with search_path set to public, so its
@@ -421,6 +425,7 @@ type LiveTable struct{
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
     Tablespace  string          // the relation's own tablespace; "" = the database default
+    AccessMethod string         // pg_am.amname of relam; "" for a foreign table, or a partitioned table without one
     Options     map[string]string // reloptions: lower-cased name -> value
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
     Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
@@ -724,10 +729,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                                                         where x.indrelid = c.oid and x.indisreplident), '')
                     else 'default' end,
                coalesce((select tn.nspname || '.' || ty.typname from pg_type ty join pg_namespace tn on tn.oid = ty.typnamespace where ty.oid = c.reloftype), ''),
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''), coalesce(am.amname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_tablespace ts on ts.oid = c.reltablespace
+        left join pg_am am on am.oid = c.relam
         left join pg_foreign_table ft on ft.ftrelid = c.oid
         left join pg_foreign_server fs on fs.oid = ft.ftserver
         where c.relkind in ('r', 'p', 'f')
@@ -739,8 +745,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, server string
             var isPartition, partitioned, unlogged, noToast, foreign bool
             var reloptions, ftoptions []string
-            var replident, ofType, tablespace string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType, &tablespace); err != nil {
+            var replident, ofType, tablespace, accessMethod string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType, &tablespace, &accessMethod); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
@@ -748,7 +754,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt.NoToast = noToast
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
-            lt.Tablespace = tablespace
+            lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.Tables[key] = lt
         }
         return nil
@@ -759,20 +765,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, c.relname, c.reltoastrelid = 0,
                coalesce(c.reloptions, '{}'::text[]) ||
                coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''), coalesce(am.amname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_tablespace ts on ts.oid = c.reltablespace
+        left join pg_am am on am.oid = c.relam
         where c.relkind = 'm'
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(matViewQ, func(matViewRows pgx.Rows) error {
         for matViewRows.Next() {
-            var schemaName, viewName, tablespace string
+            var schemaName, viewName, tablespace, accessMethod string
             var noToast bool
             var reloptions []string
-            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions, &tablespace); err != nil {
+            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions, &tablespace, &accessMethod); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, viewName)
@@ -780,7 +787,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt := newLiveTable()
             lt.NoToast = noToast
             lt.Options = parseProconfig(reloptions)
-            lt.Tablespace = tablespace
+            lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.MatViewTables[key] = lt
         }
         return nil
@@ -2266,10 +2273,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(`select current_user, current_setting('server_version_num')::int,
                       coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
                                 where d.datname = current_database() and s.setrole = 0), '{}'::text[]),
-                      coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), '')`, func(rows pgx.Rows) error {
+                      coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), ''),
+                      current_setting('default_table_access_method')`, func(rows pgx.Rows) error {
         for rows.Next() {
             var config []string
-            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace); err != nil { return err }
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace, &l.DefaultAccessMethod); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
         }
         return nil
@@ -3122,7 +3130,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With), tablespaceClause(vw.Tablespace), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s%s as %s", pqIdent(e.Key), accessMethodClause(e.Key, vw.AccessMethod, false, live.ServerVersion, nil), renderStorageParams(vw.With), tablespaceClause(vw.Tablespace), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
                 } else {
@@ -3133,6 +3141,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter materialized view %s set tablespace %s;", pqIdent(e.Key), quoteIdent(vw.Tablespace)))
                         plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("materialized view "+e.Key, e.Key))
                     }
+                    plan.Alters = append(plan.Alters, accessMethodStmts("materialized view", e.Key, vw.AccessMethod, lt, live.ServerVersion, unsafe, nil)...)
                 }
                 if len(vw.Indexes) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
@@ -3168,7 +3177,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         sub, unlogged := "", ""
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
+                        using := accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
@@ -3233,6 +3243,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
+                create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
@@ -3317,6 +3328,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s set tablespace %s;", pqIdent(fq), quoteIdent(dt.Tablespace)))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("table "+fq, fq)) }
                 }
+                if dt.Foreign == nil { plan.Alters = append(plan.Alters, accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)

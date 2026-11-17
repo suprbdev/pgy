@@ -34,6 +34,7 @@ var (
     lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` (?:alter column (` + quotedName + `) set not null|add constraint ` + quotedName + ` not null (` + quotedName + `));$`)
     lockTypeRe      = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) type (.+);$`)
     lockLoggedRe    = regexp.MustCompile(`^alter table ` + lockFQ + ` set (logged|unlogged);$`)
+    lockAccessMethodRe = regexp.MustCompile(`^alter (table|materialized view) ` + lockFQ + ` set access method (` + quotedName + `);$`)
     lockAddColumnRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add column (` + quotedName + `) (.+);$`)
     volatileCallRe  = regexp.MustCompile(`(?i)\b(random|gen_random_uuid|uuid_generate_v[14]|uuidv[47]|clock_timestamp|timeofday|nextval)\s*\(`)
     typeModsRe      = regexp.MustCompile(`^([a-z ]+?)(?:\((\d+)(?:,(\d+))?\))?$`)
@@ -63,7 +64,8 @@ func unquoteFQ(s string) string {
 // rewrites a table present in live (the snapshot the plan was made
 // against): index builds without CONCURRENTLY, constraints validated while
 // they are added, SET NOT NULL, rewriting type changes, SET LOGGED /
-// UNLOGGED, and added columns whose values must be computed per row.
+// UNLOGGED, SET ACCESS METHOD, and added columns whose values must be
+// computed per row.
 // desired supplies the volatility of the functions it declares.
 func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
     if live == nil { return nil }
@@ -134,6 +136,12 @@ func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
         if m := lockLoggedRe.FindStringSubmatch(stmt); m != nil {
             if fq := unquoteFQ(m[1]); exists(fq) {
                 warn(fq, stmt, "SET %s rewrites %s under an ACCESS EXCLUSIVE lock", strings.ToUpper(m[2]), fq)
+            }
+            continue
+        }
+        if m := lockAccessMethodRe.FindStringSubmatch(stmt); m != nil {
+            if fq := unquoteFQ(m[2]); exists(fq) && (live.Tables[fq] == nil || !live.Tables[fq].Partitioned) {
+                warn(fq, stmt, "SET ACCESS METHOD %s rewrites %s and its indexes under an ACCESS EXCLUSIVE lock, blocking reads and writes until it finishes", unquoteFQ(m[3]), fq)
             }
             continue
         }

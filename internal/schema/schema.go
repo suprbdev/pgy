@@ -101,6 +101,7 @@ type View struct {
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
     Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
+    AccessMethod    string            // materialized views: USING table access method; "" = unmanaged
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
@@ -399,6 +400,7 @@ type Table struct {
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
+    AccessMethod string           `yaml:"-"` // USING: table access method; "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -812,6 +814,9 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.Tablespace != "" {
                     existing.Tablespace = t.Tablespace
+                }
+                if t.AccessMethod != "" {
+                    existing.AccessMethod = t.AccessMethod
                 }
                 if t.Foreign != nil {
                     existing.Foreign = t.Foreign
@@ -1847,11 +1852,12 @@ func parseConstraints(v any) []*Constraint {
 
 // parseTablePartitioning fills partitioning properties from a table's YAML map:
 // `partitionBy` (parent), `partitionOf` + `forValues`/`default` (child).
-// parseTableStorage fills a table's unlogged flag and `with` storage
-// parameters from its YAML map.
+// parseTableStorage fills a table's unlogged flag, tablespace, access method
+// and `with` storage parameters from its YAML map.
 func parseTableStorage(t *Table, m map[string]any) {
     if b, ok := m["unlogged"].(bool); ok { t.Unlogged = &b }
     if ts, ok := m["tablespace"].(string); ok { t.Tablespace = strings.TrimSpace(ts) }
+    if am, ok := m["accessMethod"].(string); ok { t.AccessMethod = strings.TrimSpace(am) }
     if w, ok := m["with"].(map[string]any); ok {
         t.With = map[string]string{}
         for k, v := range w { t.With[k] = scalarToString(v) }
@@ -2649,6 +2655,7 @@ func parseView(schemaName, key string, body any) *View {
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
     if ts, ok := m["tablespace"].(string); ok { vw.Tablespace = strings.TrimSpace(ts) }
+    if am, ok := m["accessMethod"].(string); ok { vw.AccessMethod = strings.TrimSpace(am) }
     if w, ok := m["with"].(map[string]any); ok {
         vw.With = map[string]string{}
         for k, v := range w { vw.With[k] = scalarToString(v) }

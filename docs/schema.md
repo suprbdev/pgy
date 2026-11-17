@@ -507,6 +507,7 @@ schema public:
   table events_log:
     unlogged: true              # UNLOGGED: no WAL, emptied after a crash
     tablespace: fast_ssd        # TABLESPACE (created outside pgy)
+    accessMethod: heap          # USING: table access method
     with:                       # storage parameters
       fillfactor: 80
       autovacuum_vacuum_scale_factor: 0.05
@@ -525,6 +526,10 @@ schema public:
 #### Tablespaces
 
 `tablespace:` puts a table, partition, materialized view, index, or the index of a primary key, unique or exclusion constraint in a tablespace that already exists; pgy doesn't create tablespaces. New objects get `TABLESPACE` (or `USING INDEX TABLESPACE`). An existing one in another tablespace is moved with `ALTER ... SET TABLESPACE`, which rewrites it under an `ACCESS EXCLUSIVE` lock, so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). An index with `concurrently: true` moves with `REINDEX (TABLESPACE ...) INDEX CONCURRENTLY` in the no-transaction migration instead, without blocking writes. On a partitioned table or index, `SET TABLESPACE` only sets the default for new partitions, so it has no warning. `tablespace: pg_default` moves an object back; a relation in the database's default tablespace matches its name. Without the key, the tablespace is unmanaged. `pgy pull` writes it for every relation stored outside the database default.
+
+#### Access methods
+
+`accessMethod:` names the table access method of a table, partition, partitioned table or materialized view, such as `columnar` from Citus. It is compared with the live `pg_class.relam`. New relations get `USING`, and an existing table or materialized view with another access method is changed with `ALTER ... SET ACCESS METHOD`, which rewrites it and its indexes under an `ACCESS EXCLUSIVE` lock. So that needs `--unsafe` and gets a lock warning (and `--strict` fails on it by default). On a partitioned table it only sets the access method that partitions created later get, which needs neither. PostgreSQL keeps an access method for a partitioned table from version 17 on; before that the key is ignored there with a warning, so declare it on the partitions. Foreign tables and plain views have no storage, so `pgy validate` rejects the key on them. Without the key, the access method is unmanaged. `pgy pull` writes it for every relation whose access method is not the session's `default_table_access_method`.
 
 #### Replica identity and extended statistics
 
@@ -1062,6 +1067,8 @@ schema public:
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
 | `with` | map | Materialized views only. Storage parameters, authoritative when present. Omitted = unmanaged |
+| `tablespace` | string | Materialized views only. See [Tablespaces](#tablespaces). Omitted = unmanaged |
+| `accessMethod` | string | Materialized views only. Table access method (`USING`); changing it rewrites the view and needs `--unsafe`. See [Access methods](#access-methods). Omitted = unmanaged |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |

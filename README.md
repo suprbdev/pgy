@@ -238,6 +238,7 @@ A renamed object looks like a new object plus an old one to drop. Declare the ol
 | `SET NOT NULL` | scans the table under `ACCESS EXCLUSIVE`; skipped if a validated `CHECK (col IS NOT NULL)` exists | add that check first. On PostgreSQL 18 pgy does this itself: it adds the constraint `NOT VALID` and validates it in the follow-up no-transaction migration, which doesn't block writes |
 | `ALTER COLUMN ... TYPE` | rewrites the table, except when widening `varchar`/`numeric` or switching `varchar` ↔ `text` | a new column plus a backfill |
 | `SET LOGGED` / `SET UNLOGGED` | rewrites the table | — |
+| `SET ACCESS METHOD` | rewrites the table or materialized view and its indexes under `ACCESS EXCLUSIVE` (needs `--unsafe`) | — |
 | `ADD COLUMN` with a volatile default, a stored generated expression, identity or serial | writes every row | add the column bare, then backfill |
 
 A default is volatile when it calls a volatile function. pgy takes a function's volatility from the YAML that declares it, or else from the database's catalog, which covers the functions of installed extensions. Of the built-in functions it knows `random()`, `gen_random_uuid()`, `clock_timestamp()`, `timeofday()`, `nextval()`, `uuidv4()` and `uuidv7()`.

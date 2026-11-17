@@ -158,6 +158,9 @@ func Database(d *schema.Database) []Issue {
 		if v := d.Views[fq]; v != nil && !v.Materialized && v.Tablespace != "" {
 			add(Error, "view "+fq, "only materialized views have storage, so a plain view can't have a tablespace")
 		}
+		if v := d.Views[fq]; v != nil && !v.Materialized && v.AccessMethod != "" {
+			add(Error, "view "+fq, "only materialized views have storage, so a plain view can't have an access method")
+		}
 	}
 	checkNameLengths(d, add)
 
@@ -260,6 +263,9 @@ func Database(d *schema.Database) []Issue {
 		}
 		if t.Foreign != nil && t.Tablespace != "" {
 			add(Error, obj, "a foreign table has no storage, so it can't have a tablespace")
+		}
+		if t.Foreign != nil && t.AccessMethod != "" {
+			add(Error, obj, "a foreign table has no storage, so it can't have an access method")
 		}
 		for _, fk := range t.ForeignKeys {
 			if fk == nil {

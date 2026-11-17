@@ -430,3 +430,33 @@ schema app:
 		t.Errorf("tablespaces on tables, keys and indexes are valid:\n%s", got)
 	}
 }
+
+func TestValidateAccessMethods(t *testing.T) {
+	path := write(t, t.TempDir(), "am.yml", `
+servers:
+  remote: {wrapper: postgres_fdw}
+schema app:
+  foreign table ft:
+    server: remote
+    columns: {id: {type: int}}
+    accessMethod: heap
+  view v:
+    query: select 1
+    accessMethod: heap
+  materialized view mv:
+    query: select 1
+    accessMethod: heap
+  table t:
+    columns: {id: {type: int}}
+    accessMethod: heap
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{"a foreign table has no storage, so it can't have an access method", "a plain view can't have an access method"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "view app.mv") || strings.Contains(got, "table app.t:") {
+		t.Errorf("access methods on tables and materialized views are valid:\n%s", got)
+	}
+}
