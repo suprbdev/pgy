@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "regexp"
     "slices"
     "sort"
     "strconv"
@@ -30,6 +31,12 @@ type LiveTableData struct {
     // session's search_path (operator("ext".=)), where a bare = would
     // resolve to another operator or to none.
     KeyEquals map[string]string
+    // KeyTypes holds the type, with its type modifier, of each key column
+    // whose type has one (numeric(6,2), timestamp(0)): the comparison
+    // converts declared keys to it, and so do the UPDATE and DELETE
+    // statements, so that a key the modifier changes (1.005 is stored as
+    // 1.01) matches the stored row.
+    KeyTypes map[string]string
 }
 
 // dataValue converts a decoded YAML value to the form it is sent to
@@ -64,13 +71,14 @@ func dataRowsJSON(rows []map[string]any) ([]byte, error) {
 }
 
 // dataColumn describes a column for comparing data rows: typ is its type,
-// cmp the type declared values are converted to, and json whether the type
-// takes a YAML map (json, jsonb, a composite type, or an array or domain of
-// one).
+// cmp the type declared values are converted to, typmod whether cmp has a
+// type modifier, and json whether the type takes a YAML map (json, jsonb, a
+// composite type, or an array or domain of one).
 type dataColumn struct {
-    typ  string
-    cmp  string
-    json bool
+    typ    string
+    cmp    string
+    typmod bool
+    json   bool
     // eq is the equality operator of cmp's default btree operator class,
     // which PostgreSQL itself compares the type with (ORDER BY, PARTITION
     // BY, unique indexes), as SQL: = for one in pg_catalog,
@@ -92,8 +100,9 @@ type dataColumn struct {
 // element type the way PostgreSQL's GetDefaultOpClass does (the class of
 // the type itself, the polymorphic one for its kind, or that of a type it
 // is binary coercible to, the preferred one first), and returns whether the
-// comparison type is an array and the schema and name of that class's
-// equality operator ('' without one).
+// comparison type is an array, the schema and name of that class's
+// equality operator ('' without one), and whether the comparison type has a
+// type modifier.
 const dataTypeChainQ = `
     with recursive chain(name, orig, typ, mod, arr, depth) as (
         %s
@@ -105,13 +114,13 @@ const dataTypeChainQ = `
         from chain c join pg_type t on t.oid = c.typ
         where t.typtype = 'd' or (not c.arr and t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1)
     ), col as (
-        select distinct on (c.name) c.name, c.orig, c.arr, t.oid as typ, t.typtype, t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1 as nested,
+        select distinct on (c.name) c.name, c.orig, c.arr, c.mod, t.oid as typ, t.typtype, t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1 as nested,
                case when not c.arr then format_type(c.typ, c.mod) when t.typarray <> 0 then format_type(t.typarray, c.mod) else c.orig end as cmp
         from chain c join pg_type t on t.oid = c.typ
         order by c.name, c.depth desc
     )
     select c.name, c.orig, c.cmp, c.typtype = 'c' or c.typ in ('json'::regtype, 'jsonb'::regtype),
-           c.arr, coalesce(n.nspname, ''), coalesce(op.oprname, '')
+           c.arr, coalesce(n.nspname, ''), coalesce(op.oprname, ''), c.mod <> -1
     from col c
     left join lateral (
         select o.opcfamily, o.opcintype
@@ -169,7 +178,7 @@ func scanDataColumns(rows pgx.Rows, out map[string]dataColumn) error {
         var name, opSchema, op string
         var array bool
         var c dataColumn
-        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json, &array, &opSchema, &op); err != nil { return err }
+        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json, &array, &opSchema, &op, &c.typmod); err != nil { return err }
         switch {
         case op == "":
         case array || opSchema == "pg_catalog":
@@ -273,7 +282,12 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
     return nil
 }
 
-// IntrospectData compares the data rows declared in desired with the rows
+// IntrospectData is IntrospectDataWith without --unsafe.
+func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
+    return IntrospectDataWith(ctx, pool, l, desired, Options{})
+}
+
+// IntrospectDataWith compares the data rows declared in desired with the rows
 // of the live tables they belong to and records the result in
 // l.TableData. PostgreSQL does the comparison: each declared row is turned
 // into a record of the columns it uses with jsonb_to_record, so values are
@@ -284,13 +298,22 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
 // is written differently (a citext key in another case) is reported as
 // changed, and two declared rows with equal keys are an error, as is a key
 // column whose type has no default btree operator class (see
-// dataKeyTypeError). Tables whose key columns do not exist yet (they are
-// renamed or added by the plan) are skipped and get upserts, as are tables
-// whose rows use enum labels the plan has yet to add. The rows of tables
-// that do not exist yet are only checked (see checkNewTableData).
-func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
+// dataKeyTypeError). Columns are compared in their live types, except that
+// with opts.Unsafe, under which the plan changes the type of a column whose
+// declared type differs from the live one, such a column is compared in its
+// declared type (without its type modifier), so rows that only fit the new
+// type are found; when that type does not exist yet or the column is a key
+// column, the table is skipped. Tables whose key columns do not exist yet
+// (they are renamed or added by the plan) are skipped too, as are tables
+// whose rows use enum labels the plan has yet to add, and skipped tables
+// get upserts. The rows of tables that do not exist yet are only checked
+// (see checkNewTableData).
+func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database, opts Options) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
+    if rq := newRequalifier(l, desired); rq != nil { desired = rq.database(desired) }
+    desired = withUnmovedExtensions(l, desired)
+    sc := scopeFor(l.SearchPath)
     newLabels := addsEnumLabels(l, desired)
     for _, fq := range sortedKeys(desired.Tables) {
         dt := desired.Tables[fq]
@@ -313,7 +336,21 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         for col := range used {
             if _, ok := types[col]; !ok { delete(used, col) }
         }
+        names, typs := []string{}, []string{}
+        for _, col := range sortedKeys(used) {
+            if dc, lc := dt.Columns[col], lt.Columns[col]; opts.Unsafe && dc != nil && lc != nil && dc.Type != "" && sc.columnType(dc.Type) != sc.columnType(lc.Type) {
+                names, typs = append(names, col), append(typs, dc.Type)
+            }
+        }
+        if len(names) > 0 {
+            declared, err := declaredDataColumnTypes(ctx, pool, names, typs)
+            if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
+            if !hasDataColumns(declared, names) || slices.ContainsFunc(key, func(k string) bool { return slices.Contains(names, k) }) { continue }
+            for _, col := range names { types[col] = declared[col] }
+        }
         from := dataTarget(fq, lt.Partitioned || dt.PartitionBy != nil)
+        rec := "pgy_rec"
+        for used[rec] { rec += "_" }
         join := make([]string, len(key))
         sameKey := make([]string, len(key))
         liveKey := make([]string, len(key))
@@ -321,21 +358,21 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         textKey := make([]string, len(key))
         for i, k := range key {
             q := quoteIdent(k)
-            join[i] = fmt.Sprintf("pgy_row.%s %s (r.v).%s", q, types[k].eq, q)
+            join[i] = fmt.Sprintf("pgy_row.%s %s (r.%s).%s", q, types[k].eq, rec, q)
             sameKey[i] = fmt.Sprintf("pgy_row.%s %s v.%s", q, types[k].eq, q)
             liveKey[i] = "pgy_row." + q
-            declKey[i] = "v." + q
+            declKey[i] = rec + "." + q
             textKey[i] = fmt.Sprintf("%s, pgy_row.%s::text", quoteString(k), q)
         }
         diffQ := `
             with d as (select e.j, e.i - 1 as i from jsonb_array_elements($1::jsonb) with ordinality e(j, i)),
-                 r as (select d.i, d.j, v, min(d.i) over (partition by ` + strings.Join(declKey, ", ") + `) as first
-                       from d cross join lateral jsonb_to_record(d.j) as v(` + dataColumnDefs(sortedKeys(used), types) + `))
+                 r as (select d.i, d.j, ` + rec + `, min(d.i) over (partition by ` + strings.Join(declKey, ", ") + `) as first
+                       from d cross join lateral jsonb_to_record(d.j) as ` + rec + `(` + dataColumnDefs(sortedKeys(used), types) + `))
             select r.i, pgy_row.` + quoteIdent(key[0]) + ` is null, r.first,
-                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k), '{}')
+                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row.*) -> k is distinct from to_jsonb(r.` + rec + `) -> k), '{}')
             from r left join ` + from + ` pgy_row on ` + strings.Join(join, " and ") + `
             where pgy_row.` + quoteIdent(key[0]) + ` is null or r.first <> r.i
-               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k)`
+               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row.*) -> k is distinct from to_jsonb(r.` + rec + `) -> k)`
         ld := &LiveTableData{Changed: map[int][]string{}}
         missing := map[int]bool{}
         qr, err := pool.Query(ctx, diffQ, string(rows))
@@ -401,6 +438,10 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
             if s := types[k].eqSchema; s != "pg_catalog" && s != "public" && !slices.Contains(l.SearchPath, s) {
                 if ld.KeyEquals == nil { ld.KeyEquals = map[string]string{} }
                 ld.KeyEquals[k] = types[k].eq
+            }
+            if types[k].typmod {
+                if ld.KeyTypes == nil { ld.KeyTypes = map[string]string{} }
+                ld.KeyTypes[k] = types[k].cmp
             }
         }
         l.TableData[fq] = ld
@@ -490,14 +531,62 @@ func arrayLiteral(list []any) string {
     return "{" + strings.Join(parts, ",") + "}"
 }
 
+// arrayConstructor renders a list as array[...] of its elements: nested
+// lists as nested array[...], nil as null and anything else as a quoted
+// literal, which a cast of the constructor to an array type reads with the
+// element type's input function, as array_in reads an array literal's
+// elements.
+func arrayConstructor(list []any) string {
+    parts := make([]string, len(list))
+    for i, e := range list {
+        switch x := e.(type) {
+        case nil:
+            parts[i] = "null"
+        case []any:
+            parts[i] = arrayConstructor(x)
+        case bool, int, int64, uint64, float64:
+            parts[i] = quoteString(sqlValue(x))
+        default:
+            parts[i] = quoteString(fmt.Sprint(dataValue(x)))
+        }
+    }
+    return "array[" + strings.Join(parts, ", ") + "]"
+}
+
+var (
+    arrayTypeNameRe  = regexp.MustCompile(`(?i)(\[\s*\d*\s*\]|\sarray(\s*\[\s*\d*\s*\])?)\s*$`)
+    fixedCharArrayRe = regexp.MustCompile(`(?i)^(pg_catalog\.)?(character|char|nchar|national\s+character|national\s+char)(\s*\[|\s+array\b)`)
+    fixedBitArrayRe  = regexp.MustCompile(`(?i)^(pg_catalog\.)?bit(\s*\[|\s+array\b)`)
+)
+
+// isArrayTypeName reports whether typ is spelled as an array type (text[],
+// integer array[3]). A domain over an array type is not recognized.
+func isArrayTypeName(typ string) bool { return arrayTypeNameRe.MatchString(typ) }
+
+// arrayCastType returns array type typ without its type modifiers, for the
+// cast of an arrayConstructor: the assignment to the column then applies
+// them with the checks an array literal gets, where a cast to varchar(3)[]
+// would cut a longer element short instead of failing. char(n) and bit(n)
+// become bpchar and "bit", since a bare char or bit is char(1) or bit(1).
+func arrayCastType(typ string) string {
+    t := strings.TrimSpace(typmodRe.ReplaceAllString(typ, ""))
+    t = fixedCharArrayRe.ReplaceAllString(t, "${1}bpchar$3")
+    return fixedBitArrayRe.ReplaceAllString(t, `${1}"bit"$2`)
+}
+
 // dataSQL renders column col's value for table fq. Every value of a json or
 // jsonb column is a JSON document (a list or string is not an array or text
 // literal) and is written as a jsonb literal, cast on to json where the
-// column is json. Other values containing a map (composite types and their
-// arrays) are converted by jsonb_to_record to the column's declared type,
-// the conversion the comparison uses; a column the YAML gives no type
-// (an inherited or partition column) is converted through the table's row
-// type instead. Anything else is a plain literal.
+// column is json. A non-empty list for a column declared as an array is
+// array[...] of its elements' literals cast to that array type (see
+// arrayConstructor), which unlike an array literal does not depend on the
+// element type's delimiter (; for box). Other lists with a declared type (for
+// a type whose input reads [1, 2, 3], or a domain over an array type) and
+// values containing a map (composite types and their arrays) are converted
+// by jsonb_to_record to the column's declared type, the conversion the
+// comparison uses; a map for a column the YAML gives no type (an inherited
+// or partition column) is converted through the table's row type instead.
+// Anything else is a plain literal.
 func dataSQL(fq string, dt *schema.Table, col string, v any) string {
     typ := dataColumnType(dt, col)
     if kind := jsonTypeKind(typ); kind != "" {
@@ -506,7 +595,12 @@ func dataSQL(fq string, dt *schema.Table, col string, v any) string {
         if kind == "json" { return quoteString(string(b)) + "::jsonb::json" }
         return quoteString(string(b)) + "::jsonb"
     }
-    if !containsMap(v) { return sqlValue(v) }
+    list, isList := v.([]any)
+    if isList && typ != "" && !containsMap(v) && isArrayTypeName(typ) {
+        if len(list) == 0 { return sqlValue(v) }
+        return arrayConstructor(list) + "::" + arrayCastType(typ)
+    }
+    if !containsMap(v) && (!isList || typ == "") { return sqlValue(v) }
     if typ != "" {
         b, _ := json.Marshal(map[string]any{"v": dataValue(v)})
         return fmt.Sprintf("(select v from jsonb_to_record(%s::jsonb) as x(v %s))", quoteString(string(b)), typ)
@@ -576,13 +670,19 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
 
 // dataKeyWhere renders the condition that selects the row whose key columns
 // equal value(column), comparing with = or with the column's operator in
-// equals (see LiveTableData.KeyEquals).
-func dataKeyWhere(key []string, equals map[string]string, value func(string) string) string {
+// equals (see LiveTableData.KeyEquals), the value cast to the column's type
+// in types where it has one (see LiveTableData.KeyTypes).
+func dataKeyWhere(key []string, equals, types map[string]string, value func(string) string) string {
     conds := make([]string, len(key))
     for i, k := range key {
         op := "="
         if o := equals[k]; o != "" { op = o }
-        conds[i] = fmt.Sprintf("%s %s %s", quoteIdent(k), op, value(k))
+        v := value(k)
+        if t := types[k]; t != "" {
+            if strings.HasPrefix(v, "-") { v = "(" + v + ")" }
+            v += "::" + t
+        }
+        conds[i] = fmt.Sprintf("%s %s %s", quoteIdent(k), op, v)
     }
     return strings.Join(conds, " and ")
 }
@@ -649,7 +749,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 set := []string{}
                 for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
             }
         }
     }
@@ -660,7 +760,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             if ld == nil { continue }
             key := desired.Tables[fq].DataKey()
             for _, ex := range ld.Extra {
-                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return quoteString(ex[k]) })))
+                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return quoteString(ex[k]) })))
             }
         }
     }
@@ -733,8 +833,8 @@ func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned b
         return nil
     }, pqIdent(fq))
     if err := columns.run(ctx, pool); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
-    row := "to_jsonb(pgy_row)"
-    if len(text) > 0 { row = "(to_jsonb(pgy_row) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
+    row := "to_jsonb(pgy_row.*)"
+    if len(text) > 0 { row = "(to_jsonb(pgy_row.*) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
     out := []map[string]any{}
     values := &queryBatch{}
     values.add("select "+row+"::text from "+dataTarget(fq, partitioned)+" pgy_row", func(rows pgx.Rows) error {
