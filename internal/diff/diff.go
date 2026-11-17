@@ -2796,14 +2796,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
-    for k := range desired.Types {
+    for k, td := range desired.Types {
+        if td != nil && td.Kind == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Functions {
+    for k, f := range desired.Functions {
+        if f != nil && !f.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2813,7 +2815,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for k := range desired.Aggregates {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
-    for k := range desired.Procedures {
+    for k, p := range desired.Procedures {
+        if p != nil && !p.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2827,7 +2830,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Views {
+    for k, vw := range desired.Views {
+        if vw != nil && strings.TrimSpace(vw.Query) == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {

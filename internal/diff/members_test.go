@@ -119,6 +119,37 @@ func TestAttributeOnlyFunctionAfterExtensionCreate(t *testing.T) {
 	}
 }
 
+func TestAttributeOnlyDeclarationsCreateNoSchema(t *testing.T) {
+	d := &schema.Database{
+		Extensions: []*schema.Extension{{Name: "pg_net", Schema: "public"}},
+		Functions: map[string]*schema.Function{
+			"net.http_get(text, jsonb, jsonb, integer)": {Schema: "net", Name: "http_get", ArgsSig: "(text, jsonb, jsonb, integer)", Grants: map[string][]string{"reader": {"execute"}}},
+		},
+		Procedures: map[string]*schema.Procedure{"cron.run()": {Schema: "cron", Name: "run", ArgsSig: "()", Comment: "runs"}},
+		Views:      map[string]*schema.View{"topology.layer": {Schema: "topology", Name: "layer", Grants: map[string][]string{"reader": {"select"}}}},
+		Types:      map[string]*schema.TypeDef{"vault.secret": {Schema: "vault", Name: "secret", RevokePublic: true}},
+		Tables:     map[string]*schema.Table{"app.t": {Columns: map[string]*schema.Column{"id": {Type: "int"}}}},
+	}
+	sql, _ := planSQL(t, memberLive(), d, Options{})
+	for _, s := range []string{"net", "cron", "topology", "vault"} {
+		if strings.Contains(sql, `create schema if not exists "`+s+`"`) {
+			t.Errorf("an attribute-only declaration must not create schema %s, which its extension creates:\n%s", s, sql)
+		}
+	}
+	if !strings.Contains(sql, `create schema if not exists "app";`) {
+		t.Errorf("a table still needs its schema:\n%s", sql)
+	}
+	ext, grant := strings.Index(sql, `create extension "pg_net"`), strings.Index(sql, `grant execute on function "net"."http_get"(text, jsonb, jsonb, integer) to "reader";`)
+	if ext < 0 || grant < ext {
+		t.Errorf("the member's grant must follow CREATE EXTENSION:\n%s", sql)
+	}
+
+	d.Functions["net.local()"] = &schema.Function{Schema: "net", Name: "local", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1"}
+	if sql, _ := planSQL(t, memberLive(), d, Options{}); !strings.Contains(sql, `create schema if not exists "net";`) {
+		t.Errorf("a function with a body still needs its schema:\n%s", sql)
+	}
+}
+
 func TestAttributeOnlyFunctionAfterExtensionUpdate(t *testing.T) {
 	live := memberLive()
 	live.Extensions["hstore"] = true
