@@ -47,8 +47,9 @@ type Live struct{
     // or use it as a whole (count(*))
     ViewDependents map[string][]string
     // ExprProbes holds what PostgreSQL made of the declared definitions that
-    // don't match the live ones as text (see ProbeExpressions); nil when
-    // none was probed, and they are compared as text only.
+    // don't match the live ones as text, or match only by dropping a cast or
+    // a schema from one side (see ProbeExpressions); nil when none was
+    // probed, and they are compared as text only.
     ExprProbes map[ExprKey]*ExprProbe
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
@@ -258,6 +259,20 @@ type LiveRole struct {
     ConnectionLimit int
     ValidUntil string // UTC RFC 3339, "infinity", or "" when unset
     Config map[string]string // ALTER ROLE ... SET settings for all databases: lower-cased name -> value
+    Bootstrap bool // the bootstrap superuser, which initdb created (oid 10)
+}
+
+// CreatorGrant reports whether member's membership in parent is the one
+// PostgreSQL 16 and later gives a role that is not a superuser when it
+// runs CREATE ROLE parent (with createrole_self_grant unset): WITH ADMIN
+// OPTION, without INHERIT and SET, granted by the bootstrap superuser
+// alone. It is how that role manages the roles it created.
+func (l *Live) CreatorGrant(member, parent string) bool {
+    if l == nil || l.ServerVersion < 160000 { return false }
+    lm := l.RoleMemberOptions[member][parent]
+    if lm == nil || !lm.Admin || lm.Inherit || lm.Set || len(lm.Grantors) != 1 { return false }
+    lr := l.RoleDefs[lm.Grantors[0]]
+    return lr != nil && lr.Bootstrap
 }
 
 // ColumnDependent is an object whose definition uses a column: a view or
@@ -432,6 +447,7 @@ type LiveTable struct{
     Tablespace  string          // the relation's own tablespace; "" = the database default
     AccessMethod string         // pg_am.amname of relam; "" for a foreign table, or a partitioned table without one
     Options     map[string]string // reloptions: lower-cased name -> value
+    OptionOrder []string        // the names in Options in catalog order
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
     Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
     HasPK       bool            // whether a primary key constraint exists
@@ -525,8 +541,10 @@ type LiveIndex struct {
     Predicate        string
     NullsNotDistinct bool
     Options          map[string]string // reloptions: lower-cased name -> value
+    OptionOrder      []string          // the names in Options in catalog order
     Constraint       bool              // backs a primary key, unique or exclusion constraint
     Inherited        bool              // a partition's copy of an index on its parent
+    Parent           string            // schema.name of the index it is attached to as a partition; "" = none
     Invalid          bool              // indisvalid is false (interrupted concurrent build, or a partitioned index missing partitions)
     Tablespace       string            // the index's own tablespace; "" = the database default
 }
@@ -539,8 +557,15 @@ type LiveIndexOpclass struct {
     Name    string
     Default bool
     // Collation is the key column's COLLATE when it differs from the
-    // column's (or, for an expression, its type's) default; "" otherwise.
+    // collation of the column or expression itself; "" otherwise.
     Collation string
+    // KeyCollation is the collation the key column is indexed with, written
+    // out or not; "" for a type without collations.
+    KeyCollation string
+    // Column is the index column's own name: that of the table column when
+    // the index was created, or for an expression the one PostgreSQL made
+    // up for it (lower for lower(name), expr when it found none).
+    Column string
     // StatisticsTarget is the index column's attstattarget; -1 = default.
     StatisticsTarget int
     // Params holds the operator class parameters of the key column as
@@ -760,6 +785,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt.NoToast = noToast
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
+            lt.OptionOrder = proconfigNames(reloptions)
             lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.Tables[key] = lt
         }
@@ -792,7 +818,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             l.MatViews[key] = true
             lt := newLiveTable()
             lt.NoToast = noToast
-            lt.Options = parseProconfig(reloptions)
+            lt.Options, lt.OptionOrder = parseProconfig(reloptions), proconfigNames(reloptions)
             lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.MatViewTables[key] = lt
         }
@@ -915,19 +941,22 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query per-key-column operator classes so redefined opclasses can be
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
-    // flagged so a desired index without an explicit opclass matches. An
-    // expression key's default collation is that of the opclass input type
-    // when the opclass stores another type (gin_trgm_ops indexes text but
-    // stores int4), else that of the stored type. A polymorphic input type
-    // (array_ops takes anyarray) has no collation of its own, so the stored
-    // type decides there too. Operator class parameters are the index
-    // column's attoptions.
+    // flagged so a desired index without an explicit opclass matches. A
+    // column key's collation is explicit when it differs from the column's.
+    // An expression key's is explicit when pg_get_indexdef prints COLLATE
+    // for it, which it does when the collation differs from the
+    // expression's own. Operator class parameters are the index column's
+    // attoptions.
     opcQ := `
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
-               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 and oty.typtype <> 'p' then oty.typcollation end, ity.typcollation)
-                    then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
+               case when x.indcollation[k.ord] = 0 then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
+               x.indkey[k.ord] > 0 and x.indcollation[k.ord] <> ta.attcollation,
+               case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, 0, true) else '' end,
+               case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, k.ord + 1, true) else '' end,
+               k.ord,
+               coalesce(ia.attname::text, ''),
                coalesce(ia.attstattarget::int, -1),
                coalesce(ia.attoptions, '{}'::text[])
         from pg_index x
@@ -939,8 +968,6 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace opn on opn.oid = op.opcnamespace
         left join pg_attribute ta on ta.attrelid = x.indrelid and ta.attnum = x.indkey[k.ord]
         left join pg_attribute ia on ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1
-        left join pg_type ity on ity.oid = ia.atttypid
-        left join pg_type oty on oty.oid = op.opcintype
         left join pg_collation co on co.oid = x.indcollation[k.ord]
         left join pg_namespace cn on cn.oid = co.collnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -949,15 +976,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
-            var schemaName, tableName, idxName, opcName, collation string
-            var opcDefault bool
-            var target int
+            var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef, column string
+            var opcDefault, columnCollated bool
+            var ord, target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
                 return err
             }
+            collation := ""
+            if columnCollated || (indexDef != "" && indexKeyCollated(indexDef, keyDef, ord)) { collation = keyCollation }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -977,10 +1006,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                i.relispartition,
                x.indisclustered,
                not x.indisvalid,
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''),
+               coalesce(pn.nspname || '.' || pi.relname, '')
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         left join pg_tablespace ts on ts.oid = i.reltablespace
+        left join pg_inherits ih on ih.inhrelid = x.indexrelid
+        left join pg_class pi on pi.oid = ih.inhparent
+        left join pg_namespace pn on pn.oid = pi.relnamespace
         join pg_class t on t.oid = x.indrelid
         join pg_am am on am.oid = i.relam
         join pg_namespace n on n.oid = t.relnamespace
@@ -989,17 +1022,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(idefQ, func(idefRows pgx.Rows) error {
         for idefRows.Next() {
-            var schemaName, tableName, idxName, method, predicate, tablespace string
+            var schemaName, tableName, idxName, method, predicate, tablespace, parent string
             var unique, nullsNotDistinct, constraint, inherited, clustered, invalid bool
             var nKey int16
             var cols, reloptions []string
             var indoption []int16
-            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid, &tablespace); err != nil {
+            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid, &tablespace, &parent); err != nil {
                 return err
             }
             t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
             if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Invalid: invalid, Tablespace: tablespace}
+            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), OptionOrder: proconfigNames(reloptions), Constraint: constraint, Inherited: inherited, Parent: parent, Invalid: invalid, Tablespace: tablespace}
             for _, opt := range indoption[:nKey] {
                 li.Descending = append(li.Descending, opt&1 != 0)
                 li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
@@ -1882,7 +1915,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit,
                case when rolvaliduntil is null then '' when rolvaliduntil = 'infinity' then 'infinity'
                     else to_char(rolvaliduntil at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') end,
-               coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[])
+               coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[]),
+               r.oid = 10
         from pg_roles r where rolname not like 'pg\_%'
     `
     batch.add(roleQ, func(roleRows pgx.Rows) error {
@@ -1890,7 +1924,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var roleName string
             lr := &LiveRole{}
             var config []string
-            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &lr.ValidUntil, &config); err != nil {
+            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &lr.ValidUntil, &config, &lr.Bootstrap); err != nil {
                 return err
             }
             lr.Config = parseProconfig(config)
@@ -2423,6 +2457,16 @@ func parseProconfig(entries []string) map[string]string {
     return out
 }
 
+// proconfigNames returns the lower-cased names of name=value entries in
+// their order.
+func proconfigNames(entries []string) []string {
+    out := make([]string, 0, len(entries))
+    for _, e := range entries {
+        if k, _, ok := strings.Cut(e, "="); ok { out = append(out, strings.ToLower(k)) }
+    }
+    return out
+}
+
 var configCommaRe = regexp.MustCompile(`\s*,\s*`)
 
 var configQuoteReplacer = strings.NewReplacer("'", "", `"`, "")
@@ -2772,6 +2816,9 @@ type PlanDiff struct{
     Concurrent []string
     // Warnings flags statements that lock or rewrite existing tables.
     Warnings []Warning
+    // parts coordinates the indexes of partition trees while the plan is
+    // built.
+    parts *partitionIndexPlan
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -2836,7 +2883,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     deferredTriggers := []string{}
     // Column drops go after the policy and publication drops, which may use the columns.
     columnDrops := []string{}
-    plan := &PlanDiff{Warnings: recreateWarnings}
+    plan := &PlanDiff{Warnings: recreateWarnings, parts: newPartitionIndexPlan(live, desired)}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
     // policies, and memberships later in the plan
@@ -2847,14 +2894,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
-    for k := range desired.Types {
+    for k, td := range desired.Types {
+        if td != nil && td.Kind == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Functions {
+    for k, f := range desired.Functions {
+        if f != nil && !f.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2864,7 +2913,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for k := range desired.Aggregates {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
-    for k := range desired.Procedures {
+    for k, p := range desired.Procedures {
+        if p != nil && !p.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2878,7 +2928,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Views {
+    for k, vw := range desired.Views {
+        if vw != nil && strings.TrimSpace(vw.Query) == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2953,6 +3004,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // name order) — use it as-is; the CLI surfaces the cycle error before
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
+    columnSeqs := desired.ColumnSequences()
     liveFuncs := normalizedLiveFunctions(live)
     // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
     // here, not Alters: an index or generated column created below may need
@@ -3157,6 +3209,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Alters = append(plan.Alters, sequenceAlterStmts(e.Key, sq, live.SequenceDefs[e.Key])...)
                 continue
             }
+            if _, ok := columnSeqs[e.Key]; ok { continue }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
             if sq.OwnedBy != "" {
                 // OWNED BY goes into Alters (rendered after all Creates):
@@ -3169,13 +3222,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s%s as %s", pqIdent(e.Key), accessMethodClause(e.Key, vw.AccessMethod, false, live.ServerVersion, nil), renderStorageParams(vw.With), tablespaceClause(vw.Tablespace), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s%s as %s", pqIdent(e.Key), accessMethodClause(e.Key, vw.AccessMethod, false, live.ServerVersion, nil), renderStorageParams(vw.With, vw.WithOrder), tablespaceClause(vw.Tablespace), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
                 } else {
                     lt := live.MatViewTables[e.Key]
                     if lt == nil { lt = newLiveTable() }
-                    if vw.With != nil { plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, lt)...) }
+                    if vw.With != nil { plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, vw.WithOrder, lt)...) }
                     if tablespaceDiffers(vw.Tablespace, lt.Tablespace, live) {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter materialized view %s set tablespace %s;", pqIdent(e.Key), quoteIdent(vw.Tablespace)))
                         plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("materialized view "+e.Key, e.Key))
@@ -3217,7 +3270,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                         using := accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
@@ -3283,7 +3336,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
                 create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
-                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+tablespaceClause(dt.Tablespace)+";")
+                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
@@ -3400,6 +3453,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(plan.Creates[:routineAlterAt:routineAlterAt], append(routineAlters, plan.Creates[routineAlterAt:]...)...)
+    plan.Creates = append(plan.Creates, plan.parts.heldStmts()...)
+    plan.Alters = append(plan.Alters, plan.parts.heldAlterStmts()...)
+    plan.parts = nil
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
@@ -3471,13 +3527,14 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
 // revokeMembershipStmts revokes member's live memberships in roles that
 // declared doesn't list. PostgreSQL 16+ records a grant per grantor, and
 // REVOKE only removes the current user's unless GRANTED BY names another,
-// so it emits one REVOKE per grantor there.
+// so it emits one REVOKE per grantor there. The connecting role keeps the
+// memberships it got by creating a role (see Live.CreatorGrant).
 func revokeMembershipStmts(live *Live, member string, declared []string) []string {
     keep := map[string]bool{}
     for _, p := range declared { keep[p] = true }
     out := []string{}
     for _, parent := range sortedKeys(live.RoleMembers[member]) {
-        if keep[parent] { continue }
+        if keep[parent] || member == live.CurrentUser && live.CreatorGrant(member, parent) { continue }
         target := fmt.Sprintf("revoke %s from %s", grantRole(parent), grantRole(member))
         lm := live.RoleMemberOptions[member][parent]
         if live.ServerVersion < 160000 || lm == nil || len(lm.Grantors) == 0 {
@@ -5862,7 +5919,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     if dt.PrimaryKeyName != "" { pkAdd = "add constraint " + quoteIdent(truncateIdent(dt.PrimaryKeyName)) + " primary key" }
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith, dt.PrimaryKeyTablespace)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith, dt.PrimaryKeyWithOrder, dt.PrimaryKeyTablespace)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
@@ -5879,7 +5936,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(have), quoteIdent(want)))
             name = want
         }
-        if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, lt.IndexDefs[have])...) }
+        if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, dt.PrimaryKeyWithOrder, lt.IndexDefs[have])...) }
         if li := lt.IndexDefs[have]; have != "" && li != nil && tablespaceDiffers(dt.PrimaryKeyTablespace, li.Tablespace, live) {
             plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, name, dt.PrimaryKeyTablespace))
             if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("primary key index "+name, fq)) }
@@ -5928,6 +5985,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     }
 
     // Indexes (always use IF NOT EXISTS)
+    adopted := map[string]bool{}
     for _, ix := range dt.Indexes {
         if ix == nil || len(ix.Columns) == 0 { continue }
         name := LiveIndexName(fq, ix, liveIndexes)
@@ -5937,7 +5995,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
         concurrent := ix.Concurrently && lt != nil && dt.PartitionBy == nil
         partitioned := ix.Concurrently && lt != nil && dt.PartitionBy != nil
-        foreignParts := partitioned && hasForeignPartition(live, fq)
+        foreignParts := partitioned && (hasForeignPartition(live, fq) || plan.parts.hasForeignPartition(fq))
         if foreignParts {
             partitioned = false
             if !liveIndexes[name] || (lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid) {
@@ -5977,13 +6035,42 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             }
             return out
         }
+        rebuildMain := func(drop string) {
+            if dt.PartitionBy != nil && plan.parts.attachedBelow(fq, idxFq) {
+                plan.parts.dropped[idxFq] = true
+                plan.Alters = append(plan.Alters, drop)
+                plan.parts.hold(fq, true, append([]string{stmt}, indexComment(true)...)...)
+                return
+            }
+            plan.Alters = append(append(plan.Alters, drop, stmt), indexComment(true)...)
+        }
+        if li := liveIndexDef(lt, name); li != nil && li.Parent != "" && plan.parts != nil {
+            if parent, ok := plan.parts.rebuilt[li.Parent]; ok {
+                if sameIndexDefinition(ix, parent) {
+                    plan.parts.rebuilt[idxFq] = ix
+                    plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
+                } else {
+                    plan.Concurrent = append(append(plan.Concurrent, build(idxFq, fq, false, dt.PartitionBy == nil)), indexComment(true)...)
+                }
+                continue
+            }
+            if plan.parts.dropped[li.Parent] {
+                plan.parts.dropped[idxFq] = true
+                if dt.PartitionBy != nil && plan.parts.attachedBelow(fq, idxFq) {
+                    plan.parts.hold(fq, true, append([]string{stmt}, indexComment(true)...)...)
+                } else {
+                    plan.Alters = append(append(plan.Alters, stmt), indexComment(true)...)
+                }
+                continue
+            }
+        }
         if foreignParts && liveIndexes[name] && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
-            plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
+            rebuildMain(fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)))
             continue
         }
         if liveIndexes[name] && (concurrent || partitioned) && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
             if partitioned {
-                plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...)
+                plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, false, build)...)
             } else {
                 plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
             }
@@ -5995,6 +6082,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             // expensive and briefly leaves queries without it, so gate behind
             // --unsafe. Without live definition data the index is adopted by name.
             changed := indexChanged(ix, lt, name)
+            if li := lt.IndexDefs[name]; changed && li != nil && li.Parent != "" {
+                if unsafe { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("index %s is attached to index %s of a parent table, so it is not dropped on its own; change %s to the same definition, which recreates both", name, li.Parent, li.Parent)}) }
+                changed = false
+            }
             switch {
             case !unsafe || !changed:
                 plan.Alters = append(plan.Alters, indexComment(false)...)
@@ -6010,21 +6101,45 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                     }
                 }
             case partitioned:
-                plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
+                if plan.parts != nil { plan.parts.rebuilt[idxFq] = ix }
+                plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, true, build)...), indexComment(true)...)
             case concurrent:
                 plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
                 plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
             default:
-                plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
+                rebuildMain(fmt.Sprintf("drop index %s;", pqIdent(idxFq)))
             }
             continue
         }
+        if dt.PartitionOf != "" && lt != nil {
+            if x := adoptableIndex(fq, dt, lt, ix, adopted); x != "" {
+                adopted[x] = true
+                plan.Alters = append(append(plan.Alters, fmt.Sprintf("alter index %s rename to %s;", pqIdent(schemaPrefixOf(fq)+x), quoteIdent(name))), indexComment(true)...)
+                continue
+            }
+        }
+        if dt.PartitionOf != "" && lt == nil {
+            clone, ok := plan.parts.clonedIndex(fq, ix, adopted)
+            if !ok {
+                plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("index %s: creating partition %s gives it a copy of an index of %s that %s describes, under a name pgy cannot tell in advance; %s is left to the next pgy diff, which renames that copy", name, fq, dt.PartitionOf, name, name)})
+                continue
+            }
+            if clone != "" {
+                adopted[clone] = true
+                plan.Creates = append(plan.Creates, fmt.Sprintf("alter index %s rename to %s;", pqIdent(schemaPrefixOf(fq)+clone), quoteIdent(name)))
+                plan.Alters = append(plan.Alters, indexComment(true)...)
+                continue
+            }
+        }
         switch {
         case partitioned:
-            plan.Concurrent = append(append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
+            plan.Concurrent = append(append(plan.Concurrent, partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, false, build)...), indexComment(true)...)
         case concurrent:
             plan.Concurrent = append(plan.Concurrent, stmt)
             plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
+        case dt.PartitionBy != nil && plan.parts.holds(fq):
+            plan.parts.hold(fq, false, stmt)
+            plan.Alters = append(plan.Alters, indexComment(true)...)
         default:
             plan.Creates = append(plan.Creates, stmt)
             plan.Alters = append(plan.Alters, indexComment(true)...)
@@ -6057,7 +6172,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
-                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), lt.IndexDefs[ctName])...)
+                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), ct.WithOrder, lt.IndexDefs[ctName])...)
                 if li := lt.IndexDefs[ctName]; li != nil && tablespaceDiffers(ct.Tablespace, li.Tablespace, live) {
                     plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, ctName, ct.Tablespace))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("constraint "+ctName+"'s index", fq)) }
@@ -6614,16 +6729,41 @@ func collationName(s string) string {
     return s
 }
 
-// renderStorageParams renders a table's WITH (...) storage parameters, sorted,
-// or "" when there are none.
-func renderStorageParams(with map[string]string) string {
+// renderStorageParams renders a WITH (...) clause of storage parameters in
+// the order given (see orderedKeys), or "" when there are none.
+func renderStorageParams(with map[string]string, order []string) string {
     if len(with) == 0 { return "" }
-    keys := make([]string, 0, len(with))
-    for k := range with { keys = append(keys, k) }
-    sort.Strings(keys)
+    keys := orderedKeys(with, order)
     parts := make([]string, len(keys))
-    for i, k := range keys { parts[i] = k + " = " + with[k] }
+    for i, k := range keys { parts[i] = k + " = " + storageParamValue(with[k]) }
     return " with (" + strings.Join(parts, ", ") + ")"
+}
+
+// orderedKeys returns the keys of m, those listed in order first and in
+// that order, then the others sorted.
+func orderedKeys(m map[string]string, order []string) []string {
+    out := make([]string, 0, len(m))
+    seen := map[string]bool{}
+    for _, k := range order {
+        if _, ok := m[k]; ok && !seen[k] {
+            seen[k] = true
+            out = append(out, k)
+        }
+    }
+    for _, k := range sortedKeys(m) {
+        if !seen[k] { out = append(out, k) }
+    }
+    return out
+}
+
+// storageParamValue renders the value of a storage parameter for WITH (...)
+// or SET (...): a number, a lower-case word or an SQL-quoted value as it is,
+// anything else as a string literal, since PostgreSQL folds an unquoted
+// word to lower case and accepts any value as a string.
+func storageParamValue(v string) string {
+    v = strings.TrimSpace(v)
+    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) { return v }
+    return quoteString(v)
 }
 
 // columnStorageStmts emits newColumnStmts for every column a newly created
@@ -6703,7 +6843,7 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
         out = append(out, fmt.Sprintf("alter table %s set %s;", pqIdent(fq), mode))
     }
     if dt.With == nil { return out }
-    return append(out, storageParamStmts("table", fq, dt.With, lt)...)
+    return append(out, storageParamStmts("table", fq, dt.With, dt.WithOrder, lt)...)
 }
 
 // storageParamStmts emits ALTER <kind> ... SET (...) / RESET (...) so the
@@ -6712,18 +6852,18 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
 // relation has no TOAST table, since PostgreSQL silently discards them, and
 // so are create-time-only parameters the relation doesn't show (see
 // createTimeOnlyParam).
-func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) []string {
+func storageParamStmts(kind, fq string, with map[string]string, order []string, lt *LiveTable) []string {
     out := []string{}
     set, reset := []string{}, []string{}
     want := map[string]bool{}
     live := lt.Options
-    for _, k := range sortedKeys(with) {
+    for _, k := range orderedKeys(with, order) {
         want[strings.ToLower(k)] = true
         if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
         lv, ok := live[strings.ToLower(k)]
         if !ok && createTimeOnlyParam(k) { continue }
         if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(with[k])) {
-            set = append(set, k+" = "+with[k])
+            set = append(set, k+" = "+storageParamValue(with[k]))
         }
     }
     for _, k := range sortedKeys(live) {
@@ -6820,8 +6960,11 @@ func isSerialType(t string) bool {
 // defaultsEqual compares a YAML default with its live pg_get_expr form. The
 // parenthesis-insensitive constraint normalization is the fallback, since
 // PostgreSQL wraps compound defaults in parentheses ((now() + '1 day')).
+// Two defaults that cast the same expression to other types differ (see
+// exprDrops.retyped).
 func defaultsEqual(desired, live string) bool {
-    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) || constraintDefsEqual(desired, live)
+    if d, l := normalizedDefaultExpr(desired), normalizedDefaultExpr(live); d.text == l.text && !d.drops.retyped(&l.drops) { return true }
+    return constraintDefsEqual(desired, live)
 }
 
 // memoized returns f(s), caching it in cache. The normalizers it wraps are
@@ -6834,16 +6977,26 @@ func memoized(cache *sync.Map, s string, f func(string) string) string {
     return v
 }
 
-// normalizeDefaultExpr canonicalizes a default expression for comparison:
+// memoizedExpr is memoized for a normalizer that also reports what it
+// dropped.
+func memoizedExpr(cache *sync.Map, s string, f func(string) *normalizedExpr) *normalizedExpr {
+    if v, ok := cache.Load(s); ok { return v.(*normalizedExpr) }
+    v := f(s)
+    cache.Store(s, v)
+    return v
+}
+
+// normalizedDefaultExpr canonicalizes a default expression for comparison:
 // runs canonicalizeExpr (live defaults come back as 'x'::text, '-1'::integer
 // or nextval('s'::regclass)), lowercases everything outside single-quoted
-// strings, and collapses whitespace.
-func normalizeDefaultExpr(s string) string { return memoized(&activeScope().defaultExprs, s, normalizeDefaultExprUncached) }
+// strings, and collapses whitespace. It also returns what it dropped.
+func normalizedDefaultExpr(s string) *normalizedExpr { return memoizedExpr(&activeScope().defaultExprs, s, normalizeDefaultExprUncached) }
 
-func normalizeDefaultExprUncached(s string) string {
+func normalizeDefaultExprUncached(s string) *normalizedExpr {
+    n := &normalizedExpr{}
     var b strings.Builder
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
+    rs := []rune(strings.TrimSpace(canonicalizeExprNoting(s, &n.drops)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
@@ -6857,7 +7010,9 @@ func normalizeDefaultExprUncached(s string) string {
         }
         if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
             i++
+            start := i + 1
             for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            n.drops.noteLeftoverCast(string(rs[start : i+1]))
             continue
         }
         if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
@@ -6865,9 +7020,10 @@ func normalizeDefaultExprUncached(s string) string {
     }
     out := strings.Join(strings.Fields(b.String()), " ")
     out = strings.ReplaceAll(out, " (", "(")
-    out = strings.ReplaceAll(out, "nextval('public.", "nextval('")
-    for _, sch := range activeScope().path { out = strings.ReplaceAll(out, "nextval('"+sch+".", "nextval('") }
-    return out
+    out = n.drops.dropSequenceQualifier(out, "public")
+    for _, sch := range activeScope().path { out = n.drops.dropSequenceQualifier(out, sch) }
+    n.text = out
+    return n
 }
 
 // renderFKDef renders the definition body of a foreign key constraint
@@ -6963,10 +7119,10 @@ func deferralClause(deferrable, initiallyDeferred bool) string {
 // exclude constraint. Returns "" for unknown constraint types.
 // indexParameters renders the INCLUDE, WITH and USING INDEX TABLESPACE
 // clauses of a primary key or unique constraint's index.
-func indexParameters(include []string, with map[string]string, tablespace string) string {
+func indexParameters(include []string, with map[string]string, order []string, tablespace string) string {
     out := ""
     if len(include) > 0 { out = " include (" + constraintColumns(include) + ")" }
-    out += renderStorageParams(with)
+    out += renderStorageParams(with, order)
     if tablespace != "" { out += " using index tablespace " + quoteIdent(tablespace) }
     return out
 }
@@ -7027,7 +7183,7 @@ func renderConstraintDef(ct *schema.Constraint) string {
     case "unique":
         nulls := ""
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
-        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.WithOrder, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
         return fmt.Sprintf("exclude %s", excludeWithTablespace(excludeExpression(ct), ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
@@ -7098,18 +7254,31 @@ func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string)
 // bareVisibleOperators).
 func constraintDefsEqual(desired, live string) bool {
     if constraintDefsMatch(desired, live) { return true }
-    bare := bareVisibleOperators(desired)
+    bare := bareVisibleOperators(desired, nil)
     return bare != desired && constraintDefsMatch(bare, live)
 }
 
 // constraintDefsMatch compares two definitions with normalizeConstraintDef.
 // A string literal that either side marks as an object name ('seq'::regclass)
 // matches its qualified spelling on the other side, where the cast may be
-// missing, when the qualifier is optional (see nameScope).
+// missing, when the qualifier is optional (see nameScope). Two definitions
+// that cast the same expression to other types differ (see
+// exprDrops.retyped).
 func constraintDefsMatch(desired, live string) bool {
-    if normalizeConstraintDef(desired) == normalizeConstraintDef(live) { return true }
+    d, l, ok := constraintDefsMatchDrops(desired, live)
+    return ok && !d.retyped(l)
+}
+
+// constraintDefsMatchDrops reports whether two definitions normalise to the
+// same text as constraintDefsMatch compares them, and what the
+// normalisation that matched dropped from each.
+func constraintDefsMatchDrops(desired, live string) (d, l *exprDrops, ok bool) {
+    dn, ln := normalizedConstraintDef(desired), normalizedConstraintDef(live)
+    if dn.text == ln.text { return &dn.drops, &ln.drops, true }
     names := objectLiteralNames(desired, live)
-    return len(names) > 0 && normalizeConstraintDefWith(desired, names) == normalizeConstraintDefWith(live, names)
+    if len(names) == 0 { return nil, nil, false }
+    dn, ln = normalizeConstraintDefWith(desired, names), normalizeConstraintDefWith(live, names)
+    return &dn.drops, &ln.drops, dn.text == ln.text
 }
 
 // triggerDefsEqual compares a desired CREATE TRIGGER statement against
@@ -7124,11 +7293,10 @@ func triggerDefsEqual(desired, live string) bool {
     if dok && lok {
         if equal, ok := triggerCallsEqual(dc, lc); ok { return equal && constraintDefsEqual(dh, lh) }
     }
-    n := func(s string) string {
-        s = normalizeConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";"))
-        return strings.ReplaceAll(s, "executefunction", "executeprocedure")
-    }
-    return n(desired) == n(live)
+    n := func(s string) *normalizedExpr { return normalizedConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";")) }
+    text := func(n *normalizedExpr) string { return strings.ReplaceAll(n.text, "executefunction", "executeprocedure") }
+    d, l := n(desired), n(live)
+    return text(d) == text(l) && !d.drops.retyped(&l.drops)
 }
 
 var simpleIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
@@ -7194,21 +7362,25 @@ func canonicalTriggerEvents(events []string) []string {
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
-func normalizeConstraintDef(s string) string { return memoized(&activeScope().constraintDefs, s, normalizeConstraintDefUncached) }
+func normalizeConstraintDef(s string) string { return normalizedConstraintDef(s).text }
 
-func normalizeConstraintDefUncached(s string) string { return normalizeConstraintDefWith(s, nil) }
+// normalizedConstraintDef is normalizeConstraintDef with what it dropped.
+func normalizedConstraintDef(s string) *normalizedExpr { return memoizedExpr(&activeScope().constraintDefs, s, normalizeConstraintDefUncached) }
 
-// normalizeConstraintDefWith is normalizeConstraintDef for a definition in
+func normalizeConstraintDefUncached(s string) *normalizedExpr { return normalizeConstraintDefWith(s, nil) }
+
+// normalizeConstraintDefWith is normalizedConstraintDef for a definition in
 // which the string literals spelling an object name in names lose their
 // optional qualifier too.
-func normalizeConstraintDefWith(s string, names map[string]bool) string {
+func normalizeConstraintDefWith(s string, names map[string]bool) *normalizedExpr {
+    n := &normalizedExpr{}
     var b, seg strings.Builder
     flush := func() {
-        b.WriteString(strings.ReplaceAll(seg.String(), "public.", ""))
+        b.WriteString(n.drops.dropPublic(seg.String()))
         seg.Reset()
     }
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(unqualifyObjectLiterals(s, names))))
+    rs := []rune(strings.TrimSpace(canonicalizeExprNoting(unqualifyObjectLiterals(s, names, &n.drops), &n.drops)))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
@@ -7223,7 +7395,9 @@ func normalizeConstraintDefWith(s string, names map[string]bool) string {
         }
         if r == ':' && i+1 < len(rs) && rs[i+1] == ':' {
             i++
+            start := i + 1
             for i+1 < len(rs) && isCastTypeChar(rs[i+1]) { i++ }
+            n.drops.noteLeftoverCast(string(rs[start : i+1]))
             continue
         }
         switch r {
@@ -7234,7 +7408,8 @@ func normalizeConstraintDefWith(s string, names map[string]bool) string {
         seg.WriteRune(r)
     }
     flush()
-    return strings.TrimSuffix(b.String(), "notvalid")
+    n.text = strings.TrimSuffix(b.String(), "notvalid")
+    return n
 }
 
 func isCastTypeChar(r rune) bool {
@@ -7281,18 +7456,27 @@ func quoteIdent(s string) string {
 // is created ON ONLY the parent (invalid until complete), built
 // concurrently on each leaf partition, created ON ONLY each sub-partitioned
 // partition, and attached bottom-up, which makes the parent valid once
-// every partition is attached. Every statement is safe to rerun after an
+// every partition is attached. A partition's index takes the name of the
+// index the partition declares with ix's definition, if any; a partition
+// whose index is attached already is left as it is, unless dropped says
+// that idxFq is dropped first, which drops those too. Partitions the plan
+// creates are included. Every statement is safe to rerun after an
 // interruption. build renders a CREATE INDEX for (index, table, only,
 // concurrently).
-func partitionedIndexStmts(live *Live, table, idxFq string, build func(idx, table string, only, concurrently bool) string) []string {
+func partitionedIndexStmts(live *Live, parts *partitionIndexPlan, table, idxFq string, ix *schema.Index, dropped bool, build func(idx, table string, only, concurrently bool) string) []string {
     out := []string{build(idxFq, table, true, false)}
     var attach func(table, idxFq string)
     attach = func(table, idxFq string) {
         _, parentIdx := splitQualified(idxFq)
-        for _, child := range live.Partitions[table] {
+        for _, child := range parts.partitions(live, table) {
             sch, rel := splitQualified(child)
+            if own := attachedIndex(live.Tables[child], idxFq); own != "" && !dropped {
+                if parts.partitioned(live, child) { attach(child, sch+"."+own) }
+                continue
+            }
             childIdx := sch + "." + truncateIdent(rel+"_"+parentIdx)
-            if lt := live.Tables[child]; lt != nil && lt.Partitioned {
+            if own := parts.declaredMatch(child, ix); own != "" { childIdx = sch + "." + own }
+            if parts.partitioned(live, child) {
                 out = append(out, build(childIdx, child, true, false))
                 attach(child, childIdx)
             } else {
@@ -7325,19 +7509,13 @@ func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
 }
 
 // renderIndexTail renders the clauses after an index's column list: INCLUDE,
-// NULLS NOT DISTINCT, WITH (storage parameters, sorted), TABLESPACE and WHERE.
+// NULLS NOT DISTINCT, WITH (storage parameters in declaration order),
+// TABLESPACE and WHERE.
 func renderIndexTail(ix *schema.Index) string {
     out := ""
     if len(ix.Include) > 0 { out += " include (" + joinIdentList(ix.Include) + ")" }
     if ix.NullsNotDistinct { out += " nulls not distinct" }
-    if len(ix.With) > 0 {
-        keys := make([]string, 0, len(ix.With))
-        for k := range ix.With { keys = append(keys, k) }
-        sort.Strings(keys)
-        parts := make([]string, 0, len(keys))
-        for _, k := range keys { parts = append(parts, k+" = "+ix.With[k]) }
-        out += " with (" + strings.Join(parts, ", ") + ")"
-    }
+    out += renderStorageParams(ix.With, ix.WithOrder)
     if ix.Tablespace != "" { out += " tablespace " + quoteIdent(ix.Tablespace) }
     if ix.Where != "" { out += fmt.Sprintf(" where (%s)", ix.Where) }
     return out
@@ -7382,6 +7560,13 @@ func storageOptionsEqual(want, live map[string]string) bool {
 
 var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\s*=[^)]*\)`)
 
+// stripConstraintWith removes the WITH (storage parameters) clauses of a
+// constraint definition.
+func stripConstraintWith(s string) string {
+    if !strings.Contains(strings.ToLower(s), "with") { return s }
+    return constraintWithRe.ReplaceAllString(s, "")
+}
+
 // constraintMatchesLive compares named constraint ct with its live
 // definition from pg_get_constraintdef, leaving out index storage
 // parameters and the index's tablespace, which are changed in place.
@@ -7389,23 +7574,22 @@ func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bo
     if strings.EqualFold(ct.Type, "exclude") {
         if equal, ok := excludeMatchesLive(lt, name, ct); ok { return equal }
     }
-    strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
     c := *ct
     c.Tablespace = ""
-    return constraintDefsEqual(strip(renderConstraintDef(&c)), strip(lt.ConstraintDefs[name]))
+    return constraintDefsEqual(stripConstraintWith(renderConstraintDef(&c)), stripConstraintWith(lt.ConstraintDefs[name]))
 }
 
 // keyIndexStorageStmts changes the storage parameters of index idxFq, which
 // backs a primary key or unique constraint, from live to want with ALTER
 // INDEX ... SET / RESET. A nil want leaves them unmanaged.
-func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) []string {
+func keyIndexStorageStmts(idxFq string, want map[string]string, order []string, li *LiveIndex) []string {
     if want == nil || li == nil || storageOptionsEqual(want, li.Options) { return nil }
     set, reset := []string{}, []string{}
     keys := map[string]bool{}
-    for _, k := range sortedKeys(want) {
+    for _, k := range orderedKeys(want, order) {
         keys[strings.ToLower(k)] = true
         if lv, ok := li.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(want[k])) {
-            set = append(set, k+" = "+want[k])
+            set = append(set, k+" = "+storageParamValue(want[k]))
         }
     }
     for _, k := range sortedKeys(li.Options) {
@@ -7448,11 +7632,58 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
             return true
         }
         if !opclassParamsEqual(params, parseProconfig(live[i].Params)) { return true }
-        want := collationName(indexColumnCollation(ix, c))
-        if base, _ := splitIndexOrdering(c); want == "default" && live[i].Collation == "" && isIndexExpression(base) { want = "" }
-        if want != collationName(live[i].Collation) { return true }
+        want, have := collationName(indexColumnCollation(ix, c)), live[i].Collation
+        if want != "" && have == "" { have = live[i].KeyCollation }
+        if want != collationName(have) { return true }
     }
     return false
+}
+
+// indexKeyCollated reports whether key column n (from 0) of def, an index
+// definition as pg_get_indexdef prints it, has a COLLATE clause. key is the
+// column as pg_get_indexdef prints it on its own. PostgreSQL prints the
+// clause only for a collation other than the column's or expression's own.
+func indexKeyCollated(def, key string, n int) bool {
+    keys := indexDefKeys(def)
+    if n >= len(keys) { return false }
+    rest, ok := strings.CutPrefix(keys[n], key)
+    return ok && strings.HasPrefix(rest, " COLLATE ")
+}
+
+// indexDefKeys splits the key column list of an index definition printed by
+// pg_get_indexdef into its entries, each with its COLLATE, operator class
+// and ordering.
+func indexDefKeys(def string) []string {
+    var out []string
+    depth, start := 0, -1
+    var quote byte
+    for i := 0; i < len(def); i++ {
+        c := def[i]
+        if quote != 0 {
+            if c == quote && i+1 < len(def) && def[i+1] == quote {
+                i++
+            } else if c == quote {
+                quote = 0
+            }
+            continue
+        }
+        switch c {
+        case '\'', '"':
+            quote = c
+        case '(':
+            depth++
+            if depth == 1 && start < 0 { start = i + 1 }
+        case ')':
+            depth--
+            if depth == 0 && start >= 0 { return append(out, strings.TrimSpace(def[start:i])) }
+        case ',':
+            if depth == 1 && start >= 0 {
+                out = append(out, strings.TrimSpace(def[start:i]))
+                start = i + 1
+            }
+        }
+    }
+    return nil
 }
 
 // splitOpclass separates an operator class reference into its name and its

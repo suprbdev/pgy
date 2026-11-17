@@ -1,6 +1,8 @@
 package diff
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,6 +34,36 @@ func TestCreateTimeOnlyParamsCreate(t *testing.T) {
 	sql := Render(Plan(emptyLive(), createTimeDesired(), false))
 	if !strings.Contains(sql, `with (fillfactor = 70, tsdb.hypertable = true, tsdb.partition_column = 'at');`) {
 		t.Errorf("CREATE TABLE passes every parameter:\n%s", sql)
+	}
+}
+
+func TestCreateTimeOnlyParamsInYAMLOrderQuoted(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.yml")
+	if err := os.WriteFile(p, []byte(`
+schema app:
+  table m:
+    columns: {at: {type: timestamptz}}
+    with:
+      tsdb.hypertable: true
+      tsdb.partition_column: at
+      tsdb.chunk_interval: 1 day
+      fillfactor: 70
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := schema.LoadAndMerge([]string{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := Render(Plan(emptyLive(), d, false))
+	if !strings.Contains(sql, `with (tsdb.hypertable = true, tsdb.partition_column = at, tsdb.chunk_interval = '1 day', fillfactor = 70);`) {
+		t.Errorf("CREATE TABLE passes the parameters in YAML order, quoting values that need it:\n%s", sql)
+	}
+	live := liveWithTable("app.m", map[string]*LiveColumn{"at": {Type: "timestamp with time zone"}})
+	live.Schemas["app"] = true
+	live.Tables["app.m"].Options = map[string]string{"fillfactor": "70"}
+	if sql := Render(Plan(live, d, true)); sql != "" {
+		t.Errorf("the namespaced parameters are create-time only, got:\n%s", sql)
 	}
 }
 

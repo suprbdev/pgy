@@ -159,12 +159,13 @@ func ownedByTable(seq, s string) string {
 }
 
 type index struct {
-    full   *schema.Database
-    byName map[string][]ref
+    full       *schema.Database
+    byName     map[string][]ref
+    columnSeqs map[string]schema.SequenceColumn
 }
 
 func newIndex(full *schema.Database) *index {
-    ix := &index{full: full, byName: map[string][]ref{}}
+    ix := &index{full: full, byName: map[string][]ref{}, columnSeqs: full.ColumnSequences()}
     for _, r := range declared(full) {
         name := strings.ToLower(schema.RoutineName(r.key))
         if i := strings.IndexByte(name, '.'); i >= 0 { name = name[i+1:] }

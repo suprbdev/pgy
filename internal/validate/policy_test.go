@@ -86,6 +86,57 @@ schema app:
 	}
 }
 
+func TestPolicyLeavesOutObjectsPgyDoesNotCreate(t *testing.T) {
+	d := policyDB(t, `
+schema extensions:
+  function digest(text, text):
+    grants: {reader: [execute]}
+  procedure maintain():
+    revokePublic: true
+  view pg_stat_statements:
+    grants: {reader: [select]}
+  type hstore:
+    revokePublic: true
+schema app:
+  table t:
+    columns:
+      id: {type: bigint, identity: always}
+      s: {type: bigserial}
+    owner: app_owner
+    grants: {}
+  sequence t_id_seq:
+    grants: {reader: [usage]}
+  sequence t_s_seq:
+    grants: {reader: [usage]}
+  sequence standalone:
+    grants: {}
+  function own():
+    returns: int
+    language: sql
+    body: select 1
+`)
+	all := map[string]bool{}
+	for _, k := range PolicyKinds {
+		all[k] = true
+	}
+	got := messages(CheckPolicy(d, Policy{RequireGrants: all, RequireOwners: all}))
+	for _, want := range []string{
+		"function app.own(): policy: functions must declare a grants block",
+		"function app.own(): policy: functions must declare an owner",
+		"sequence app.standalone: policy: sequences must declare an owner",
+		"schema app: policy: schemas must declare an owner",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, clean := range []string{"extensions", "app.t_id_seq", "app.t_s_seq", "table app.t"} {
+		if strings.Contains(got, clean) {
+			t.Errorf("%s must not be flagged:\n%s", clean, got)
+		}
+	}
+}
+
 func TestValidateKeyColumnsAndPolicies(t *testing.T) {
 	path := write(t, t.TempDir(), "k.yml", `
 schema app:

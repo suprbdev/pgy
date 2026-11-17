@@ -345,6 +345,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         if sq == nil { continue }
         hard(ix.resolveDeps(sq.DependsOn))
         if t := ownedByTable(k, sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
+        if c, ok := ix.columnSeqs[k]; ok { hard([]ref{{kindTable, c.Table}}) }
     }
     for _, co := range d.Collations {
         if co != nil { hard(ix.resolveDeps(co.DependsOn)) }

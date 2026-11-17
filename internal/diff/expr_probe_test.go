@@ -320,7 +320,7 @@ func TestExprProbeIgnoresExclusionIndexParameters(t *testing.T) {
 
 func TestExprProbeCollectsTextMismatchesOnly(t *testing.T) {
 	live, desired := exprProbeLive(), exprProbeDesired(t)
-	plan := collectExprProbes(live, desired)
+	plan := collectExprProbes(live, desired, false)
 	got := map[ExprKey]bool{}
 	for _, r := range plan.requests {
 		got[r.key] = true
@@ -340,7 +340,7 @@ func TestExprProbeCollectsTextMismatchesOnly(t *testing.T) {
 	live.ExprProbes = exprProbesFor(live, desired, exprProbeCases())
 	spelled := applyExprProbes(live.scoped(), desired)
 	spelled.ExprProbes = nil
-	if again := collectExprProbes(spelled, desired); len(again.requests) != 0 {
+	if again := collectExprProbes(spelled, desired, false); len(again.requests) != 0 {
 		t.Errorf("a schema that matches as text has nothing to probe, got %d requests", len(again.requests))
 	}
 }
@@ -366,7 +366,7 @@ func TestExprProbeSkipsChangesNoSpellingExplains(t *testing.T) {
 		{ExprProcedureArgs, "app.p(i interval default '1 hour')", ""}: true,
 	}
 	got := map[ExprKey]bool{}
-	for _, r := range collectExprProbes(live, desired).requests {
+	for _, r := range collectExprProbes(live, desired, false).requests {
 		got[r.key] = true
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -376,7 +376,7 @@ func TestExprProbeSkipsChangesNoSpellingExplains(t *testing.T) {
 
 func TestExprProbeStatements(t *testing.T) {
 	live, desired := exprProbeLive(), exprProbeDesired(t)
-	plan := collectExprProbes(live, desired)
+	plan := collectExprProbes(live, desired, false)
 	stmts := map[ExprKey]probeStmt{}
 	for _, r := range plan.requests {
 		stmts[r.key] = r.attach.stmt
@@ -444,7 +444,7 @@ func TestExprProbeRenamedTableCopiesTheLiveOne(t *testing.T) {
 	renamed.Columns["shape"] = &shape
 	renamed.Constraints = []*schema.Constraint{{Name: "t_box", Type: "check", Expression: "shape <@ cube '(0, 0),(1, 1)'"}}
 	desired.Tables["app.t2"] = &renamed
-	plan := collectExprProbes(live, desired)
+	plan := collectExprProbes(live, desired, false)
 	var rel *probeRelation
 	for _, r := range plan.spec.Relations {
 		if r.Name == "t2" {
@@ -468,7 +468,7 @@ func TestExprProbeRenamedTableCopiesTheLiveOne(t *testing.T) {
 
 func TestExprProbeResults(t *testing.T) {
 	live, desired := exprProbeLive(), exprProbeDesired(t)
-	plan := collectExprProbes(live, desired)
+	plan := collectExprProbes(live, desired, false)
 	reply := &probeReply{}
 	reply.Relations = make([]probeRelationReply, len(plan.spec.Relations))
 	rels := map[string]int{}
@@ -542,7 +542,7 @@ func TestExprProbeNeedsAConnection(t *testing.T) {
 		t.Errorf("without a connection nothing is probed, got %v, %v", err, live.ExprProbes)
 	}
 	live.Offline = true
-	if plan := collectExprProbes(live, desired); len(plan.requests) == 0 {
+	if plan := collectExprProbes(live, desired, false); len(plan.requests) == 0 {
 		t.Fatal("the fixture has definitions to probe")
 	}
 	if err := ProbeExpressions(context.Background(), nil, live, desired); err != nil || live.ExprProbes != nil {
@@ -556,7 +556,7 @@ func TestExprProbeSkipsViewTriggers(t *testing.T) {
 	vt := newLiveTable()
 	vt.Triggers["v_t"] = `CREATE TRIGGER v_t INSTEAD OF INSERT ON app.v FOR EACH ROW EXECUTE FUNCTION app.trg('10')`
 	live.ViewTables = map[string]*LiveTable{"app.v": vt}
-	for _, r := range collectExprProbes(live, desired).requests {
+	for _, r := range collectExprProbes(live, desired, false).requests {
 		if r.key.Kind == ExprTrigger && r.key.Object == "app.v" {
 			t.Errorf("a view's trigger can't be attached to a table, so it is not probed: %+v", r.key)
 		}
