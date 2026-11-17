@@ -308,7 +308,7 @@ func TestExtensionPruneAfterEveryOtherDrop(t *testing.T) {
 	live.Extensions["hstore"] = true
 	live.ExtensionDefs = map[string]*LiveExtension{"hstore": {Schema: "app", Version: "1.8"}}
 	live.Servers = map[string]*LiveServer{"old_srv": {Wrapper: "postgres_fdw"}}
-	live.EventTriggers = map[string]*LiveEventTrigger{"old_et": {Event: "ddl_command_end"}}
+	live.EventTriggers = map[string]*LiveEventTrigger{"old_et": {Event: "ddl_command_end", Function: "app.old_et_fn"}}
 	live.Publications = map[string]*LivePublication{"old_pub": {}}
 	d.Extensions = []*schema.Extension{}
 	d.Servers, d.EventTriggers, d.Publications = map[string]*schema.Server{}, map[string]*schema.EventTrigger{}, map[string]*schema.Publication{}

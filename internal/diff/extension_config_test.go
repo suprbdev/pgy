@@ -25,13 +25,13 @@ func TestPruneKeepsRulesOfAttributeOnlyAndExtensionViews(t *testing.T) {
 	}}
 	live.TableGrants["public.geometry_columns"] = map[string]map[string]bool{"public": {"select": true}}
 	live.TableGrants["public.mine"] = map[string]map[string]bool{"public": {"select": true}}
-	early, late := planPrune(live, d, "")
+	early, late, _ := planPrune(live, d, "", nil)
 	if len(early)+len(late) != 0 {
 		t.Errorf("rules and triggers of an extension's view or a view declared without a query are never pruned, got %v %v", early, late)
 	}
 
 	d.Views["public.mine"].Query = "select 1"
-	early, _ = planPrune(live, d, "")
+	early, _, _ = planPrune(live, d, "", nil)
 	if want := []string{`drop trigger "keep_trigger" on "public"."mine";`, `drop rule "keep_insert" on "public"."mine";`}; !reflect.DeepEqual(early, want) {
 		t.Errorf("a view pgy defines still has its undeclared rules and triggers pruned, got %v", early)
 	}
@@ -43,7 +43,7 @@ func TestPruneKeepsObjectsOfExtensionTables(t *testing.T) {
 	d := &schema.Database{Tables: map[string]*schema.Table{
 		"public.spatial_ref_sys": {Name: "public.spatial_ref_sys", ColumnsSet: true, Columns: map[string]*schema.Column{"srid": {Type: "integer"}}},
 	}}
-	if early, late := planPrune(live, d, ""); len(early)+len(late) != 0 {
+	if early, late, _ := planPrune(live, d, "", nil); len(early)+len(late) != 0 {
 		t.Errorf("an extension's table keeps its constraints, indexes and rules, got %v %v", early, late)
 	}
 }

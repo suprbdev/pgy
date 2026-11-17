@@ -54,42 +54,54 @@ type Options struct {
 // anything on a relation an extension owns, a table declared without
 // columns or a view declared without a query.
 //
+// A live object owned by a role whose privileges the connecting role lacks
+// (see Live.OwnerRoles) is left alone with a warning, and so are the
+// undeclared triggers, constraints and indexes of a declared table it does
+// not own. A routine that objects the plan keeps still use (see
+// LiveFunction.Dependents) is kept too, with a warning.
+//
 // early holds the drops that must precede column drops (triggers,
 // constraints, indexes, views); late holds the drops of objects other
 // objects may still reference until then (tables, routines, sequences,
 // domains, types). Objects of one kind are dropped in a single statement so
-// dependencies among them do not dictate an order.
-func planPrune(live *Live, desired *schema.Database, migrationsTable string) (early, late []string) {
+// dependencies among them do not dictate an order. planned holds the drops
+// the rest of the plan makes, which may remove what uses a routine.
+func planPrune(live *Live, desired *schema.Database, migrationsTable string, planned []string) (early, late []string, warnings []Warning) {
     if migrationsTable == "" { migrationsTable = "pgy.migrations" }
-    managed := managedSchemas(desired)
-    inScope := func(key string) bool {
-        i := strings.IndexByte(key, '.')
-        return i > 0 && managed[key[:i]] && !InDottedSchema(live, key)
+    inScope := pruneScope(live, desired)
+    owned := func(kind, key, fq, parts string) bool {
+        if owner := live.Owners[key]; !live.mayDrop(owner) {
+            warnings = append(warnings, notOwnerWarning(live, kind+" "+fq, owner, parts))
+            return false
+        }
+        return true
     }
+    const tableObjects = "the triggers, constraints, indexes, rules and statistics it no longer declares"
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
         if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
-        early = append(early, pruneTableObjects(fq, dt, lt)...)
+        if drops := pruneTableObjects(fq, dt, lt); len(drops) > 0 && owned("table", "rel:"+fq, fq, tableObjects) { early = append(early, drops...) }
     }
     for _, fq := range sortedKeys(desired.Views) {
         vw := desired.Views[fq]
         if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] { continue }
+        var drops []string
         if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
-            early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
+            drops = pruneIndexes(fq, vw.Indexes, lt)
         }
         if vt := live.ViewTables[fq]; !vw.Materialized && vt != nil {
-            early = append(early, pruneTableObjects(fq, &schema.Table{Triggers: vw.Triggers, Rules: vw.Rules}, vt)...)
+            drops = pruneTableObjects(fq, &schema.Table{Triggers: vw.Triggers, Rules: vw.Rules}, vt)
         }
+        if len(drops) > 0 && owned("view", "rel:"+fq, fq, tableObjects) { early = append(early, drops...) }
     }
 
-    undeclared := func(liveSet map[string]bool, declared func(string) bool, extKind string) []string {
+    undeclared := func(kind string, liveSet map[string]bool, declared func(string) bool, extKind string) []string {
         out := []string{}
-        for k, ok := range liveSet {
-            if !ok || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] { continue }
+        for _, k := range sortedKeys(liveSet) {
+            if !liveSet[k] || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] || !owned(kind, extKind+":"+k, k, "") { continue }
             out = append(out, k)
         }
-        sort.Strings(out)
         return out
     }
     isView := func(k string) bool { return desired.Views[k] != nil }
@@ -99,8 +111,8 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
         for i, k := range keys { parts[i] = pqIdent(k) }
         return []string{fmt.Sprintf("drop %s %s;", kind, strings.Join(parts, ", "))}
     }
-    early = append(early, dropList("view", undeclared(live.Views, isView, "rel"))...)
-    early = append(early, dropList("materialized view", undeclared(live.MatViews, isView, "rel"))...)
+    early = append(early, dropList("view", undeclared("view", live.Views, isView, "rel"))...)
+    early = append(early, dropList("materialized view", undeclared("materialized view", live.MatViews, isView, "rel"))...)
 
     tables, foreignTables := map[string]bool{}, map[string]bool{}
     inheritKept, _ := keptInheritanceChildren(live, desired, migrationsTable)
@@ -113,31 +125,34 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
             tables[k] = true
         }
     }
-    late = append(late, dropList("foreign table", undeclared(foreignTables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
-    late = append(late, dropList("table", undeclared(tables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
+    late = append(late, dropList("foreign table", undeclared("foreign table", foreignTables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
+    late = append(late, dropList("table", undeclared("table", tables, func(k string) bool { return desired.Tables[k] != nil }, "rel"))...)
 
-    late = append(late, pruneRoutines(live, desired, inScope)...)
+    routinesAt := len(late)
 
     sequences := map[string]bool{}
     for k, ok := range live.Sequences {
         if ok && !live.OwnedSequences[k] { sequences[k] = true }
     }
-    late = append(late, dropList("sequence", undeclared(sequences, func(k string) bool { return desired.Sequences[k] != nil }, "rel"))...)
-    late = append(late, dropList("domain", undeclared(live.Domains, func(k string) bool { return desired.Domains[k] != nil }, "type"))...)
-    late = append(late, dropList("type", undeclared(live.Types, func(k string) bool { return desired.Types[k] != nil }, "type"))...)
+    late = append(late, dropList("sequence", undeclared("sequence", sequences, func(k string) bool { return desired.Sequences[k] != nil }, "rel"))...)
+    late = append(late, dropList("domain", undeclared("domain", live.Domains, func(k string) bool { return desired.Domains[k] != nil }, "type"))...)
+    late = append(late, dropList("type", undeclared("type", live.Types, func(k string) bool { return desired.Types[k] != nil }, "type"))...)
     tsConfigs := map[string]bool{}
     for k := range live.TSConfigs { tsConfigs[k] = true }
-    early = append(early, dropList("text search configuration", undeclared(tsConfigs, func(k string) bool { return desired.TSConfigs[k] != nil }, "tscfg"))...)
-    late = append(late, dropList("text search dictionary", undeclared(live.TSDictionaries, func(k string) bool { return desired.TSDictionaries[k] != nil }, "tsdict"))...)
-    late = append(late, dropList("collation", undeclared(live.Collations, func(k string) bool { return desired.Collations[k] != nil }, "coll"))...)
-    return early, late
+    early = append(early, dropList("text search configuration", undeclared("text search configuration", tsConfigs, func(k string) bool { return desired.TSConfigs[k] != nil }, "tscfg"))...)
+    late = append(late, dropList("text search dictionary", undeclared("text search dictionary", live.TSDictionaries, func(k string) bool { return desired.TSDictionaries[k] != nil }, "tsdict"))...)
+    late = append(late, dropList("collation", undeclared("collation", live.Collations, func(k string) bool { return desired.Collations[k] != nil }, "coll"))...)
+    routines, routineWarnings := pruneRoutines(live, desired, inScope, append(append(append([]string{}, planned...), early...), late...))
+    late = append(late[:routinesAt:routinesAt], append(routines, late[routinesAt:]...)...)
+    return early, late, append(warnings, routineWarnings...)
 }
 
 // pruneServers returns the DROP statements for the live servers a servers
 // block does not list, each after the drops of its user mappings, which
 // DROP SERVER does not remove. A server that foreign tables still use once
-// planPrune's drops have run is kept and reported instead, since dropping
-// it would fail. Without a servers block, servers are unmanaged.
+// planPrune's drops have run, or that the connecting role may not drop (see
+// Live.OwnerRoles), is kept and reported instead, since dropping it would
+// fail. Without a servers block, servers are unmanaged.
 func pruneServers(live *Live, desired *schema.Database, migrationsTable string) (drops []string, warnings []Warning) {
     if desired.Servers == nil { return nil, nil }
     if migrationsTable == "" { migrationsTable = "pgy.migrations" }
@@ -151,7 +166,7 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
         i := strings.IndexByte(fq, '.')
         lt := live.Tables[fq]
-        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq]
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq] && live.mayDrop(live.Owners["rel:"+fq])
     }
     users := map[string][]string{}
     for _, fq := range sortedKeys(live.Tables) {
@@ -161,6 +176,10 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         if desired.Servers[name] != nil { continue }
         if left := users[name]; len(left) > 0 {
             warnings = append(warnings, Warning{Message: fmt.Sprintf("server %s is not in the servers block but still has foreign tables this plan keeps (%s), so it is not dropped; drop or move them first", name, strings.Join(left, ", "))})
+            continue
+        }
+        if owner := live.Servers[name].Owner; !live.mayDrop(owner) {
+            warnings = append(warnings, notOwnerWarning(live, "server "+name, owner, ""))
             continue
         }
         for _, role := range live.Servers[name].UserMappings {
@@ -268,10 +287,79 @@ func pruneIndexes(fq string, declared []*schema.Index, lt *LiveTable) []string {
     return out
 }
 
-// pruneRoutines drops undeclared plain functions and procedures in managed
-// schemas. Window functions are left alone, and so are routines written in
-// C or internal, which YAML cannot declare.
-func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bool) []string {
+// pruneRoutines drops the routines routinePruneCandidates returns, but for
+// those owned by a role whose privileges the connecting role lacks and those
+// that objects outside them still use once planned, the plan's other drops,
+// and the routine drops themselves have run. Both are reported.
+func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bool, planned []string) ([]string, []Warning) {
+    var warnings []Warning
+    candidates := []*routineCandidate{}
+    for _, c := range routinePruneCandidates(live, desired, inScope) {
+        if owner := live.Owners["proc:"+c.norm]; !live.mayDrop(owner) {
+            warnings = append(warnings, notOwnerWarning(live, c.kind+" "+c.signature, owner, ""))
+            continue
+        }
+        candidates = append(candidates, c)
+    }
+    kept := map[*routineCandidate][]string{}
+    for changed := true; changed; {
+        changed = false
+        dropped := droppedObjects(append(append([]string{}, planned...), routineDrops(candidates, kept)...))
+        dropPartitions(dropped, live)
+        for _, c := range candidates {
+            if _, ok := kept[c]; ok { continue }
+            users, seen := []string{}, map[string]bool{}
+            for _, dep := range *c.dependents {
+                if dep.removedBy(dropped) || seen[dep.Description] { continue }
+                seen[dep.Description] = true
+                users = append(users, dep.Description)
+            }
+            if len(users) > 0 { kept[c], changed = users, true }
+        }
+    }
+    for _, c := range candidates {
+        users, ok := kept[c]
+        if !ok { continue }
+        listed := strings.Join(users[:min(len(users), maxListedDependents)], ", ")
+        if more := len(users) - maxListedDependents; more > 0 { listed += fmt.Sprintf(" and %d more", more) }
+        warnings = append(warnings, Warning{Kind: "dependents", Message: fmt.Sprintf("%s %s is not declared but still in use (%s), so --prune keeps it; pgy diff drops it once nothing depends on it, or declare it to keep it for good", c.kind, c.signature, listed)})
+    }
+    return routineDrops(candidates, kept), warnings
+}
+
+// routineDrops returns one DROP statement per kind for the candidates not in
+// kept: aggregates, then functions, then procedures.
+func routineDrops(candidates []*routineCandidate, kept map[*routineCandidate][]string) []string {
+    objects := map[string][]string{}
+    for _, c := range candidates {
+        if _, ok := kept[c]; !ok { objects[c.kind] = append(objects[c.kind], c.object) }
+    }
+    out := []string{}
+    for _, kind := range []string{"aggregate", "function", "procedure"} {
+        if len(objects[kind]) > 0 { out = append(out, "drop "+kind+" "+strings.Join(objects[kind], ", ")+";") }
+    }
+    return out
+}
+
+// routineCandidate is a routine --prune would drop.
+type routineCandidate struct {
+    // norm is the normalized signature keying the live maps.
+    norm string
+    // kind is aggregate, function or procedure.
+    kind string
+    // signature is the live "schema.name(identity args)".
+    signature string
+    // object is what DROP names: the quoted name and the arguments.
+    object string
+    // dependents points at the live routine's Dependents.
+    dependents *[]ExtensionDependent
+}
+
+// routinePruneCandidates returns the undeclared plain functions, aggregates
+// and procedures in the schemas inScope accepts, sorted by object. Window
+// functions are left alone, and so are routines written in C or internal,
+// which YAML cannot declare, and the members of extensions.
+func routinePruneCandidates(live *Live, desired *schema.Database, inScope func(string) bool) []*routineCandidate {
     want := map[string]bool{}
     for k, f := range desired.Functions {
         if f != nil { want[normalizeFunctionSignature(schema.RoutineName(k)+f.ArgsSig)] = true }
@@ -282,33 +370,40 @@ func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bo
     for k, ag := range desired.Aggregates {
         if ag != nil { want[normalizeFunctionSignature(schema.RoutineName(k)+aggregateArgs(ag.ArgsSig))] = true }
     }
-    collect := func(norm, sig string) (string, bool) {
-        if sig == "" || want[norm] || live.ExtensionMembers["proc:"+norm] || !inScope(schema.RoutineName(sig)) { return "", false }
+    out := []*routineCandidate{}
+    collect := func(norm, kind, sig string, dependents *[]ExtensionDependent) {
+        if sig == "" || want[norm] || live.ExtensionMembers["proc:"+norm] || !inScope(schema.RoutineName(sig)) { return }
         name := schema.RoutineName(sig)
-        return pqIdent(name) + sig[len(name):], true
+        object := pqIdent(name) + sig[len(name):]
+        if kind == "aggregate" { object = aggregateDropArgs(object) }
+        out = append(out, &routineCandidate{norm: norm, kind: kind, signature: sig, object: object, dependents: dependents})
     }
-    funcs, procs, aggs := []string{}, []string{}, []string{}
     for norm, lf := range live.FunctionDefs {
         if lf == nil || lf.Internal { continue }
         if lf.Kind == "a" && live.AggregateDefs[norm] != nil {
-            if s, ok := collect(norm, lf.Signature); ok { aggs = append(aggs, aggregateDropArgs(s)) }
+            collect(norm, "aggregate", lf.Signature, &lf.Dependents)
             continue
         }
         if lf.Kind != "f" || CompiledLanguage(lf.Language) { continue }
-        if s, ok := collect(norm, lf.Signature); ok { funcs = append(funcs, s) }
+        collect(norm, "function", lf.Signature, &lf.Dependents)
     }
     for norm, lp := range live.ProcedureDefs {
         if lp == nil || CompiledLanguage(lp.Language) { continue }
-        if s, ok := collect(norm, lp.Signature); ok { procs = append(procs, s) }
+        collect(norm, "procedure", lp.Signature, &lp.Dependents)
     }
-    sort.Strings(funcs)
-    sort.Strings(procs)
-    sort.Strings(aggs)
-    out := []string{}
-    if len(aggs) > 0 { out = append(out, "drop aggregate "+strings.Join(aggs, ", ")+";") }
-    if len(funcs) > 0 { out = append(out, "drop function "+strings.Join(funcs, ", ")+";") }
-    if len(procs) > 0 { out = append(out, "drop procedure "+strings.Join(procs, ", ")+";") }
+    sort.Slice(out, func(i, j int) bool { return out[i].object < out[j].object })
     return out
+}
+
+// pruneScope returns whether --prune considers the object with key
+// "schema.name": one in a schema the YAML declares objects in (see
+// managedSchemas) whose name InDottedSchema doesn't make ambiguous.
+func pruneScope(live *Live, desired *schema.Database) func(string) bool {
+    managed := managedSchemas(desired)
+    return func(key string) bool {
+        i := strings.IndexByte(key, '.')
+        return i > 0 && managed[key[:i]] && !InDottedSchema(live, key)
+    }
 }
 
 // aggregateDropArgs turns the empty argument list of a count(*)-style

@@ -319,12 +319,12 @@ func versionLess(a, b string) bool {
 // the update paths of the installed ones and the views and routines that
 // use them when a version differs, the member names of extensions declared
 // in another schema than they are in, and the objects that use an extension
-// opts lets pruning drop. Without it the plan is still valid: statements
-// are ordered by dependsOn and the requirements of PostgreSQL's own
-// extensions, nothing is checked against the server, objects that follow a
-// moved extension are compared in their old spelling, and ALTER EXTENSION
-// ... UPDATE and DROP EXTENSION are planned without looking for
-// dependents.
+// or a routine opts lets pruning drop. Without it the plan is still valid:
+// statements are ordered by dependsOn and the requirements of PostgreSQL's
+// own extensions, nothing is checked against the server, objects that
+// follow a moved extension are compared in their old spelling, and ALTER
+// EXTENSION ... UPDATE, DROP EXTENSION and the DROP FUNCTION of pruned
+// routines are planned without looking for dependents.
 func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database, opts Options) error {
     if live == nil || desired == nil || pool == nil { return nil }
     create, update := false, false
@@ -342,7 +342,8 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
         }
     }
     prunable := sortedKeys(prunableExtensions(live, desired, opts))
-    if !create && !update && len(moving) == 0 && len(prunable) == 0 { return nil }
+    routines := prunableRoutines(live, desired, opts)
+    if !create && !update && len(moving) == 0 && len(prunable) == 0 && len(routines) == 0 { return nil }
     batch := &queryBatch{}
     if create || update {
         available := map[string]*AvailableExtension{}
@@ -417,6 +418,7 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
         })
     }
     if len(prunable) > 0 { queryExtensionDependents(batch, live, prunable) }
+    if len(routines) > 0 { queryRoutineDependents(batch, routines) }
     return batch.run(ctx, pool)
 }
 

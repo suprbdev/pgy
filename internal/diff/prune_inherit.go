@@ -23,7 +23,7 @@ func keptInheritanceChildren(live *Live, desired *schema.Database, migrationsTab
 	candidate := map[string]bool{}
 	for k, lt := range live.Tables {
 		i := strings.IndexByte(k, '.')
-		if lt == nil || lt.IsPartition || k == migrationsTable || i <= 0 || !managed[k[:i]] || InDottedSchema(live, k) || desired.Tables[k] != nil || live.ExtensionMembers["rel:"+k] {
+		if lt == nil || lt.IsPartition || k == migrationsTable || i <= 0 || !managed[k[:i]] || InDottedSchema(live, k) || desired.Tables[k] != nil || live.ExtensionMembers["rel:"+k] || !live.mayDrop(live.Owners["rel:"+k]) {
 			continue
 		}
 		candidate[k] = true

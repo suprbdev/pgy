@@ -656,8 +656,7 @@ schema public:
 	sql := convergeLive(t, db, y, diff.Options{Unsafe: true, Prune: true})
 	wantLines := []string{
 		`create extension if not exists "plperl";`,
-		`revoke all on language "plperl" from public;`,
-		fmt.Sprintf(`grant usage on language "plperl" to %q;`, dev),
+		fmt.Sprintf(`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plperl' and lanpltrusted) then revoke all on language "plperl" from public; grant usage on language "plperl" to %q; end if; end $$;`, dev),
 		`set check_function_bodies = off;`,
 		`create function "public"."two"() returns integer language plperl as $$return 2;$$;`,
 		`reset check_function_bodies;`,
@@ -676,5 +675,87 @@ schema public:
 	}
 	if a, b := languageACLs(t, db), languageACLs(t, copy); !reflect.DeepEqual(a, b) {
 		t.Errorf("language ACLs %v were rebuilt as %v", a, b)
+	}
+}
+
+// TestIntegrationLanguagesOfPendingExtensions grants on languages an
+// extension of the same plan brings: one not named like the extension that
+// brings it, here through cascade, in a single migration, and an untrusted
+// one, whose statements are skipped instead of failing the migration.
+func TestIntegrationLanguagesOfPendingExtensions(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	dev := freshRole(t, admin, "dev")
+	db := freshDatabase(t, admin, "pgytest_language_pending")
+	if _, err := db.Exec(ctx, `create extension plperl; drop extension plperl`); err != nil {
+		t.Skipf("this server cannot load PL/Perl: %v", err)
+	}
+	y := strings.ReplaceAll(`
+extensions:
+  - {name: bool_plperl, schema: public, cascade: true}
+  - {name: plperlu, schema: pg_catalog}
+languages:
+  plperl:
+    grants: {DEV: [usage]}
+  plperlu:
+    grants: {DEV: [usage]}
+`, "DEV", dev)
+	plan := planExtensionsLive(t, db, y, diff.Options{})
+	if msgs := warningMessages(plan); msgs != "" {
+		t.Errorf("languages the plan's extensions may bring are not reported, got:\n%s", msgs)
+	}
+	applyPlan(t, db, plan)
+	owner := db.Config().ConnConfig.User
+	acls := languageACLs(t, db)
+	if want := aclOf(owner, "="+"U", owner+"=U", dev+"=U"); acls["plperl"] != want {
+		t.Errorf("plperl, which bool_plperl brings, is granted in the same migration: ACL %q, want %q", acls["plperl"], want)
+	}
+	if acls["plperlu"] != "" {
+		t.Errorf("nothing is granted on the untrusted plperlu, got ACL %q", acls["plperlu"])
+	}
+	plan = planExtensionsLive(t, db, y, diff.Options{})
+	if sql := diff.Render(plan); sql != "" {
+		t.Errorf("a second diff must be empty, got:\n%s", sql)
+	}
+	if msgs := warningMessages(plan); !strings.Contains(msgs, "language plperlu is not trusted") {
+		t.Errorf("the untrusted language is reported once it exists, got:\n%s", msgs)
+	}
+}
+
+// TestIntegrationExtensionRevokedPublicDrift repairs PUBLIC regaining
+// EXECUTE on a function whose extension's script revoked it
+// (pg_buffercache_pages), although the grants block doesn't list public.
+func TestIntegrationExtensionRevokedPublicDrift(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_ext_public_drift")
+	y := strings.ReplaceAll(`
+extensions:
+  - {name: pg_buffercache, schema: public}
+schema public:
+  function pg_buffercache_pages():
+    grants: {APP: [execute]}
+`, "APP", app)
+	applyPlan(t, db, planExtensionsLive(t, db, y, diff.Options{}))
+	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{})); sql != "" {
+		t.Fatalf("a second diff must be empty, got:\n%s", sql)
+	}
+	if _, err := db.Exec(ctx, `grant execute on function pg_buffercache_pages() to public`); err != nil {
+		t.Fatal(err)
+	}
+	plan := planExtensionsLive(t, db, y, diff.Options{})
+	if sql := strings.TrimSpace(diff.Render(plan)); sql != `revoke execute on function "public"."pg_buffercache_pages"() from public;` {
+		t.Errorf("PUBLIC's EXECUTE, which the extension revoked, is revoked again, got:\n%s", sql)
+	}
+	if msgs := warningMessages(plan); !strings.Contains(msgs, "the script of extension pg_buffercache left PUBLIC without them") {
+		t.Errorf("want a warning naming the extension, got:\n%s", msgs)
+	}
+	applyPlan(t, db, plan)
+	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{})); sql != "" {
+		t.Errorf("a diff after the repair must be empty, got:\n%s", sql)
+	}
+	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{PublicGrants: diff.PublicExplicit})); sql != "" {
+		t.Errorf("policy.public_grants: explicit leaves PUBLIC alone, got:\n%s", sql)
 	}
 }
