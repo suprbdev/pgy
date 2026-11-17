@@ -87,8 +87,9 @@ type Live struct{
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
     // ColumnDependents: "schema.relation.column" -> the views, materialized
-    // views, triggers, policies and rules whose definitions use the column,
-    // which PostgreSQL won't let ALTER COLUMN ... TYPE change under them.
+    // views, triggers, policies, rules and generated columns whose
+    // definitions use the column, which PostgreSQL won't let ALTER COLUMN ...
+    // TYPE change under them.
     ColumnDependents map[string][]ColumnDependent
     // RoleMemberOptions: member role -> parent role -> the membership's
     // options, combined over grantors.
@@ -209,8 +210,9 @@ type LiveRole struct {
 }
 
 // ColumnDependent is an object whose definition uses a column: a view or
-// materialized view (Name is "schema.view"), or a trigger, policy or rule
-// (Name is its name, Table the relation it is on).
+// materialized view (Name is "schema.view"), a trigger, policy or rule
+// (Name is its name, Table the relation it is on), or a generated column of
+// the same table (Kind "generated", Name is the column).
 type ColumnDependent struct {
     Kind, Name, Table string
 }
@@ -1800,13 +1802,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select distinct n.nspname || '.' || c.relname || '.' || a.attname,
                case when d.classid = 'pg_trigger'::regclass then 'trigger'
                     when d.classid = 'pg_policy'::regclass then 'policy'
+                    when d.classid = 'pg_attrdef'::regclass then 'generated'
                     when ev.relkind = 'v' then 'view' when ev.relkind = 'm' then 'matview' else 'rule' end,
                case when d.classid = 'pg_trigger'::regclass then tg.tgname::text
                     when d.classid = 'pg_policy'::regclass then po.polname::text
+                    when d.classid = 'pg_attrdef'::regclass then ga.attname::text
                     when ev.relkind in ('v', 'm') then evn.nspname || '.' || ev.relname
                     else rw.rulename::text end,
                case when d.classid = 'pg_trigger'::regclass then tgn.nspname || '.' || tgc.relname
                     when d.classid = 'pg_policy'::regclass then pon.nspname || '.' || poc.relname
+                    when d.classid = 'pg_attrdef'::regclass then n.nspname || '.' || c.relname
                     else evn.nspname || '.' || ev.relname end
         from pg_depend d
         join pg_class c on c.oid = d.refobjid
@@ -1821,9 +1826,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_policy po on d.classid = 'pg_policy'::regclass and po.oid = d.objid
         left join pg_class poc on poc.oid = po.polrelid
         left join pg_namespace pon on pon.oid = poc.relnamespace
+        left join pg_attrdef ad on d.classid = 'pg_attrdef'::regclass and ad.oid = d.objid
+        left join pg_attribute ga on ga.attrelid = ad.adrelid and ga.attnum = ad.adnum
         where d.refclassid = 'pg_class'::regclass and d.refobjsubid > 0 and d.deptype = 'n'
-        and d.classid in ('pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass)
+        and d.classid in ('pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass, 'pg_attrdef'::regclass)
         and not (d.classid = 'pg_rewrite'::regclass and ev.oid = c.oid and ev.relkind in ('v', 'm'))
+        and not (d.classid = 'pg_attrdef'::regclass and (ga.attgenerated = '' or ad.adrelid <> c.oid))
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
@@ -2273,31 +2281,105 @@ func normalizeConfigValue(v string) string {
     return configCommaRe.ReplaceAllString(v, ",")
 }
 
-// configClauses returns SET / RESET action clauses that bring a live
-// function's or procedure's configuration in line with a YAML set block. A
-// nil block leaves configuration unmanaged; an empty block resets every
-// live setting. Clauses are sorted for deterministic output.
-var (
-    configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
-    configIdentRe  = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
-)
+var configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 
-// configValueSQL renders a SET value. Each comma-separated element that is
-// not already quoted, a number or a lower-case identifier is quoted, so
-// values such as 5s, 64MB or America/New_York (which PostgreSQL stores, and
-// pgy pull emits, unquoted) form valid SQL, and UTC isn't folded to utc.
-func configValueSQL(v string) string {
-    parts := splitTopLevelQuoted(v)
-    for i, p := range parts {
+// listQuoteParams are the parameters PostgreSQL stores as a list of quoted
+// identifiers (GUC_LIST_QUOTE), the same names pg_dump singles out. Only
+// their values are comma-separated lists.
+var listQuoteParams = map[string]bool{
+    "local_preload_libraries": true, "search_path": true, "session_preload_libraries": true,
+    "shared_preload_libraries": true, "temp_tablespaces": true, "unix_socket_directories": true,
+}
+
+// configValueSQL renders the value of a SET clause for the parameter name.
+// The value of a list parameter (listQuoteParams) is rendered element by
+// element. Any other value is one value, commas included, and is quoted
+// unless it is a number or a word PostgreSQL accepts bare, so 5s, 64MB,
+// America/New_York, UTC (not folded to utc) and reserved words such as all
+// form valid SQL. A value already written as one SQL string literal is kept
+// as it is, and the multi-argument spelling ('a', 'b') becomes the single
+// value PostgreSQL stores for it.
+func configValueSQL(name, v string) string {
+    v = strings.TrimSpace(v)
+    if listQuoteParams[strings.ToLower(name)] {
+        parts := splitTopLevelQuoted(v)
+        for i, p := range parts { parts[i] = configListElementSQL(strings.TrimSpace(p)) }
+        return strings.Join(parts, ", ")
+    }
+    switch {
+    case v == "":
+        return "''"
+    case isQuotedWith(v, '\''), configNumberRe.MatchString(v), configBareWord(v):
+        return v
+    }
+    if elems, ok := configQuotedElements(v); ok { return quoteString(strings.Join(elems, ", ")) }
+    return quoteString(v)
+}
+
+// configListElementSQL renders one element of a list parameter's value. An
+// element PostgreSQL could not read as a quoted identifier (empty, or
+// longer than an identifier may be) becomes a string literal.
+func configListElementSQL(p string) string {
+    switch {
+    case isQuotedWith(p, '\''):
+        return p
+    case isQuotedWith(p, '"'):
+        if inner := unquote(p, '"'); inner != "" && len(inner) < 64 { return p }
+        return quoteString(unquote(p, '"'))
+    case configBareWord(p):
+        return p
+    }
+    return quoteString(p)
+}
+
+// configBareWord reports whether v can follow SET ... = without quotes: a
+// lower-case identifier that is not a reserved word, or one of the reserved
+// words the SET grammar accepts.
+func configBareWord(v string) bool {
+    return plainIdentRe.MatchString(v) && (!reservedWords[v] || v == "on" || v == "true" || v == "false")
+}
+
+// configQuotedElements reads v as the multi-argument spelling of a SET
+// value, a comma-separated list with at least one quoted element, and
+// returns the elements without their quotes. ok is false for anything else,
+// such as free text that merely contains a quote.
+func configQuotedElements(v string) (elems []string, ok bool) {
+    for _, p := range splitTopLevelQuoted(v) {
         p = strings.TrimSpace(p)
         switch {
-        case p == "", strings.HasPrefix(p, "'"), strings.HasPrefix(p, `"`), configNumberRe.MatchString(p), configIdentRe.MatchString(p):
-        default:
-            p = quoteString(p)
+        case isQuotedWith(p, '\''):
+            p, ok = unquote(p, '\''), true
+        case isQuotedWith(p, '"'):
+            p, ok = unquote(p, '"'), true
+        case strings.ContainsAny(p, `'"`):
+            return nil, false
         }
-        parts[i] = p
+        elems = append(elems, p)
     }
-    return strings.Join(parts, ", ")
+    return elems, ok
+}
+
+// isQuotedWith reports whether s is one string wrapped in the quote
+// character q, with every q inside it doubled.
+func isQuotedWith(s string, q byte) bool {
+    if len(s) < 2 || s[0] != q || s[len(s)-1] != q { return false }
+    return !strings.ContainsRune(strings.ReplaceAll(s[1:len(s)-1], string([]byte{q, q}), ""), rune(q))
+}
+
+// unquote strips the quote character q wrapping s and undoubles the ones
+// inside it.
+func unquote(s string, q byte) string {
+    return strings.ReplaceAll(s[1:len(s)-1], string([]byte{q, q}), string(q))
+}
+
+// ConfigValueYAML returns the YAML set value under which pgy writes back
+// value, a setting of the parameter name as PostgreSQL stores it. A value
+// holding quotes or outer whitespace is written as an SQL string literal,
+// since configValueSQL would otherwise read them as the value's own quoting.
+func ConfigValueYAML(name, value string) string {
+    if listQuoteParams[strings.ToLower(name)] { return value }
+    if !strings.ContainsAny(value, `'"`) && value == strings.TrimSpace(value) { return value }
+    return quoteString(value)
 }
 
 // splitTopLevelQuoted splits on commas outside single and double quotes.
@@ -2318,6 +2400,10 @@ func splitTopLevelQuoted(s string) []string {
     return append(out, s[start:])
 }
 
+// configClauses returns SET / RESET action clauses that bring a live
+// function's or procedure's configuration in line with a YAML set block. A
+// nil block leaves configuration unmanaged; an empty block resets every
+// live setting. Clauses are sorted for deterministic output.
 func configClauses(desired map[string]string, live map[string]string) []string {
     if desired == nil { return nil }
     out := []string{}
@@ -2331,7 +2417,7 @@ func configClauses(desired map[string]string, live map[string]string) []string {
     for _, k := range keys {
         lv, ok := live[strings.ToLower(k)]
         if !ok || normalizeConfigValue(lv) != normalizeConfigValue(desired[k]) {
-            out = append(out, fmt.Sprintf("set %s = %s", k, configValueSQL(desired[k])))
+            out = append(out, fmt.Sprintf("set %s = %s", k, configValueSQL(k, desired[k])))
         }
     }
     extra := []string{}
@@ -2530,7 +2616,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         recreated[k] = v
     }
     recreateWarnings = append(recreateWarnings, argWarnings...)
-    live, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, unsafe)
+    live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
@@ -2628,7 +2714,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(plan.Creates, renames...)
-    
+    plan.Creates = append(plan.Creates, typeChangeEarly...)
+
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
@@ -2744,7 +2831,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range f.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(f.Set[k]))
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
                 }
             }
             attrs := []string{}
@@ -2781,7 +2868,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range pr.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(pr.Set[k]))
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
                 }
             }
             attrsStr := ""
@@ -5492,9 +5579,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             // Changed definition → drop + recreate. Rebuilding an index can be
             // expensive and briefly leaves queries without it, so gate behind
             // --unsafe. Without live definition data the index is adopted by name.
-            changed := false
-            if lt != nil && lt.IndexDefs[name] != nil { changed = indexDefinitionDiffers(ix, lt.IndexDefs[name]) }
-            if liveOCs, ok := liveIndexOpclasses(lt)[name]; ok && indexOpclassesDiffer(ix, liveOCs) { changed = true }
+            changed := indexChanged(ix, lt, name)
             switch {
             case !unsafe || !changed:
                 plan.Alters = append(plan.Alters, indexComment(false)...)
@@ -5926,15 +6011,22 @@ func RenderMain(p *PlanDiff) string {
 // alterColumnStmts reconciles an existing column's live attributes with its
 // desired definition. Type changes can rewrite the table or fail on cast, so
 // they are gated behind --unsafe (with an optional USING expression from the
-// column's `using` property). Identity changes go through
-// identityAlterStmts; identity/serial columns keep their generated defaults
-// and implicit NOT NULL.
+// column's `using` property). A default is dropped before the type changes
+// and the declared one set afterwards, since PostgreSQL has to cast a
+// default left in place to the new type and gives up when no implicit or
+// assignment cast exists. Identity changes go through identityAlterStmts;
+// identity/serial columns keep their generated defaults and implicit NOT
+// NULL.
 func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
 
     typeChanged := c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type)
     collateChanged := c.Collate != "" && collationName(c.Collate) != lc.Collation
+    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
+    sequenceDefault := strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval(")
+    resetDefault := unsafe && typeChanged && !generated && lc.Default != "" && !sequenceDefault
+    if resetDefault { out = append(out, target+" drop default;") }
     if unsafe && c.Type != "" && (typeChanged || collateChanged) {
         stmt := fmt.Sprintf("%s type %s", target, c.Type)
         if c.Collate != "" { stmt += " collate " + collationIdent(c.Collate) }
@@ -5973,12 +6065,11 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     }
     out = append(out, serialConversionStmts(fq, cn, c, lc)...)
 
-    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
     if !generated {
         switch {
-        case c.Default != "" && !defaultsEqual(c.Default, lc.Default):
+        case c.Default != "" && (resetDefault || !defaultsEqual(c.Default, lc.Default)):
             out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
-        case c.Default == "" && lc.Default != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval("):
+        case c.Default == "" && lc.Default != "" && !sequenceDefault && !resetDefault:
             out = append(out, fmt.Sprintf("%s drop default;", target))
         }
     }
@@ -6863,6 +6954,16 @@ func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) [
 func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
     if lt == nil { return nil }
     return lt.IndexOpclasses
+}
+
+// indexChanged reports whether desired index ix differs from lt's live
+// index name, in its definition or its operator classes. An index whose
+// live definition is unknown counts as unchanged.
+func indexChanged(ix *schema.Index, lt *LiveTable, name string) bool {
+    if lt == nil { return false }
+    if li := lt.IndexDefs[name]; li != nil && indexDefinitionDiffers(ix, li) { return true }
+    liveOCs, ok := lt.IndexOpclasses[name]
+    return ok && indexOpclassesDiffer(ix, liveOCs)
 }
 
 // indexOpclassesDiffer reports whether the desired index's operator classes

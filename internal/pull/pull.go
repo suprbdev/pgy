@@ -719,9 +719,20 @@ func addSet(m *node, config map[string]string) {
 	}
 	set := newMap()
 	for _, k := range sortedKeys(config) {
-		add(set, k, str(config[k]))
+		add(set, k, setting(k, config[k]))
 	}
 	add(m, "set", set)
+}
+
+// setting is the YAML value of a stored setting of the parameter name. A
+// value that has to be written as an SQL string literal is double-quoted in
+// the YAML, which keeps the literal's own quotes readable.
+func setting(name, value string) *node {
+	n := str(diff.ConfigValueYAML(name, value))
+	if n.Value != value {
+		n.Style = yaml.DoubleQuotedStyle
+	}
+	return n
 }
 
 func (b *builder) tables() {
@@ -1760,7 +1771,7 @@ func (b *builder) database() *node {
 			if len(lr.Config) > 0 {
 				set := flowMap()
 				for _, k := range sortedKeys(lr.Config) {
-					add(set, k, str(lr.Config[k]))
+					add(set, k, setting(k, lr.Config[k]))
 				}
 				add(r, "set", set)
 			}
@@ -1776,7 +1787,7 @@ func (b *builder) database() *node {
 		settings := func(m map[string]string) *node {
 			set := flowMap()
 			for _, k := range sortedKeys(m) {
-				add(set, k, str(m[k]))
+				add(set, k, setting(k, m[k]))
 			}
 			return set
 		}
