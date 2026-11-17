@@ -126,32 +126,26 @@ func TestIntegrationPLPythonIndentedBodyRunsAfterRebuild(t *testing.T) {
 		t.Skipf("plpython3u is not available on this server: %v", err)
 	}
 	dst := freshDatabase(t, admin, "pgytest_routine_plpython_copy")
-	if _, err := dst.Exec(ctx, `create extension plpython3u`); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := src.Exec(ctx, `
+		create extension hstore;
+		create extension hstore_plpython3u;
 		create function public.sign(a integer) returns integer language plpython3u as $$
     if a > 0:
         return 1
     return -1
+$$;
+		create function public.size(h hstore) returns integer language plpython3u transform for type hstore as $$
+    return len(h)
 $$;`); err != nil {
 		t.Fatal(err)
 	}
-	res, err := pull.Build(introspectAll(t, src), pull.Options{Single: true})
-	if err != nil {
-		t.Fatal(err)
+	y := pullAndRebuild(t, src, dst)
+	if d := routineSourceDifferences(t, src, dst); len(d) > 0 {
+		t.Errorf("bodies differ after pull and rebuild:\n%s\n%s", strings.Join(d, "\n"), y)
 	}
-	pulled, err := schema.LoadAndMerge([]string{writeYAML(t, string(res.Files[0].Content))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pulled.Extensions = nil
-	if stmt, err := applyAsMigrations(ctx, dst, diff.PlanWith(introspectAll(t, dst), pulled, diff.Options{})); err != nil {
-		t.Fatalf("rebuilding: %q: %v\n%s", stmt, err, res.Files[0].Content)
-	}
-	var got int
-	if err := dst.QueryRow(ctx, `select public.sign(-5)`).Scan(&got); err != nil || got != -1 {
-		t.Errorf("rebuilt PL/Python function: %d, %v\n%s", got, err, res.Files[0].Content)
+	var sign, size int
+	if err := dst.QueryRow(ctx, `select public.sign(-5), public.size('a=>1, b=>2')`).Scan(&sign, &size); err != nil || sign != -1 || size != 2 {
+		t.Errorf("rebuilt PL/Python functions: %d, %d, %v\n%s", sign, size, err, y)
 	}
 }
 
