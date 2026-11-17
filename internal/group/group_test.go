@@ -743,3 +743,21 @@ func TestPlanKeepsWarningsOfStepsWithoutStatements(t *testing.T) {
         t.Errorf("a plan with only warnings must keep them and render nothing, got %q", Render(steps))
     }
 }
+
+func TestPlanOrdersServerGroupBeforeItsForeignTables(t *testing.T) {
+    _, paths := writeSchemas(t, map[string]string{
+        "app.yml":      "schema app:\n  foreign table orders:\n    server: wh\n    columns:\n      id: {type: integer, nullable: true}\n",
+        "database.yml": "extensions: [postgres_fdw]\nservers:\n  wh: {wrapper: postgres_fdw, options: {dbname: remote}}\n",
+    })
+    steps := planFiles(t, nil, paths("app.yml", "database.yml"), ModeFile, false)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"database", "app"}) {
+        t.Fatalf("the group declaring the server must come first, got %v", got)
+    }
+    if sql := stepSQL(t, steps, "database"); !strings.Contains(sql, `create server "wh"`) {
+        t.Errorf("expected the server in its own group:\n%s", sql)
+    }
+    if sql := stepSQL(t, steps, "app"); !strings.Contains(sql, `create foreign table if not exists "app"."orders"`) || strings.Contains(sql, "create server") {
+        t.Errorf("expected only the foreign table in the later group:\n%s", sql)
+    }
+    assertEmittedOnce(t, steps)
+}

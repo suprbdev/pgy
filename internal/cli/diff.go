@@ -90,6 +90,7 @@ Exit codes:
                     Types: map[string]bool{},
                     Functions: map[string]bool{},
                     Extensions: map[string]bool{},
+                    Offline: true,
                 }
             } else {
                 p, err2 := db.Connect(ctx, cfg.DSN)

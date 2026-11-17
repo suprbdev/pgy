@@ -36,6 +36,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Domains](#domains)
 - [Sequences](#sequences)
 - [Functions](#functions)
+  - [Transforms](#transforms)
 - [Aggregates](#aggregates)
 - [Procedures](#procedures)
 - [Collations](#collations)
@@ -793,11 +794,17 @@ schema reporting:
     comment: orders in the warehouse
 ```
 
-Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change instead. A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables. Without the block, servers are unmanaged.
+Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
 
-User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none.
+A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables and together with their user mappings (`DROP USER MAPPING`). A server that still has foreign tables the plan keeps (in a schema the YAML doesn't manage, or declared on another server name) is not dropped, and `pgy diff` says so. Without the block, servers are unmanaged.
 
-Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped. PostgreSQL cannot move a foreign table to another server, so a changed `server` is reported. Check constraints, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`. A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or storage settings, and cannot be partitioned themselves. `pgy pull` writes servers to `database.yml` and foreign tables to their schema's file.
+User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none. A materialized view that reads a foreign table is populated when it is created, which fails without a user mapping. `pgy diff` warns when a plan creates such a view while the server has none: set `withData: false` and refresh the view once the mapping exists, or create the server and its user mapping before running the migration.
+
+Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped, and `options: {}` means none. Columns can be `generated` (stored, or `virtual` on PostgreSQL 18) and take a `storage` mode. PostgreSQL cannot move a foreign table to another server, so a changed `server` is only reported, also under `--unsafe`. Nor can it turn a table into a foreign table or back: a table declared as one kind that is the other in the database is reported and left alone. Check constraints, `triggers`, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`.
+
+A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. It can also be an inheritance child (`inherits`, as for [inheritance](#inheritance)): `CREATE FOREIGN TABLE ... INHERITS (...) SERVER ...`. In both cases the columns it gets from its parent are left to the parent. List one without a `type` to set what the foreign table keeps of its own for it, such as the wrapper's column `options`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or table storage parameters, and cannot be partitioned themselves.
+
+`pgy pull` writes servers to `database.yml` and foreign tables to their schema's file. It writes the `options` block of every server and foreign table, as `options: {}` when there are none, so the pulled YAML also notices options added to them later. A column gets an `options` block only when it has options: an option added later to a column without one goes unnoticed unless the YAML lists `options: {}` for that column.
 
 Server properties:
 
@@ -809,6 +816,7 @@ Server properties:
 | `options` | map | Wrapper options. Authoritative when present; omitted = unmanaged |
 | `owner` | string | Owner role, diffed against live |
 | `comment` | string | `COMMENT ON SERVER` |
+| `renamedFrom` | string | Previous name: `ALTER SERVER ... RENAME TO` when only that name exists live |
 
 Foreign table properties:
 
@@ -817,8 +825,10 @@ Foreign table properties:
 | `server` | string | Required. The server the table reads through |
 | `options` | map | Wrapper table options. Authoritative when present; omitted = unmanaged |
 | `partitionOf`, `forValues`, `default` | | Attach as a partition of a local partitioned table, as for [partitions](#partitioning) |
-| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `collate`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options |
+| `inherits` | list | Parent tables (`INHERITS`), as for [inheritance](#inheritance) |
+| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `generated`, `virtual`, `collate`, `storage`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options. Columns of a partition or inheritance child take no `type` |
 | `constraints` | map | Check constraints, as on [tables](#constraints) |
+| `triggers` | map | Triggers, as on [tables](#triggers) |
 | `grants`, `owner`, `comment`, `renamedFrom`, `dependsOn` | | As on tables |
 
 ## Views
@@ -1048,6 +1058,10 @@ PostgreSQL checks a `language: sql` body against the catalog when the function i
 
 `language: sql` routines may also use a SQL-standard body (PostgreSQL 14+), written as the `body` itself: `body: begin atomic select x + 1; end` or `body: return x * 2`. pgy emits it after the attributes instead of as an `AS` string. PostgreSQL parses such a body when the routine is created and records what it references, so the tables and routines it uses must exist first: declare them in `dependsOn`, which `pgy pull` fills in from `pg_depend`. PostgreSQL stores the body in a rewritten form, so pgy cannot compare it, as with views. A changed SQL-standard body is applied only while `replace: true` is set. Switching between a string body and a SQL-standard one is always applied.
 
+A string `body` is dollar-quoted in the SQL pgy emits. A body on one line is passed to PostgreSQL as written. A body of several lines goes on the lines between the dollar quotes: PostgreSQL stores a newline, the body, and a closing newline unless the body already ends with one, so a `|` block and a `|-` block create the same function. Whitespace around the body is ignored when it is compared with the live function, so these newlines never show up as a change. `pgy pull` writes every body so that the function is recreated with the same source byte for byte, which matters for whitespace-sensitive languages such as PL/Python: a body indented as a whole keeps the indentation of its first line (`body: |2`). A stored source the two rules above cannot produce, such as one of several lines that starts right after the opening quote, is pulled with three newlines appended; pgy takes a body ending in three or more newlines as written, without those three. `body: ""` declares a function with an empty body, which `sql`, PL/Perl and PL/Tcl accept; leaving `body` out is an attribute-only declaration (see the table below).
+
+The same goes for procedures. A routine's `language` is compared with the live one, and a different language is applied with `CREATE OR REPLACE`.
+
 Overloads — functions sharing a name but taking different arguments — are separate declarations: `function area(r float8):` and `function area(w float8, h float8):` are created, compared, granted and commented independently. The same applies to procedures.
 
 Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. `fn(t my_type)` and `fn(t public.my_type)` refer to the same function, and so do `fn(t my_type)` and `fn(t app.my_type)` while `app` is on the connection's `search_path` (see [Name resolution](#name-resolution)).
@@ -1075,6 +1089,7 @@ schema public:
 |----------|------|-------------|
 | `returns` | string | Return type |
 | `language` | string | e.g. `plpgsql`, `sql` |
+| `transform` | list | Types of the `TRANSFORM FOR TYPE` clause, e.g. `[hstore, jsonb]`. See [Transforms](#transforms). Omitted = unmanaged; `[]` = none |
 | `security` | string | `definer` or `invoker` |
 | `stable` | boolean | Marks function `STABLE` |
 | `volatile` | boolean | Marks function `VOLATILE` |
@@ -1087,10 +1102,31 @@ schema public:
 | `set` | map | `SET` configuration options (e.g. `search_path`). Values are written and quoted as for [role settings](#roles): strings, numbers or booleans, one value each unless the parameter is a list such as `search_path`. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`), a language change or a changed `transform` list emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
 | *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
+
+### Transforms
+
+A transform converts a type between its SQL form and a procedural language's native one: with `hstore_plpython3u` a PL/Python function receives an `hstore` argument as a dict instead of a string. PostgreSQL ships transforms as extensions (`hstore_plperl`, `hstore_plpython3u`, `jsonb_plperl`, `jsonb_plpython3u`, `ltree_plpython3u`, `bool_plperl` and the `plperlu` variants), and a function or procedure opts in per type with `TRANSFORM FOR TYPE`, which is the `transform` list:
+
+```yaml
+extensions:
+  - {name: hstore_plpython3u, cascade: true}   # installs hstore and plpython3u too
+  - {name: jsonb_plpython3u, cascade: true}
+
+schema app:
+  function merge(doc jsonb, attrs hstore):
+    returns: jsonb
+    language: plpython3u
+    transform: [jsonb, hstore]     # TRANSFORM FOR TYPE jsonb, FOR TYPE hstore
+    body: |
+      doc.update(attrs)
+      return doc
+```
+
+The list is compared with the routine's live transforms (`pg_proc.protrftypes`) in any order, and a difference emits `CREATE OR REPLACE`. Without `transform` the routine's transforms are unmanaged: pgy does not compare them, and a `CREATE OR REPLACE` it emits for another reason keeps the ones the routine has. `transform: []` declares a routine without transforms. `pgy pull` writes the list, and writes `transform: []` for the other routines of a language that has transforms, so that one added later is noticed. A clause written into `language` (`language: plpython3u transform for type hstore`) is read the same way. Transforms themselves (`CREATE TRANSFORM`) come from their extensions; `pgy pull` reports one that no extension owns.
 
 
 ## Aggregates
@@ -1112,6 +1148,8 @@ schema app:
     parallel: safe           # safe | restricted | unsafe
     comment: sum of ints
 ```
+
+`initcond: ""` is an initial state of its own, the empty string (an empty `text` accumulator, the empty `hstore`), and is emitted, compared and pulled as such. Leave `initcond` out for an aggregate that starts from NULL. `minitcond` works the same way.
 
 The other `CREATE AGGREGATE` options use the same names, in camelCase where PostgreSQL's have an underscore:
 
@@ -1140,7 +1178,7 @@ schema app:
 
 ## Procedures
 
-Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
+Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, language, `transform`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted. Bodies are stored and pulled as described under [Functions](#functions), and `body: ""` is an empty body.
 
 ```yaml
 schema public:
@@ -1164,6 +1202,7 @@ schema public:
 | Property | Type | Description |
 |----------|------|-------------|
 | `language` | string | e.g. `plpgsql`, `sql` |
+| `transform` | list | Types of the `TRANSFORM FOR TYPE` clause. See [Transforms](#transforms). Omitted = unmanaged; `[]` = none |
 | `security` | string | `definer` or `invoker` |
 | `set` | map | `SET` configuration options (e.g. `search_path`). Compared like function `set`; omitted = unmanaged |
 | `body` | string | Procedure body (dollar-quoted in output SQL) |

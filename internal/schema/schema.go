@@ -113,6 +113,7 @@ type Server struct {
     Owner   string            // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
     Comment string
+    RenamedFrom string // previous name; emitted as ALTER SERVER ... RENAME TO when only the old name exists live
 }
 
 // ForeignTable holds what makes a table a CREATE FOREIGN TABLE: the server
@@ -538,6 +539,12 @@ type Function struct {
     Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
     Body string
+    // BodySet reports a body key in the YAML, so that an empty body can be
+    // told from a declaration without one (which manages only attributes).
+    BodySet bool `yaml:"-"`
+    // Transform lists the types of the TRANSFORM FOR TYPE clause. nil leaves
+    // the routine's transforms unmanaged; an empty list declares none.
+    Transform []string
     // Replace re-emits a SQL-standard body (BEGIN ATOMIC / RETURN), which
     // PostgreSQL rewrites when it stores it, so it cannot be compared.
     Replace bool
@@ -559,13 +566,17 @@ type Aggregate struct {
     SType       string
     FinalFunc   string
     InitCond    string
+    // InitCondSet reports an initcond key in the YAML, so that the empty
+    // string can be told from no initial condition.
+    InitCondSet bool `yaml:"-"`
     CombineFunc string
     Parallel    string // safe | restricted | unsafe
     // Options holds the other CREATE AGGREGATE options by SQL name (sspace,
     // finalfunc_extra, finalfunc_modify, serialfunc, deserialfunc, msfunc,
     // minvfunc, mstype, msspace, mfinalfunc, mfinalfunc_extra,
     // mfinalfunc_modify, minitcond, sortop, hypothetical). Options left out
-    // are unmanaged.
+    // are unmanaged. An empty value means unset, except for minitcond, whose
+    // empty string is an initial condition.
     Options     map[string]string
     DependsOn   []string `yaml:"dependsOn"`
     Comment     string
@@ -593,6 +604,8 @@ type Procedure struct {
     Security string // definer/invoker
     Set      map[string]string
     Body     string
+    BodySet  bool `yaml:"-"` // a body key is present; see Function.BodySet
+    Transform []string // TRANSFORM FOR TYPE types; see Function.Transform
     Replace  bool // re-emit a SQL-standard body; see Function.Replace
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
@@ -600,6 +613,44 @@ type Procedure struct {
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// HasBody reports whether f declares a body, which may be empty. Without
+// one, f manages only the attributes of a function that already exists.
+func (f *Function) HasBody() bool { return f.BodySet || strings.TrimSpace(f.Body) != "" }
+
+// HasBody reports whether p declares a body, which may be empty.
+func (p *Procedure) HasBody() bool { return p.BodySet || strings.TrimSpace(p.Body) != "" }
+
+// HasInitCond reports whether ag declares an initial condition, which may
+// be the empty string.
+func (ag *Aggregate) HasInitCond() bool { return ag.InitCondSet || ag.InitCond != "" }
+
+var languageTransformRe = regexp.MustCompile(`(?is)^\s*(\S+)\s+transform\s+(.*)$`)
+
+var transformTypeRe = regexp.MustCompile(`(?is)^\s*for\s+type\s+(.+?)\s*$`)
+
+// SplitLanguage splits a routine's language into the language name and the
+// types of a TRANSFORM FOR TYPE clause written after it ("plpython3u
+// transform for type hstore, for type jsonb"). transform is nil when the
+// language carries no such clause.
+func SplitLanguage(language string) (name string, transform []string) {
+    m := languageTransformRe.FindStringSubmatch(language)
+    if m == nil { return strings.TrimSpace(language), nil }
+    transform = []string{}
+    for _, part := range strings.Split(m[2], ",") {
+        if t := transformTypeRe.FindStringSubmatch(part); t != nil { transform = append(transform, t[1]) }
+    }
+    return m[1], transform
+}
+
+// RoutineTransform returns the transform types a routine declares: its
+// transform list when set, otherwise the types of a TRANSFORM clause in its
+// language. nil means the routine's transforms are unmanaged.
+func RoutineTransform(language string, transform []string) []string {
+    if transform != nil { return transform }
+    _, fromLanguage := SplitLanguage(language)
+    return fromLanguage
 }
 
 // IsSQLStandardBody reports whether body, for a routine in language, is a
@@ -981,6 +1032,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
             fillColumnOrderFromNode(node, out, schemaName)
         }
     }
+    fillFDWScalarsFromNode(node, out)
     return out, nil
 }
 
@@ -1869,7 +1921,8 @@ func parseFunction(schemaName, key string, body any) *Function {
         fn.Set = map[string]string{}
         for k, v := range set { fn.Set[k] = scalarToString(v) }
     }
-    if b, ok := m["body"].(string); ok { fn.Body = b }
+    if b, ok := m["body"].(string); ok { fn.Body, fn.BodySet = b, true }
+    if t, ok := m["transform"]; ok && t != nil { fn.Transform = parseTransform(t) }
     if r, ok := m["replace"].(bool); ok { fn.Replace = r }
     if dep, ok := m["dependsOn"]; ok {
         fn.DependsOn = parseStringListFromNode(dep)
@@ -1879,6 +1932,19 @@ func parseFunction(schemaName, key string, body any) *Function {
     if cm, ok := m["comment"].(string); ok { fn.Comment = cm }
     if o, ok := m["owner"].(string); ok { fn.Owner = strings.TrimSpace(o) }
     return fn
+}
+
+// parseTransform reads a transform list, or one comma-separated string, of
+// type names, each optionally written as "for type <name>".
+func parseTransform(v any) []string {
+    out := []string{}
+    items := parseStringListFromNode(v)
+    if s, ok := v.(string); ok { items = strings.Split(s, ",") }
+    for _, t := range items {
+        if m := transformTypeRe.FindStringSubmatch(t); m != nil { t = m[1] }
+        if t = strings.TrimSpace(t); t != "" { out = append(out, t) }
+    }
+    return out
 }
 
 func parseAggregate(schemaName, key string, body any) *Aggregate {
@@ -1895,7 +1961,7 @@ func parseAggregate(schemaName, key string, body any) *Aggregate {
     str := func(k string) string { s, _ := m[k].(string); return strings.TrimSpace(s) }
     ag.SFunc, ag.SType, ag.FinalFunc, ag.CombineFunc = str("sfunc"), str("stype"), str("finalfunc"), str("combinefunc")
     ag.Parallel = strings.ToLower(str("parallel"))
-    if v, ok := m["initcond"]; ok { ag.InitCond = scalarToString(v) }
+    if v, ok := m["initcond"]; ok && v != nil { ag.InitCond, ag.InitCondSet = scalarToString(v), true }
     for _, o := range AggregateOptions {
         if v, ok := m[o[0]]; ok && v != nil {
             if ag.Options == nil { ag.Options = map[string]string{} }
@@ -1935,7 +2001,8 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
         pr.Set = map[string]string{}
         for k, v := range set { pr.Set[k] = scalarToString(v) }
     }
-    if b, ok := m["body"].(string); ok { pr.Body = b }
+    if b, ok := m["body"].(string); ok { pr.Body, pr.BodySet = b, true }
+    if t, ok := m["transform"]; ok && t != nil { pr.Transform = parseTransform(t) }
     if r, ok := m["replace"].(bool); ok { pr.Replace = r }
     if dep, ok := m["dependsOn"]; ok {
         pr.DependsOn = parseStringListFromNode(dep)
@@ -2620,10 +2687,83 @@ func parseServers(v any) map[string]*Server {
             if o, ok := b["owner"].(string); ok { s.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { s.Grants = parseGrants(g) }
             if c, ok := b["comment"].(string); ok { s.Comment = c }
+            if v, ok := b["renamedFrom"].(string); ok { s.RenamedFrom = strings.TrimSpace(v) }
         }
         out[name] = s
     }
     return out
+}
+
+// fillFDWScalarsFromNode replaces the values parsed for a server's version
+// and for server, foreign table and foreign column options with their YAML
+// source text. These settings are strings to PostgreSQL, and decoding a bare
+// scalar as a number loses what was written: 15.10 would become 15.1 and
+// 05432 an octal integer.
+func fillFDWScalarsFromNode(root *yaml.Node, db *Database) {
+    if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 { return }
+    top := root.Content[0]
+    if top.Kind != yaml.MappingNode { return }
+    for i := 0; i+1 < len(top.Content); i += 2 {
+        key, body := top.Content[i].Value, resolveAlias(top.Content[i+1])
+        if body.Kind != yaml.MappingNode { continue }
+        if key == "servers" {
+            for j := 0; j+1 < len(body.Content); j += 2 {
+                s, def := db.Servers[body.Content[j].Value], resolveAlias(body.Content[j+1])
+                if s == nil || def.Kind != yaml.MappingNode { continue }
+                if v := mappingValue(def, "version"); v != nil && v.Kind == yaml.ScalarNode && s.Version != "" { s.Version = scalarText(v) }
+                fillScalarTexts(mappingValue(def, "options"), s.Options)
+            }
+            continue
+        }
+        schemaName, ok := strings.CutPrefix(key, "schema ")
+        if !ok { continue }
+        schemaName = strings.TrimSpace(schemaName)
+        for j := 0; j+1 < len(body.Content); j += 2 {
+            tname, foreign := tableKey(body.Content[j].Value)
+            def := resolveAlias(body.Content[j+1])
+            t := db.Tables[qualify(schemaName, tname)]
+            if !foreign || t == nil || t.Foreign == nil || def.Kind != yaml.MappingNode { continue }
+            fillScalarTexts(mappingValue(def, "options"), t.Foreign.Options)
+            cols := mappingValue(def, "columns")
+            if cols == nil || cols.Kind != yaml.MappingNode { continue }
+            for x := 0; x+1 < len(cols.Content); x += 2 {
+                c, spec := t.Columns[cols.Content[x].Value], resolveAlias(cols.Content[x+1])
+                if c == nil || spec.Kind != yaml.MappingNode { continue }
+                fillScalarTexts(mappingValue(spec, "options"), c.FDWOptions)
+            }
+        }
+    }
+}
+
+// resolveAlias returns the node a YAML alias points at, or n itself.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+    if n != nil && n.Kind == yaml.AliasNode && n.Alias != nil { return n.Alias }
+    return n
+}
+
+// mappingValue returns the value node of key in mapping node m, or nil.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+    if m == nil || m.Kind != yaml.MappingNode { return nil }
+    for i := 0; i+1 < len(m.Content); i += 2 {
+        if m.Content[i].Value == key { return resolveAlias(m.Content[i+1]) }
+    }
+    return nil
+}
+
+// scalarText returns a scalar node's value as written, or "" for a null.
+func scalarText(n *yaml.Node) string {
+    if n.ShortTag() == "!!null" { return "" }
+    return n.Value
+}
+
+// fillScalarTexts overwrites the entries of out that mapping node m sets to
+// a scalar with that scalar's source text.
+func fillScalarTexts(m *yaml.Node, out map[string]string) {
+    if m == nil || m.Kind != yaml.MappingNode || out == nil { return }
+    for i := 0; i+1 < len(m.Content); i += 2 {
+        k, v := m.Content[i].Value, resolveAlias(m.Content[i+1])
+        if _, ok := out[k]; ok && v.Kind == yaml.ScalarNode { out[k] = scalarText(v) }
+    }
 }
 
 // parsePublications parses { name: {allTables, tables, schemas, publish,

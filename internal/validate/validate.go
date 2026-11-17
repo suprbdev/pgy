@@ -472,7 +472,7 @@ func Database(d *schema.Database) []Issue {
 	for _, k := range sortedKeys(d.Functions) {
 		if f := d.Functions[k]; f != nil {
 			checkDeps(d, "function "+k, f.DependsOn, add)
-			if strings.TrimSpace(f.Body) != "" && (f.Returns == "" || f.Language == "") {
+			if f.HasBody() && (f.Returns == "" || f.Language == "") {
 				add(Error, "function "+k, "needs returns and language")
 			}
 			if r := strings.ToLower(strings.TrimSpace(f.Returns)); f.Rows != nil && r != "" && !strings.HasPrefix(r, "setof ") && !strings.HasPrefix(r, "table") {
@@ -483,7 +483,7 @@ func Database(d *schema.Database) []Issue {
 	for _, k := range sortedKeys(d.Procedures) {
 		if p := d.Procedures[k]; p != nil {
 			checkDeps(d, "procedure "+k, p.DependsOn, add)
-			if strings.TrimSpace(p.Body) == "" || p.Language == "" {
+			if !p.HasBody() || p.Language == "" {
 				add(Error, "procedure "+k, "needs body and language")
 			}
 		}
@@ -926,6 +926,15 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 	for _, k := range sortedKeys(d.Tables) {
 		if t := d.Tables[k]; t != nil && t.Foreign != nil && d.Servers != nil && d.Servers[t.Foreign.Server] == nil {
 			add(Error, "foreign table "+k, "uses server %s, which servers: does not declare", t.Foreign.Server)
+		}
+	}
+	servers := newRenameGroup()
+	for k := range d.Servers {
+		servers.declared[k] = true
+	}
+	for _, k := range sortedKeys(d.Servers) {
+		if s := d.Servers[k]; s != nil && s.RenamedFrom != "" {
+			servers.check("server "+k, s.RenamedFrom, add)
 		}
 	}
 	for _, k := range sortedKeys(d.Tables) {

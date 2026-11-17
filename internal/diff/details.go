@@ -31,16 +31,22 @@ type LiveDetails struct {
     // ("table x", "view x", "function x(args)", ...) for routines with a
     // SQL-standard body, whose references PostgreSQL records in pg_depend.
     RoutineDeps map[string][]string
+    // TransformLanguages: procedural languages that have at least one
+    // transform, so their routines can take a TRANSFORM FOR TYPE clause.
+    TransformLanguages map[string]bool
     // Unsupported lists objects pgy cannot express (operators, operator
-    // classes and families, conversions, base types, casts, and text search
-    // parsers and templates),
+    // classes and families, conversions, base types, casts, text search
+    // parsers and templates, procedural languages, transforms and
+    // foreign-data wrappers),
     // excluding extension members and objects other objects create (such as
     // a range type's multirange casts).
     Unsupported []UnsupportedObject
 }
 
-// UnsupportedObject is a database object pgy has no YAML for. Detail holds
-// extra information for some kinds; it is empty for the others.
+// UnsupportedObject is a database object pgy has no YAML for. Schema is
+// empty for kinds that live outside schemas (languages, transforms,
+// foreign-data wrappers). Detail holds extra information for some kinds; it
+// is empty for the others.
 type UnsupportedObject struct {
     Kind, Schema, Name, Detail string
 }
@@ -81,6 +87,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         CompositeOrder: map[string][]string{}, Ranges: map[string]*schema.RangeDef{}, DomainTypes: map[string]LiveDomainType{},
         Collations: map[string]*schema.Collation{}, TSParsers: map[string]string{}, TSDictionaries: map[string]*schema.TSDictionary{},
         ViewDeps: map[string][]string{}, Populated: map[string]bool{}, RoutineDeps: map[string][]string{},
+        TransformLanguages: map[string]bool{},
     }
     l.Details = d
     const unsupportedQ = `
@@ -95,10 +102,14 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'cast', case when st.typnamespace = 'pg_catalog'::regnamespace then tt.typnamespace else st.typnamespace end,
                    '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, ''
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
+            union all select 'language', 0::oid, l.lanname::text, 'pg_language'::regclass, l.oid, '' from pg_language l where l.lanispl
+            union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, ''
+              from pg_transform t join pg_language l on l.oid = t.trflang
+            union all select 'foreign-data wrapper', 0::oid, w.fdwname::text, 'pg_foreign_data_wrapper'::regclass, w.oid, '' from pg_foreign_data_wrapper w
         )
-        select distinct o.kind, n.nspname, o.name, o.detail
-        from objs o join pg_namespace n on n.oid = o.nsp
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        select distinct o.kind, coalesce(n.nspname, ''), o.name, o.detail
+        from objs o left join pg_namespace n on n.oid = o.nsp
+        where (o.nsp = 0 or n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_')
         and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype in ('e', 'i'))
         order by 2, 1, 3`
     unsupported := &queryBatch{}
@@ -152,6 +163,13 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 var identity string
                 if err := scan(&r.Schema, &r.Name, &identity, &r.Arguments, &r.Returns, &r.Language, &r.Procedure); err != nil { return err }
                 d.Routines[publicScope.functionSignature(fmt.Sprintf("%s.%s(%s)", r.Schema, r.Name, identity))] = r
+                return nil
+            }},
+        {`select distinct l.lanname from pg_transform t join pg_language l on l.oid = t.trflang`,
+            func(scan func(...any) error) error {
+                var language string
+                if err := scan(&language); err != nil { return err }
+                d.TransformLanguages[language] = true
                 return nil
             }},
         {`select n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
