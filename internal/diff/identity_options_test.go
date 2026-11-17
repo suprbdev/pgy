@@ -68,3 +68,45 @@ func TestIdentityOptionsAlter(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentitySequenceGrantsCreateNoSequence(t *testing.T) {
+	d := identityDB()
+	d.Tables["app.t"].Columns["s"] = &schema.Column{Type: "bigserial"}
+	d.Tables["app.t"].Columns["named"] = &schema.Column{Type: "bigint", Identity: "always", IdentityOptions: &schema.Sequence{Name: "named_ids"}}
+	d.Sequences = map[string]*schema.Sequence{
+		"app.t_n_seq":    {Grants: map[string][]string{"reader": {"usage"}}, Comment: "n ids"},
+		"app.named_ids":  {Grants: map[string][]string{"reader": {"select"}}},
+		"app.t_s_seq":    {Grants: map[string][]string{"reader": {"update"}}},
+		"app.standalone": {},
+	}
+	sql := Render(Plan(emptyLive(), d, false))
+	for _, seq := range []string{"t_n_seq", "named_ids", "t_s_seq"} {
+		if strings.Contains(sql, `create sequence if not exists "app"."`+seq+`"`) {
+			t.Errorf("the column creates %s, so the plan must not:\n%s", seq, sql)
+		}
+	}
+	table := strings.Index(sql, `create table if not exists "app"."t"`)
+	for _, want := range []string{
+		`create sequence if not exists "app"."standalone";`,
+		`grant usage on sequence "app"."t_n_seq" to "reader";`,
+		`grant select on sequence "app"."named_ids" to "reader";`,
+		`grant update on sequence "app"."t_s_seq" to "reader";`,
+		`comment on sequence "app"."t_n_seq" is 'n ids';`,
+	} {
+		if i := strings.Index(sql, want); i < 0 || strings.HasPrefix(want, "grant") && i < table {
+			t.Errorf("want %q after the table in:\n%s", want, sql)
+		}
+	}
+
+	live := Simulate(emptyLive(), d)
+	live.TableGrants = map[string]map[string]map[string]bool{
+		"app.t_n_seq":   {"reader": {"usage": true}},
+		"app.named_ids": {"reader": {"select": true}},
+		"app.t_s_seq":   {"reader": {"update": true}},
+	}
+	live.RelComments["app.t_n_seq"] = "n ids"
+	live.Tables["app.t"].Columns["s"].Default = "nextval('app.t_s_seq'::regclass)"
+	if sql := Render(Plan(live, d, true)); sql != "" {
+		t.Errorf("the sequences in their declared state must not diff:\n%s", sql)
+	}
+}

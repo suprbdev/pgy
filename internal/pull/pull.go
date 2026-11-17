@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,10 +22,20 @@ import (
 type Options struct {
 	// Schemas limits output to these schemas; empty means every schema.
 	Schemas []string
+	// ExcludeSchemas leaves these schemas out.
+	ExcludeSchemas []string
+	// DatabaseSettings writes the database: block (ALTER DATABASE ... SET
+	// and ALTER ROLE ... IN DATABASE ... SET) also when Schemas or
+	// ExcludeSchemas limits the pull, which otherwise leaves it out.
+	DatabaseSettings bool
 	// MigrationsTable ("schema.table") is left out; empty means pgy.migrations.
 	MigrationsTable string
 	// Owners emits owner: for objects not owned by the connecting role.
 	Owners bool
+	// OwnerKinds lists object kinds, named as the policy kinds
+	// (validate.PolicyKinds), whose owner Owners emits also when it is the
+	// connecting role, as policy.require_owners asks.
+	OwnerKinds map[string]bool
 	// Roles emits the cluster's non-system roles.
 	Roles bool
 	// Data holds rows (from diff.TableRows) to emit as data: blocks, keyed
@@ -124,6 +135,9 @@ type builder struct {
 	serials map[string]string
 	// serialSeqs: sequences represented by a serial column
 	serialSeqs map[string]bool
+	// identitySeqs: sequence -> "schema.table.column" of the identity column
+	// it belongs to
+	identitySeqs map[string]string
 }
 
 func (b *builder) warn(format string, args ...any) {
@@ -131,15 +145,116 @@ func (b *builder) warn(format string, args ...any) {
 }
 
 func (b *builder) wantSchema(s string) bool {
+	if slices.Contains(b.opts.ExcludeSchemas, s) {
+		return false
+	}
 	if len(b.opts.Schemas) == 0 {
 		return s != "pgy" || b.schemaHasObjectsBesidesMigrations(s)
 	}
-	for _, w := range b.opts.Schemas {
-		if w == s {
-			return true
+	return slices.Contains(b.opts.Schemas, s)
+}
+
+// limited reports whether Options.Schemas or Options.ExcludeSchemas leaves
+// schemas out, so that database-wide objects are written only as far as
+// the pulled schemas need them.
+func (b *builder) limited() bool {
+	return len(b.opts.Schemas) > 0 || len(b.opts.ExcludeSchemas) > 0
+}
+
+// keptExtensions returns the extensions a limited pull writes, or nil when
+// every schema is pulled: those installed in a pulled schema, those an
+// object of a pulled schema depends on (diff.LiveDetails.ExtensionUsers),
+// those owning the language of a languages: entry or the foreign-data
+// wrapper of a server or a foreignDataWrappers: entry, which are written
+// whatever the schemas, and the extensions these require.
+func (b *builder) keptExtensions(languages, wrappers *node) map[string]bool {
+	if !b.limited() {
+		return nil
+	}
+	kept := map[string]bool{}
+	var keep func(name string)
+	keep = func(name string) {
+		if name == "" || kept[name] || !b.live.Extensions[name] {
+			return
+		}
+		kept[name] = true
+		if le := b.live.ExtensionDefs[name]; le != nil {
+			for _, r := range le.Requires {
+				keep(r)
+			}
 		}
 	}
-	return false
+	for _, name := range sortedKeys(b.live.Extensions) {
+		if le := b.live.ExtensionDefs[name]; le != nil && b.wantSchema(le.Schema) {
+			keep(name)
+		}
+		for s := range b.d.ExtensionUsers[name] {
+			if b.wantSchema(s) {
+				keep(name)
+			}
+		}
+	}
+	for _, ls := range b.live.Servers {
+		if ls != nil {
+			keep(b.live.MemberExtension["fdw:"+ls.Wrapper])
+		}
+	}
+	for _, n := range []struct {
+		kind string
+		m    *node
+	}{{"language:", languages}, {"fdw:", wrappers}} {
+		if n.m == nil {
+			continue
+		}
+		for i := 0; i < len(n.m.Content); i += 2 {
+			keep(b.live.MemberExtension[n.kind+n.m.Content[i].Value])
+		}
+	}
+	return kept
+}
+
+// keptPublication reports whether a limited pull writes publication name:
+// one that publishes a table or schema of the pulled schemas and nothing
+// else. A publication of tables in other schemas as well is left out with
+// a warning, since a rebuild could not create it and leaving the other
+// tables out would remove them from it. FOR ALL TABLES publications are
+// database-wide and left out.
+func (b *builder) keptPublication(name string, lp *diff.LivePublication) bool {
+	if !b.limited() {
+		return true
+	}
+	if lp.AllTables {
+		return false
+	}
+	pulled, other := false, []string{}
+	for _, t := range sortedKeys(lp.Tables) {
+		if b.wantSchema(schemaOf(t)) {
+			pulled = true
+		} else {
+			other = append(other, t)
+		}
+	}
+	for _, s := range lp.Schemas {
+		if b.wantSchema(s) {
+			pulled = true
+		} else {
+			other = append(other, "tables in schema "+s)
+		}
+	}
+	if pulled && len(other) > 0 {
+		b.warn("publication %s also publishes %s, outside the pulled schemas, so it was left out", name, strings.Join(other, ", "))
+		return false
+	}
+	return pulled
+}
+
+// warnPartialBlock warns that a limited pull wrote a block of kind (which
+// --unsafe --prune treats as the complete list) without the objects in
+// left, which pgy diff --unsafe --prune would then drop.
+func (b *builder) warnPartialBlock(block, kind string, left []string) {
+	if len(left) > 0 {
+		b.warn("%s lists only the %s of the pulled schemas; pgy diff --unsafe --prune with this YAML would drop the others: %s", block, kind, strings.Join(left, ", "))
+	}
 }
 
 func (b *builder) schemaHasObjectsBesidesMigrations(s string) bool {
@@ -290,11 +405,16 @@ func (b *builder) memberType(k string) {
 	}
 }
 
-func (b *builder) owner(m *node, key string) {
-	if !b.opts.Owners {
-		return
-	}
-	if o := b.live.Owners[key]; o != "" && o != b.live.CurrentUser {
+// owner adds the owner of the object with Live.Owners key key, of policy
+// kind kind, to m (see addOwner).
+func (b *builder) owner(m *node, kind, key string) {
+	b.addOwner(m, kind, b.live.Owners[key])
+}
+
+// addOwner adds owner: o to m with Options.Owners, unless o is the
+// connecting role and Options.OwnerKinds does not list kind.
+func (b *builder) addOwner(m *node, kind, o string) {
+	if b.opts.Owners && o != "" && (o != b.live.CurrentUser || b.opts.OwnerKinds[kind]) {
 		add(m, "owner", str(o))
 	}
 }
@@ -310,7 +430,7 @@ func (b *builder) schemas() {
 			continue
 		}
 		blk := newMap()
-		b.owner(blk, "schema:"+s)
+		b.owner(blk, "schemas", "schema:"+s)
 		if c := b.live.SchemaComments[s]; c != "" && (s != "public" || c != "standard public schema") {
 			add(blk, "comment", str(c))
 		}
@@ -370,10 +490,13 @@ func serialShaped(ls *diff.LiveSequence, typ string) bool {
 }
 
 func (b *builder) collectSerials() {
-	b.serials, b.serialSeqs = map[string]string{}, map[string]bool{}
+	b.serials, b.serialSeqs, b.identitySeqs = map[string]string{}, map[string]bool{}, map[string]string{}
 	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
 	for fq, lt := range b.live.Tables {
 		for cn, lc := range lt.Columns {
+			if lc.Identity != "" && lc.IdentitySequence != nil {
+				b.identitySeqs[lc.IdentitySequence.Name] = fq + "." + cn
+			}
 			m := nextvalRe.FindStringSubmatch(strings.TrimSpace(lc.Default))
 			if m == nil {
 				continue
@@ -441,7 +564,7 @@ func (b *builder) types() {
 			add(t, "revokePublic", boolean(true))
 		}
 		addStr(t, "comment", b.live.TypeComments[k])
-		b.owner(t, "type:"+k)
+		b.owner(t, "types", "type:"+k)
 		add(blk, "type "+schema.QuoteName(name), t)
 	}
 	for _, k := range sortedKeys(b.live.BaseTypes) {
@@ -502,7 +625,7 @@ func (b *builder) domains() {
 			add(m, "revokePublic", boolean(true))
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
-		b.owner(m, "type:"+k)
+		b.owner(m, "domains", "type:"+k)
 		add(blk, "domain "+schema.QuoteName(name), m)
 	}
 }
@@ -616,7 +739,11 @@ func (b *builder) sequences() {
 			continue
 		}
 		if b.serialSeqs[k] {
-			b.serialSequence(k, ls)
+			b.columnSequence(k, ls.Owner)
+			continue
+		}
+		if column := b.identitySeqs[k]; column != "" {
+			b.columnSequence(k, column)
 			continue
 		}
 		if b.live.OwnedSequences[k] && ls.Owner == "" {
@@ -660,15 +787,15 @@ func (b *builder) sequences() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
-		b.owner(m, "rel:"+k)
+		b.owner(m, "sequences", "rel:"+k)
 		add(blk, "sequence "+schema.QuoteName(name), m)
 	}
 }
 
-// serialSequence writes the grants and comment of a serial column's
-// sequence, which the column creates, as a sequence block that depends on
-// the column's table, so a rebuild applies them once the table exists.
-func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
+// columnSequence writes the grants and comment of the sequence of a serial
+// or identity column ("schema.table.column"), which the column creates, as
+// a sequence block that depends on the column's table.
+func (b *builder) columnSequence(k, column string) {
 	g := b.grantsFor(b.live.TableGrants[k], k, "sequences")
 	comment := b.live.RelComments[k]
 	if g == nil && comment == "" {
@@ -683,8 +810,8 @@ func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
 		add(m, "grants", g)
 	}
 	addStr(m, "comment", comment)
-	if strings.Count(ls.Owner, ".") >= 2 {
-		table, _ := b.ownerColumn(ls.Owner)
+	if strings.Count(column, ".") >= 2 {
+		table, _ := b.ownerColumn(column)
 		add(m, "dependsOn", list([]string{"table " + schema.QualifiedName(table)}))
 	}
 	add(blk, "sequence "+schema.QuoteName(name), m)
@@ -768,7 +895,7 @@ func (b *builder) routines() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
-		b.owner(m, "proc:"+norm)
+		b.owner(m, kindOf(r)+"s", "proc:"+norm)
 		add(blk, key, m)
 	}
 }
@@ -850,7 +977,7 @@ func (b *builder) aggregates() {
 			}
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
-		b.owner(m, "proc:"+norm)
+		b.owner(m, "aggregates", "proc:"+norm)
 		add(blk, "aggregate "+schema.QuoteName(short)+args, m)
 	}
 }
@@ -976,7 +1103,7 @@ func (b *builder) tables() {
 			add(t, "grants", g)
 		}
 		addStr(t, "comment", b.live.RelComments[fq])
-		b.owner(t, "rel:"+fq)
+		b.owner(t, "tables", "rel:"+fq)
 		key := "table "
 		if lt.Foreign != nil {
 			key = "foreign table "
@@ -1007,9 +1134,7 @@ func (b *builder) servers() *node {
 		addStr(s, "type", ls.Type)
 		addStr(s, "version", ls.Version)
 		add(s, "options", stringsNode(ls.Options))
-		if b.opts.Owners && ls.Owner != b.live.CurrentUser {
-			addStr(s, "owner", ls.Owner)
-		}
+		b.addOwner(s, "servers", ls.Owner)
 		if g := grantsNode(ls.Grants); g != nil {
 			add(s, "grants", g)
 		}
@@ -1852,7 +1977,7 @@ func (b *builder) views() {
 			}
 			add(m, "columnDefaults", dm)
 		}
-		b.owner(m, "rel:"+k)
+		b.owner(m, "views", "rel:"+k)
 		add(blk, key, m)
 	}
 }
@@ -1862,10 +1987,12 @@ func (b *builder) views() {
 // event triggers.
 func (b *builder) database() *node {
 	doc := newMap()
+	languages, wrappers := b.languages(), b.wrappers()
+	kept := b.keptExtensions(languages, wrappers)
 	if len(b.live.Extensions) > 0 {
 		exts := &node{Kind: yaml.SequenceNode}
 		for _, name := range sortedKeys(b.live.Extensions) {
-			if name == "plpgsql" {
+			if name == "plpgsql" || kept != nil && !kept[name] {
 				continue
 			}
 			le := b.live.ExtensionDefs[name]
@@ -1901,29 +2028,36 @@ func (b *builder) database() *node {
 	if b.opts.Roles && len(b.live.RoleDefs) > 0 {
 		roles := newMap()
 		for _, name := range sortedKeys(b.live.RoleDefs) {
-			if name == b.live.CurrentUser || name == "postgres" {
+			lr := b.live.RoleDefs[name]
+			if lr.Bootstrap {
 				continue
 			}
-			lr := b.live.RoleDefs[name]
+			connecting := name == b.live.CurrentUser
 			r := flowMap()
 			for _, a := range []struct {
 				key string
 				on  bool
 			}{{"login", lr.Login}, {"superuser", lr.Superuser}, {"createdb", lr.CreateDB}, {"createrole", lr.CreateRole}, {"replication", lr.Replication}, {"bypassRLS", lr.BypassRLS}} {
-				if a.on {
+				if a.on && !connecting {
 					add(r, a.key, boolean(true))
 				}
 			}
-			if !lr.Inherit {
+			if !lr.Inherit && !connecting {
 				add(r, "inherit", boolean(false))
 			}
-			if lr.ConnectionLimit >= 0 {
+			if lr.ConnectionLimit >= 0 && !connecting {
 				add(r, "connectionLimit", num(strconv.Itoa(lr.ConnectionLimit)))
 			}
-			if lr.ValidUntil != "" {
+			if lr.ValidUntil != "" && !connecting {
 				add(r, "validUntil", str(lr.ValidUntil))
 			}
-			if parents := sortedKeys(b.live.RoleMembers[name]); len(parents) > 0 {
+			parents := []string{}
+			for _, p := range sortedKeys(b.live.RoleMembers[name]) {
+				if !connecting || !b.live.CreatorGrant(name, p) {
+					parents = append(parents, p)
+				}
+			}
+			if len(parents) > 0 {
 				items := &node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
 				for _, p := range parents {
 					lm := b.live.RoleMemberOptions[name][p]
@@ -1954,13 +2088,16 @@ func (b *builder) database() *node {
 				add(r, "set", set)
 			}
 			addStr(r, "comment", b.live.RoleComments[name])
+			if connecting && len(r.Content) == 0 {
+				continue
+			}
 			add(roles, name, r)
 		}
 		if len(roles.Content) > 0 {
 			add(doc, "roles", roles)
 		}
 	}
-	if len(b.live.DatabaseConfig) > 0 || len(b.live.DatabaseRoleConfig) > 0 {
+	if (len(b.live.DatabaseConfig) > 0 || len(b.live.DatabaseRoleConfig) > 0) && (!b.limited() || b.opts.DatabaseSettings) {
 		db := newMap()
 		settings := func(m map[string]string) *node {
 			set := flowMap()
@@ -1985,9 +2122,13 @@ func (b *builder) database() *node {
 		add(doc, "defaultPrivileges", dp)
 	}
 	if len(b.live.Publications) > 0 {
-		pubs := newMap()
+		pubs, left := newMap(), []string{}
 		for _, name := range sortedKeys(b.live.Publications) {
 			lp := b.live.Publications[name]
+			if !b.keptPublication(name, lp) {
+				left = append(left, name)
+				continue
+			}
 			p := newMap()
 			if lp.AllTables {
 				add(p, "allTables", boolean(true))
@@ -2031,21 +2172,28 @@ func (b *builder) database() *node {
 			addStr(p, "comment", lp.Comment)
 			add(pubs, name, p)
 		}
-		add(doc, "publications", pubs)
+		if len(pubs.Content) > 0 || !b.limited() {
+			add(doc, "publications", pubs)
+			b.warnPartialBlock("publications:", "publications", left)
+		}
 	}
-	if l := b.languages(); l != nil {
-		add(doc, "languages", l)
+	if languages != nil {
+		add(doc, "languages", languages)
 	}
-	if w := b.wrappers(); w != nil {
-		add(doc, "foreignDataWrappers", w)
+	if wrappers != nil {
+		add(doc, "foreignDataWrappers", wrappers)
 	}
 	if srv := b.servers(); srv != nil {
 		add(doc, "servers", srv)
 	}
-	ets := newMap()
+	ets, left := newMap(), []string{}
 	for _, name := range sortedKeys(b.live.EventTriggers) {
 		le := b.live.EventTriggers[name]
 		if le.Extension {
+			continue
+		}
+		if b.limited() && !b.wantSchema(schemaOf(le.Function)) {
+			left = append(left, name)
 			continue
 		}
 		e := newMap()
@@ -2062,6 +2210,7 @@ func (b *builder) database() *node {
 	}
 	if len(ets.Content) > 0 {
 		add(doc, "eventTriggers", ets)
+		b.warnPartialBlock("eventTriggers:", "event triggers", left)
 	}
 	return doc
 }

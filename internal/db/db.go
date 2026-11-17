@@ -41,17 +41,36 @@ func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, fn func(context.C
     })
 }
 
+// EnsureMigrationsTable creates the migrations table schema.table, and its
+// schema, unless they exist. It looks them up in the catalog first and runs
+// only the CREATE statements for what is missing, so a role without CREATE
+// on the database (or on the schema) can use a migrations table that
+// already exists: PostgreSQL checks that privilege before IF NOT EXISTS.
 func EnsureMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema, table string) error {
-    q := fmt.Sprintf(`
-        create schema if not exists %s;
+    var hasSchema, hasTable bool
+    err := pool.QueryRow(ctx, `
+        select exists (select from pg_catalog.pg_namespace where nspname = $1),
+               exists (select from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+                       where n.nspname = $1 and c.relname = $2)`, schema, table).Scan(&hasSchema, &hasTable)
+    if err != nil {
+        return err
+    }
+    if hasTable {
+        return nil
+    }
+    q := ""
+    if !hasSchema {
+        q = fmt.Sprintf("create schema if not exists %s;\n", pqIdent(schema))
+    }
+    q += fmt.Sprintf(`
         create table if not exists %s.%s (
             version integer primary key,
             name text not null,
             checksum text not null,
             applied_at timestamptz not null default now()
         );
-    `, pqIdent(schema), pqIdent(schema), pqIdent(table))
-    _, err := pool.Exec(ctx, q)
+    `, pqIdent(schema), pqIdent(table))
+    _, err = pool.Exec(ctx, q)
     return err
 }
 
