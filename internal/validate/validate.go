@@ -151,6 +151,7 @@ func Database(d *schema.Database) []Issue {
 		add(Error, "", "%v", err)
 	}
 	checkRenames(d, add)
+	checkWrappersAndLanguages(d, add)
 	checkOwnerGrants(d, add)
 	checkNameClashes(d, add)
 	for _, fq := range sortedKeys(d.Views) {
@@ -1047,6 +1048,58 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 		if p := d.Procedures[k]; p != nil && p.RenamedFrom != "" {
 			routines.check("procedure "+k, qualifiedSource(k, p.RenamedFrom)+p.ArgsSig, add)
 		}
+	}
+}
+
+// untrustedLanguages are the languages of PostgreSQL and its own extensions
+// that only superusers can use, on which GRANT and REVOKE fail.
+var untrustedLanguages = map[string]bool{"internal": true, "c": true, "plperlu": true, "pltclu": true, "plpythonu": true, "plpython2u": true, "plpython3u": true}
+
+// checkWrappersAndLanguages reports foreignDataWrappers entries that define
+// or rename a wrapper a declared extension creates, renames that clash,
+// languages entries for a language that takes no privileges, and grants of
+// anything but USAGE, the only privilege wrappers and languages have.
+func checkWrappersAndLanguages(d *schema.Database, add func(Severity, string, string, ...any)) {
+	usageOnly := func(obj string, grants map[string][]string) {
+		for _, role := range sortedKeys(grants) {
+			for _, priv := range grants[role] {
+				if strings.TrimSuffix(priv, "*") != "usage" {
+					add(Error, obj, "grants %s to %s; write usage, the only privilege there is here and the form pgy compares with the database", strings.TrimSuffix(priv, "*"), role)
+				}
+			}
+		}
+	}
+	wrappers := newRenameGroup()
+	for k := range d.ForeignDataWrappers {
+		wrappers.declared[k] = true
+	}
+	for _, k := range sortedKeys(d.ForeignDataWrappers) {
+		w := d.ForeignDataWrappers[k]
+		if w == nil {
+			continue
+		}
+		obj := "foreign-data wrapper " + k
+		usageOnly(obj, w.Grants)
+		if ext := d.WrapperExtension(k); ext != "" && (w.ManagesHandler() || w.ManagesValidator()) {
+			add(Error, obj, "extension %s creates this wrapper with its own handler and validator, so the entry cannot set them; it manages the wrapper's options, owner, grants and comment", ext)
+		}
+		if w.RenamedFrom == "" {
+			continue
+		}
+		wrappers.check(obj, w.RenamedFrom, add)
+		if ext := d.WrapperExtension(w.RenamedFrom); ext != "" {
+			add(Error, obj, "renamedFrom %s names the wrapper of extension %s, and pgy does not rename an extension's objects", w.RenamedFrom, ext)
+		}
+	}
+	for _, k := range sortedKeys(d.Languages) {
+		l := d.Languages[k]
+		if l == nil {
+			continue
+		}
+		if untrustedLanguages[k] {
+			add(Error, "language "+k, "is not a trusted language: only superusers can use it, and PostgreSQL rejects GRANT and REVOKE on it")
+		}
+		usageOnly("language "+k, l.Grants)
 	}
 }
 

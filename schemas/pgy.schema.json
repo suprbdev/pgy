@@ -104,6 +104,59 @@
         }
       }
     },
+    "foreignDataWrappers": {
+      "description": "Foreign-data wrappers. A wrapper an extension owns (postgres_fdw, file_fdw, dblink_fdw, ...) is never created or dropped: its entry manages options, owner, grants and comment. Any other wrapper is created by pgy (CREATE FOREIGN DATA WRAPPER) after extensions and before servers when the database lacks it, and altered in place otherwise; keys left out are unmanaged. When present, --unsafe --prune drops the wrappers not listed that no extension owns and no remaining server uses.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "handler": {
+            "type": "string",
+            "description": "HANDLER function, optionally schema-qualified, e.g. public.postgres_fdw_handler. The empty string means NO HANDLER. Omitted = unmanaged: an existing wrapper keeps its handler, and a new one is created without. Not allowed on a wrapper an extension owns."
+          },
+          "validator": {
+            "type": "string",
+            "description": "VALIDATOR function, optionally schema-qualified. The empty string means NO VALIDATOR. Omitted = unmanaged: an existing wrapper keeps its validator, and a new one is created without. Not allowed on a wrapper an extension owns."
+          },
+          "options": {
+            "type": "object",
+            "description": "Wrapper options (OPTIONS (...)). Authoritative when present: unlisted options are dropped. Omitted = unmanaged.",
+            "additionalProperties": {
+              "$ref": "#/definitions/scalar"
+            }
+          },
+          "owner": {
+            "type": "string",
+            "description": "Owner role (ALTER FOREIGN DATA WRAPPER ... OWNER TO), diffed against live. PostgreSQL requires it to be a superuser."
+          },
+          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the wrapper (usage), e.g. {app_owner: [usage]}, which a role that is not a superuser needs to create or own a server. On an extension's wrapper, what the extension granted is left alone unless its grantee is listed." },
+          "comment": {
+            "type": "string",
+            "description": "COMMENT ON FOREIGN DATA WRAPPER."
+          },
+          "renamedFrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Previous name. When only that name exists live, pgy renames the wrapper (ALTER FOREIGN DATA WRAPPER ... RENAME TO) instead of creating a new one; once applied it is a no-op."
+          }
+        }
+      }
+    },
+    "languages": {
+      "description": "Privileges of procedural languages that exist already (sql, plpgsql) or that a declared extension creates (plperl, pltcl, ...). Languages are never created or dropped.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "grants"
+        ],
+        "properties": {
+          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the language (usage), e.g. {app_dev: [usage], public: []}. PUBLIC's default USAGE is left alone unless public is listed; public: [] revokes it." }
+        }
+      }
+    },
     "publications": {
       "description": "Logical replication publications (CREATE PUBLICATION). When present, --unsafe --prune drops publications not listed.",
       "type": "object",

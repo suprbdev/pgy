@@ -38,17 +38,15 @@ type LiveDetails struct {
     TransformLanguages map[string]bool
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, text search
-    // parsers and templates, procedural languages, transforms and
-    // foreign-data wrappers),
+    // parsers and templates, procedural languages and transforms),
     // excluding extension members and objects other objects create (such as
     // a range type's multirange casts).
     Unsupported []UnsupportedObject
 }
 
 // UnsupportedObject is a database object pgy has no YAML for. Schema is
-// empty for kinds that live outside schemas (languages, transforms,
-// foreign-data wrappers). Detail holds extra information for some kinds; it
-// is empty for the others.
+// empty for kinds that live outside schemas (languages, transforms). Detail
+// holds extra information for some kinds; it is empty for the others.
 type UnsupportedObject struct {
     Kind, Schema, Name, Detail string
 }
@@ -107,7 +105,6 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'language', 0::oid, l.lanname::text, 'pg_language'::regclass, l.oid, '' from pg_language l where l.lanispl
             union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, ''
               from pg_transform t join pg_language l on l.oid = t.trflang
-            union all select 'foreign-data wrapper', 0::oid, w.fdwname::text, 'pg_foreign_data_wrapper'::regclass, w.oid, '' from pg_foreign_data_wrapper w
         )
         select distinct o.kind, coalesce(n.nspname, ''), o.name, o.detail
         from objs o left join pg_namespace n on n.oid = o.nsp

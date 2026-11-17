@@ -163,6 +163,51 @@ func withoutInitialGrants(liveG, initial map[string]map[string]bool, desired map
 	return out
 }
 
+// memberLiveGrants returns liveG, the ACL of the object with
+// Live.ExtensionMembers key key, as a grants block desired has to see it
+// under mode: unchanged for an object no extension owns, and otherwise
+// without what its extension granted (see withoutInitialGrants).
+// publicDefault is as for InitialGrants.
+func memberLiveGrants(live *Live, mode PublicGrants, key, publicDefault string, liveG map[string]map[string]bool, desired map[string][]string) map[string]map[string]bool {
+	initial, ok := live.InitialGrants(key, publicDefault)
+	if !ok {
+		return liveG
+	}
+	return withoutInitialGrants(liveG, initial, desired, mode == PublicAuthoritative)
+}
+
+// coversPublic reports whether a grants block covers PUBLIC under mode, so
+// that PUBLIC's privileges it doesn't list are revoked. byKind is whether
+// PostgreSQL gives PUBLIC nothing by default on that kind of object.
+func coversPublic(mode PublicGrants, byKind bool, grants map[string][]string) bool {
+	_, listed := grants["public"]
+	switch mode {
+	case PublicAuthoritative:
+		return true
+	case PublicExplicit:
+		return listed
+	}
+	return byKind || listed
+}
+
+// publicRevokeWarnings returns a warning for each statement of revokes that
+// takes privileges from PUBLIC, for a grants block that covers PUBLIC
+// without listing it. byKind says why blocks on that kind of object do.
+func publicRevokeWarnings(revokes []string, mode PublicGrants, byKind string) []Warning {
+	var out []Warning
+	for _, s := range revokes {
+		if !strings.HasSuffix(s, " from public;") {
+			continue
+		}
+		why := byKind
+		if mode == PublicAuthoritative {
+			why = "policy.public_grants: authoritative makes every grants block cover PUBLIC"
+		}
+		out = append(out, Warning{Kind: "public_revoke", Message: fmt.Sprintf("%s: the grants block doesn't list public, so this revokes PUBLIC's privileges (%s; list public to keep them)", strings.TrimSuffix(s, ";"), why)})
+	}
+	return out
+}
+
 // pendingGrants stands in for the unknown ACL of an object that an
 // extension of the same plan is about to create, starting from liveG, the
 // default privileges it is created with. Each grantee the block lists

@@ -179,6 +179,12 @@ func declaredMembers(live *Live, desired *schema.Database) map[string][]string {
 	for _, k := range sortedKeys(desired.Domains) {
 		add("type:"+k, "domain "+k)
 	}
+	for _, k := range sortedKeys(desired.Languages) {
+		add("language:"+k, "language "+k)
+	}
+	for _, k := range sortedKeys(desired.ForeignDataWrappers) {
+		add("fdw:"+k, "foreign-data wrapper "+k)
+	}
 	return out
 }
 
@@ -327,6 +333,8 @@ func newExtensionDependent(a dependentAddress, description string) ExtensionDepe
 		add("drop %s %s", a.kind, fq)
 	case "server", "event trigger":
 		add("drop %s %s", a.kind, quoteIdent(owner))
+	case "foreign-data wrapper":
+		add("drop foreign data wrapper %s", quoteIdent(owner))
 	}
 	return d
 }

@@ -408,7 +408,7 @@ func TestIntegrationPruneKeepsCompiledFunctions(t *testing.T) {
 	}
 }
 
-func TestIntegrationPullReportsLanguagesTransformsAndWrappers(t *testing.T) {
+func TestIntegrationPullReportsLanguagesAndTransforms(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
 	db := freshDatabase(t, admin, "pgytest_pull_unsupported_global")
@@ -429,7 +429,6 @@ func TestIntegrationPullReportsLanguagesTransformsAndWrappers(t *testing.T) {
 			"language plsample is not supported by pgy and was left out",
 			"transform for integer language plsample is not supported by pgy and was left out",
 			"transform for text language plsample is not supported by pgy and was left out",
-			"foreign-data wrapper second_pg is not supported by pgy and was left out",
 		} {
 			if !contains(got, want) {
 				t.Errorf("missing %q in:\n%s", want, got)
@@ -437,6 +436,18 @@ func TestIntegrationPullReportsLanguagesTransformsAndWrappers(t *testing.T) {
 		}
 		if contains(got, "plpgsql") || contains(got, "wrapper postgres_fdw") {
 			t.Errorf("extension members must not be reported:\n%s", got)
+		}
+		if contains(got, "second_pg") {
+			t.Errorf("a wrapper no extension owns is pulled, not reported:\n%s", got)
+		}
+		database := ""
+		for _, f := range res.Files {
+			if f.Name == "database.yml" {
+				database = string(f.Content)
+			}
+		}
+		if want := "foreignDataWrappers:\n  second_pg:\n    handler: public.postgres_fdw_handler\n    validator: public.postgres_fdw_validator\n    options: {}\n"; !contains(database, want) {
+			t.Errorf("want:\n%s\nin database.yml:\n%s", want, database)
 		}
 	}
 }
