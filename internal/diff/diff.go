@@ -44,6 +44,10 @@ type Live struct{
     ViewProbes map[string]*ViewProbe
     // ViewDependents: view or materialized view -> the views selecting from it
     ViewDependents map[string][]string
+    // ExprProbes holds what PostgreSQL made of the declared definitions that
+    // don't match the live ones as text (see ProbeExpressions); nil when
+    // none was probed, and they are compared as text only.
+    ExprProbes map[ExprKey]*ExprProbe
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
     // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)
@@ -2751,6 +2755,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
     live, renames := applyRenames(live, desired)
+    live = applyExprProbes(live, desired)
     liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     var partitionDetaches []string
