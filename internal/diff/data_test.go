@@ -113,6 +113,42 @@ func TestDataChangedKeyIsRewritten(t *testing.T) {
 	}
 }
 
+func TestDataKeyOperatorOffSearchPath(t *testing.T) {
+	live := Simulate(emptyLive(), dataDB())
+	live.TableData["app.plan"] = &LiveTableData{
+		Changed:   map[int][]string{0: {"code"}, 1: {"name"}},
+		Extra:     []map[string]string{{"code": "old"}},
+		KeyEquals: map[string]string{"code": `operator("ext".=)`},
+	}
+	p := PlanWith(live, dataDB(), Options{Unsafe: true, Prune: true})
+	for _, want := range []string{
+		`update only "app"."plan" set "code" = 'free' where "code" operator("ext".=) 'free';`,
+		`update only "app"."plan" set "name" = 'Pro' where "code" operator("ext".=) 'pro';`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %q in\n%s", want, Render(p))
+		}
+	}
+	if len(p.Drops) == 0 || p.Drops[0] != `delete from only "app"."plan" where "code" operator("ext".=) 'old';` {
+		t.Errorf("expected a delete with the key's operator, got %v", p.Drops)
+	}
+}
+
+func TestDataKeyTypeError(t *testing.T) {
+	types := map[string]dataColumn{
+		"id":    {typ: "integer", cmp: "integer", eq: "=", eqSchema: "pg_catalog"},
+		"code":  {typ: "ext.citext", cmp: "ext.citext", eq: `operator("ext".=)`, eqSchema: "ext"},
+		"shape": {typ: "box", cmp: "box"},
+	}
+	if err := dataKeyTypeError("app.t", []string{"id", "code", "later"}, types); err != nil {
+		t.Errorf("keys with an equality operator, and columns the database lacks, pass: %v", err)
+	}
+	err := dataKeyTypeError("app.t", []string{"id", "shape"}, types)
+	if err == nil || !strings.Contains(err.Error(), "data for app.t: key column shape has type box, which has no default btree operator class") {
+		t.Errorf("expected an error naming the table, the column and its type, got %v", err)
+	}
+}
+
 func TestDataMapHint(t *testing.T) {
 	types := map[string]dataColumn{"attrs": {typ: "hstore"}, "meta": {typ: "jsonb", json: true}, "pairs": {typ: "app.pair[]", json: true}}
 	ok := []map[string]any{{"attrs": `"a"=>"1"`, "meta": map[string]any{"a": 1}, "pairs": []any{map[string]any{"a": 1}}, "unknown": map[string]any{}}}

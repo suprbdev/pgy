@@ -462,6 +462,7 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
     Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
@@ -1446,6 +1447,7 @@ func parseColumnSpec(spec any) *Column {
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }
