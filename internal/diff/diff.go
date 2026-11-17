@@ -2808,6 +2808,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SQL-language bodies, which are validated at CREATE time) without forming
     // a table->function->table cycle.
     deferredTriggers := []string{}
+    // Column drops go after the policy and publication drops, which may use the columns.
+    columnDrops := []string{}
     plan := &PlanDiff{Warnings: recreateWarnings}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
@@ -3344,8 +3346,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if _, ok := dt.Columns[cn]; !ok && !lc.Inherited && !parentDeclaresColumn(desired, dt, cn, 0) { dropCols = append(dropCols, cn) }
                     }
                     sort.Strings(dropCols)
+                    sort.SliceStable(dropCols, func(i, j int) bool { return lt.Columns[dropCols[i]].Generated != "" && lt.Columns[dropCols[j]].Generated == "" })
+                    leftOut := map[string]bool{}
                     for _, cn := range dropCols {
-                        plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), quoteIdent(cn)))
+                        if w, prunable := columnDropBlocked(live, desired, fq, cn, leftOut, opts.Prune); w != nil {
+                            plan.Warnings = append(plan.Warnings, *w)
+                            leftOut[cn] = prunable
+                            continue
+                        }
+                        columnDrops = append(columnDrops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), quoteIdent(cn)))
                     }
                 }
             }
@@ -3359,6 +3368,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
     planPublications(plan, live, desired, opts)
+    plan.Drops = append(plan.Drops, columnDrops...)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
     grantStmts, grantWarnings := planGrantsWarned(live, desired, opts.PublicGrants)
     plan.Alters = append(plan.Alters, grantStmts...)

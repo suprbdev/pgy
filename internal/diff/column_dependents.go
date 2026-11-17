@@ -250,6 +250,67 @@ func forgetConstraint(lt *LiveTable, name string) {
     forgetIndex(lt, name)
 }
 
+// columnDropBlocked returns the warning for a DROP COLUMN of column cn of
+// table fq that PostgreSQL would reject, because an object the plan keeps
+// still uses the column, or nil. Such an object is a view or materialized
+// view the YAML doesn't declare (or declares without a query), a trigger or
+// rule its table or view doesn't list, a policy its table doesn't list when
+// it has no policies block, which would drop it, and a generated column
+// whose own drop is left out (leftOut, by column, says whether --prune would
+// let it go). Undeclared views, triggers and rules that prune drops first
+// don't count. prunable reports whether --prune would drop all of them.
+func columnDropBlocked(live *Live, desired *schema.Database, fq, cn string, leftOut map[string]bool, prune bool) (w *Warning, prunable bool) {
+    managed := managedSchemas(desired)
+    exists := func(v string) bool { return live.Views[v] || live.MatViews[v] }
+    declaredRelation := func(rel string) bool { return desired.Tables[rel] != nil || desired.Views[rel] != nil }
+    names, policies := []string{}, false
+    prunable = true
+    for _, d := range dedupeDependents(live.ColumnDependents[fq+"."+cn]) {
+        canPrune := false
+        switch d.Kind {
+        case "view", "matview":
+            vw := desired.Views[d.Name]
+            if !exists(d.Name) || vw != nil && strings.TrimSpace(vw.Query) != "" { continue }
+            schemaName, _, _ := strings.Cut(d.Name, ".")
+            canPrune = vw == nil && managed[schemaName] && !live.ExtensionMembers["rel:"+d.Name]
+            names = append(names, "view "+d.Name)
+            if d.Kind == "matview" { names[len(names)-1] = "materialized " + names[len(names)-1] }
+        case "trigger", "rule":
+            if live.Tables[d.Table] == nil && !exists(d.Table) || dependentDeclared(desired, d) { continue }
+            inherited := false
+            if lt := live.Tables[d.Table]; lt != nil { inherited = lt.TriggerInherited[d.Name] && d.Kind == "trigger" }
+            schemaName, _, _ := strings.Cut(d.Table, ".")
+            undeclaredView := live.Views[d.Table] && desired.Views[d.Table] == nil && managed[schemaName] && !live.ExtensionMembers["rel:"+d.Table]
+            canPrune = !inherited && (declaredRelation(d.Table) || undeclaredView)
+            names = append(names, fmt.Sprintf("%s %s on %s", d.Kind, d.Name, d.Table))
+        case "policy":
+            if dependentDeclared(desired, d) { continue }
+            if dt := desired.Tables[d.Table]; dt != nil && dt.Policies != nil { continue }
+            policies = policies || desired.Tables[d.Table] != nil
+            names = append(names, fmt.Sprintf("policy %s on %s", d.Name, d.Table))
+        case "generated":
+            p, kept := leftOut[d.Name]
+            if d.Table != fq || !kept { continue }
+            canPrune = p
+            names = append(names, "generated column "+d.Name)
+        default:
+            continue
+        }
+        if canPrune && prune { names = names[:len(names)-1]; continue }
+        prunable = prunable && canPrune
+    }
+    if len(names) == 0 { return nil, false }
+    uses, them, exist := "uses", "it", "it exists"
+    if len(names) > 1 { uses, them, exist = "use", "them", "they exist" }
+    hint := "--prune drops " + them + " first"
+    if !prunable {
+        hint = "drop " + them + " first, in a hand-written migration"
+        if policies { hint += " (a policies block drops the policies it doesn't list)" }
+    }
+    msg := fmt.Sprintf("dropping column %s.%s: %s still %s it, and PostgreSQL rejects the drop while %s, so the column is kept; %s", fq, cn, strings.Join(names, ", "), uses, exist, hint)
+    return &Warning{Table: fq, Kind: "dependents", Message: msg}, prunable
+}
+
 // columnDependents returns what has to go before column col
 // ("schema.relation.column") can change type: the views and materialized
 // views that use it, directly or through other views, each one listed after
