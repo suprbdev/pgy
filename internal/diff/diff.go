@@ -395,6 +395,7 @@ type LiveFunction struct{
     Cost       float64 // procost
     Rows       float64 // prorows (0 unless set-returning)
     Config     map[string]string // proconfig: lower-cased parameter name -> value
+    ConfigOrder []string // the Config names in proconfig order
     Returns    string // pg_get_function_result, e.g. "SETOF integer"; "" when unknown
     // SQLBody reports a SQL-standard body (BEGIN ATOMIC / RETURN); Body then
     // holds PostgreSQL's rewritten form, from pg_get_function_sqlbody.
@@ -409,6 +410,7 @@ type LiveProcedure struct{
     SQLBody  bool // SQL-standard body; see LiveFunction.SQLBody
     Security string // definer|invoker
     Config   map[string]string // proconfig: lower-cased parameter name -> value
+    ConfigOrder []string // the Config names in proconfig order
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
 }
@@ -509,11 +511,38 @@ type LivePartitionBound struct {
 
 // LiveStatistic is an extended statistics object: its kinds (empty = all)
 // and items (columns and expressions) from pg_get_statisticsobjdef.
+// Schema and Name are set for an object in another schema than its table's,
+// which LiveTable.Statistics keys by its qualified name (see StatisticKey).
 type LiveStatistic struct {
     Kinds   []string
     Items   []string
     Comment string
     Target  int // stxstattarget; -1 = default
+    Schema  string
+    Name    string
+}
+
+// StatisticKey returns the LiveTable.Statistics key of the statistics object
+// name in schema nsp on table fq: the name for an object in the table's
+// schema (nsp "" included), and the quoted schema and name for one in
+// another schema.
+func StatisticKey(fq, nsp, name string) string {
+    if nsp == "" || nsp+"." == schemaPrefixOf(fq) { return name }
+    return quoteIdent(nsp) + "." + quoteIdent(name)
+}
+
+// statisticTarget returns the qualified, quoted name of the statistics
+// object name in schema nsp ("" = the table's) on table fq.
+func statisticTarget(fq, nsp, name string) string {
+    if nsp == "" { return pqIdent(schemaPrefixOf(fq) + name) }
+    return quoteIdent(nsp) + "." + quoteIdent(name)
+}
+
+// liveStatisticTarget returns the qualified, quoted name of the live
+// statistics object ls with LiveTable.Statistics key key on table fq.
+func liveStatisticTarget(fq, key string, ls *LiveStatistic) string {
+    if ls != nil && ls.Schema != "" { return statisticTarget(fq, ls.Schema, ls.Name) }
+    return statisticTarget(fq, "", key)
 }
 
 var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS ` + catalogName + `(?: \(([^)]*)\))? ON (.+) FROM ` + catalogName + `$`)
@@ -1203,29 +1232,32 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     statQ := `
         select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, ''),
-               coalesce(s.stxstattarget::int, -1)
+               coalesce(s.stxstattarget::int, -1), sn.nspname
         from pg_statistic_ext s
         join pg_class c on c.oid = s.stxrelid
         join pg_namespace n on n.oid = c.relnamespace
+        join pg_namespace sn on sn.oid = s.stxnamespace
         left join pg_description d on d.objoid = s.oid and d.classoid = 'pg_statistic_ext'::regclass
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(statQ, func(statRows pgx.Rows) error {
         for statRows.Next() {
-            var schemaName, tableName, name, def, comment string
+            var schemaName, tableName, name, def, comment, statSchema string
             var target int
-            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment, &target); err != nil { return err }
-            t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
+            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment, &target, &statSchema); err != nil { return err }
+            fq := fmt.Sprintf("%s.%s", schemaName, tableName)
+            t := l.Tables[fq]
             if t == nil { continue }
             ls := &LiveStatistic{Comment: comment, Target: target}
+            if statSchema != schemaName { ls.Schema, ls.Name = statSchema, name }
             if m := statisticsDefRe.FindStringSubmatch(def); m != nil {
                 for _, k := range strings.Split(m[1], ",") {
                     if k = strings.TrimSpace(k); k != "" { ls.Kinds = append(ls.Kinds, k) }
                 }
                 ls.Items = splitTopLevel(m[2])
             }
-            t.Statistics[name] = ls
+            t.Statistics[StatisticKey(fq, statSchema, name)] = ls
         }
         return nil
     })
@@ -1389,13 +1421,13 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if kind == "p" {
                 norm := publicScope.functionSignature(key)
                 l.Procedures[norm] = true
-                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), Language: language, Transform: transform}
+                lp := &LiveProcedure{Signature: key, Args: fullArgs, Body: src, SQLBody: sqlBody, Security: "invoker", Config: parseProconfig(config), ConfigOrder: proconfigNames(config), Language: language, Transform: transform}
                 if secdef { lp.Security = "definer" }
                 l.ProcedureDefs[norm] = lp
                 continue
             }
             l.Functions[key] = true
-            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs, Language: language, Transform: transform}
+            lf := &LiveFunction{Signature: key, Kind: kind, Internal: internal, Body: src, Strict: strict, Leakproof: leakproof, Parallel: parallel, Cost: cost, Rows: rows, Security: "invoker", Volatility: "volatile", Config: parseProconfig(config), ConfigOrder: proconfigNames(config), Returns: returns, SQLBody: sqlBody, Args: fullArgs, Language: language, Transform: transform}
             if secdef { lf.Security = "definer" }
             switch vol {
             case "i": lf.Volatility = "immutable"
@@ -1597,7 +1629,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         for rows.Next() {
             var key, tmpl, opts string
             if err := rows.Scan(&key, &tmpl, &opts); err != nil { return err }
-            l.TSDictionaryDefs[key] = &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: parseDictOptions(opts)}
+            options, order := parseDictOptions(opts)
+            l.TSDictionaryDefs[key] = &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: options, OptionOrder: order}
         }
         return nil
     })
@@ -2885,7 +2918,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     recreateWarnings = append(recreateWarnings, viewWarnings...)
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
-        if recreated == nil { recreated = map[string]string{} }
+        if recreated == nil { recreated = map[string]recreatedRoutine{} }
         recreated[k] = v
     }
     recreateWarnings = append(recreateWarnings, argWarnings...)
@@ -2944,12 +2977,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Tables {
+    for k, dt := range desired.Tables {
         if attributeOnly(desired, "table", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
+        }
+        if dt == nil { continue }
+        for _, st := range dt.Statistics {
+            if st != nil && st.Schema != "" { neededSchemas[st.Schema] = true }
         }
     }
     for k := range desired.Views {
@@ -3037,6 +3074,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     routineAlterAt := len(plan.Creates)
     routineCreates := map[string]bool{}
     routineAlters := []string{}
+    routinePost := []string{}
 
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
@@ -3116,15 +3154,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
-            if found { f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired]) }
+            r, isRecreated := recreated[normalizedDesired]
+            if found {
+                f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired])
+            } else if isRecreated {
+                f = keepLiveFunctionAttributes(f, r.function)
+            }
             setClauses := ""
-            if len(f.Set) > 0 {
-                keys := make([]string, 0, len(f.Set))
-                for k := range f.Set { keys = append(keys, k) }
-                sort.Strings(keys)
-                for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
-                }
+            for _, k := range orderedKeys(f.Set, f.SetOrder) {
+                setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
             }
             attrs := []string{}
             if f.Security != "" { attrs = append(attrs, "security "+f.Security) }
@@ -3139,7 +3177,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             body := f.Body
             verb := "create function"
             if found { verb = "create or replace function" }
-            if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
+            if isRecreated {
+                plan.Creates = append(plan.Creates, r.drop)
+                routinePost = append(routinePost, r.restore(live, desired, opts.PublicGrants, "function", fname, f.ArgsSig, f.Grants, f.RevokePublic, f.Comment, f.Owner)...)
+            }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, routineLanguageSQL(f.Language, f.Transform, liveTransforms[normalizedDesired]), attrsStr+setClauses, routineBodySQL(f.Language, body))
             plan.Creates = append(plan.Creates, stmt)
             if !schema.IsSQLStandardBody(f.Language, body) { routineCreates[stmt] = true }
@@ -3159,26 +3200,27 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
+            r, isRecreated := recreated[norm]
             if found {
                 lp := live.ProcedureDefs[norm]
                 if lp == nil || !procedureChanged(pr, lp) { continue }
                 // fall through: definition changed, emit CREATE OR REPLACE
                 pr = keepLiveProcedureAttributes(pr, lp)
+            } else if isRecreated {
+                pr = keepLiveProcedureAttributes(pr, r.procedure)
             }
             setClauses := ""
-            if len(pr.Set) > 0 {
-                keys := make([]string, 0, len(pr.Set))
-                for k := range pr.Set { keys = append(keys, k) }
-                sort.Strings(keys)
-                for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
-                }
+            for _, k := range orderedKeys(pr.Set, pr.SetOrder) {
+                setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
             }
             attrsStr := ""
             if pr.Security != "" { attrsStr = " security " + pr.Security }
             verb := "create procedure"
             if found { verb = "create or replace procedure" }
-            if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
+            if isRecreated {
+                plan.Creates = append(plan.Creates, r.drop)
+                routinePost = append(routinePost, r.restore(live, desired, opts.PublicGrants, "procedure", prname, pr.ArgsSig, pr.Grants, pr.RevokePublic, pr.Comment, pr.Owner)...)
+            }
             stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, routineLanguageSQL(pr.Language, pr.Transform, liveTransforms[norm]), attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
             plan.Creates = append(plan.Creates, stmt)
             if !schema.IsSQLStandardBody(pr.Language, pr.Body) { routineCreates[stmt] = true }
@@ -3208,13 +3250,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if td.AttributeOnly() {
                 if len(td.Options) > 0 {
                     opts := []string{}
-                    for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+                    for _, k := range orderedKeys(td.Options, td.OptionOrder) { opts = append(opts, k+" = "+td.Options[k]) }
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
                 }
                 continue
             }
             opts := []string{"template = " + td.Template}
-            for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+            for _, k := range orderedKeys(td.Options, td.OptionOrder) { opts = append(opts, k+" = "+td.Options[k]) }
             plan.Creates = append(plan.Creates, fmt.Sprintf("create text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
         case "tsconfig":
             tc := desired.TSConfigs[e.Key]
@@ -3502,6 +3544,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, routinePost...)
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
@@ -4652,9 +4695,10 @@ func uncheckedRoutineCreates(creates []string, routines map[string]bool) []strin
 // from live, which CREATE OR REPLACE cannot change. Under --unsafe each is
 // planned as new: the returned live is a copy without it (or its comment,
 // grants, owner and PUBLIC EXECUTE, which DROP FUNCTION discards), and
-// recreated maps its normalized signature to the DROP FUNCTION to run first.
-// Without --unsafe, live is returned unchanged with a warning per function.
-func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, warns []Warning) {
+// recreated maps its normalized signature to the DROP FUNCTION to run first
+// and what the live function had (see recreatedRoutine). Without --unsafe,
+// live is returned unchanged with a warning per function.
+func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]recreatedRoutine, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil }
     for _, k := range sortedKeys(desired.Functions) {
@@ -4673,8 +4717,8 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
             warns = append(warns, Warning{Message: fmt.Sprintf("function %s%s: %s; that drops and recreates the function, which needs --unsafe", fname, f.ArgsSig, why)})
             continue
         }
-        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop function %s;", pqIdent(fname)+grantFuncArgs(f.ArgsSig))
+        if recreated == nil { recreated, out = map[string]recreatedRoutine{}, cloneLive(live) }
+        recreated[norm] = newRecreatedRoutine(live, norm, fmt.Sprintf("drop function %s;", pqIdent(fname)+grantFuncArgs(f.ArgsSig)))
         delete(out.Functions, lf.Signature)
         delete(out.FunctionDefs, norm)
         delete(out.FunctionComments, norm)
@@ -4696,9 +4740,9 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
             out.ProcedureDefs[norm] = &LiveProcedure{Signature: lp.Signature, Body: p.Body, SQLBody: lp.SQLBody, Security: lp.Security, Config: lp.Config, Args: p.ArgsSig, Transform: schema.RoutineTransform(p.Language, p.Transform)}
             continue
         }
-        if recreated == nil { recreated = map[string]string{} }
+        if recreated == nil { recreated = map[string]recreatedRoutine{} }
         if out == live { out = cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop procedure %s;", pqIdent(pname)+grantFuncArgs(p.ArgsSig))
+        recreated[norm] = newRecreatedRoutine(live, norm, fmt.Sprintf("drop procedure %s;", pqIdent(pname)+grantFuncArgs(p.ArgsSig)))
         delete(out.Procedures, norm)
         delete(out.ProcedureDefs, norm)
         delete(out.FunctionComments, norm)
@@ -4780,12 +4824,55 @@ func splitArgDefault(a string) (decl, def string) {
 // types: their argument names or modes changed, which CREATE OR REPLACE
 // rejects. Under --unsafe each is planned as new, like
 // recreateChangedFunctions does, with recreated holding the DROP of the live
-// routine. Without --unsafe each is blocked (left out of the plan) with a
-// warning, and its comment, grants and owner are compared with the live
-// routine's.
-func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]string, blocked map[string]bool, warns []Warning) {
+// routine and what it had. Without --unsafe each is blocked (left out of the
+// plan) with a warning, and its comment, grants and owner are compared with
+// the live routine's.
+func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]recreatedRoutine, blocked map[string]bool, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil, nil }
+    dropped := map[string]bool{}
+    for _, rr := range renamedArgumentRoutines(live, desired) {
+        kind, name, args, norm, lnorm, liveArgs := rr.kind, rr.name, rr.args, rr.key, rr.liveKey, rr.liveArgs
+        if !unsafe {
+            if blocked == nil { blocked = map[string]bool{} }
+            if out == live { out = cloneLive(live) }
+            blocked[norm] = true
+            if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
+            if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
+            if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
+            if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
+            warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
+            continue
+        }
+        if dropped[lnorm] { continue }
+        dropped[lnorm] = true
+        if recreated == nil { recreated, out = map[string]recreatedRoutine{}, cloneLive(live) }
+        recreated[norm] = newRecreatedRoutine(live, lnorm, fmt.Sprintf("drop %s %s;", kind, pqIdent(name)+grantFuncArgs(liveArgs)))
+        if lf := out.FunctionDefs[lnorm]; lf != nil { delete(out.Functions, lf.Signature) }
+        delete(out.FunctionDefs, lnorm)
+        delete(out.Procedures, lnorm)
+        delete(out.ProcedureDefs, lnorm)
+        delete(out.FunctionComments, lnorm)
+        delete(out.FunctionGrants, lnorm)
+        delete(out.FunctionPublicExec, lnorm)
+        delete(out.Owners, "proc:"+lnorm)
+    }
+    return out, recreated, blocked, warns
+}
+
+// renamedRoutine is a declared function or procedure that is not live under
+// its own signature but has the argument types of a live routine that no
+// declaration names (see recreateRenamedArguments).
+type renamedRoutine struct {
+    kind, name, args string // function or procedure, its qualified name and its declared arguments
+    key, liveKey     string // the normalized signatures of the declaration and of the live routine
+    liveArgs         string // the live routine's arguments
+}
+
+// renamedArgumentRoutines returns the declared functions and procedures with
+// a body whose argument names or modes differ from those of a live routine
+// with the same argument types, functions first, each kind in key order.
+func renamedArgumentRoutines(live *Live, desired *schema.Database) []renamedRoutine {
     declared := map[string]bool{}
     for k, f := range desired.Functions {
         if f != nil { declared[normalizeFunctionSignature(schema.RoutineName(k)+f.ArgsSig)] = true }
@@ -4800,6 +4887,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
     for norm := range live.Procedures {
         if !declared[norm] { byIdentity["procedure "+routineIdentity(norm, true)] = norm }
     }
+    var out []renamedRoutine
     check := func(kind, name, args string) {
         norm := normalizeFunctionSignature(name + args)
         if kind == "function" && live.FunctionDefs[norm] != nil || kind == "procedure" && live.Procedures[norm] { return }
@@ -4809,28 +4897,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
         if !ok { return }
         liveArgs := lnorm[strings.IndexByte(lnorm, '('):]
         if lf := live.FunctionDefs[lnorm]; lf != nil { liveArgs = lf.Signature[strings.IndexByte(lf.Signature, '('):] }
-        if !unsafe {
-            if blocked == nil { blocked = map[string]bool{} }
-            if out == live { out = cloneLive(live) }
-            blocked[norm] = true
-            if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
-            if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
-            if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
-            if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
-            warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
-            return
-        }
-        if recreated == nil { recreated, out = map[string]string{}, cloneLive(live) }
-        recreated[norm] = fmt.Sprintf("drop %s %s;", kind, pqIdent(name)+grantFuncArgs(liveArgs))
-        if lf := out.FunctionDefs[lnorm]; lf != nil { delete(out.Functions, lf.Signature) }
-        delete(out.FunctionDefs, lnorm)
-        delete(out.Procedures, lnorm)
-        delete(out.ProcedureDefs, lnorm)
-        delete(out.FunctionComments, lnorm)
-        delete(out.FunctionGrants, lnorm)
-        delete(out.FunctionPublicExec, lnorm)
-        delete(out.Owners, "proc:"+lnorm)
-        delete(byIdentity, id)
+        out = append(out, renamedRoutine{kind: kind, name: name, args: args, key: norm, liveKey: lnorm, liveArgs: liveArgs})
     }
     for _, k := range sortedKeys(desired.Functions) {
         if f := desired.Functions[k]; f != nil && f.HasBody() { check("function", schema.RoutineName(k), f.ArgsSig) }
@@ -4838,7 +4905,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
     for _, k := range sortedKeys(desired.Procedures) {
         if p := desired.Procedures[k]; p != nil && p.HasBody() { check("procedure", schema.RoutineName(k), p.ArgsSig) }
     }
-    return out, recreated, blocked, warns
+    return out
 }
 
 // routineIdentity returns "name(types)" for a routine signature: the
@@ -5026,12 +5093,12 @@ func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDic
     }
     if td.Options == nil { return nil, warn }
     opts := []string{}
-    for _, k := range sortedKeys(td.Options) {
+    for _, k := range orderedKeys(td.Options, td.OptionOrder) {
         if v, ok := ld.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(v), normalizeConfigValue(td.Options[k])) {
             opts = append(opts, k+" = "+td.Options[k])
         }
     }
-    for _, k := range sortedKeys(ld.Options) {
+    for _, k := range orderedKeys(ld.Options, ld.OptionOrder) {
         found := false
         for w := range td.Options { found = found || strings.EqualFold(w, k) }
         if !found { opts = append(opts, k) }
@@ -5281,9 +5348,9 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             name := truncateIdent(st.Name)
             have := ""
             if lt != nil {
-                if ls := lt.Statistics[name]; ls != nil && statisticMatchesLive(st, ls) { have = ls.Comment }
+                if ls := lt.Statistics[StatisticKey(k, st.Schema, name)]; ls != nil && statisticMatchesLive(st, ls) { have = ls.Comment }
             }
-            comment("statistics "+pqIdent(schemaPrefixOf(k)+name), st.Comment, have)
+            comment("statistics "+statisticTarget(k, statisticSchema(k, st), name), st.Comment, have)
         }
         for _, pol := range dt.Policies {
             if pol == nil || pol.Comment == "" || pol.Name == "" { continue }
@@ -5636,15 +5703,25 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(viewNames)
     for _, k := range viewNames {
         vw := desired.Views[k]
-        if vw == nil || vw.Grants == nil { continue }
-        liveG := live.TableGrants[k]
-        desiredG := resolveGrantRoles(vw.Grants, live.CurrentUser)
-        if !live.Views[k] && !live.MatViews[k] {
-            liveG = created(k, "tables")
-            if strings.TrimSpace(vw.Query) == "" { liveG = pendingGrants(liveG, desiredG) }
+        if vw == nil { continue }
+        var revoked map[string]map[string]bool
+        if vw.Grants != nil {
+            liveG := live.TableGrants[k]
+            desiredG := resolveGrantRoles(vw.Grants, live.CurrentUser)
+            if !live.Views[k] && !live.MatViews[k] {
+                liveG = created(k, "tables")
+                if strings.TrimSpace(vw.Query) == "" { liveG = pendingGrants(liveG, desiredG) }
+            }
+            liveG = member("rel:"+k, "", liveG, desiredG)
+            owner := objectOwner(live, "rel:"+k, vw.Owner)
+            addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
+            revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
         }
-        liveG = member("rel:"+k, "", liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, vw.Owner), covers(true, desiredG)))
+        for _, col := range sortedKeys(vw.ColumnGrants) {
+            if vw.ColumnGrants[col] == nil { continue }
+            colG := resolveGrantRoles(vw.ColumnGrants[col], live.CurrentUser)
+            addFor(colG)(columnGrantDiffStmts(k, col, colG, withoutPrivileges(live.ColumnGrants[k][col], revoked), covers(true, colG)))
+        }
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
@@ -6304,10 +6381,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     for _, st := range dt.Statistics {
         if st == nil || len(st.Columns) == 0 { continue }
         name := truncateIdent(st.Name)
-        target := pqIdent(schemaPrefixOf(fq) + name)
+        target := statisticTarget(fq, statisticSchema(fq, st), name)
         liveTarget := -1
         if lt != nil {
-            if ls := lt.Statistics[name]; ls != nil {
+            if ls := lt.Statistics[StatisticKey(fq, st.Schema, name)]; ls != nil {
                 if statisticMatchesLive(st, ls) {
                     if st.StatisticsTarget != nil && *st.StatisticsTarget != ls.Target {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter statistics %s set statistics %d;", target, *st.StatisticsTarget))
@@ -6333,9 +6410,16 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     }
 }
 
-// renderStatistic renders CREATE STATISTICS in the table's schema. Plain
-// or declared columns are quoted; anything else is an expression in
-// parentheses.
+// statisticSchema returns the schema statistics object st on table fq is
+// declared in, or "" for the table's.
+func statisticSchema(fq string, st *schema.Statistic) string {
+    if st.Schema+"." == schemaPrefixOf(fq) { return "" }
+    return st.Schema
+}
+
+// renderStatistic renders CREATE STATISTICS in the schema st names, or in
+// the table's. Plain or declared columns are quoted; anything else is an
+// expression in parentheses.
 func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Column) string {
     kinds := ""
     if k := statisticKinds(st.Kinds); len(k) > 0 && len(k) < 3 { kinds = " (" + strings.Join(k, ", ") + ")" }
@@ -6344,7 +6428,7 @@ func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Co
         c = strings.TrimSpace(c)
         if isIndexExpression(c) && cols[c] == nil { items[i] = "(" + c + ")" } else { items[i] = quoteIdent(c) }
     }
-    return fmt.Sprintf("create statistics %s%s on %s from %s;", pqIdent(schemaPrefixOf(fq)+truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
+    return fmt.Sprintf("create statistics %s%s on %s from %s;", statisticTarget(fq, statisticSchema(fq, st), truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
 }
 
 // statisticKinds returns the requested kinds in PostgreSQL's order.

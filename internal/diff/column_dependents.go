@@ -279,7 +279,7 @@ func declarationsOf(fq string, dt *schema.Table, lt *LiveTable) tableDeclaration
         if c != nil && c.Unique { d.columnKeys[LiveUniqueKeyName(fq, cn, lt.Constraints)] = true }
     }
     for _, st := range dt.Statistics {
-        if st != nil { d.statistics[truncateIdent(st.Name)] = true }
+        if st != nil { d.statistics[StatisticKey(fq, st.Schema, truncateIdent(st.Name))] = true }
     }
     return d
 }
@@ -670,8 +670,9 @@ func recreateView(live, out *Live, desired *schema.Database, v string, prune boo
 
 // restoreView returns the statements that give view v, created again from
 // vw, back what it has in live and vw leaves unmanaged: the grants on the
-// view and on its columns, its comment, column comments and column
-// defaults, its owner, and the comments of its declared triggers and rules.
+// view and on the columns vw declares no grants for, its comment, column
+// comments and column defaults, its owner, and the comments of its declared
+// triggers and rules.
 // The triggers and rules vw doesn't declare are created again from their
 // live definitions, with their comments, unless prune drops them anyway.
 func restoreView(live *Live, vw *schema.View, v string, prune bool) []string {
@@ -685,6 +686,7 @@ func restoreView(live *Live, vw *schema.View, v string, prune bool) []string {
         out = append(out, grants...)
     }
     for _, col := range sortedKeys(live.ColumnGrants[v]) {
+        if vw.ColumnGrants[col] != nil { continue }
         want := map[string][]string{}
         for role, privs := range live.ColumnGrants[v][col] { want[role] = sortedKeys(privs) }
         _, grants := columnGrantDiffStmts(v, col, want, nil, false)
