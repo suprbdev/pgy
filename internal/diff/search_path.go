@@ -29,8 +29,8 @@ type nameScope struct {
 	// path lists the optional schemas other than public.
 	path    []string
 	schemas map[string]bool
-	// folded matches an optional qualifier in lower-cased text without
-	// double quotes.
+	// folded matches an optional qualifier, pg_catalog's included, in
+	// lower-cased text without double quotes.
 	folded *regexp.Regexp
 	// pathQualifier and pathOperator match, in SQL as it is written, the
 	// qualifier of a schema in path and an OPERATOR(schema.op) call for
@@ -75,7 +75,7 @@ func schemaPattern(schema string) string {
 
 func newNameScope(path []string) *nameScope {
 	sc := &nameScope{path: path, schemas: map[string]bool{"public": true}}
-	folded, spelled := []string{"public"}, []string{}
+	folded, spelled := []string{"public", "pg_catalog"}, []string{}
 	literal := []string{"public", `"public"`}
 	for _, s := range path {
 		sc.schemas[s] = true

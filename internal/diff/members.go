@@ -11,9 +11,12 @@ import (
 
 // initPrivsQ reads pg_init_privs for the objects extensions created: one row
 // per privilege the extension's script left with a role other than the
-// object's owner, and one with an empty grantee for an initial ACL that
-// holds nothing else. The first column is the object's Live.ExtensionMembers
-// key, with the signature of a routine not yet normalized.
+// object's owner, then or now, and one with an empty grantee for an initial
+// ACL that holds nothing else. The first column is the object's
+// Live.ExtensionMembers key, with the signature of a routine not yet
+// normalized. ALTER ... OWNER TO leaves pg_init_privs alone, so the entry
+// of the role that owned the object when the script ran, the one it
+// granted to itself, stays there.
 const initPrivsQ = `
     select case ip.classoid
              when 'pg_proc'::regclass then 'proc:' || pn.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
@@ -33,7 +36,7 @@ const initPrivsQ = `
     left join pg_namespace tn on tn.oid = t.typnamespace
     left join pg_language l on ip.classoid = 'pg_language'::regclass and l.oid = ip.objoid
     left join pg_foreign_data_wrapper w on ip.classoid = 'pg_foreign_data_wrapper'::regclass and w.oid = ip.objoid
-    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner)
+    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner) and a.grantee <> a.grantor
     left join pg_roles r on r.oid = a.grantee
     where ip.privtype = 'e' and ip.objsubid = 0
     and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid) is not null
