@@ -105,7 +105,7 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 		if p.RequireGrants[o.kind] && !o.grants {
 			warn(obj, "%s must declare a grants block (require_grants)", o.kind)
 		}
-		if p.RequireOwners[o.kind] && o.owner == "" && (o.kind != "sequences" || columnSeqs[o.key] == "") {
+		if _, ofColumn := columnSeqs[o.key]; p.RequireOwners[o.kind] && o.owner == "" && (o.kind != "sequences" || !ofColumn) {
 			warn(obj, "%s must declare an owner (require_owners)", o.kind)
 		}
 	}

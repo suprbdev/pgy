@@ -287,7 +287,7 @@ func (b *builder) unsupported() {
 
 func (b *builder) block(fq string) (*node, string, bool) {
 	s, name, ok := strings.Cut(fq, ".")
-	if !ok || !b.wantSchema(s) {
+	if !ok || !b.wantSchema(s) || diff.InDottedSchema(b.live, fq) {
 		return nil, "", false
 	}
 	blk := b.blocks[s]
@@ -373,7 +373,7 @@ func (b *builder) memberRoutine(norm string, r *diff.LiveRoutine) {
 		sig = lp.Signature
 	}
 	if i := strings.IndexByte(sig, '('); i >= 0 {
-		add(blk, kindOf(r)+" "+r.Name+sig[i:], m)
+		add(blk, kindOf(r)+" "+schema.QuoteName(r.Name)+sig[i:], m)
 	}
 }
 
@@ -389,7 +389,7 @@ func (b *builder) memberView(k string, materialized bool) {
 		if materialized {
 			kind = "materialized view "
 		}
-		add(blk, kind+name, m)
+		add(blk, kind+schema.QuoteName(name), m)
 	}
 }
 
@@ -401,7 +401,7 @@ func (b *builder) memberType(k string) {
 		return
 	}
 	if m := b.memberGrants("type:"+k, "usage", diff.WithPublicDefault(b.live.TypeGrants[k], "usage", !b.live.TypePublicRevoked[k])); m != nil {
-		add(blk, "type "+name, m)
+		add(blk, "type "+schema.QuoteName(name), m)
 	}
 }
 
@@ -423,6 +423,10 @@ func (b *builder) schemas() {
 	b.declaredSchema = map[string]bool{}
 	for _, s := range sortedKeys(b.live.Schemas) {
 		if s == "pg_toast" || !b.wantSchema(s) {
+			continue
+		}
+		if strings.Contains(s, ".") {
+			b.warn("schema %s was left out with its objects: pgy reads a dot as the separator between a schema and an object's name, so it cannot manage a schema whose name contains one", s)
 			continue
 		}
 		blk := newMap()
@@ -561,7 +565,7 @@ func (b *builder) types() {
 		}
 		addStr(t, "comment", b.live.TypeComments[k])
 		b.owner(t, "types", "type:"+k)
-		add(blk, "type "+name, t)
+		add(blk, "type "+schema.QuoteName(name), t)
 	}
 	for _, k := range sortedKeys(b.live.BaseTypes) {
 		if b.member("type", k) {
@@ -622,7 +626,7 @@ func (b *builder) domains() {
 		}
 		addStr(m, "comment", b.live.TypeComments[k])
 		b.owner(m, "domains", "type:"+k)
-		add(blk, "domain "+name, m)
+		add(blk, "domain "+schema.QuoteName(name), m)
 	}
 }
 
@@ -646,7 +650,7 @@ func (b *builder) collations() {
 		}
 		addStr(m, "rules", co.Rules)
 		addStr(m, "comment", b.live.CollationComments[k])
-		add(blk, "collation "+name, m)
+		add(blk, "collation "+schema.QuoteName(name), m)
 	}
 }
 
@@ -668,7 +672,7 @@ func (b *builder) textSearch() {
 		}
 		add(m, "options", opts)
 		addStr(m, "comment", b.live.TSComments["dict:"+k])
-		add(blk, "text search dictionary "+name, m)
+		add(blk, "text search dictionary "+schema.QuoteName(name), m)
 	}
 	for _, k := range sortedKeys(b.live.TSConfigs) {
 		if b.member("tscfg", k) {
@@ -682,11 +686,11 @@ func (b *builder) textSearch() {
 		add(m, "parser", str(strings.TrimPrefix(b.d.TSParsers[k], "pg_catalog.")))
 		maps := newMap()
 		for _, tok := range sortedKeys(b.live.TSConfigs[k]) {
-			add(maps, tok, list(b.live.TSConfigs[k][tok]))
+			add(maps, tok, list(b.references(b.live.TSConfigs[k][tok])))
 		}
 		add(m, "mappings", maps)
 		addStr(m, "comment", b.live.TSComments["config:"+k])
-		add(blk, "text search configuration "+name, m)
+		add(blk, "text search configuration "+schema.QuoteName(name), m)
 	}
 }
 
@@ -776,14 +780,15 @@ func (b *builder) sequences() {
 			add(m, "unlogged", boolean(true))
 		}
 		if ls.Owner != "" {
-			add(m, "ownedBy", str(ls.Owner))
+			table, column := b.ownerColumn(ls.Owner)
+			add(m, "ownedBy", str(schema.QualifiedName(table)+"."+schema.QuoteName(column)))
 		}
 		if g := b.grantsFor(b.live.TableGrants[k], k, "sequences"); g != nil {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
 		b.owner(m, "sequences", "rel:"+k)
-		add(blk, "sequence "+name, m)
+		add(blk, "sequence "+schema.QuoteName(name), m)
 	}
 }
 
@@ -806,9 +811,10 @@ func (b *builder) columnSequence(k, column string) {
 	}
 	addStr(m, "comment", comment)
 	if strings.Count(column, ".") >= 2 {
-		add(m, "dependsOn", list([]string{"table " + diff.ColumnRelation(column)}))
+		table, _ := b.ownerColumn(column)
+		add(m, "dependsOn", list([]string{"table " + schema.QualifiedName(table)}))
 	}
-	add(blk, "sequence "+name, m)
+	add(blk, "sequence "+schema.QuoteName(name), m)
 }
 
 func (b *builder) routines() {
@@ -831,7 +837,7 @@ func (b *builder) routines() {
 		if r.Procedure {
 			args = procInRe.ReplaceAllString(args, "$1")
 		}
-		key := fmt.Sprintf("%s %s(%s)", kindOf(r), r.Name, args)
+		key := fmt.Sprintf("%s %s(%s)", kindOf(r), schema.QuoteName(r.Name), args)
 		if r.Procedure {
 			lp := b.live.ProcedureDefs[norm]
 			if lp == nil {
@@ -845,7 +851,7 @@ func (b *builder) routines() {
 			addSet(m, lp.Config)
 			add(m, "body", routineBody(lp.Body, lp.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
-				add(m, "dependsOn", list(deps))
+				add(m, "dependsOn", list(dependencies(deps)))
 			}
 		} else {
 			lf := b.live.FunctionDefs[norm]
@@ -879,7 +885,7 @@ func (b *builder) routines() {
 			addSet(m, lf.Config)
 			add(m, "body", routineBody(lf.Body, lf.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
-				add(m, "dependsOn", list(deps))
+				add(m, "dependsOn", list(dependencies(deps)))
 			}
 		}
 		if !b.live.FunctionPublicExec[norm] {
@@ -972,7 +978,7 @@ func (b *builder) aggregates() {
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "aggregates", "proc:"+norm)
-		add(blk, "aggregate "+short+args, m)
+		add(blk, "aggregate "+schema.QuoteName(short)+args, m)
 	}
 }
 
@@ -1023,10 +1029,10 @@ func (b *builder) tables() {
 		}
 		if parent == "" {
 			if len(lt.Inherits) > 0 {
-				add(t, "inherits", list(lt.Inherits))
+				add(t, "inherits", list(qualifiedNames(lt.Inherits)))
 			}
 			if lt.OfType != "" {
-				add(t, "of", str(lt.OfType))
+				add(t, "of", str(schema.QualifiedName(lt.OfType)))
 				if cols := b.columns(fq, lt); len(cols.Content) > 0 {
 					add(t, "columns", cols)
 				}
@@ -1050,7 +1056,7 @@ func (b *builder) tables() {
 				}
 			}
 		} else {
-			add(t, "partitionOf", str(parent))
+			add(t, "partitionOf", str(schema.QualifiedName(parent)))
 			b.partitionBound(t, fq)
 			if cols := b.columns(fq, lt); len(cols.Content) > 0 {
 				add(t, "columns", cols)
@@ -1098,7 +1104,7 @@ func (b *builder) tables() {
 		if lt.Foreign != nil {
 			key = "foreign table "
 		}
-		add(blk, key+name, t)
+		add(blk, key+schema.QuoteName(name), t)
 	}
 }
 
@@ -1166,9 +1172,9 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 			add(c, "type", str(lc.Type))
 		}
 		if lc.Collation != "" && lc.CollationSchema != "" {
-			add(c, "collate", str(lc.CollationSchema+"."+lc.Collation))
+			add(c, "collate", str(schema.QualifiedName(lc.CollationSchema+"."+lc.Collation)))
 		} else {
-			addStr(c, "collate", lc.Collation)
+			addStr(c, "collate", schema.QuoteName(lc.Collation))
 		}
 		if lc.Storage != "" && lc.TypeStorage != "" && lc.Storage != lc.TypeStorage {
 			add(c, "storage", str(lc.Storage))
@@ -1353,7 +1359,7 @@ func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
 			fk := newMap()
 			add(fk, "columns", list(splitIdents(m[1])))
 			ref := flowMap()
-			add(ref, "table", str(qualifyRef(strings.ReplaceAll(m[2], `"`, ""), fq)))
+			add(ref, "table", str(schema.QualifiedName(relationKey(m[2]))))
 			add(ref, "columns", list(splitIdents(m[3])))
 			add(fk, "references", ref)
 			tail := m[4]
@@ -1913,14 +1919,14 @@ func (b *builder) views() {
 				if b.live.MatViews[dep] {
 					kind = "materialized view "
 				}
-				ds = append(ds, kind+dep)
+				ds = append(ds, kind+schema.QualifiedName(dep))
 			}
 			add(m, "dependsOn", list(ds))
 		}
 		add(m, "query", literal(b.d.ViewQueries[k]))
-		key := "view " + name
+		key := "view " + schema.QuoteName(name)
 		if mat {
-			key = "materialized view " + name
+			key = "materialized view " + schema.QuoteName(name)
 			if !b.d.Populated[k] {
 				add(m, "withData", boolean(false))
 			}
@@ -2128,11 +2134,11 @@ func (b *builder) database() *node {
 				for _, t := range sortedKeys(lp.Tables) {
 					pt := lp.Tables[t]
 					if len(pt.Columns) == 0 && pt.Where == "" && !pt.Only {
-						ts.Content = append(ts.Content, str(t))
+						ts.Content = append(ts.Content, str(schema.QualifiedName(t)))
 						continue
 					}
 					e := flowMap()
-					add(e, "table", str(t))
+					add(e, "table", str(schema.QualifiedName(t)))
 					if pt.Only {
 						add(e, "only", boolean(true))
 					}
@@ -2191,7 +2197,7 @@ func (b *builder) database() *node {
 		if len(le.Tags) > 0 {
 			add(e, "tags", list(le.Tags))
 		}
-		add(e, "function", str(le.Function+"()"))
+		add(e, "function", str(schema.QualifiedName(le.Function)+"()"))
 		if le.Enabled != "origin" {
 			add(e, "enabled", str(le.Enabled))
 		}
@@ -2378,17 +2384,85 @@ func stripParens(s string) string {
 	return s
 }
 
-// qualifyRef qualifies a referenced name with the referring object's schema
-// when PostgreSQL printed it unqualified (it was on the search_path).
-func qualifyRef(name, fq string) string {
-	base := name
-	if i := strings.IndexByte(name, '('); i >= 0 {
-		base = name[:i]
+// relationKey returns the model key of a relation as SQL names it, as in
+// pg_get_constraintdef: quoted where needed, in public when unqualified.
+func relationKey(ident string) string {
+	parts, ok := schema.SplitName(ident)
+	if !ok {
+		parts = strings.Split(strings.TrimSpace(ident), ".")
 	}
-	if strings.Contains(base, ".") {
-		return name
+	if len(parts) == 1 {
+		return "public." + parts[0]
 	}
-	return "public." + name
+	return strings.Join(parts, ".")
+}
+
+// qualifiedNames writes the model keys fqs as references, with
+// schema.QualifiedName.
+func qualifiedNames(fqs []string) []string {
+	out := make([]string, len(fqs))
+	for i, fq := range fqs {
+		out[i] = schema.QualifiedName(fq)
+	}
+	return out
+}
+
+// dependencyKinds are the kinds a dependsOn entry pull writes starts with.
+var dependencyKinds = []string{"materialized view ", "view ", "sequence ", "foreign table ", "table ", "function ", "procedure ", "aggregate ", "type ", "domain "}
+
+// dependencies writes dependsOn entries, a kind and a model key (with the
+// argument types of a routine), with the names quoted where
+// schema.QuoteName quotes them.
+func dependencies(deps []string) []string {
+	out := make([]string, len(deps))
+	for i, dep := range deps {
+		out[i] = dep
+		for _, kind := range dependencyKinds {
+			key, ok := strings.CutPrefix(dep, kind)
+			if !ok {
+				continue
+			}
+			args := ""
+			if strings.HasSuffix(key, ")") {
+				if j := strings.IndexByte(key, '('); j >= 0 {
+					key, args = key[:j], key[j:]
+				}
+			}
+			out[i] = kind + schema.QualifiedName(key) + args
+			break
+		}
+	}
+	return out
+}
+
+// references writes names as the database reports them, schema.name or a
+// name alone, as references: a schema.name of a schema the database has
+// with schema.QualifiedName, anything else as it is.
+func (b *builder) references(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = n
+		if s, _, ok := strings.Cut(n, "."); ok && b.live.Schemas[s] {
+			out[i] = schema.QualifiedName(n)
+		}
+	}
+	return out
+}
+
+// ownerColumn splits the live owner of a sequence, schema.table.column, into
+// the key of its table and its column, at a table the database has, since
+// either name may contain dots.
+func (b *builder) ownerColumn(owner string) (table, column string) {
+	table = diff.ColumnRelation(owner)
+	if lt := b.live.Tables[table]; lt != nil && lt.Columns[owner[len(table)+1:]] != nil {
+		return table, owner[len(table)+1:]
+	}
+	for _, fq := range sortedKeys(b.live.Tables) {
+		if col, ok := strings.CutPrefix(owner, fq+"."); ok && b.live.Tables[fq].Columns[col] != nil {
+			return fq, col
+		}
+	}
+	return table, strings.TrimPrefix(owner, table+".")
 }
 
 // triggerFunction qualifies the function call of a trigger definition.

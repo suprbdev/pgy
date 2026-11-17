@@ -18,6 +18,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Updating extensions](#updating-extensions)
   - [Objects an extension owns](#objects-an-extension-owns)
 - [Database Settings](#database-settings)
+  - [Parameters an extension defines](#parameters-an-extension-defines)
 - [Tables](#tables)
   - [Columns](#columns)
   - [Primary Key](#primary-key)
@@ -204,7 +205,8 @@ Names are written unquoted and pgy quotes them in SQL, so `Order Items`, `user` 
 - **A key is always a name.** YAML reads an unquoted `2024`, `1.5`, `true`, `null` or `~` as a number, a boolean or null. pgy takes such a key as the text you wrote: `2024: {type: numeric}` declares the column `2024`, and `null: "NULL"` under a foreign table's `options` is file_fdw's `null` option. Quoting them (`"2024":`) is equivalent, and is what `pgy pull` writes so that other YAML tools read the file the same way.
 - **In a list of names**, such as `primaryKey: [id, 2024]` or an enum's `labels: [1, 2]`, such an entry is taken as a name too. YAML has already normalised a number by then (`1.0` becomes `1`, `0x10` becomes `16`), and the JSON Schema asks for strings there, so quote these: `primaryKey: [id, "2024"]`.
 - **Column, attribute, constraint, index, trigger, rule, policy and statistics names may contain dots**: `a.b: {type: integer}` is the column `"a.b"`. A sequence's `ownedBy` is read as `schema.table.column` (or `table.column`), with everything after the table being the column.
-- **Table, view, type, function and other schema-level names cannot contain a dot.** In those a dot separates the schema from the name: `table x.y:` inside `schema app:` declares table `y` in schema `x`.
+- **In table, view, type, function and other schema-level names, a dot separates the schema from the name**: `table x.y:` inside `schema app:` declares table `y` in schema `x`. To declare a name that contains a dot, write it in double quotes as in SQL, with `""` for a double quote in it: `table "x.y":` inside `schema app:` declares the table `app."x.y"`, and `function "f.n"(a int):` the function. Wherever such an object is referred to (`inherits`, `partitionOf`, `of`, a foreign key's `references.table`, `dependsOn`, `ownedBy`, publication `tables`, `renamedFrom`, `collate`, text search `mappings`, an event trigger's `function`), quote the name the same way: `inherits: [app."x.y"]`, `dependsOn: [view app."v.w"]`, `ownedBy: app."x.y".id`, and `renamedFrom: '"x.y"'` for a name in the same schema (YAML itself removes the quotes of a value that starts with one, so put the whole value in single quotes). That includes collations PostgreSQL ships whose name contains a dot: `collate: '"en_US.utf8"'`. Names inside SQL (a column's `type`, a view's `query`, a trigger's `procedure`, a default) are quoted as in SQL anyway: `type: app."en.um"`. `pgy pull` writes all of these names quoted. A name without a dot may be quoted too: `table "orders":` is `table orders:`.
+- **Schema names cannot contain a dot.** pgy reads the first dot of every reference as the end of the schema name, so `pgy validate` rejects a `schema <name>:` block or `schemas:` entry whose name has one. `pgy pull` leaves such a schema out with a warning, and `--unsafe --prune` leaves its objects alone, along with any object whose dotted name starts with the name of such a schema.
 
 ### Name resolution
 
@@ -361,7 +363,7 @@ A name left unqualified only resolves while the extension's schema is on the `se
 
 Raising `version:` emits `ALTER EXTENSION ... UPDATE TO`. Many update scripts drop one of the extension's objects and create it again: every `pg_stat_statements` update recreates the `pg_stat_statements` view, and `postgres_fdw` 1.2 replaces `postgres_fdw_get_connections()`. PostgreSQL rejects that while something outside the extension uses the object (`cannot drop view pg_stat_statements because other objects depend on it`), and the migration fails. The update scripts live on the server, so pgy cannot know which objects an update replaces. With a connection, it looks up in `pg_depend` the views, materialized views and SQL-standard routine bodies that use an object of each extension it is about to update, directly or through other views, and treats all of them as possibly in the way:
 
-- **Declared views.** With `--unsafe`, they are dropped right before the update, dependents first, and recreated from the YAML after it, in the same migration. Their declared triggers and rules come back with them, and the live grants, comment, column comments, column defaults and owner that the YAML leaves unmanaged are restored, as around a [column type change](#columns). Without `--unsafe` the plan is the update alone, and `pgy diff` warns (kind `dependents`), naming the views. The statements `--unsafe` would add are reported as left out, like every other unsafe change.
+- **Declared views.** With `--unsafe`, they are dropped right before the update, dependents first, and recreated from the YAML after it, in the same migration. They get back what they had, including what the YAML leaves unmanaged, as around a column type change (see [Recreated views](#recreated-views)). Without `--unsafe` the plan is the update alone, and `pgy diff` warns (kind `dependents`), naming the views. The statements `--unsafe` would add are reported as left out, like every other unsafe change.
 - **Materialized views** are never dropped for an update, because recreating one rebuilds its data and its indexes. `pgy diff` warns (kind `dependents`), naming the materialized view and the extension. If the update replaces an object it uses, the migration fails until the materialized view is dropped in a hand-written migration. The next `pgy diff` creates a declared one again.
 - **Functions and procedures with a SQL-standard body** (`BEGIN ATOMIC`, `RETURN`) are reported the same way and never dropped. PostgreSQL does not record what a body written as text uses, so such a routine neither blocks the update nor is reported.
 - **Views the YAML doesn't declare** can't be recreated, so they stay and are reported too. With `--unsafe --prune`, a view or materialized view that pruning drops anyway is dropped before the update instead of after it.
@@ -451,7 +453,16 @@ database:
 
 A changed `search_path` under `set` is also set for the session that runs the migration, so the statements after it resolve unqualified names the way later sessions will (see [Name resolution](#name-resolution)). Other settings, and the per-role ones under `roles`, take effect in sessions that start afterwards.
 
-Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. PostgreSQL lets only superusers set such a parameter in a session that has not loaded the extension's library. A migration that creates the extension has loaded it; a later migration run by a non-superuser that changes the setting has not, and fails with `permission denied to set parameter` unless it first calls one of the extension's functions (for example a hand-added `select show_limit();` for `pg_trgm`).
+Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. A role that is not a superuser may need some help to set it; see the next section.
+
+### Parameters an extension defines
+
+A parameter that an extension's library defines (`pg_trgm.similarity_threshold`, pgvector's `hnsw.ef_search` and `ivfflat.probes`) can appear wherever settings do: in the `set:` of a [function](#functions), a [procedure](#procedures) or a [role](#roles), and under `database:` in `set:` and `roles:`. All of them are applied after the extensions are created, so such a setting can be declared together with its extension.
+
+PostgreSQL knows such a parameter only in a session that has loaded the extension's library. Until then it lets only a superuser set it: `CREATE FUNCTION ... SET`, `ALTER FUNCTION`, `ALTER PROCEDURE`, `ALTER ROLE` and `ALTER DATABASE ... SET` run by another role fail with `permission denied to set parameter "hnsw.ef_search"`. The migration that creates the extension has loaded its library, but a later migration that adds or changes the setting has not. The prefix of a parameter is not always the extension's name (pgvector's are `hnsw` and `ivfflat`), so pgy cannot tell which library to load, and `LOAD` is itself reserved to superusers. Two ways out, on PostgreSQL 15 and later alike:
+
+- **Grant the parameter once.** A superuser runs `GRANT SET ON PARAMETER hnsw.ef_search TO deployer;` for the role that runs migrations. PostgreSQL accepts the grant before the library is loaded, and the setting can then be applied in any session.
+- **Load the library first.** Add a statement that uses the extension at the top of the migration, by hand: a call to one of its functions (`select show_limit();` for `pg_trgm`) or a cast to one of its types (`select '[1]'::vector;` for pgvector). Edit the buffer before `pgy commit`, since a committed migration's checksum covers its text.
 
 ## Tables
 
@@ -559,13 +570,14 @@ For columns that already exist in the live database, `pgy diff` reconciles their
 - **Nullability**: emits `SET NOT NULL` / `DROP NOT NULL` to match `nullable`/`notNull`. Primary-key and identity columns never emit `DROP NOT NULL`. On PostgreSQL 18, making an existing column NOT NULL instead adds `CONSTRAINT <table>_<column>_not_null NOT NULL <column> NOT VALID`, which enforces it for new rows without scanning, and validates it in the no-transaction migration `pgy commit` writes after the main one: `VALIDATE CONSTRAINT` scans under a lock that doesn't block reads or writes. If existing rows hold NULLs, that migration fails; fix the rows and migrate again, or rerun `pgy diff`, which emits the pending `VALIDATE`. Primary key, identity and generated columns, partitions, foreign tables and columns with a validated `CHECK (col IS NOT NULL)` keep `SET NOT NULL`. With `notNullName` the constraint takes that name instead (`ADD CONSTRAINT <name> NOT NULL <column>` where `SET NOT NULL` would be used), and a NOT NULL column whose constraint has another name gets `RENAME CONSTRAINT`.
 - **Serial**: changing an existing column's type to `serial`, `bigserial` or `smallserial` creates its `<table>_<column>_seq` sequence owned by the column, starts it after the column's largest value, and makes `nextval()` its default.
 - **Generated**: an existing column's expression changes with `ALTER COLUMN ... SET EXPRESSION` (PostgreSQL 17+, under `--unsafe`), and dropping `generated` emits `DROP EXPRESSION`. PostgreSQL cannot make a plain column generated, so declaring `generated` on one only warns.
-- **Type** (requires `--unsafe`): a differing type emits `ALTER COLUMN ... TYPE`, with `using` appended as the cast expression when set. Types are compared normalized — `varchar(255)` matches the live `character varying(255)`, `int`/`integer`/`int4` are equivalent, and `serial` matches its live `integer` + `nextval` form. Type changes can rewrite the table or fail on incompatible casts, hence the `--unsafe` gate. PostgreSQL won't change the type of a column that a view, materialized view, trigger, policy or rule uses, so pgy drops those first, along with the views built on them, and recreates them from the YAML after the change. A recreated view keeps the live grants, comments and owner that its YAML leaves unmanaged, and a materialized view is repopulated. A dependent the YAML doesn't declare can't be recreated: `pgy diff` warns about it and leaves the column's dependents alone, so the change still fails until you declare it. The statements around the change are ordered so that nothing written for the old type is in its way:
+- **Type** (requires `--unsafe`): a differing type emits `ALTER COLUMN ... TYPE`, with `using` appended as the cast expression when set. Types are compared normalized — `varchar(255)` matches the live `character varying(255)`, `int`/`integer`/`int4` are equivalent, and `serial` matches its live `integer` + `nextval` form. Type changes can rewrite the table or fail on incompatible casts, hence the `--unsafe` gate. PostgreSQL won't change the type of a column that a view, materialized view, trigger, policy or rule uses, so pgy drops those first, along with the views built on them (also those that use one without naming its columns, such as `select count(*) from v`) and the triggers, policies and rules that use those views, and recreates them from the YAML after the change. A table, column or view renamed with `renamedFrom` in the same diff is followed under its new name. A recreated view gets back what it had, including what its YAML leaves unmanaged (see [Recreated views](#recreated-views)), and a materialized view is repopulated. A dependent the YAML doesn't declare can't be recreated: `pgy diff` warns about it and leaves the column's dependents alone, so the change still fails until you declare it. The statements around the change are ordered so that nothing written for the old type is in its way:
   - The column's default is dropped before the change and the declared `default` set again after it. PostgreSQL has to cast a default left in place to the new type and refuses when there is no implicit cast (`default for column ... cannot be cast automatically`), whatever `using` says. `nextval(...)` defaults stay.
   - Indexes and check, unique and exclusion constraints on the column that the same diff redefines (or drops, with `--prune`) are dropped before the change and created after it. Left in place, PostgreSQL rebuilds them from their old definition, and an operator class or expression written for the old type may not accept the new one. Indexes and constraints the YAML leaves as they are stay for PostgreSQL to carry over.
   - A foreign key whose columns change type on both sides is dropped before either change and added again after both, since PostgreSQL checks it after each one, when the two types may not be comparable. Like any foreign key added to an existing table it comes back `NOT VALID` and is validated in the no-transaction migration.
-  - PostgreSQL refuses the change while a generated column uses the column. A stored generated column that the YAML drops or now declares as a plain column gets `DROP EXPRESSION` first. One that stays generated is reported (kind `dependents`) and left alone, because dropping and re-adding it would also drop the indexes and constraints on it: write that migration by hand.
+  - PostgreSQL refuses the change while a generated column uses the column. A stored generated column that the YAML drops or now declares as a plain column gets `DROP EXPRESSION` first. One that stays generated is dropped before the change and added again after it from the YAML (see [Generated columns added again](#generated-columns-added-again)).
 - **Identity**: a changed kind emits `SET GENERATED ALWAYS | BY DEFAULT`, and changed sequence options emit `SET START WITH / SET INCREMENT BY / ...` (options left out of the YAML are unmanaged; `start` only affects a later `RESTART`). Under `--unsafe`, an identity declared on an existing column is added with `ADD GENERATED ... AS IDENTITY` (dropping its default first), and one the YAML no longer declares is removed with `DROP IDENTITY`. The new sequence starts at `start`, not after existing values, so set `start` past them, for example when converting a `serial` column.
-- **Generated** (requires `--unsafe`): a changed `generated` expression emits `ALTER COLUMN ... SET EXPRESSION AS (...)` (PostgreSQL 17+. On 15/16, `pgy diff` emits nothing for the change and prints a warning instead, because drop-and-re-add would also drop the indexes and constraints that use the column. Write that migration by hand), and removing `generated` from a live generated column emits `DROP EXPRESSION`, turning it into a plain column that keeps its current values. Expressions are compared normalized, so `price * qty` matches the live `(price * (qty)::numeric)`, and [through the server](#how-expressions-are-compared) when that is not enough (`ean13(isbn)`, stored as `(isbn)::ean13`). A plain column cannot be turned into a generated one in place. Generated columns never get `SET DEFAULT`/`DROP DEFAULT`.
+- **Generated** (requires `--unsafe`): a changed `generated` expression emits `ALTER COLUMN ... SET EXPRESSION AS (...)` on PostgreSQL 17+. PostgreSQL 15 and 16 have no `SET EXPRESSION`, so there the column is dropped and added again with the new expression (see [Generated columns added again](#generated-columns-added-again)); without `--unsafe`, `pgy diff` warns. Removing `generated` from a live generated column emits `DROP EXPRESSION`, turning it into a plain column that keeps its current values. Expressions are compared normalized, so `price * qty` matches the live `(price * (qty)::numeric)`, and [through the server](#how-expressions-are-compared) when that is not enough (`ean13(isbn)`, stored as `(isbn)::ean13`). A plain column cannot be turned into a generated one in place. Generated columns never get `SET DEFAULT`/`DROP DEFAULT`.
+- **Removed** (requires `--unsafe`): a column the YAML no longer declares is dropped with `DROP COLUMN`, after the generated columns, policies and publications the same plan drops. PostgreSQL rejects the drop while a view, materialized view, trigger, rule, policy or generated column still uses the column, so when one of them stays (it isn't declared, and `--prune` is off or doesn't drop it), `pgy diff` keeps the column and warns (kind `dependents`), naming them. `--prune` drops undeclared views, materialized views, triggers and rules first; a policy goes when the table's `policies` block leaves it out.
 
 ```yaml
 schema public:
@@ -575,6 +587,24 @@ schema public:
         type: numeric(10,2)          # was: text
         using: amount::numeric(10,2) # cast for ALTER ... TYPE (with --unsafe)
 ```
+
+#### Generated columns added again
+
+PostgreSQL can't change a generated column in place in two cases: the type of a column it uses changes, and, before PostgreSQL 17, its expression changes. With `--unsafe`, pgy drops the generated column and adds it again from the YAML:
+
+```sql
+drop view "app"."lc";                                   -- what uses the column, as around a type change
+alter table "app"."users" drop column "name_lc";
+alter table "app"."users" alter column "name" type citext;
+alter table "app"."users" add column "name_lc" text generated always as (lower(name)) stored;
+create index if not exists "users_name_lc" on "app"."users"("name_lc");
+create or replace view "app"."lc" as select id, name_lc from app.users;
+```
+
+- The indexes, constraints and extended statistics on the column go with it and are created again from the YAML, like new ones: a check or foreign key `NOT VALID` and validated in the no-transaction migration, an index with `concurrently: true` there too. The views, materialized views, triggers, policies and rules that use the column are dropped first and recreated after, like around a type change (see [Recreated views](#recreated-views)).
+- What the YAML leaves unmanaged on the column comes back: its comment, grants, storage, compression, statistics target and `n_distinct` settings.
+- The column moves to the end of the table, and a stored column is computed again for every row, which rewrites the table under an `ACCESS EXCLUSIVE` lock (a lock warning says so). `pgy diff` prints a warning for each column it adds again.
+- pgy only does this when everything that goes with the column can be created again. It keeps the column, and warns with the reason, when the table is partitioned, has inheritance children, or is a foreign or typed table; when the column is part of the primary key, has a collation the YAML doesn't declare, or a foreign key references it or a publication lists it; when an index, constraint or statistics object on it isn't declared and `--prune` is off; or when an object that uses it isn't declared. The migration then has to be written by hand.
 
 ### Primary Key
 
@@ -991,7 +1021,7 @@ servers:
 | `validator` | string | `VALIDATOR` function, optionally schema-qualified. `""` = `NO VALIDATOR`. Omitted = unmanaged, like `handler`. Not allowed on a wrapper an extension owns |
 | `options` | map | Wrapper options. Authoritative when present (`options: {}` means none); omitted = unmanaged. Values are passed on as written |
 | `owner` | string | Owner role, diffed against live. PostgreSQL requires the owner of a wrapper to be a superuser |
-| `grants` | map | Role → privileges (`usage`). See below |
+| `grants` | map | Role → privileges (`usage`; `all` stands for it). See below |
 | `comment` | string | `COMMENT ON FOREIGN DATA WRAPPER` |
 | `renamedFrom` | string | Previous name: `ALTER FOREIGN DATA WRAPPER ... RENAME TO` when only that name exists live. Its servers follow |
 
@@ -1010,7 +1040,7 @@ For views and materialized views that already exist, `pgy diff` compares the dec
 
 - **Same definition:** the view is left alone.
 - **Changed query, same columns** (or new columns added at the end): `CREATE OR REPLACE VIEW`.
-- **A column dropped, renamed or retyped:** `CREATE OR REPLACE VIEW` can't do that, so with `--unsafe` the view is dropped and recreated together with the declared views that select from it, and their comments, grants, owner, options, triggers and rules are restored. Without `--unsafe`, `pgy diff` warns. A view that an undeclared view depends on is left alone with a warning.
+- **A column dropped, renamed or retyped:** `CREATE OR REPLACE VIEW` can't do that, so with `--unsafe` the view is dropped and recreated together with the declared views that select from it, which get back what they had (see [Recreated views](#recreated-views)). Without `--unsafe`, `pgy diff` warns. A view that an undeclared view (or one declared without a `query`) depends on is left alone with a warning.
 - **A materialized view whose query changed:** dropped and recreated with its indexes under `--unsafe`, with a lock warning, since it is refilled and unreadable meanwhile.
 - **A declared query that can't be compared,** because it uses something the plan creates: a plain view is replaced, and a materialized view is left alone, each with a warning.
 
@@ -1032,6 +1062,16 @@ schema public:
 `securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
 
 A view or materialized view declared without `query` is never created: the declaration manages the `grants`, `owner`, `comment` and `columnComments` of one that already exists, such as an extension's `pg_stat_statements`. See [Objects an extension owns](#objects-an-extension-owns).
+
+### Recreated views
+
+pgy drops a view and creates it again from the YAML when its columns change (above), when the type of a column it uses changes ([Column alterations](#column-alterations)) and around an extension update ([Updating extensions](#updating-extensions)). In all three cases the new view gets back what the old one had:
+
+- what the YAML declares for it: `comment`, `grants`, `owner`, options, `columnComments`, `columnDefaults`, `triggers`, `rules` and, for a materialized view, `indexes`;
+- what the YAML leaves unmanaged, restored from the database: the grants on the view and on its columns (column grants can't be declared, so they are always restored), the comment, column comments and column defaults, the owner, the options, and the comments of declared triggers and rules;
+- triggers and rules the YAML doesn't list, created again from their definitions in the database, with their comments. With `--prune`, which drops them anyway, they are not.
+
+A materialized view is refilled; indexes on it that the YAML doesn't declare are not created again.
 
 ### Materialized Views
 
@@ -1278,7 +1318,7 @@ schema public:
 | `parallel` | string | `safe`, `restricted` or `unsafe` → `PARALLEL ...`. PostgreSQL's default is `unsafe`, which keeps any query calling the function off parallel plans. Omitted = unmanaged |
 | `cost` | number | Planner cost estimate (`COST`, in `cpu_operator_cost` units; default 100). Omitted = unmanaged |
 | `rows` | number | Estimated result rows for set-returning functions (`ROWS`; default 1000). `pgy validate` rejects it on functions that don't return `setof` or `table`. Omitted = unmanaged |
-| `set` | map | `SET` configuration options (e.g. `search_path`). Values are written and quoted as for [role settings](#roles): strings, numbers or booleans, one value each unless the parameter is a list such as `search_path`. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
+| `set` | map | `SET` configuration options (e.g. `search_path`). Values are written and quoted as for [role settings](#roles): strings, numbers or booleans, one value each unless the parameter is a list such as `search_path`. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting. For a parameter an extension defines, see [Parameters an extension defines](#parameters-an-extension-defines) |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
 | *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`), a language change or a changed `transform` list emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too, [as expressions](#how-expressions-are-compared): a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
@@ -1383,7 +1423,7 @@ schema public:
 | `language` | string | e.g. `plpgsql`, `sql` |
 | `transform` | list | Types of the `TRANSFORM FOR TYPE` clause. See [Transforms](#transforms). Omitted = unmanaged; `[]` = none |
 | `security` | string | `definer` or `invoker` |
-| `set` | map | `SET` configuration options (e.g. `search_path`). Compared like function `set`; omitted = unmanaged |
+| `set` | map | `SET` configuration options (e.g. `search_path`). Compared like function `set`; omitted = unmanaged. See [Parameters an extension defines](#parameters-an-extension-defines) |
 | `body` | string | Procedure body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
@@ -1410,7 +1450,7 @@ languages:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`) |
+| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`; `all` stands for `usage`) |
 
 - **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates a language's extension, the grants run after `CREATE EXTENSION`. pgy takes the extension to be the one named like the language (`plperl` for the language `plperl`), which is how the extensions of procedural languages are called. Any other language that does not exist gets no statements, and `pgy diff` warns with the name of the entry.
 - **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
@@ -1555,7 +1595,7 @@ Behavior:
 - Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
 - `pgy pull --roles` writes every role except the `pg_` roles and the bootstrap superuser that `initdb` created (whatever its name; a role called `postgres` that is not that superuser, as on Supabase, is written). The role pgy connects as is written with its memberships, settings and comment only, leaving its attributes unmanaged, since it exists wherever pgy can connect but its memberships need not; the memberships `CREATE ROLE` gave it (see `inRoles` above) are left out, because they come back when it creates those roles again.
 - `comment` is diffed against `pg_shdescription` like other object comments.
-- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you, and so are words SQL reserves, such as `all` (the same applies to function and procedure `set:`, and to `database:`).
+- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you, and so are words SQL reserves, such as `all` (the same applies to function and procedure `set:`, and to `database:`). A parameter an extension defines may need a grant first; see [Parameters an extension defines](#parameters-an-extension-defines).
   - A value is one value, commas included: `application_name: "a,b"` sets `a,b`. Only PostgreSQL's quoted-list parameters are split on commas into elements: `search_path`, `temp_tablespaces`, `session_preload_libraries`, `shared_preload_libraries`, `local_preload_libraries` and `unix_socket_directories`.
   - An empty string sets an empty value (`search_path: ""` is `SET search_path = ''`).
   - YAML numbers and booleans are fine (`statement_timeout: 0`, `jit: false`).
@@ -1579,6 +1619,19 @@ Behavior:
 ## Grants
 
 Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, foreign servers, [foreign-data wrappers](#foreign-data-wrappers) and [languages](#languages) (`usage`), and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump). A privilege written as `insert with grant option` is granted `WITH GRANT OPTION`, which lets the role grant it on. Removing the suffix later emits `REVOKE GRANT OPTION FOR insert ...` and keeps the privilege itself.
+
+`all` (or `all privileges`, optionally `with grant option`) stands for every privilege of the object's kind, which is how PostgreSQL stores `GRANT ALL`. `pgy diff` expands it before comparing, using the server's version, and writes the expanded list in the migration:
+
+| Kind | `all` stands for |
+|------|------------------|
+| Tables, views, materialized views, foreign tables | `select`, `insert`, `update`, `delete`, `truncate`, `references`, `trigger`, and `maintain` on PostgreSQL 17 and later |
+| Columns | `select`, `insert`, `update`, `references` |
+| Sequences | `usage`, `select`, `update` |
+| Functions, procedures | `execute` |
+| Schemas | `usage`, `create` |
+| Types, domains, foreign servers, foreign-data wrappers, languages | `usage` |
+
+The same holds for the kinds of [default privileges](#default-privileges). So `all` on a table grants `MAINTAIN` on PostgreSQL 17 and 18, and a database upgraded to 17 gets it with the next migration. Without a server, as in `diff --from-empty`, `all` stays in the migration as `GRANT ALL`. `pgy pull` writes the expanded list, as PostgreSQL reports it.
 
 ```yaml
 schema app:

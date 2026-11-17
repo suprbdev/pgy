@@ -861,3 +861,72 @@ func TestPlanWrappersAndLanguagesComeWithTheExtensions(t *testing.T) {
         t.Errorf("expected only the server in the group that declares it:\n%s", sql)
     }
 }
+
+func TestPlanArgumentDefaultReplacedOnce(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": "schema app:\n  function f(a int default 2):\n    returns: int\n    language: sql\n    body: select a\n  procedure p(a int default 2):\n    language: sql\n    body: select a\n",
+        "b.yml": "schema app:\n  table b:\n    columns:\n      id: {type: int}\n",
+        "c.yml": "schema app:\n  table c:\n    columns:\n      id: {type: int}\n",
+    })
+    live := &diff.Live{
+        Schemas:       map[string]bool{"app": true},
+        Functions:     map[string]bool{"app.f(a integer)": true},
+        FunctionDefs:  map[string]*diff.LiveFunction{"app.f(a int)": {Signature: "app.f(a integer)", Args: "a integer DEFAULT 1", Kind: "f", Body: "select a", Returns: "integer", Language: "sql", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100}},
+        Procedures:    map[string]bool{"app.p(a int)": true},
+        ProcedureDefs: map[string]*diff.LiveProcedure{"app.p(a int)": {Signature: "app.p(a integer)", Args: "a integer DEFAULT 1", Body: "select a", Language: "sql", Security: "invoker"}},
+    }
+    steps := planFiles(t, live, p("a.yml", "b.yml", "c.yml"), ModeFile, false)
+    for _, kind := range []string{"function", "procedure"} {
+        if got := strings.Count(Render(steps), "create or replace "+kind); got != 1 { t.Errorf("expected one %s replace, got %d:\n%s", kind, got, Render(steps)) }
+    }
+    if sql := stepSQL(t, steps, "a"); !strings.Contains(sql, "default 2") { t.Errorf("the group of a.yml replaces both:\n%s", sql) }
+}
+
+func TestPlanReplaceRoutinesAndRulesEmittedOnce(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": `
+schema public:
+  function f():
+    returns: int
+    language: sql
+    replace: true
+    body: return 1
+  procedure p():
+    language: sql
+    replace: true
+    body: begin atomic select 1; end
+  table a:
+    columns:
+      id: {type: int}
+    rules:
+      r: {event: insert, instead: true, do: nothing, replace: true}
+  view a_ids:
+    query: select id from public.a
+    rules:
+      vr: {event: update, instead: true, do: nothing, replace: true}
+`,
+        "b.yml": "tables:\n  b:\n    columns:\n      id: {type: int}\n",
+    })
+    steps := planFiles(t, nil, p("a.yml", "b.yml"), ModeFile, false)
+    sql := Render(steps)
+    for _, stmt := range []string{`function "public"."f"`, `procedure "public"."p"`, `rule "r"`, `rule "vr"`} {
+        if got := strings.Count(sql, stmt); got != 1 { t.Errorf("expected %q once, got %d:\n%s", stmt, got, sql) }
+    }
+}
+
+func TestPlanDottedNamesOrderGroups(t *testing.T) {
+    for _, uses := range []string{
+        "schema app:\n  sequence s:\n    ownedBy: app.\"x.y\".n\n",
+        "schema app:\n  view v:\n    query: select n from app.\"x.y\"\n",
+        "schema app:\n  table c:\n    inherits: [app.\"x.y\"]\n    columns:\n      e: {type: int}\n",
+    } {
+        _, p := writeSchemas(t, map[string]string{
+            "a.yml": uses,
+            "b.yml": "schema app:\n  table \"x.y\":\n    columns:\n      n: {type: int}\n",
+        })
+        steps := planFiles(t, nil, p("a.yml", "b.yml"), ModeFile, false)
+        if got := stepNames(steps); !reflect.DeepEqual(got, []string{"b", "a"}) {
+            t.Errorf("the group that declares app.\"x.y\" comes first, got %v for\n%s", got, uses)
+        }
+    }
+}

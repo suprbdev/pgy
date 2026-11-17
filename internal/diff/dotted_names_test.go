@@ -222,7 +222,7 @@ func TestRecreateDependentsOfDottedColumn(t *testing.T) {
 			"app.vv": {Name: "vv", Query: `select "a.b" from app.v`},
 		},
 	}
-	_, _, pre, _, warns := recreateColumnDependents(live, d, Options{Unsafe: true})
+	_, _, pre, _, _, warns := recreateColumnDependents(live, d, Options{Unsafe: true})
 	if len(warns) != 0 {
 		t.Fatalf("warnings: %v", warns)
 	}

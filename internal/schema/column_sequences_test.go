@@ -20,11 +20,11 @@ schema app:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"app.t_id_seq":  "app.t.id",
-		"app.named_ids": "app.t.named",
-		"other.ids":     "app.t.elsewhere",
-		"app.t_s_seq":   "app.t.s",
+	want := map[string]SequenceColumn{
+		"app.t_id_seq":  {"app.t", "id"},
+		"app.named_ids": {"app.t", "named"},
+		"other.ids":     {"app.t", "elsewhere"},
+		"app.t_s_seq":   {"app.t", "s"},
 	}
 	if got := db.ColumnSequences(); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)

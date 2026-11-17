@@ -486,8 +486,8 @@ schema app:
 `)
 	got := messages(Files([]string{p}))
 	for _, want := range []string{
-		"sequence app.audit_id_seq: is the sequence of column app.audit.id, which always has the owner of its table; remove owner",
-		"sequence app.event_ids: is the sequence of column app.events.id, which always has the owner of its table; remove owner",
+		"sequence app.audit_id_seq: is the sequence of column id of table app.audit, which always has the owner of its table; remove owner",
+		"sequence app.event_ids: is the sequence of column id of table app.events, which always has the owner of its table; remove owner",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)

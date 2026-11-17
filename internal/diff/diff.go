@@ -42,7 +42,9 @@ type Live struct{
     // ViewProbes compares declared view queries with the live views (see
     // ProbeViews); nil when they weren't probed, and views are create-only.
     ViewProbes map[string]*ViewProbe
-    // ViewDependents: view or materialized view -> the views selecting from it
+    // ViewDependents: view or materialized view -> the views and
+    // materialized views selecting from it, whether they name its columns
+    // or use it as a whole (count(*))
     ViewDependents map[string][]string
     // ExprProbes holds what PostgreSQL made of the declared definitions that
     // don't match the live ones as text (see ProbeExpressions); nil when
@@ -131,7 +133,8 @@ type Live struct{
     TypePublicRevoked map[string]bool
     FunctionGrants map[string]map[string]map[string]bool // key normalized "schema.name(args)"
     SchemaGrants   map[string]map[string]map[string]bool // key schema name
-    // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists (pg_attribute.attacl)
+    // ColumnGrants: "schema.table" -> column -> role -> privilege -> exists
+    // (pg_attribute.attacl), for tables, views and materialized views
     ColumnGrants map[string]map[string]map[string]map[string]bool
     // FunctionPublicExec: normalized signature -> PUBLIC still has EXECUTE
     // (true when proacl is NULL, i.e. default privileges, or PUBLIC=X entry present).
@@ -678,6 +681,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         RoleMembers: map[string]map[string]bool{},
         RoleMemberOptions: map[string]map[string]*LiveMembership{},
         ColumnDependents: map[string][]ColumnDependent{},
+        ViewDependents: map[string][]string{},
         RoleComments: map[string]string{},
         TableGrants: map[string]map[string]map[string]bool{},
         TypeGrants: map[string]map[string]map[string]bool{},
@@ -1611,7 +1615,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     attrQ := `
         select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod),
-               coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
+               coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || case when strpos(co.collname, '.') > 0 then quote_ident(co.collname) else co.collname::text end
                          from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
                coalesce(col_description(c.oid, a.attnum), '')
@@ -1806,7 +1810,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = c.relnamespace
         join pg_attribute att on att.attrelid = c.oid and att.attnum > 0 and not att.attisdropped
         cross join lateral aclexplode(att.attacl) a
-        where c.relkind in ('r', 'p', 'f')
+        where c.relkind in ('r', 'p', 'f', 'v', 'm')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> c.relowner
@@ -1956,6 +1960,29 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var dep ColumnDependent
             if err := rows.Scan(&col, &dep.Kind, &dep.Name, &dep.Table); err != nil { return err }
             l.ColumnDependents[col] = append(l.ColumnDependents[col], dep)
+        }
+        return nil
+    })
+
+    viewDepQ := `
+        select distinct rn.nspname || '.' || r.relname, vn.nspname || '.' || v.relname
+        from pg_depend d
+        join pg_rewrite rw on d.classid = 'pg_rewrite'::regclass and rw.oid = d.objid
+        join pg_class v on v.oid = rw.ev_class
+        join pg_namespace vn on vn.oid = v.relnamespace
+        join pg_class r on r.oid = d.refobjid
+        join pg_namespace rn on rn.oid = r.relnamespace
+        where d.refclassid = 'pg_class'::regclass and d.deptype = 'n'
+        and v.oid <> r.oid and v.relkind in ('v', 'm') and r.relkind in ('v', 'm')
+        and vn.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and vn.nspname !~ '^pg_(toast_)?temp_'
+        order by 1, 2
+    `
+    batch.add(viewDepQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var ref, dep string
+            if err := rows.Scan(&ref, &dep); err != nil { return err }
+            l.ViewDependents[ref] = append(l.ViewDependents[ref], dep)
         }
         return nil
     })
@@ -2770,6 +2797,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live = routinesAfterMoves(live.scoped(), desired)
+    desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
@@ -2778,7 +2806,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
     var partitionDetaches []string
-    live, replaceViews, viewDrops, viewWarnings := planViewChanges(live, desired, unsafe)
+    live, replaceViews, viewDrops, viewPost, viewWarnings := planViewChanges(live, desired, opts)
     recreateWarnings = append(recreateWarnings, viewWarnings...)
     live, renamedArgs, blockedRoutines, argWarnings := recreateRenamedArguments(live, desired, unsafe)
     for k, v := range renamedArgs {
@@ -2788,7 +2816,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     recreateWarnings = append(recreateWarnings, argWarnings...)
     live, updatePost, updateWarnings := recreateUpdateDependents(extensions, live, desired, opts)
     recreateWarnings = append(recreateWarnings, updateWarnings...)
-    live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
+    live, typeChangeEarly, typeChangePre, typeChangePost, readdedColumns, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
@@ -2800,6 +2828,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SQL-language bodies, which are validated at CREATE time) without forming
     // a table->function->table cycle.
     deferredTriggers := []string{}
+    // Column drops go after the policy and publication drops, which may use the columns.
+    columnDrops := []string{}
     plan := &PlanDiff{Warnings: recreateWarnings}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
@@ -3120,7 +3150,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Alters = append(plan.Alters, sequenceAlterStmts(e.Key, sq, live.SequenceDefs[e.Key])...)
                 continue
             }
-            if columnSeqs[e.Key] != "" { continue }
+            if _, ok := columnSeqs[e.Key]; ok { continue }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
             if sq.OwnedBy != "" {
                 // OWNED BY goes into Alters (rendered after all Creates):
@@ -3278,6 +3308,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                 }
                 sort.Strings(colNames)
+                sort.SliceStable(colNames, func(i, j int) bool { return indexOf(readdedColumns[fq], colNames[i]) < 0 && indexOf(readdedColumns[fq], colNames[j]) >= 0 })
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
@@ -3342,8 +3373,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if _, ok := dt.Columns[cn]; !ok && !lc.Inherited && !parentDeclaresColumn(desired, dt, cn, 0) { dropCols = append(dropCols, cn) }
                     }
                     sort.Strings(dropCols)
+                    sort.SliceStable(dropCols, func(i, j int) bool { return lt.Columns[dropCols[i]].Generated != "" && lt.Columns[dropCols[j]].Generated == "" })
+                    leftOut := map[string]bool{}
                     for _, cn := range dropCols {
-                        plan.Drops = append(plan.Drops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), quoteIdent(cn)))
+                        if w, prunable := columnDropBlocked(live, desired, fq, cn, leftOut, opts.Prune); w != nil {
+                            plan.Warnings = append(plan.Warnings, *w)
+                            leftOut[cn] = prunable
+                            continue
+                        }
+                        columnDrops = append(columnDrops, fmt.Sprintf("alter table %s drop column %s;", pqIdent(fq), quoteIdent(cn)))
                     }
                 }
             }
@@ -3357,11 +3395,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)
     planPublications(plan, live, desired, opts)
+    plan.Drops = append(plan.Drops, columnDrops...)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
     grantStmts, grantWarnings := planGrantsWarned(live, desired, opts.PublicGrants)
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
@@ -3664,13 +3704,9 @@ func sequenceAlterStmts(fq string, sq *schema.Sequence, ls *LiveSequence) []stri
 // "schema.table.column" (in seq's schema when unqualified, since PostgreSQL
 // requires the two to share a schema), or "" for none.
 func qualifyOwnedBy(seq, s string) string {
-    s = strings.TrimSpace(s)
-    if strings.EqualFold(s, "none") { return "" }
-    if strings.Count(s, ".") == 1 {
-        seqSchema, _, _ := strings.Cut(seq, ".")
-        return seqSchema + "." + s
-    }
-    return s
+    schemaName, table, column, ok := schema.OwnedByParts(seq, s)
+    if !ok { return "" }
+    return schemaName + "." + table + "." + column
 }
 
 // domainCheckName is the name of a domain's single check: constraintName, or
@@ -4750,8 +4786,13 @@ func dollarQuoteInline(body string) string {
     return tag + " " + body + " " + tag
 }
 
-// qualifyName qualifies an unqualified object name with public.
+// qualifyName qualifies an unqualified object name with public. A name in
+// double quotes is read with schema.SplitName.
 func qualifyName(s string) string {
+    if parts, ok := schema.SplitName(s); ok && len(parts) <= 2 {
+        if len(parts) == 1 { return "public." + parts[0] }
+        return parts[0] + "." + parts[1]
+    }
     if strings.Contains(s, ".") { return s }
     return "public." + s
 }
@@ -4908,15 +4949,26 @@ func tsConfigStmts(fq string, tc *schema.TSConfig, live map[string][]string) []s
 
 func joinTSDicts(dicts []string) string {
     parts := make([]string, len(dicts))
-    for i, d := range dicts { parts[i] = pqIdent(strings.TrimSpace(d)) }
+    for i, d := range dicts {
+        if names, ok := schema.SplitName(d); ok {
+            for j, n := range names { names[j] = quoteIdent(n) }
+            parts[i] = strings.Join(names, ".")
+            continue
+        }
+        parts[i] = pqIdent(strings.TrimSpace(d))
+    }
     return strings.Join(parts, ", ")
 }
 
 // sameTSDicts compares dictionary lists by unqualified name, in order.
 func sameTSDicts(want, have []string) bool {
     if len(want) != len(have) { return false }
+    plain := func(d string) string {
+        if names, ok := schema.SplitName(d); ok { return strings.Join(names, ".") }
+        return d
+    }
     for i := range want {
-        if collationName(want[i]) != collationName(have[i]) { return false }
+        if collationName(plain(want[i])) != collationName(plain(have[i])) { return false }
     }
     return true
 }
@@ -4954,13 +5006,11 @@ func renderDomain(fq string, dm *schema.Domain) string {
 }
 
 // ownedByIdent quotes sequence seq's table.column (or schema.table.column)
-// OWNED BY target, schema-qualified. Everything after the table is the
-// column name, which may itself contain dots.
+// OWNED BY target, schema-qualified, read as schema.OwnedByParts reads it.
 func ownedByIdent(seq, s string) string {
-    if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
-    parts := strings.SplitN(qualifyOwnedBy(seq, s), ".", 3)
-    for i := range parts { parts[i] = quoteIdent(parts[i]) }
-    return strings.Join(parts, ".")
+    schemaName, table, column, ok := schema.OwnedByParts(seq, s)
+    if !ok { return "none" }
+    return quoteIdent(schemaName) + "." + quoteIdent(table) + "." + quoteIdent(column)
 }
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
@@ -6375,7 +6425,7 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
         case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
             switch {
             case serverVersion > 0 && serverVersion < 170000:
-                warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); drop and re-add the column, along with the indexes and constraints that use it, in a hand-written migration", fq, cn, serverVersion/10000))
+                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, serverVersion/10000)) }
             case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }
@@ -6488,6 +6538,10 @@ func identityOptionsClause(o *schema.Sequence) string {
 // collationIdent quotes a COLLATE target ("C", app.ci), accepting parts the
 // YAML already double-quoted.
 func collationIdent(s string) string {
+    if parts, ok := schema.SplitName(s); ok {
+        for i, p := range parts { parts[i] = quoteIdent(p) }
+        return strings.Join(parts, ".")
+    }
     parts := strings.Split(strings.TrimSpace(s), ".")
     for i, p := range parts { parts[i] = `"` + strings.Trim(strings.TrimSpace(p), `"`) + `"` }
     return strings.Join(parts, ".")
@@ -6496,6 +6550,7 @@ func collationIdent(s string) string {
 // collationName returns a COLLATE target's unqualified, unquoted name, as
 // pg_collation.collname reports it.
 func collationName(s string) string {
+    if parts, ok := schema.SplitName(s); ok { return parts[len(parts)-1] }
     s = strings.ReplaceAll(strings.TrimSpace(s), `"`, "")
     if i := strings.LastIndexByte(s, '.'); i >= 0 { s = s[i+1:] }
     return s
