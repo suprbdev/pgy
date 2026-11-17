@@ -36,6 +36,9 @@ type GlobalConfig struct {
     // other settings.
     Policy        validate.Policy
     Migrate       migratePolicy
+    // KeepExtensions lists the extensions of the config's
+    // prune.keep_extensions, which pgy diff --prune never drops.
+    KeepExtensions []string
 }
 
 // failsOn reports whether a --strict run fails on a finding of kind.
@@ -120,6 +123,9 @@ func AttachGlobalFlags(root *cobra.Command) {
             return err
         }
         if cfg.Migrate, err = resolveMigratePolicy(fc.Policy); err != nil {
+            return err
+        }
+        if cfg.KeepExtensions, err = resolvePrune(fc.Prune); err != nil {
             return err
         }
 

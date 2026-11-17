@@ -128,6 +128,8 @@ migrations_table: pgy.migrations
 buffer: ./.pgy.buffer.sql
 ```
 
+It also takes the `ci:` and `policy:` blocks described under [Strict mode](#strict-mode), and the `prune:` block described under [Unsafe changes and pruning](#unsafe-changes-and-pruning).
+
 ### Strict mode
 
 `--strict` (or `PGY_STRICT=1`) is meant for CI. It makes `pgy diff`, `pgy validate` and `pgy pull` exit 1 when they report a finding of a kind listed in `ci.fail_on`, after writing their output as usual. It also makes `pgy diff` refuse `--unsafe` and `--prune` while `ci.forbid_unsafe` is true. Without `--strict` nothing changes: findings stay warnings.
@@ -142,7 +144,7 @@ ci:
 |------|---------|
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
-| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column; an extension `--prune` would drop is kept because objects still use it |
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
@@ -203,10 +205,20 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 - tables, views, materialized views, functions, procedures, aggregates, sequences, domains, enum/composite/range types, collations, text search configurations and dictionaries
 - triggers, foreign keys, check/unique/exclude constraints and indexes on declared tables, and indexes on declared materialized views
 - event triggers and publications, when the YAML has an `eventTriggers:` / `publications:` block
+- extensions installed in those schemas, when the YAML has an `extensions:` block that does not list them and nothing that stays uses them (see [Removing extensions](docs/schema.md#removing-extensions))
 - role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
 - rows of tables with a `data:` block that the block no longer lists
 
-Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, extensions, and the migrations table.
+Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
+
+A `prune:` block in the config file names extensions that `--prune` must leave alone, for example ones the hosting platform installed:
+
+```yaml
+prune:
+  keep_extensions: [pg_stat_statements, postgis]
+```
+
+An undeclared extension that is still in use is not dropped either: `pgy diff` warns and names what uses it, instead of writing a `DROP EXTENSION` that PostgreSQL would reject.
 
 > **Warning:** run `--prune` with **all** of your schema files. With an explicit `--schemas` subset, it drops every object the subset doesn't mention in the schemas it touches, including whole tables and their data. Always read the buffer before committing it.
 

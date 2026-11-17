@@ -295,7 +295,21 @@ With a connection, `pgy diff` also warns about an extension the server does not 
 
 Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
 
-Extensions are never dropped by pgy, not even with `--unsafe --prune`: remove one with a hand-written migration.
+### Removing extensions
+
+Without `--prune`, pgy never drops an extension. With `pgy diff --unsafe --prune`, a present `extensions:` block is authoritative, like `servers:`, `eventTriggers:` and `publications:`: an installed extension it does not list is dropped with `DROP EXTENSION` (never `CASCADE`), after every other drop in the plan. `extensions: []` declares that no extension is wanted. Without the block, extensions are unmanaged and none is dropped.
+
+Several rules keep this from removing something the database still needs:
+
+- **Scope.** Only extensions installed in a schema the YAML declares objects in (tables, views, functions, types and so on) are considered, which is the scope `--prune` uses for those objects. An extension in any other schema is left alone. That covers a dedicated `extensions` schema and the schemas a hosting platform installs its own extensions into. A `schema:` on a declared extension does not put that schema in scope.
+- **Ignore list.** Extensions named in `prune.keep_extensions` of the [config file](../README.md#unsafe-changes-and-pruning) are never dropped. Use it for extensions the application does not own, such as a `pg_stat_statements` installed in `public`.
+- **`plpgsql`** is never dropped.
+- **Requirements.** An extension that one staying installed requires is kept: declaring `earthdistance` without listing `cube` never drops `cube`.
+- **Dependents.** PostgreSQL refuses to drop an extension while objects outside it use its types, functions, operators or operator classes: a column of type `citext`, an index with `gin_trgm_ops`, a view calling `akeys()`. With a connection, pgy looks them up in `pg_depend` for each extension it is about to drop. When the same plan drops all of them (the table is pruned, the column or the index is dropped), `DROP EXTENSION` follows those drops. Otherwise the statement is left out and `pgy diff` warns (kind `dependents`), naming the extension and what still uses it, so the migration always applies. Once nothing uses the extension, the next `pgy diff --unsafe --prune` drops it. That takes two migrations when a dependent is changed instead of dropped: retyping a column from `citext` to `text` and removing `citext` from the block changes the type in the first and drops the extension in the second.
+
+PostgreSQL does not record what a function body written as text (`plpgsql`, or `language sql` with a quoted body) calls, so such a function does not hold an extension back, and fails the next time it runs. SQL-standard bodies (`BEGIN ATOMIC`, `RETURN`) are tracked.
+
+`pgy pull` lists every installed extension, so pulled YAML never plans a drop against the database it came from.
 
 ### Objects an extension owns
 
