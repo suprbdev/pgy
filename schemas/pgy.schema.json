@@ -846,6 +846,13 @@
       },
       "additionalProperties": false
     },
+    "transform": {
+      "description": "Types of the routine's TRANSFORM FOR TYPE clause, e.g. [hstore, jsonb] (the transforms come from extensions such as hstore_plpython3u and jsonb_plperl). Omit to leave the routine's transforms unmanaged; [] declares none.",
+      "oneOf": [
+        { "$ref": "#/definitions/stringList" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
     "function": {
       "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
       "type": "object",
@@ -855,6 +862,7 @@
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "returns": { "type": "string", "description": "Return type, e.g. trigger, jsonb, setof record." },
         "language": { "type": "string", "description": "e.g. sql, plpgsql." },
+        "transform": { "$ref": "#/definitions/transform" },
         "security": { "type": "string", "enum": ["definer", "invoker"] },
         "stable": { "type": "boolean", "description": "Marks the function STABLE." },
         "volatile": { "type": "boolean", "description": "Marks the function VOLATILE." },
@@ -889,6 +897,7 @@
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "language": { "type": "string" },
+        "transform": { "$ref": "#/definitions/transform" },
         "security": { "type": "string", "enum": ["definer", "invoker"] },
         "set": {
           "type": "object",

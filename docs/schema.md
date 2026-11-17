@@ -35,6 +35,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Domains](#domains)
 - [Sequences](#sequences)
 - [Functions](#functions)
+  - [Transforms](#transforms)
 - [Aggregates](#aggregates)
 - [Procedures](#procedures)
 - [Collations](#collations)
@@ -1041,6 +1042,10 @@ PostgreSQL checks a `language: sql` body against the catalog when the function i
 
 `language: sql` routines may also use a SQL-standard body (PostgreSQL 14+), written as the `body` itself: `body: begin atomic select x + 1; end` or `body: return x * 2`. pgy emits it after the attributes instead of as an `AS` string. PostgreSQL parses such a body when the routine is created and records what it references, so the tables and routines it uses must exist first: declare them in `dependsOn`, which `pgy pull` fills in from `pg_depend`. PostgreSQL stores the body in a rewritten form, so pgy cannot compare it, as with views. A changed SQL-standard body is applied only while `replace: true` is set. Switching between a string body and a SQL-standard one is always applied.
 
+A string `body` is dollar-quoted in the SQL pgy emits. A body on one line is passed to PostgreSQL as written. A body of several lines goes on the lines between the dollar quotes: PostgreSQL stores a newline, the body, and a closing newline unless the body already ends with one, so a `|` block and a `|-` block create the same function. Whitespace around the body is ignored when it is compared with the live function, so these newlines never show up as a change. `pgy pull` writes every body so that the function is recreated with the same source byte for byte, which matters for whitespace-sensitive languages such as PL/Python: a body indented as a whole keeps the indentation of its first line (`body: |2`). A stored source the two rules above cannot produce, such as one of several lines that starts right after the opening quote, is pulled with three newlines appended; pgy takes a body ending in three or more newlines as written, without those three. `body: ""` declares a function with an empty body, which `sql`, PL/Perl and PL/Tcl accept; leaving `body` out is an attribute-only declaration (see the table below).
+
+The same goes for procedures. A routine's `language` is compared with the live one, and a different language is applied with `CREATE OR REPLACE`.
+
 Overloads — functions sharing a name but taking different arguments — are separate declarations: `function area(r float8):` and `function area(w float8, h float8):` are created, compared, granted and commented independently. The same applies to procedures.
 
 Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. An unqualified type is treated as `public` — `fn(t my_type)` and `fn(t public.my_type)` refer to the same function. Note: if the connection's `search_path` includes a non-`public` schema, introspection may report that schema's types unqualified, which will not match a qualified declaration; keep non-`public` types qualified in YAML and off the `search_path`.
@@ -1068,6 +1073,7 @@ schema public:
 |----------|------|-------------|
 | `returns` | string | Return type |
 | `language` | string | e.g. `plpgsql`, `sql` |
+| `transform` | list | Types of the `TRANSFORM FOR TYPE` clause, e.g. `[hstore, jsonb]`. See [Transforms](#transforms). Omitted = unmanaged; `[]` = none |
 | `security` | string | `definer` or `invoker` |
 | `stable` | boolean | Marks function `STABLE` |
 | `volatile` | boolean | Marks function `VOLATILE` |
@@ -1080,10 +1086,31 @@ schema public:
 | `set` | map | `SET` configuration options (e.g. `search_path`). Values are written and quoted as for [role settings](#roles): strings, numbers or booleans, one value each unless the parameter is a list such as `search_path`. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
-| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
+| *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`), a language change or a changed `transform` list emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
 | *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
+
+### Transforms
+
+A transform converts a type between its SQL form and a procedural language's native one: with `hstore_plpython3u` a PL/Python function receives an `hstore` argument as a dict instead of a string. PostgreSQL ships transforms as extensions (`hstore_plperl`, `hstore_plpython3u`, `jsonb_plperl`, `jsonb_plpython3u`, `ltree_plpython3u`, `bool_plperl` and the `plperlu` variants), and a function or procedure opts in per type with `TRANSFORM FOR TYPE`, which is the `transform` list:
+
+```yaml
+extensions:
+  - {name: hstore_plpython3u, cascade: true}   # installs hstore and plpython3u too
+  - {name: jsonb_plpython3u, cascade: true}
+
+schema app:
+  function merge(doc jsonb, attrs hstore):
+    returns: jsonb
+    language: plpython3u
+    transform: [jsonb, hstore]     # TRANSFORM FOR TYPE jsonb, FOR TYPE hstore
+    body: |
+      doc.update(attrs)
+      return doc
+```
+
+The list is compared with the routine's live transforms (`pg_proc.protrftypes`) in any order, and a difference emits `CREATE OR REPLACE`. Without `transform` the routine's transforms are unmanaged: pgy does not compare them, and a `CREATE OR REPLACE` it emits for another reason keeps the ones the routine has. `transform: []` declares a routine without transforms. `pgy pull` writes the list, and writes `transform: []` for the other routines of a language that has transforms, so that one added later is noticed. A clause written into `language` (`language: plpython3u transform for type hstore`) is read the same way. Transforms themselves (`CREATE TRANSFORM`) come from their extensions; `pgy pull` reports one that no extension owns.
 
 
 ## Aggregates
@@ -1105,6 +1132,8 @@ schema app:
     parallel: safe           # safe | restricted | unsafe
     comment: sum of ints
 ```
+
+`initcond: ""` is an initial state of its own, the empty string (an empty `text` accumulator, the empty `hstore`), and is emitted, compared and pulled as such. Leave `initcond` out for an aggregate that starts from NULL. `minitcond` works the same way.
 
 The other `CREATE AGGREGATE` options use the same names, in camelCase where PostgreSQL's have an underscore:
 
@@ -1133,7 +1162,7 @@ schema app:
 
 ## Procedures
 
-Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted.
+Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, language, `transform`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted. Bodies are stored and pulled as described under [Functions](#functions), and `body: ""` is an empty body.
 
 ```yaml
 schema public:
@@ -1157,6 +1186,7 @@ schema public:
 | Property | Type | Description |
 |----------|------|-------------|
 | `language` | string | e.g. `plpgsql`, `sql` |
+| `transform` | list | Types of the `TRANSFORM FOR TYPE` clause. See [Transforms](#transforms). Omitted = unmanaged; `[]` = none |
 | `security` | string | `definer` or `invoker` |
 | `set` | map | `SET` configuration options (e.g. `search_path`). Compared like function `set`; omitted = unmanaged |
 | `body` | string | Procedure body (dollar-quoted in output SQL) |
