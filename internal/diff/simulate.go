@@ -268,7 +268,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Signature: schema.RoutineName(k) + pr.ArgsSig, Security: "invoker"}
         prev := out.ProcedureDefs[norm]
-        if prev != nil { lp.Security = prev.Security }
+        if prev != nil {
+            lp.Security = prev.Security
+            pr = keepLiveProcedureAttributes(pr, prev)
+        }
         if prev == nil || procedureChanged(pr, prev) {
             lp.Config = simulateConfig(pr.Set)
         } else {
@@ -402,6 +405,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body) ||
             routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform))
         if prev != nil && !replaced { *lf = *prev }
+        if prev != nil && replaced { f = keepLiveFunctionAttributes(f, prev) }
         if hasBody {
             lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body)
             lf.Language, _ = schema.SplitLanguage(f.Language)

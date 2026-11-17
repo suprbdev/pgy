@@ -177,3 +177,72 @@ func TestRoutineSourcePlrust(t *testing.T) {
 		t.Error("a plrust body is compared with the source in plrust's JSON document")
 	}
 }
+
+func attributeLive() *Live {
+	live := emptyLive()
+	live.Schemas["app"] = true
+	live.Functions["app.f()"] = true
+	live.FunctionDefs["app.f()"] = &LiveFunction{
+		Signature: "app.f()", Kind: "f", Body: "select 1", Returns: "SETOF integer", Language: "sql",
+		Security: "definer", Volatility: "stable", Strict: true, Leakproof: true, Parallel: "safe", Cost: 5, Rows: 50,
+		Config: map[string]string{"work_mem": "1MB", "search_path": `"$user", public`},
+	}
+	live.Procedures["app.p()"] = true
+	live.ProcedureDefs["app.p()"] = &LiveProcedure{Signature: "app.p()", Body: "select 1", Language: "sql", Security: "definer", Config: map[string]string{"statement_timeout": "5s"}}
+	return live
+}
+
+func attributeDB() *schema.Database {
+	return &schema.Database{
+		Functions:  map[string]*schema.Function{"app.f()": {Schema: "app", Name: "f", ArgsSig: "()", Returns: "setof int", Language: "sql", Body: "select 2"}},
+		Procedures: map[string]*schema.Procedure{"app.p()": {Schema: "app", Name: "p", ArgsSig: "()", Language: "sql", Body: "select 2"}},
+	}
+}
+
+func TestRoutineReplaceKeepsUnmanagedAttributes(t *testing.T) {
+	p := Plan(attributeLive(), attributeDB(), false)
+	for _, want := range []string{
+		`create or replace function "app"."f"() returns setof int language sql security definer stable strict leakproof parallel safe cost 5 rows 50 set search_path = "$user", public set work_mem = '1MB' as $$select 2$$;`,
+		`create or replace procedure "app"."p"() language sql security definer set statement_timeout = '5s' as $$select 2$$;`,
+	} {
+		if !findCreate(p, want) {
+			t.Errorf("missing %s in:\n%s", want, Render(p))
+		}
+	}
+	sim := Simulate(attributeLive(), attributeDB())
+	if lf := sim.FunctionDefs["app.f()"]; lf.Body != "select 2" || lf.Security != "definer" || lf.Volatility != "stable" || !lf.Strict || lf.Parallel != "safe" || lf.Cost != 5 || lf.Rows != 50 || lf.Config["work_mem"] != "1MB" {
+		t.Errorf("a simulated replace keeps the unmanaged function attributes: %+v", lf)
+	}
+	if lp := sim.ProcedureDefs["app.p()"]; lp.Body != "select 2" || lp.Security != "definer" || lp.Config["statement_timeout"] != "5s" {
+		t.Errorf("a simulated replace keeps the unmanaged procedure attributes: %+v", lp)
+	}
+}
+
+func TestRoutineReplaceDeclaredAttributesWin(t *testing.T) {
+	d := attributeDB()
+	no := false
+	f := d.Functions["app.f()"]
+	f.Security, f.Volatility, f.Strict, f.Leakproof, f.Parallel, f.Set = "invoker", "volatile", &no, &no, "unsafe", map[string]string{}
+	f.Cost, f.Rows = ptr(100.0), ptr(1000.0)
+	d.Procedures["app.p()"].Security, d.Procedures["app.p()"].Set = "invoker", map[string]string{}
+	p := Plan(attributeLive(), d, false)
+	for _, want := range []string{
+		`create or replace function "app"."f"() returns setof int language sql security invoker volatile parallel unsafe cost 100 rows 1000 as $$select 2$$;`,
+		`create or replace procedure "app"."p"() language sql security invoker as $$select 2$$;`,
+	} {
+		if !findCreate(p, want) {
+			t.Errorf("missing %s in:\n%s", want, Render(p))
+		}
+	}
+}
+
+func TestRoutineReplaceLeavesDefaultAttributesOut(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["app"] = true
+	live.Functions["app.f()"] = true
+	live.FunctionDefs["app.f()"] = &LiveFunction{Signature: "app.f()", Kind: "f", Body: "select 1", Returns: "integer", Language: "sql", Security: "invoker", Volatility: "volatile", Parallel: "unsafe", Cost: 100}
+	d := &schema.Database{Functions: map[string]*schema.Function{"app.f()": {Schema: "app", Name: "f", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 2"}}}
+	if p := Plan(live, d, false); !findCreate(p, `create or replace function "app"."f"() returns int language sql as $$select 2$$;`) {
+		t.Errorf("default live attributes add nothing to the replace:\n%s", Render(p))
+	}
+}

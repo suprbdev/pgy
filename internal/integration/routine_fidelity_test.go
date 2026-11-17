@@ -305,6 +305,50 @@ func TestIntegrationPulledDefinerSettingsDrift(t *testing.T) {
 	}
 }
 
+func TestIntegrationRoutineReplaceKeepsUnmanagedAttributes(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		create function %[1]s.f() returns int language sql strict stable leakproof parallel safe cost 5 security definer set work_mem = '1MB' as 'select 1';
+		create function %[1]s.rows() returns setof int language sql rows 50 as 'select 1';
+		create procedure %[1]s.p() language sql security definer set search_path = %[1]s, public as 'select 1';`, sch)); err != nil {
+		t.Fatal(err)
+	}
+	attributes := func() string {
+		var out string
+		if err := pool.QueryRow(ctx, `
+			select string_agg(format('%s %s %s %s %s %s %s %s %s %s', proname, prosecdef, provolatile, proisstrict, proleakproof, proparallel, procost, prorows, proconfig, prosrc), E'\n' order by proname)
+			from pg_proc where pronamespace = $1::regnamespace`, sch).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := attributes()
+	d := loadSpellingYAML(t, strings.ReplaceAll(`
+schema SCH:
+  function f():
+    returns: int
+    language: sql
+    body: select 2
+  function rows():
+    returns: setof int
+    language: sql
+    body: select 2
+  procedure p():
+    language: sql
+    body: select 2
+`, "SCH", sch))
+	plan := diff.Plan(introspectAll(t, pool), d, false)
+	applyPlan(t, pool, plan)
+	if again := diff.Render(diff.Plan(introspectAll(t, pool), d, false)); again != "" {
+		t.Errorf("plan did not converge:\n%s", again)
+	}
+	if want, got := strings.ReplaceAll(before, "select 1", "select 2"), attributes(); got != want {
+		t.Errorf("replacing the bodies must keep the attributes the YAML leaves unmanaged:\n%s\nwant:\n%s\nplan:\n%s", got, want, diff.Render(plan))
+	}
+}
+
 func TestIntegrationRoutineTransform(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()

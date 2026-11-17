@@ -3016,6 +3016,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
+            if found { f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired]) }
             setClauses := ""
             if len(f.Set) > 0 {
                 keys := make([]string, 0, len(f.Set))
@@ -3062,6 +3063,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 lp := live.ProcedureDefs[norm]
                 if lp == nil || !procedureChanged(pr, lp) { continue }
                 // fall through: definition changed, emit CREATE OR REPLACE
+                pr = keepLiveProcedureAttributes(pr, lp)
             }
             setClauses := ""
             if len(pr.Set) > 0 {
