@@ -785,18 +785,25 @@ type probeDef struct {
 	Parts []string `json:"parts"`
 }
 
+// probeFailure is the error of the statement with the given ID.
+type probeFailure struct {
+	ID  int    `json:"id"`
+	Err string `json:"err"`
+}
+
+// probeRelationReply is what pg_temp.pgy_probe read back from the copy of
+// one relation, or why it couldn't copy it.
+type probeRelationReply struct {
+	Err  string     `json:"err"`
+	Defs []probeDef `json:"defs"`
+}
+
 // probeReply is the output of pg_temp.pgy_probe. Relations lines up with
 // probeSpec.Relations.
 type probeReply struct {
-	Errors []struct {
-		ID  int    `json:"id"`
-		Err string `json:"err"`
-	} `json:"errors"`
-	Relations []struct {
-		Err  string     `json:"err"`
-		Defs []probeDef `json:"defs"`
-	} `json:"relations"`
-	Defs []probeDef `json:"defs"`
+	Errors    []probeFailure       `json:"errors"`
+	Relations []probeRelationReply `json:"relations"`
+	Defs      []probeDef           `json:"defs"`
 }
 
 // probeRequest is one definition to probe. relation is its index in
@@ -1197,10 +1204,71 @@ begin
 end
 $f$`}
 
-// runExprProbe sends the whole probe in one pipelined round trip: a
-// transaction that creates the probe's functions, calls pg_temp.pgy_probe
-// and rolls back. When the server stops at an error the transaction is
-// rolled back on its own.
+// exprProbeWorkers is how many connections runExprProbes splits the
+// relations across, and exprProbeChunk the fewest relations worth a
+// connection of their own; copying one takes about a millisecond.
+const (
+	exprProbeWorkers = 4
+	exprProbeChunk   = 50
+)
+
+// runExprProbes runs spec, on one connection, or with its relations split
+// across several when there are many of them. The statements for domains
+// and routines stay with the first.
+func runExprProbes(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*probeReply, error) {
+	workers := min(exprProbeWorkers, (len(spec.Relations)+exprProbeChunk-1)/exprProbeChunk)
+	if workers <= 1 {
+		return runExprProbe(ctx, pool, spec)
+	}
+	specs, index := make([]*probeSpec, workers), make([][]int, workers)
+	for w := range specs {
+		specs[w] = &probeSpec{Relations: []*probeRelation{}, Run: []probeStmt{}}
+	}
+	specs[0].Run = spec.Run
+	for i, r := range spec.Relations {
+		w := i % workers
+		specs[w].Relations, index[w] = append(specs[w].Relations, r), append(index[w], i)
+	}
+	type result struct {
+		worker int
+		reply  *probeReply
+		err    error
+	}
+	results := make(chan result, workers)
+	for w := range specs {
+		go func(w int) {
+			reply, err := runExprProbe(ctx, pool, specs[w])
+			results <- result{w, reply, err}
+		}(w)
+	}
+	merged := &probeReply{Relations: make([]probeRelationReply, len(spec.Relations))}
+	var firstErr error
+	for range specs {
+		r := <-results
+		if r.err == nil && len(r.reply.Relations) != len(index[r.worker]) {
+			r.err = fmt.Errorf("unexpected reply")
+		}
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		for j, rel := range r.reply.Relations {
+			merged.Relations[index[r.worker][j]] = rel
+		}
+		merged.Errors, merged.Defs = append(merged.Errors, r.reply.Errors...), append(merged.Defs, r.reply.Defs...)
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return merged, nil
+}
+
+// runExprProbe sends a probe in one pipelined round trip: a transaction
+// that creates the probe's functions, calls pg_temp.pgy_probe and rolls
+// back. When the server stops at an error the transaction is rolled back
+// on its own.
 func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*probeReply, error) {
 	payload, err := json.Marshal(spec)
 	if err != nil {
@@ -1276,7 +1344,7 @@ func ProbeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desir
 	if len(plan.requests) == 0 {
 		return nil
 	}
-	reply, err := runExprProbe(ctx, pool, &plan.spec)
+	reply, err := runExprProbes(ctx, pool, &plan.spec)
 	if err != nil {
 		return fmt.Errorf("expression probe: %w", err)
 	}

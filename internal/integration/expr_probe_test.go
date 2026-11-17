@@ -448,6 +448,104 @@ schema app:
 	}
 }
 
+// TestIntegrationProbeExpressionsUnreadableTable probes as a role that may
+// not read one of the tables: that table can't be copied, so its
+// definitions are compared as text, and the other table's are unaffected.
+func TestIntegrationProbeExpressionsUnreadableTable(t *testing.T) {
+	pool, d := exprProbeDatabase(t, "pgytest_expr_probe_unreadable", `
+schema app:
+  table open:
+    columns:
+      id: {type: bigint}
+      ttl: {type: interval, default: "'1 hour'"}
+  table closed:
+    columns:
+      id: {type: bigint}
+      ttl: {type: interval, default: "'2 hours'"}
+`)
+	ctx := context.Background()
+	const role = "pgytest_expr_probe_reader"
+	admin := connect(t)
+	dropRole := func() {
+		admin.Exec(context.Background(), `drop role if exists `+role) //nolint
+	}
+	dropRole()
+	t.Cleanup(dropRole)
+	for _, stmt := range []string{
+		`create role ` + role + ` login password 'pgy'`,
+		`grant usage on schema app to ` + role,
+		`grant select on app.open to ` + role,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `drop owned by `+role) //nolint
+	})
+	cfg := pool.Config().Copy()
+	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "pgy"
+	reader, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	live := probed(t, reader, d)
+	if p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: "app.open", Name: "ttl"}]; p == nil || p.Err != "" {
+		t.Errorf("the readable table's default must be probed, got %+v", p)
+	}
+	if p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: "app.closed", Name: "ttl"}]; p == nil || !strings.Contains(p.Err, "permission denied") {
+		t.Errorf("the unreadable table's default can't be probed, got %+v", p)
+	}
+	want := []string{`alter table "app"."closed" alter column "ttl" set default '2 hours';`}
+	if got := diff.Plan(live, d, true).Alters; !reflect.DeepEqual(got, want) {
+		t.Errorf("want only the unreadable table's default planned, got %v", got)
+	}
+}
+
+// TestIntegrationProbeExpressionsManyTables probes more tables than one
+// connection takes, so the probe is split across several, and checks that
+// every result still reaches its own definition.
+func TestIntegrationProbeExpressionsManyTables(t *testing.T) {
+	const tables = 130
+	var y strings.Builder
+	y.WriteString("schema app:\n")
+	for i := 0; i < tables; i++ {
+		fmt.Fprintf(&y, "  table t%d:\n    columns:\n      id: {type: bigint}\n      ttl: {type: interval, default: \"'%d hours'\"}\n", i, i+1)
+		fmt.Fprintf(&y, "    constraints:\n      t%d_ttl: {type: check, expression: \"ttl > '%d minutes'\"}\n", i, i+1)
+	}
+	pool, d := exprProbeDatabase(t, "pgytest_expr_probe_many", y.String())
+	live := assertExprProbeClean(t, pool, d, diff.ExprDefault, diff.ExprConstraint)
+	if len(live.ExprProbes) != 2*tables {
+		t.Fatalf("want a default and a check probed per table, got %d probes", len(live.ExprProbes))
+	}
+	for i := 0; i < tables; i++ {
+		fq := fmt.Sprintf("app.t%d", i)
+		p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: fq, Name: "ttl"}]
+		if want := live.Tables[fq].Columns["ttl"].Default; p == nil || len(p.Parts) != 1 || p.Parts[0] != want {
+			t.Fatalf("%s: want its own default %q read back, got %+v", fq, want, p)
+		}
+	}
+
+	changed := loadYAML(t, "app", strings.Replace(strings.Replace(y.String(), `"ttl > '77 minutes'"`, `"nope(ttl) > '77 minutes'"`, 1), `default: "'100 hours'"`, `default: "'1000 hours'"`, 1))
+	live = probed(t, pool, changed)
+	for k, p := range live.ExprProbes {
+		if want := map[bool]string{true: "function nope(interval) does not exist"}[k.Name == "t76_ttl"]; p.Err != want {
+			t.Errorf("%s %s %s: err %q, want %q", k.Kind, k.Object, k.Name, p.Err, want)
+		}
+	}
+	plan := diff.Plan(live, changed, true)
+	want := []string{
+		`alter table "app"."t76" drop constraint "t76_ttl";`,
+		`alter table "app"."t76" add constraint "t76_ttl" check (nope(ttl) > '77 minutes') not valid;`,
+		`alter table "app"."t99" alter column "ttl" set default '1000 hours';`,
+	}
+	if !reflect.DeepEqual(plan.Alters, want) {
+		t.Errorf("want the two changed definitions planned and nothing else, got:\n%s", strings.Join(plan.Alters, "\n"))
+	}
+}
+
 // exprProbeLeftovers counts what a probe must not leave behind.
 func exprProbeLeftovers(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()

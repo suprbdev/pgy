@@ -469,10 +469,7 @@ func TestExprProbeResults(t *testing.T) {
 	live, desired := exprProbeLive(), exprProbeDesired(t)
 	plan := collectExprProbes(live, desired)
 	reply := &probeReply{}
-	reply.Relations = make([]struct {
-		Err  string     `json:"err"`
-		Defs []probeDef `json:"defs"`
-	}, len(plan.spec.Relations))
+	reply.Relations = make([]probeRelationReply, len(plan.spec.Relations))
 	rels := map[string]int{}
 	for i, r := range plan.spec.Relations {
 		rels[r.Name] = i
@@ -492,14 +489,7 @@ func TestExprProbeResults(t *testing.T) {
 			reply.Defs = append(reply.Defs, probeDef{Kind: r.attach.kind, Name: r.attach.name, Parts: []string{"read " + r.attach.name}})
 		}
 	}
-	reply.Errors = append(reply.Errors, struct {
-		ID  int    `json:"id"`
-		Err string `json:"err"`
-	}{failedID, `function cube(unknown) does not exist`})
-	reply.Errors = append(reply.Errors, struct {
-		ID  int    `json:"id"`
-		Err string `json:"err"`
-	}{-1, `ignored`})
+	reply.Errors = append(reply.Errors, probeFailure{failedID, `function cube(unknown) does not exist`}, probeFailure{-1, `ignored`})
 
 	probes := plan.results(reply)
 	if len(probes) != len(plan.requests) {
