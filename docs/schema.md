@@ -384,7 +384,7 @@ database:
 
 `roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
 
-A changed `search_path` is also set for the session that runs the migration, so the statements after it resolve unqualified names the way later sessions will (see [Name resolution](#name-resolution)). Other settings take effect in sessions that start afterwards.
+A changed `search_path` under `set` is also set for the session that runs the migration, so the statements after it resolve unqualified names the way later sessions will (see [Name resolution](#name-resolution)). Other settings, and the per-role ones under `roles`, take effect in sessions that start afterwards.
 
 Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. PostgreSQL lets only superusers set such a parameter in a session that has not loaded the extension's library. A migration that creates the extension has loaded it; a later migration run by a non-superuser that changes the setting has not, and fails with `permission denied to set parameter` unless it first calls one of the extension's functions (for example a hand-added `select show_limit();` for `pg_trgm`).
 
