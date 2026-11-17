@@ -158,7 +158,7 @@ func pruneTableObjects(fq string, dt *schema.Table, lt *LiveTable) []string {
     }
     for _, name := range sortedKeys(lt.Triggers) {
         if wantTriggers[name] || lt.TriggerInherited[name] { continue }
-        out = append(out, fmt.Sprintf("drop trigger %s on %s;", pqIdent(name), pqIdent(fq)))
+        out = append(out, fmt.Sprintf("drop trigger %s on %s;", quoteIdent(name), pqIdent(fq)))
     }
 
     wantConstraints := map[string]bool{}
@@ -175,7 +175,7 @@ func pruneTableObjects(fq string, dt *schema.Table, lt *LiveTable) []string {
     for _, name := range sortedKeys(lt.ConstraintDefs) {
         def := strings.ToUpper(strings.TrimSpace(lt.ConstraintDefs[name]))
         if wantConstraints[name] || lt.ConstraintInherited[name] || strings.HasPrefix(def, "PRIMARY KEY") || strings.HasPrefix(def, "NOT NULL") { continue }
-        stmt := fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), pqIdent(name))
+        stmt := fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(name))
         if strings.HasPrefix(def, "FOREIGN KEY") {
             fks = append(fks, stmt)
         } else {
@@ -194,7 +194,7 @@ func pruneTableObjects(fq string, dt *schema.Table, lt *LiveTable) []string {
         if r != nil { wantRules[truncateIdent(r.Name)] = true }
     }
     for _, name := range sortedKeys(lt.Rules) {
-        if !wantRules[name] { out = append(out, fmt.Sprintf("drop rule %s on %s;", pqIdent(name), pqIdent(fq))) }
+        if !wantRules[name] { out = append(out, fmt.Sprintf("drop rule %s on %s;", quoteIdent(name), pqIdent(fq))) }
     }
     out = append(out, fks...)
     out = append(out, others...)

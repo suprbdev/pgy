@@ -16,7 +16,16 @@ func newMap() *node { return &yaml.Node{Kind: yaml.MappingNode} }
 
 func flowMap() *node { return &yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle} }
 
-func str(s string) *node { return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s} }
+// str is a string scalar. The encoder quotes it when its plain form would
+// read back as another type, except for <<, which it writes plain and which
+// then reads back as a merge key, so that one is quoted here.
+func str(s string) *node {
+	n := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s}
+	if s == "<<" {
+		n.Style = yaml.DoubleQuotedStyle
+	}
+	return n
+}
 
 func num(s string) *node { return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: s} }
 
@@ -99,7 +108,9 @@ func render(doc *node) ([]byte, error) {
 }
 
 // add appends a key/value pair to a mapping node, keeping insertion order.
+// The key is a string scalar, so one that YAML would otherwise read as a
+// number, a boolean or null (a column named 2024, an option named null) is
+// written quoted.
 func add(m *node, key string, v *node) {
-	k := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
-	m.Content = append(m.Content, k, v)
+	m.Content = append(m.Content, str(key), v)
 }

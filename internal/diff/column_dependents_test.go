@@ -26,7 +26,7 @@ func TestRecreateColumnDependents(t *testing.T) {
 			Triggers: []*schema.Trigger{{Name: "t_b", Timing: "before", Events: []string{"update of b"}, Level: "row", Procedure: "app.touch()"}}}},
 		Views: map[string]*schema.View{"app.v": {Name: "v", Query: "select b, c from app.t"}, "app.vv": {Name: "vv", Query: "select b from app.v"}},
 	}
-	out, pre, post, warns := recreateColumnDependents(live, d, true)
+	out, _, pre, post, warns := recreateColumnDependents(live, d, Options{Unsafe: true})
 	if len(warns) != 0 {
 		t.Fatalf("warnings: %v", warns)
 	}
@@ -43,11 +43,11 @@ func TestRecreateColumnDependents(t *testing.T) {
 			t.Errorf("missing %q in post:\n%s", w, joined)
 		}
 	}
-	if _, pre, _, _ := recreateColumnDependents(live, d, false); len(pre) != 0 {
+	if _, _, pre, _, _ := recreateColumnDependents(live, d, Options{}); len(pre) != 0 {
 		t.Error("without --unsafe types don't change, so nothing is dropped")
 	}
 	delete(d.Views, "app.vv")
-	_, pre, _, warns = recreateColumnDependents(live, d, true)
+	_, _, pre, _, warns = recreateColumnDependents(live, d, Options{Unsafe: true})
 	if len(pre) != 0 || len(warns) != 2 || !strings.Contains(warns[0].Message, "view app.vv depends on it and isn't declared") {
 		t.Errorf("undeclared view: pre %v, warnings %v", pre, warns)
 	}

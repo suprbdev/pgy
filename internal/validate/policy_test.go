@@ -49,6 +49,13 @@ schema app:
     set: {search_path: app}
     grants: {public: [], reader: [execute]}
     body: select 1
+  function safe_empty_path():
+    returns: int
+    language: sql
+    security: definer
+    set: {search_path: ""}
+    revokePublic: true
+    body: select 1
 `)
 	p := Policy{
 		SecurityDefinerHardened: true,
@@ -69,7 +76,7 @@ schema app:
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	for _, clean := range []string{"app.locked", "app.safe()", "app.safe_grants()"} {
+	for _, clean := range []string{"app.locked", "app.safe()", "app.safe_grants()", "app.safe_empty_path()"} {
 		if strings.Contains(got, clean+":") {
 			t.Errorf("%s follows the policy but was flagged:\n%s", clean, got)
 		}

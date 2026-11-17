@@ -142,7 +142,7 @@ ci:
 |------|---------|
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
-| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column |
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
@@ -270,5 +270,5 @@ References inside SQL text are found by name. A name that only looks like a refe
 
 - Forward-only: there are no down migrations. To undo a change, write the reverse change as a new migration.
 - `pgy init` and `pgy migrate` take an advisory lock, so concurrent runs wait for each other.
-- Committed migrations carry a checksum, which `pgy migrate` verifies before applying them. `pgy migrate` and `pgy status` also warn when an applied migration's file has changed or disappeared since it ran, and when a pending migration is numbered below the latest applied one, which usually means a merge from another branch. Such a migration still runs, just out of order.
+- Committed migrations carry a checksum, which `pgy migrate` verifies before applying them. It treats CR LF line endings as LF, so a checkout that converts line endings doesn't invalidate it. `pgy migrate` and `pgy status` also warn when an applied migration's file has changed or disappeared since it ran, and when a pending migration is numbered below the latest applied one, which usually means a merge from another branch. Such a migration still runs, just out of order.
 - SQL is split into statements with single and double quotes, `E'...'` strings, dollar quotes and comments respected.
