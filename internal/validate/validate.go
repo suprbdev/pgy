@@ -72,6 +72,7 @@ func Files(paths []string) []Issue {
 		obj  any
 	}
 	owners := map[string][]owner{}
+	extensions := map[string][]owner{}
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -108,21 +109,31 @@ func Files(paths []string) []Issue {
 		for k, obj := range singleOwnerObjects(d) {
 			owners[k] = append(owners[k], owner{p, obj})
 		}
-	}
-	for _, k := range sortedKeys(owners) {
-		decls := owners[k]
-		differ := false
-		for _, o := range decls[1:] {
-			if !reflect.DeepEqual(o.obj, decls[0].obj) {
-				differ = true
+		for _, ext := range d.Extensions {
+			if ext != nil {
+				extensions["extension "+ext.Name] = append(extensions["extension "+ext.Name], owner{p, ext})
 			}
 		}
-		if differ {
-			files := make([]string, len(decls))
-			for i, o := range decls {
-				files[i] = o.file
+	}
+	for _, group := range []struct {
+		decls map[string][]owner
+		rule  string
+	}{{owners, "the last file wins"}, {extensions, "the first declaration wins"}} {
+		for _, k := range sortedKeys(group.decls) {
+			decls := group.decls[k]
+			differ := false
+			for _, o := range decls[1:] {
+				if !reflect.DeepEqual(o.obj, decls[0].obj) {
+					differ = true
+				}
 			}
-			issues = append(issues, Issue{Severity: Warning, Object: k, Message: fmt.Sprintf("declared differently in %s; the last file wins", strings.Join(files, ", "))})
+			if differ {
+				files := make([]string, len(decls))
+				for i, o := range decls {
+					files[i] = o.file
+				}
+				issues = append(issues, Issue{Severity: Warning, Object: k, Message: fmt.Sprintf("declared differently in %s; %s", strings.Join(files, ", "), group.rule)})
+			}
 		}
 	}
 	issues = append(issues, Database(schema.Merge(dbs))...)
@@ -599,6 +610,38 @@ func Database(d *schema.Database) []Issue {
 	return issues
 }
 
+var builtinTriggerFunctions = map[string]bool{
+	"suppress_redundant_updates_trigger": true,
+	"tsvector_update_trigger":            true,
+	"tsvector_update_trigger_column":     true,
+	"unique_key_recheck":                 true,
+}
+
+// undeclarableFunction reports whether a function no schema file declares
+// may exist all the same: a PostgreSQL built-in, or one a declared extension
+// could provide. An extension's functions live in its schema, which an
+// unqualified name can reach through the search_path; an extension declared
+// without a schema usually lands in public.
+func undeclarableFunction(d *schema.Database, name string) bool {
+	name = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), `"`, ""))
+	sch, fn, qualified := strings.Cut(name, ".")
+	if !qualified {
+		return builtinTriggerFunctions[name] || len(d.Extensions) > 0
+	}
+	if sch == "pg_catalog" {
+		return builtinTriggerFunctions[fn]
+	}
+	for _, ext := range d.Extensions {
+		if ext == nil {
+			continue
+		}
+		if s := strings.ToLower(strings.Trim(ext.Schema, `"`)); s == sch || (s == "" && sch == "public") {
+			return true
+		}
+	}
+	return false
+}
+
 func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(Severity, string, string, ...any)) {
 	proc := strings.TrimSpace(tr.Procedure)
 	if proc == "" {
@@ -610,7 +653,9 @@ func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(S
 	}
 	keys := schema.ResolveDependencyKeys("function "+proc, d)
 	if len(keys) == 0 {
-		add(Warning, obj, "trigger %s calls %s, which no schema file declares", tr.Name, proc)
+		if !undeclarableFunction(d, proc) {
+			add(Warning, obj, "trigger %s calls %s, which no schema file declares", tr.Name, proc)
+		}
 	} else if r := noArgReturns(d, keys); r != "" && r != "trigger" {
 		add(Error, obj, "trigger %s calls %s, which returns %s; trigger functions must return trigger", tr.Name, proc, r)
 	}

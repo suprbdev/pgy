@@ -1881,8 +1881,8 @@ func TestExtensionSchemaVersionAltered(t *testing.T) {
 		`alter extension "pg_trgm" set schema "extensions";`,
 		`alter extension "pg_trgm" update to '1.6';`,
 	}
-	if len(p.Creates) != 0 || len(p.Alters) != 2 || p.Alters[0] != want[0] || p.Alters[1] != want[1] {
-		t.Errorf("want alters %v, got creates=%v alters=%v", want, p.Creates, p.Alters)
+	if len(p.Alters) != 0 || len(p.Creates) != 2 || p.Creates[0] != want[0] || p.Creates[1] != want[1] {
+		t.Errorf("want creates %v, got creates=%v alters=%v", want, p.Creates, p.Alters)
 	}
 }
 

@@ -51,7 +51,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if prev != nil { *le = *prev }
         if ext.Schema != "" {
             out.Schemas[ext.Schema] = true
-            if prev == nil || prev.Relocatable { le.Schema = ext.Schema }
+            if prev == nil || prev.Relocatable {
+                if prev != nil && prev.Schema != ext.Schema && le.MovedFrom == "" { le.MovedFrom = prev.Schema }
+                le.Schema = ext.Schema
+            }
         }
         if ext.Version != "" { le.Version = ext.Version }
         if ext.Comment != "" { le.Comment = ext.Comment }
@@ -653,6 +656,7 @@ func cloneLive(l *Live) *Live {
         Functions:          cloneSet(l.Functions),
         Extensions:         cloneSet(l.Extensions),
         ExtensionDefs:      cloneMap(l.ExtensionDefs, func(e *LiveExtension) *LiveExtension { c := *e; return &c }),
+        AvailableExtensions: l.AvailableExtensions,
         Views:              cloneSet(l.Views),
         MatViews:           cloneSet(l.MatViews),
         ViewOptions:        cloneMap(l.ViewOptions, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),

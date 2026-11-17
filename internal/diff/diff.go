@@ -27,6 +27,10 @@ type Live struct{
     Extensions map[string]bool
     // ExtensionDefs: extension name -> installed schema/version
     ExtensionDefs map[string]*LiveExtension
+    // AvailableExtensions: the extensions the server can install, by name.
+    // nil when unknown: no connection, or IntrospectExtensions found
+    // nothing to look up.
+    AvailableExtensions map[string]*AvailableExtension
     Views      map[string]bool
     MatViews   map[string]bool
     // ViewOptions: "schema.view" -> reloptions (security_invoker, security_barrier, check_option)
@@ -261,6 +265,32 @@ type LiveExtension struct {
     // DefaultComment is the comment the extension's control file gives it,
     // which CREATE EXTENSION sets.
     DefaultComment string
+    // DefaultVersion is the version CREATE EXTENSION installs on this
+    // server; "" when unknown.
+    DefaultVersion string
+    // Requires lists the installed extensions this one depends on, sorted.
+    Requires []string
+    // UpdateTargets holds the versions ALTER EXTENSION ... UPDATE TO can
+    // reach from Version; nil when unknown.
+    UpdateTargets map[string]bool
+    // MovedFrom is the schema a simulated ALTER EXTENSION ... SET SCHEMA
+    // moved the extension out of, while the other live definitions still
+    // spell its objects the old way; "" otherwise.
+    MovedFrom string
+    // Members holds the unqualified names of the types, routines,
+    // relations, operator classes and text search objects the extension
+    // owns, and Operators those of its operators. Both are nil until
+    // IntrospectExtensions loads them for an extension that has to move.
+    Members   map[string]bool
+    Operators map[string]bool
+}
+
+// AvailableExtension is an extension the server can install: its default
+// version and, for every version it can install or update to, the
+// extensions that version requires.
+type AvailableExtension struct {
+    DefaultVersion string
+    Requires       map[string][]string
 }
 
 type LiveFunction struct{
@@ -1581,19 +1611,23 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     extQ := `
         select e.extname, n.nspname, e.extversion, e.extrelocatable,
                coalesce(obj_description(e.oid, 'pg_extension'), ''),
-               coalesce((select a.comment from pg_available_extensions a where a.name = e.extname), '')
+               coalesce(a.comment, ''), coalesce(a.default_version, ''),
+               array(select r.extname::text from pg_depend d join pg_extension r on r.oid = d.refobjid
+                     where d.classid = 'pg_extension'::regclass and d.objid = e.oid
+                     and d.refclassid = 'pg_extension'::regclass order by 1)
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
+        left join pg_available_extensions a on a.name = e.extname
     `
     batch.add(extQ, func(extRows pgx.Rows) error {
         for extRows.Next() {
-            var extName, extSchema, extVersion, comment, defaultComment string
-            var relocatable bool
-            if err := extRows.Scan(&extName, &extSchema, &extVersion, &relocatable, &comment, &defaultComment); err != nil {
+            var extName string
+            le := &LiveExtension{}
+            if err := extRows.Scan(&extName, &le.Schema, &le.Version, &le.Relocatable, &le.Comment, &le.DefaultComment, &le.DefaultVersion, &le.Requires); err != nil {
                 return err
             }
             l.Extensions[extName] = true
-            l.ExtensionDefs[extName] = &LiveExtension{Schema: extSchema, Version: extVersion, Relocatable: relocatable, Comment: comment, DefaultComment: defaultComment}
+            l.ExtensionDefs[extName] = le
         }
         return nil
     })
@@ -2614,6 +2648,12 @@ func Plan(live *Live, desired *schema.Database, unsafe bool) *PlanDiff {
 
 // PlanWith diffs desired against live with the given options.
 func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
+    return withoutMoveEchoes(planWith(live, desired, opts), live, desired, opts)
+}
+
+// planWith is PlanWith before withoutMoveEchoes drops the statements that
+// only echo an extension's move to another schema.
+func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live, renames := applyRenames(live, desired)
     liveTransforms := routineTransforms(live)
@@ -2715,7 +2755,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
     for s := range neededSchemas {
-        if s == "public" { continue } // public schema always exists
+        if s == "public" || systemSchema(s) { continue }
         schemaNames = append(schemaNames, s)
     }
     sort.Strings(schemaNames)
@@ -2728,9 +2768,6 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, typeChangeEarly...)
 
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
-    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
-        plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
-    }
     for _, role := range sortedKeys(desired.DatabaseRoleSettings) {
         prefix := "alter role " + strings.ReplaceAll(grantRole(role), "%", "%%") + " in database %I "
         for _, c := range configClauses(desired.DatabaseRoleSettings[role], live.DatabaseRoleConfig[resolveRole(role, live.CurrentUser)]) {
@@ -2739,20 +2776,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
-    extNames := make([]string, 0, len(desired.Extensions))
-    for _, ext := range desired.Extensions {
-        if ext != nil && ext.Name != "" { extNames = append(extNames, ext.Name) }
-    }
-    sort.Strings(extNames)
-    for _, extName := range extNames {
-        ext := findExtension(desired, extName)
-        if ext == nil { continue }
-        if live.Extensions[ext.Name] {
-            plan.Alters = append(plan.Alters, extensionAlterStmts(ext, live.ExtensionDefs[ext.Name])...)
-            continue
-        }
-        plan.Creates = append(plan.Creates, renderExtension(ext))
-        if ext.Comment != "" { plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", quoteIdent(ext.Name), quoteString(ext.Comment))) }
+    planExtensions(plan, live, desired)
+    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
+        plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
     }
     planServers(plan, live, desired)
     
@@ -4565,7 +4591,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
 func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
     if ld == nil { return nil, "" }
     warn := ""
-    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !strings.EqualFold(t, ld.Template) {
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !tsTemplatesEqual(t, ld.Template) {
         warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
     }
     if td.Options == nil { return nil, warn }
@@ -5665,7 +5691,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
-                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, ct.With, lt.IndexDefs[ctName])...)
+                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), lt.IndexDefs[ctName])...)
                 if li := lt.IndexDefs[ctName]; li != nil && tablespaceDiffers(ct.Tablespace, li.Tablespace, live) {
                     plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, ctName, ct.Tablespace))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("constraint "+ctName+"'s index", fq)) }
@@ -6392,8 +6418,7 @@ func isSerialType(t string) bool {
 // parenthesis-insensitive constraint normalization is the fallback, since
 // PostgreSQL wraps compound defaults in parentheses ((now() + '1 day')).
 func defaultsEqual(desired, live string) bool {
-    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) ||
-        normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) || constraintDefsEqual(desired, live)
 }
 
 // memoized returns f(s), caching it in cache. The normalizers it wraps are
@@ -6602,7 +6627,7 @@ func renderConstraintDef(ct *schema.Constraint) string {
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
         return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
-        return fmt.Sprintf("exclude %s", excludeWithTablespace(ct.Expression, ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("exclude %s", excludeWithTablespace(excludeExpression(ct), ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
     return ""
 }
@@ -6665,16 +6690,28 @@ func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string)
         constraintDefsEqual(pol.WithCheck, live.WithCheck)
 }
 
+// constraintDefsEqual compares two definitions with normalizeConstraintDef.
+// A string literal that either side marks as an object name ('seq'::regclass)
+// matches its public.-qualified spelling on the other side, where the cast
+// may be missing.
 func constraintDefsEqual(desired, live string) bool {
-    return normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+    if normalizeConstraintDef(desired) == normalizeConstraintDef(live) { return true }
+    names := objectLiteralNames(desired, live)
+    return len(names) > 0 && normalizeConstraintDefWith(desired, names) == normalizeConstraintDefWith(live, names)
 }
 
 // triggerDefsEqual compares a desired CREATE TRIGGER statement against
-// pg_get_triggerdef() output. Both sides go through normalizeConstraintDef
-// (case, quoting, parens, casts, whitespace, public. qualifiers); on top of
-// that the trailing semicolon is ignored and EXECUTE FUNCTION (emitted by
-// PostgreSQL 11+) is treated as equal to EXECUTE PROCEDURE.
+// pg_get_triggerdef() output. The part before EXECUTE goes through
+// normalizeConstraintDef (case, quoting, parens, casts, whitespace, public.
+// qualifiers); the function call is compared by name, where EXECUTE FUNCTION
+// equals EXECUTE PROCEDURE and a public or pg_catalog qualifier is ignored,
+// and by argument values, since PostgreSQL stores every argument as a string.
 func triggerDefsEqual(desired, live string) bool {
+    dh, dc, dok := splitTriggerCall(desired)
+    lh, lc, lok := splitTriggerCall(live)
+    if dok && lok {
+        if equal, ok := triggerCallsEqual(dc, lc); ok { return equal && constraintDefsEqual(dh, lh) }
+    }
     n := func(s string) string {
         s = normalizeConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";"))
         return strings.ReplaceAll(s, "executefunction", "executeprocedure")
@@ -6738,7 +6775,9 @@ func canonicalTriggerEvents(events []string) []string {
 // against pg_get_constraintdef() output: after canonicalizeExpr (IN/BETWEEN/
 // LIKE rewrites, cast removal), outside single-quoted strings it strips
 // double quotes, parentheses, whitespace, and "public." qualifiers, and
-// lowercases. A trailing NOT VALID is ignored: validating the constraint
+// lowercases. String literals are kept as written, except that one naming a
+// database object loses its public. qualifier (see unqualifyObjectLiterals).
+// A trailing NOT VALID is ignored: validating the constraint
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
@@ -6746,13 +6785,23 @@ func normalizeConstraintDef(s string) string { return memoized(&normalizeConstra
 
 var normalizeConstraintDefCache sync.Map
 
-func normalizeConstraintDefUncached(s string) string {
-    var b strings.Builder
+func normalizeConstraintDefUncached(s string) string { return normalizeConstraintDefWith(s, nil) }
+
+// normalizeConstraintDefWith is normalizeConstraintDef for a definition in
+// which the string literals spelling an object name in names lose their
+// public. qualifier too.
+func normalizeConstraintDefWith(s string, names map[string]bool) string {
+    var b, seg strings.Builder
+    flush := func() {
+        b.WriteString(strings.ReplaceAll(seg.String(), "public.", ""))
+        seg.Reset()
+    }
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
+    rs := []rune(strings.TrimSpace(canonicalizeExpr(unqualifyObjectLiterals(s, names))))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
+            if !inQ { flush() }
             inQ = !inQ
             b.WriteRune(r)
             continue
@@ -6771,9 +6820,10 @@ func normalizeConstraintDefUncached(s string) string {
             continue
         }
         if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
-        b.WriteRune(r)
+        seg.WriteRune(r)
     }
-    return strings.TrimSuffix(strings.ReplaceAll(b.String(), "public.", ""), "notvalid")
+    flush()
+    return strings.TrimSuffix(b.String(), "notvalid")
 }
 
 func isCastTypeChar(r rune) bool {
@@ -6922,6 +6972,9 @@ var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\
 // definition from pg_get_constraintdef, leaving out index storage
 // parameters and the index's tablespace, which are changed in place.
 func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bool {
+    if strings.EqualFold(ct.Type, "exclude") {
+        if equal, ok := excludeMatchesLive(lt, name, ct); ok { return equal }
+    }
     strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
     c := *ct
     c.Tablespace = ""
@@ -7102,33 +7155,6 @@ func renderExtension(ext *schema.Extension) string {
     if ext.Version != "" { stmt += " version " + quoteString(ext.Version) }
     if ext.Cascade { stmt += " cascade" }
     return stmt + ";"
-}
-
-// extensionAlterStmts moves a live extension to its declared schema (when it
-// is relocatable; others cannot be moved and are left alone) and updates it
-// to its declared version. Unset schema/version are unmanaged.
-func extensionAlterStmts(ext *schema.Extension, le *LiveExtension) []string {
-    if le == nil { return nil }
-    out := []string{}
-    if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
-        out = append(out, fmt.Sprintf("alter extension %s set schema %s;", quoteIdent(ext.Name), quoteIdent(ext.Schema)))
-    }
-    if ext.Version != "" && ext.Version != le.Version {
-        out = append(out, fmt.Sprintf("alter extension %s update to %s;", quoteIdent(ext.Name), quoteString(ext.Version)))
-    }
-    if ext.Comment != "" && ext.Comment != le.Comment {
-        out = append(out, fmt.Sprintf("comment on extension %s is %s;", quoteIdent(ext.Name), quoteString(ext.Comment)))
-    }
-    return out
-}
-
-func findExtension(db *schema.Database, name string) *schema.Extension {
-    for _, ext := range db.Extensions {
-        if ext != nil && ext.Name == name {
-            return ext
-        }
-    }
-    return nil
 }
 
 // normalizeFunctionSignature normalizes function signatures for comparison

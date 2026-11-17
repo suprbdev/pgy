@@ -16,8 +16,10 @@ var (
     exprNotInListRe = regexp.MustCompile(`(?i)\bnot\s+in\s*\(([^()]*)\)`)
     exprInListRe    = regexp.MustCompile(`(?i)\bin\s*\(([^()]*)\)`)
     exprOperand     = `((?:[\w.]+|"[^"]*")(?:\([^()]*\))?|\x00\d+\x00)`
-    exprNotBetweenRe = regexp.MustCompile(`(?i)` + exprOperand + `\s+not\s+between\s+` + exprOperand + `\s+and\s+` + exprOperand)
-    exprBetweenRe    = regexp.MustCompile(`(?i)` + exprOperand + `\s+between\s+` + exprOperand + `\s+and\s+` + exprOperand)
+    exprBound       = `(-?(?:[\w.]+|"[^"]*")(?:\([^()]*\))?|\x00\d+\x00)`
+    exprNotBetweenRe = regexp.MustCompile(`(?i)` + exprOperand + `\s+not\s+between\s+` + exprBound + `\s+and\s+` + exprBound)
+    exprBetweenRe    = regexp.MustCompile(`(?i)` + exprOperand + `\s+between\s+` + exprBound + `\s+and\s+` + exprBound)
+    exprCatalogRe    = regexp.MustCompile(`(?i)(^|[^\w$."])"?pg_catalog"?\.`)
     exprLikeRe       = regexp.MustCompile(`(?i)\b(not\s+)?(i?like)\b`)
     exprTypedLiteralRe = regexp.MustCompile(`(?i)\b(?:interval|date|time|timestamp|timestamptz|numeric|decimal|text|jsonb|json|uuid|inet|cidr|bool|boolean|bytea|int|integer|int4|int8|bigint|smallint|real|float8|varchar|char)\s+(\x00\d+\x00)`)
     exprPlaceholderRe  = regexp.MustCompile(`\x00(\d+)\x00`)
@@ -28,11 +30,15 @@ var (
 // deparser (pg_get_expr, pg_get_constraintdef) prints it in, so a YAML
 // expression and its live echo can be compared textually:
 //
+//   - pg_catalog. qualifiers are dropped: pg_catalog is always searched
+//     first, so PostgreSQL never prints them for a name it resolves there
 //   - ::type casts are removed, including multi-word and modified types
-//     ('a'::character varying(10), x::timestamp(3) with time zone)
+//     ('a'::character varying(10), x::timestamp(3) with time zone), and
+//     CAST(x AS type) becomes (x)
 //   - x IN (a, b) becomes x = ANY (ARRAY[a, b]); NOT IN becomes <> ALL
 //     (a single-element list becomes = / <>); subquery INs are left alone
-//   - x BETWEEN a AND b becomes x >= a AND x <= b (NOT BETWEEN: x < a OR x > b)
+//   - x BETWEEN a AND b becomes x >= a AND x <= b (NOT BETWEEN: x < a OR x > b);
+//     the bounds may be negative
 //   - LIKE / ILIKE / NOT LIKE / NOT ILIKE become ~~ / ~~* / !~~ / !~~*
 //   - != becomes <>
 //   - typed literals (interval '1 day') lose their type prefix, matching the
@@ -43,6 +49,8 @@ var (
 // Single-quoted string literals are never rewritten.
 func canonicalizeExpr(s string) string {
     masked, lits := maskStringLiterals(s)
+    masked = exprCatalogRe.ReplaceAllString(masked, "$1")
+    masked = rewriteCastCalls(masked)
     masked = exprCastRe.ReplaceAllString(masked, "")
     masked = strings.ReplaceAll(masked, "!=", "<>")
     masked = maskPositionIn(masked)
@@ -71,6 +79,35 @@ func canonicalizeExpr(s string) string {
         }
         return lit
     })
+}
+
+// rewriteCastCalls replaces each CAST(x AS type) in s, whose string
+// literals are already masked, with (x), which is what x::type becomes once
+// casts are removed. Nested calls are rewritten from the outside in.
+func rewriteCastCalls(s string) string {
+    for start := 0; ; {
+        i := strings.Index(strings.ToLower(s[start:]), "cast")
+        if i < 0 { return s }
+        i += start
+        j := i + len("cast")
+        for j < len(s) && s[j] == ' ' { j++ }
+        start = i + len("cast")
+        if (i > 0 && (isWordByte(s[i-1]) || s[i-1] == '"' || s[i-1] == '.')) || j >= len(s) || s[j] != '(' { continue }
+        depth, as, end := 0, -1, -1
+        for k := j; k < len(s) && end < 0; k++ {
+            switch s[k] {
+            case '(':
+                depth++
+            case ')':
+                if depth--; depth == 0 { end = k }
+            case ' ', '\t', '\n':
+                if depth == 1 && k+4 <= len(s) && strings.EqualFold(s[k+1:k+3], "as") && strings.ContainsRune(" \t\n", rune(s[k+3])) { as = k }
+            }
+        }
+        if end < 0 || as < 0 { continue }
+        s = s[:i] + "(" + strings.TrimSpace(s[j+1:as]) + ")" + s[end+1:]
+        start = i
+    }
 }
 
 // maskPositionIn replaces the IN keyword of position(a IN b) calls with \x01

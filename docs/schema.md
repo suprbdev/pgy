@@ -213,7 +213,8 @@ the same table is declared in more than one file:
 - **`dependsOn`** entries are appended (duplicates ignored).
 - **`grants`, `policies`, `comment`**, and partition settings from a later
   file replace the earlier values when present.
-- **Extensions** are deduplicated by name.
+- **Extensions** are deduplicated by name, and the first declaration wins.
+  `pgy validate` warns when two declarations of one extension differ.
 - **Types, functions, procedures, views, sequences, and domains** are keyed by
   name; a later declaration replaces an earlier one.
 
@@ -273,11 +274,11 @@ extensions: [pg_trgm, pgcrypto]
 |----------|------|-------------|
 | `name` | string | Extension name |
 | `ifNotExists` | boolean | Adds `IF NOT EXISTS` to the SQL statement |
-| `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing. A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged |
-| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged |
+| `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
+| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
 | `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
-| `dependsOn` | list | See [Dependencies](#dependencies) |
+| `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
 
 ```yaml
 extensions:
@@ -286,6 +287,14 @@ extensions:
     schema: extensions
     version: "1.6"
 ```
+
+Extension statements come right after `CREATE SCHEMA`, before every object that could use the extension, and in requirement order: an extension is created after the declared extensions it requires. With a connection pgy reads the requirements from the server (`pg_available_extension_versions`); `diff --from-empty` knows those between PostgreSQL's own extensions (`earthdistance` needs `cube`, each transform such as `hstore_plperl` needs its language and its type) and otherwise follows `dependsOn: [extension <name>]`, which `pgy pull` writes for every extension that requires another.
+
+With a connection, `pgy diff` also warns about an extension the server does not offer, a `version` it cannot install, and a `version` the installed one has no update path to. The last case is left out of the plan, since PostgreSQL cannot downgrade an extension.
+
+Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
+
+Extensions are never dropped by pgy, not even with `--unsafe --prune`: remove one with a hand-written migration.
 
 ## Database Settings
 
@@ -302,6 +311,8 @@ database:
 ```
 
 `roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
+
+Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. PostgreSQL lets only superusers set such a parameter in a session that has not loaded the extension's library. A migration that creates the extension has loaded it; a later migration run by a non-superuser that changes the setting has not, and fails with `permission denied to set parameter` unless it first calls one of the extension's functions (for example a hand-added `select show_limit();` for `pg_trgm`).
 
 ## Tables
 
@@ -544,7 +555,9 @@ triggers:
 
 Events may name columns, `"update of status, total"` (quote it in a YAML flow list, since the comma would otherwise split it). `referencing` emits `REFERENCING OLD TABLE AS ... NEW TABLE AS ...`, which statement-level `AFTER` triggers use to see every affected row at once.
 
-Triggers are compared against the live database by **definition**, not just name: if a live trigger's `pg_get_triggerdef()` no longer matches the desired trigger (timing, events, level, `when:` guard, procedure, deferrability), it is dropped and recreated in the same migration. The comparison normalizes cosmetic differences (case, quoting, parentheses, type casts, `public.` qualifiers, event order, `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE`), so an unchanged trigger emits no SQL.
+Triggers are compared against the live database by **definition**, not just name: if a live trigger's `pg_get_triggerdef()` no longer matches the desired trigger (timing, events, level, `when:` guard, procedure, deferrability), it is dropped and recreated in the same migration. The comparison normalizes cosmetic differences (case, quoting, parentheses, type casts, `public.` qualifiers, event order, `EXECUTE FUNCTION` vs `EXECUTE PROCEDURE`, a `pg_catalog.` qualifier on the function), so an unchanged trigger emits no SQL.
+
+`procedure` is the function call as `CREATE TRIGGER` takes it, arguments included. PostgreSQL stores every trigger argument as a string, so arguments are compared by value and any spelling it accepts matches: `moddatetime(updated_at)`, `moddatetime('updated_at')`, `f($$doc$$)` and `f(E'doc')` are the same call, a bare identifier is folded to lower case unless it is double-quoted, and `007` is the string `7`. A changed argument recreates the trigger; `'public.parent'` and `'parent'` are different arguments.
 
 The optional `when:` expression is emitted verbatim as `WHEN (<expression>)` between `FOR EACH ROW` and `EXECUTE`. Use it to guard row triggers, e.g. a supersede trigger that must not fire for rows older than the current one (`when: old.created_at <= new.created_at`) — with `AFTER ... FOR EACH ROW` triggers on multi-row inserts, every row's trigger sees the fully-inserted statement result, so unguarded triggers can outdate each other.
 
@@ -618,7 +631,7 @@ constraints:
     columns: [col1, col2]       # for unique
     nullsNotDistinct: true      # unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     include: [col3]             # unique: INCLUDE (non-key) columns of its index
-    with: {fillfactor: 70}      # unique: storage parameters of its index
+    with: {fillfactor: 70}      # unique/exclude: storage parameters of its index
     tablespace: fast_ssd        # unique/exclude: USING INDEX TABLESPACE
     deferrable: true            # unique/exclude: DEFERRABLE
     initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
@@ -631,7 +644,11 @@ constraints:
 
 Constraints (including foreign keys) are matched against the live database by name, and their definitions are compared via `pg_get_constraintdef()`. A constraint whose definition changed is dropped and re-added — since the re-add revalidates existing rows (and can fail on them), this requires `--unsafe`. Without `--unsafe`, a redefined constraint emits no SQL.
 
-Definition comparison is normalized: casts (`''::text`), parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so a live `CHECK ((email <> ''::text))` matches a YAML `expression: "email <> ''"` without churn. The rewrites PostgreSQL applies when storing an expression are also understood: `x in ('a', 'b')` matches `x = ANY (ARRAY['a', 'b'])`, `between` matches its `>=`/`<=` form, `like`/`ilike` match `~~`/`~~*`, `!=` matches `<>`, and `-1` matches `'-1'::integer`. A trailing `NOT VALID` is ignored on both sides. The `with` of a unique constraint or primary key is compared with its index's storage parameters and changed in place (`ALTER INDEX ... SET / RESET`), and is unmanaged when left out. Primary keys are otherwise matched by existence only and never dropped, so a primary key's `include` applies when it is created.
+Definition comparison is normalized: casts (`''::text`), parentheses, whitespace, identifier quoting, and `public.` qualifiers are ignored, so a live `CHECK ((email <> ''::text))` matches a YAML `expression: "email <> ''"` without churn. The rewrites PostgreSQL applies when storing an expression are also understood: `x in ('a', 'b')` matches `x = ANY (ARRAY['a', 'b'])`, `between` matches its `>=`/`<=` form, `like`/`ilike` match `~~`/`~~*`, `!=` matches `<>`, and `-1` matches `'-1'::integer`. `cast(x as type)` matches `x::type`, `between` may have negative bounds, and a `pg_catalog.` qualifier is ignored. A string literal is compared as written (`'public.x'` and `'x'` are different values), except where it names an object: `'public.seq'::regclass`, `nextval('public.seq')` and `to_tsvector('public.cfg', body)` match the unqualified names PostgreSQL prints while `public` is on the search_path. A trailing `NOT VALID` is ignored on both sides. The `with` of a unique constraint or primary key is compared with its index's storage parameters and changed in place (`ALTER INDEX ... SET / RESET`), and is unmanaged when left out. Primary keys are otherwise matched by existence only and never dropped, so a primary key's `include` applies when it is created.
+
+An exclusion constraint's `expression` is everything after `EXCLUDE`: `using gist (room_id with =, during with &&) where (active)`. It is compared with the live constraint element by element, so spellings PostgreSQL does not print back make no difference: leaving out `using` (btree), naming the operator class that is the default for the column (`room_id gist_int4_ops with =`), and `with operator(pg_catalog.=)` for an operator PostgreSQL finds without the qualifier. Its index's storage parameters come from a `WITH (...)` clause in the expression (which is where `pgy pull` writes them), from the `with` key, or both, the key winning; they are applied when the constraint is created, and afterwards compared and changed in place like a unique constraint's. With neither, they are unmanaged.
+
+Constants are compared as text, so a literal has to be written the way PostgreSQL prints it back: `'1 day'::interval` rather than `'24 hours'`, `'"a"=>"1"'::hstore` rather than `'a=>1'`, `'(0, 0, 0)'::cube` rather than `'(0,0,0)'`. The same goes for function-style casts (`isbn('...')`, stored as `'...'::isbn`) and `type 'literal'` constants of types pgy does not know. `pgy pull`, or `\d` in psql, shows the stored form.
 
 ### Partitioning
 
@@ -1230,7 +1247,7 @@ schema app:
         generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
 ```
 
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged); its template can't be changed in place, so a changed one is reported. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
 
 ## Row Level Security
 
@@ -1535,7 +1552,9 @@ schema app:
 ```
 
 - A row missing from the table is inserted. A row whose listed columns differ is updated, and only those columns are written. Columns a row doesn't list are left alone. With `--unsafe --prune`, rows the YAML no longer declares are deleted.
-- PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), maps (for `json`/`jsonb` and composite-type columns) and dates compare by value. Values that contain a map, and every value of a `json` or `jsonb` column (where `[]` is an empty JSON array and a string is a JSON string), are written through `jsonb_populate_record`, the same conversion the comparison uses. Two things don't survive YAML: the original spacing of `json` values, and the difference between a JSON `null` and SQL `NULL` in `json`/`jsonb` columns, which both become YAML `null` and are written as SQL `NULL`. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
+- PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), maps (for `json`/`jsonb` and composite-type columns) and dates compare by value. Every value of a `json` or `jsonb` column is a JSON document (`[]` is an empty JSON array and a string is a JSON string) and is written as a `jsonb` literal. A map for a composite-type column is written through `jsonb_to_record`, the same conversion the comparison uses. Two things don't survive YAML: the original spacing of `json` values, and the difference between a JSON `null` and SQL `NULL` in `json`/`jsonb` columns, which both become YAML `null` and are written as SQL `NULL`. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
+- A type YAML has no notation for takes its value as text, the way PostgreSQL reads and prints it: an `hstore` is `attrs: '"seats"=>"1"'` (or `seats=>1`), an `ltree` is `path: top.science`, a range is `during: "[1,5)"`, and a composite value may also be written as `'(1,x)'`. This covers extension types and domains over them. A map given to a column that takes none (an `hstore` column, say) is an error in `pgy diff`, which names the row and the column, when the table or the column's type already exists in the database; otherwise PostgreSQL rejects it when the migration runs. `pgy pull --data` writes types that PostgreSQL would turn into JSON objects through a cast (`hstore`) in their text form, so its rows load back.
+- Rows are matched on the key with the key columns' own equality, so a `citext` key matches in any case. A key that matches but is written differently is updated to the spelling in the YAML. Two rows whose keys are equal that way (`free` and `FREE` in a `citext` column) are an error in `pgy diff` when the key's types exist in the database; `pgy validate`, which has no database, only catches keys written identically.
 - Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
 - `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
 - `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`. A `key` that isn't the primary key or a unique constraint gets a warning.
