@@ -210,7 +210,7 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 - role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
 - rows of tables with a `data:` block that the block no longer lists
 
-Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
+Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), undeclared inheritance children of a table the plan keeps (their rows are part of the parent's, as with TimescaleDB chunks; `pgy diff` names them in a warning), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
 
 A `prune:` block in the config file names extensions that `--prune` must leave alone, for example ones the hosting platform installed:
 

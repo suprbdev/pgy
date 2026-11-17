@@ -3347,6 +3347,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
+        _, inheritWarnings := keptInheritanceChildren(live, desired, opts.MigrationsTable)
+        plan.Warnings = append(plan.Warnings, inheritWarnings...)
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
         plan.Drops = append(plan.Drops, serverDrops...)
         plan.Warnings = append(plan.Warnings, serverWarnings...)
