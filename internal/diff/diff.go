@@ -4824,9 +4824,9 @@ func splitArgDefault(a string) (decl, def string) {
 // types: their argument names or modes changed, which CREATE OR REPLACE
 // rejects. Under --unsafe each is planned as new, like
 // recreateChangedFunctions does, with recreated holding the DROP of the live
-// routine and what it had. Without --unsafe each is blocked (left out of the plan) with a
-// warning, and its comment, grants and owner are compared with the live
-// routine's.
+// routine and what it had. Without --unsafe each is blocked (left out of the
+// plan) with a warning, and its comment, grants and owner are compared with
+// the live routine's.
 func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool) (out *Live, recreated map[string]recreatedRoutine, blocked map[string]bool, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil, nil }
