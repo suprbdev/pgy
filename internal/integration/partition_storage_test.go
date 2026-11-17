@@ -16,7 +16,7 @@ schema SCH:
 `
 	for _, step := range []struct{ extra, want string }{
 		{"    unlogged: true\n    with: {fillfactor: 90}\n", "with (fillfactor = 90)"},
-		{"    unlogged: true\n    with: {fillfactor: 70, autovacuum_enabled: false}\n", "set (autovacuum_enabled = false, fillfactor = 70)"},
+		{"    unlogged: true\n    with: {fillfactor: 70, autovacuum_enabled: false}\n", "set (fillfactor = 70, autovacuum_enabled = false)"},
 	} {
 		if sql := convergeYAML(t, pool, sch, base+step.extra); !contains(sql, step.want) {
 			t.Errorf("want %q, got:\n%s", step.want, sql)
