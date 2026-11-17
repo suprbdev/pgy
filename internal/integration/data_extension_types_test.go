@@ -35,8 +35,12 @@ schema app:
   type attr:
     type: composite
     attributes: {name: text, props: hstore}
+  type edition:
+    type: composite
+    attributes: {n: int, code: app.book_id}
+    dependsOn: [domain app.book_id]
   table book:
-    dependsOn: [domain app.book_id, domain app.span, domain app.must, domain app.tags, domain app.price, type app.attr]
+    dependsOn: [domain app.book_id, domain app.span, domain app.must, domain app.tags, domain app.price, type app.attr, type app.edition]
     columns:
       id: {type: isbn13}
       alias: {type: app.book_id, nullable: true}
@@ -48,6 +52,7 @@ schema app:
       labels: {type: app.tags, nullable: true}
       history: {type: "hstore[]", nullable: true}
       extra: {type: app.attr, nullable: true}
+      first: {type: app.edition, nullable: true}
       meta: {type: jsonb, nullable: true}
       title: {type: citext}
     primaryKey: [id]
@@ -64,6 +69,7 @@ schema app:
           labels: k=>v
           history: [a=>1, "b=>2, c=>\"x y\""]
           extra: {name: x, props: k=>v}
+          first: (1,9780306406157)
           meta: {a: [1, 2]}
           title: Second
         - {id: 978-0-13-110362-7, alias: null, shelf: null, attrs: null, history: [], title: Third}
@@ -152,6 +158,7 @@ func TestIntegrationDataExtensionTypes(t *testing.T) {
 		`labels: '"k"=>"v"'`,
 		`history: ['"a"=>"1"', '"b"=>"2", "c"=>"x y"']`,
 		`extra: '(x,"""k""=>""v""")'`,
+		`first: '(1,978-0-306-40615-7)'`,
 		`meta: {a: [1, 2]}`,
 		`alias: 978-1-86197-271-2`,
 	} {

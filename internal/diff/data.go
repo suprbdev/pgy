@@ -576,27 +576,30 @@ func partitioned(live *Live, dt *schema.Table, fq string) bool {
 }
 
 // dataTextColumnsQ lists the columns of a table whose to_jsonb form does not
-// load back into the column: to_jsonb renders a type that is not built in
+// load back into the column. to_jsonb renders a type that is not built in
 // and has a cast to json (hstore) with that cast, wherever the type occurs
 // (as the column's type, under a domain, as an array element or inside a
-// composite type). The second result column is true when the column is an
-// array of such a type, whose elements can be read as text one by one.
+// composite type). And the object it makes of a composite value cannot be
+// converted back when an attribute is a domain over a type without a binary
+// input function (see dataTypeChainQ). The second result column is true
+// when the column is an array of a type with such a cast, whose elements can
+// be read as text one by one.
 const dataTextColumnsQ = `
-    with recursive reach(attnum, typ, kind) as (
-        select a.attnum, a.atttypid, 0
+    with recursive reach(attnum, typ, kind, dom) as (
+        select a.attnum, a.atttypid, 0, false
         from pg_attribute a
         where a.attrelid = $1::text::regclass and a.attnum > 0 and not a.attisdropped
       union
-        select r.attnum, n.typ, n.kind
+        select r.attnum, n.typ, n.kind, n.dom
         from reach r
         join pg_type t on t.oid = r.typ
         cross join lateral (
-            select t.typbasetype as typ, r.kind as kind where t.typtype = 'd'
+            select t.typbasetype as typ, r.kind as kind, r.dom or r.kind = 2 as dom where t.typtype = 'd'
             union all
-            select t.typelem, case when r.kind = 0 then 1 else 2 end
+            select t.typelem, case when r.kind = 0 then 1 else 2 end, r.dom
             where t.typtype <> 'd' and t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1
             union all
-            select ca.atttypid, 2 from pg_attribute ca
+            select ca.atttypid, 2, r.dom from pg_attribute ca
             where t.typtype = 'c' and ca.attrelid = t.typrelid and ca.attnum > 0 and not ca.attisdropped
         ) n
     )
@@ -604,9 +607,10 @@ const dataTextColumnsQ = `
     from reach r
     join pg_attribute a on a.attrelid = $1::text::regclass and a.attnum = r.attnum
     join pg_type t on t.oid = r.typ
-    where t.oid >= 16384 and t.typtype not in ('c', 'd')
+    where t.typtype not in ('c', 'd')
       and not (t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1)
-      and exists (select 1 from pg_cast c where c.castsource = t.oid and c.casttarget = 'json'::regtype and c.castmethod = 'f')
+      and ((r.dom and t.typreceive::oid = 0)
+           or (t.oid >= 16384 and exists (select 1 from pg_cast c where c.castsource = t.oid and c.casttarget = 'json'::regtype and c.castmethod = 'f')))
     group by a.attnum, a.attname
     order by a.attnum`
 
