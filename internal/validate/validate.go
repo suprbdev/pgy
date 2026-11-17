@@ -1075,6 +1075,8 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 	for _, k := range key {
 		if !tableHasColumn(d, fq, k, 0) {
 			add(Error, obj, "data key column %s is not declared", k)
+		} else if c := t.Columns[k]; c != nil && unorderedType(c.Type) {
+			add(Error, obj, "data key column %s has type %s, which has no default btree operator class, so rows cannot be matched or ordered by it; use key columns of another type", k, strings.TrimSpace(c.Type))
 		}
 	}
 	if len(t.Data.Key) > 0 && !uniqueOn(t, key) {
@@ -1103,6 +1105,21 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 			}
 		}
 	}
+}
+
+// unorderedType reports whether typ is a built-in type without a default
+// btree operator class, or an array of one. Extension types are left to
+// pgy diff, which looks the class up in the database.
+func unorderedType(typ string) bool {
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	for strings.HasSuffix(typ, "[]") {
+		typ = strings.TrimSpace(strings.TrimSuffix(typ, "[]"))
+	}
+	switch strings.TrimPrefix(typ, "pg_catalog.") {
+	case "json", "jsonpath", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle":
+		return true
+	}
+	return false
 }
 
 // uniqueOn reports whether cols are exactly t's primary key or the columns
