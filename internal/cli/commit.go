@@ -1,8 +1,6 @@
 package cli
 
 import (
-    "crypto/sha256"
-    "encoding/hex"
     "fmt"
     "os"
     "path/filepath"
@@ -78,8 +76,7 @@ func writeMigration(dir string, num int, slug string, body []byte, created time.
     base := fmt.Sprintf("%04d", num)
     if slug != "" { base = base + "_" + slug }
     filename := filepath.Join(dir, base+".sql")
-    sum := sha256.Sum256(body)
-    header := fmt.Sprintf("-- pgy %s\n-- created %s\n-- checksum %s\n\n", VersionString(), created.Format(time.RFC3339), hex.EncodeToString(sum[:]))
+    header := fmt.Sprintf("-- pgy %s\n-- created %s\n-- checksum %s\n\n", VersionString(), created.Format(time.RFC3339), sqlChecksum(string(body)))
     if err := os.WriteFile(filename, append([]byte(header), body...), 0o644); err != nil { return "", err }
     return filename, nil
 }

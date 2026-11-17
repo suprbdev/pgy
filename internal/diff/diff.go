@@ -2273,31 +2273,105 @@ func normalizeConfigValue(v string) string {
     return configCommaRe.ReplaceAllString(v, ",")
 }
 
-// configClauses returns SET / RESET action clauses that bring a live
-// function's or procedure's configuration in line with a YAML set block. A
-// nil block leaves configuration unmanaged; an empty block resets every
-// live setting. Clauses are sorted for deterministic output.
-var (
-    configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
-    configIdentRe  = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
-)
+var configNumberRe = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 
-// configValueSQL renders a SET value. Each comma-separated element that is
-// not already quoted, a number or a lower-case identifier is quoted, so
-// values such as 5s, 64MB or America/New_York (which PostgreSQL stores, and
-// pgy pull emits, unquoted) form valid SQL, and UTC isn't folded to utc.
-func configValueSQL(v string) string {
-    parts := splitTopLevelQuoted(v)
-    for i, p := range parts {
+// listQuoteParams are the parameters PostgreSQL stores as a list of quoted
+// identifiers (GUC_LIST_QUOTE), the same names pg_dump singles out. Only
+// their values are comma-separated lists.
+var listQuoteParams = map[string]bool{
+    "local_preload_libraries": true, "search_path": true, "session_preload_libraries": true,
+    "shared_preload_libraries": true, "temp_tablespaces": true, "unix_socket_directories": true,
+}
+
+// configValueSQL renders the value of a SET clause for the parameter name.
+// The value of a list parameter (listQuoteParams) is rendered element by
+// element. Any other value is one value, commas included, and is quoted
+// unless it is a number or a word PostgreSQL accepts bare, so 5s, 64MB,
+// America/New_York, UTC (not folded to utc) and reserved words such as all
+// form valid SQL. A value already written as one SQL string literal is kept
+// as it is, and the multi-argument spelling ('a', 'b') becomes the single
+// value PostgreSQL stores for it.
+func configValueSQL(name, v string) string {
+    v = strings.TrimSpace(v)
+    if listQuoteParams[strings.ToLower(name)] {
+        parts := splitTopLevelQuoted(v)
+        for i, p := range parts { parts[i] = configListElementSQL(strings.TrimSpace(p)) }
+        return strings.Join(parts, ", ")
+    }
+    switch {
+    case v == "":
+        return "''"
+    case isQuotedWith(v, '\''), configNumberRe.MatchString(v), configBareWord(v):
+        return v
+    }
+    if elems, ok := configQuotedElements(v); ok { return quoteString(strings.Join(elems, ", ")) }
+    return quoteString(v)
+}
+
+// configListElementSQL renders one element of a list parameter's value. An
+// element PostgreSQL could not read as a quoted identifier (empty, or
+// longer than an identifier may be) becomes a string literal.
+func configListElementSQL(p string) string {
+    switch {
+    case isQuotedWith(p, '\''):
+        return p
+    case isQuotedWith(p, '"'):
+        if inner := unquote(p, '"'); inner != "" && len(inner) < 64 { return p }
+        return quoteString(unquote(p, '"'))
+    case configBareWord(p):
+        return p
+    }
+    return quoteString(p)
+}
+
+// configBareWord reports whether v can follow SET ... = without quotes: a
+// lower-case identifier that is not a reserved word, or one of the reserved
+// words the SET grammar accepts.
+func configBareWord(v string) bool {
+    return plainIdentRe.MatchString(v) && (!reservedWords[v] || v == "on" || v == "true" || v == "false")
+}
+
+// configQuotedElements reads v as the multi-argument spelling of a SET
+// value, a comma-separated list with at least one quoted element, and
+// returns the elements without their quotes. ok is false for anything else,
+// such as free text that merely contains a quote.
+func configQuotedElements(v string) (elems []string, ok bool) {
+    for _, p := range splitTopLevelQuoted(v) {
         p = strings.TrimSpace(p)
         switch {
-        case p == "", strings.HasPrefix(p, "'"), strings.HasPrefix(p, `"`), configNumberRe.MatchString(p), configIdentRe.MatchString(p):
-        default:
-            p = quoteString(p)
+        case isQuotedWith(p, '\''):
+            p, ok = unquote(p, '\''), true
+        case isQuotedWith(p, '"'):
+            p, ok = unquote(p, '"'), true
+        case strings.ContainsAny(p, `'"`):
+            return nil, false
         }
-        parts[i] = p
+        elems = append(elems, p)
     }
-    return strings.Join(parts, ", ")
+    return elems, ok
+}
+
+// isQuotedWith reports whether s is one string wrapped in the quote
+// character q, with every q inside it doubled.
+func isQuotedWith(s string, q byte) bool {
+    if len(s) < 2 || s[0] != q || s[len(s)-1] != q { return false }
+    return !strings.ContainsRune(strings.ReplaceAll(s[1:len(s)-1], string([]byte{q, q}), ""), rune(q))
+}
+
+// unquote strips the quote character q wrapping s and undoubles the ones
+// inside it.
+func unquote(s string, q byte) string {
+    return strings.ReplaceAll(s[1:len(s)-1], string([]byte{q, q}), string(q))
+}
+
+// ConfigValueYAML returns the YAML set value under which pgy writes back
+// value, a setting of the parameter name as PostgreSQL stores it. A value
+// holding quotes or outer whitespace is written as an SQL string literal,
+// since configValueSQL would otherwise read them as the value's own quoting.
+func ConfigValueYAML(name, value string) string {
+    if listQuoteParams[strings.ToLower(name)] { return value }
+    if !strings.ContainsAny(value, `'"`) && value == strings.TrimSpace(value) { return value }
+    return quoteString(value)
 }
 
 // splitTopLevelQuoted splits on commas outside single and double quotes.
@@ -2318,6 +2392,10 @@ func splitTopLevelQuoted(s string) []string {
     return append(out, s[start:])
 }
 
+// configClauses returns SET / RESET action clauses that bring a live
+// function's or procedure's configuration in line with a YAML set block. A
+// nil block leaves configuration unmanaged; an empty block resets every
+// live setting. Clauses are sorted for deterministic output.
 func configClauses(desired map[string]string, live map[string]string) []string {
     if desired == nil { return nil }
     out := []string{}
@@ -2331,7 +2409,7 @@ func configClauses(desired map[string]string, live map[string]string) []string {
     for _, k := range keys {
         lv, ok := live[strings.ToLower(k)]
         if !ok || normalizeConfigValue(lv) != normalizeConfigValue(desired[k]) {
-            out = append(out, fmt.Sprintf("set %s = %s", k, configValueSQL(desired[k])))
+            out = append(out, fmt.Sprintf("set %s = %s", k, configValueSQL(k, desired[k])))
         }
     }
     extra := []string{}
@@ -2744,7 +2822,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range f.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(f.Set[k]))
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, f.Set[k]))
                 }
             }
             attrs := []string{}
@@ -2781,7 +2859,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for k := range pr.Set { keys = append(keys, k) }
                 sort.Strings(keys)
                 for _, k := range keys {
-                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(pr.Set[k]))
+                    setClauses += fmt.Sprintf(" set %s = %s", k, configValueSQL(k, pr.Set[k]))
                 }
             }
             attrsStr := ""

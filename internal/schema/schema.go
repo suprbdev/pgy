@@ -1867,9 +1867,7 @@ func parseFunction(schemaName, key string, body any) *Function {
     fn.Rows = floatPtr(m["rows"])
     if set, ok := m["set"].(map[string]any); ok {
         fn.Set = map[string]string{}
-        for k, v := range set {
-            if s, ok := v.(string); ok { fn.Set[k] = s }
-        }
+        for k, v := range set { fn.Set[k] = scalarToString(v) }
     }
     if b, ok := m["body"].(string); ok { fn.Body = b }
     if r, ok := m["replace"].(bool); ok { fn.Replace = r }
@@ -1935,9 +1933,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
     if s, ok := m["security"].(string); ok { pr.Security = s }
     if set, ok := m["set"].(map[string]any); ok {
         pr.Set = map[string]string{}
-        for k, v := range set {
-            if s, ok := v.(string); ok { pr.Set[k] = s }
-        }
+        for k, v := range set { pr.Set[k] = scalarToString(v) }
     }
     if b, ok := m["body"].(string); ok { pr.Body = b }
     if r, ok := m["replace"].(bool); ok { pr.Replace = r }
