@@ -3330,7 +3330,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
-    plan.Warnings = append(plan.Warnings, lockWarnings(live, plan)...)
+    plan.Warnings = append(plan.Warnings, lockWarnings(live, desired, plan)...)
     return plan
 }
 
