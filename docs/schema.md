@@ -1234,6 +1234,8 @@ A string `body` is dollar-quoted in the SQL pgy emits. A body on one line is pas
 
 The same goes for procedures. A routine's `language` is compared with the live one, and a different language is applied with `CREATE OR REPLACE`.
 
+A language's validator may store something other than the source. PL/Rust (`plrust`) compiles a function when it is created and keeps a JSON document in `prosrc`, holding the source, the toolchain version and the compiled library for the server's architecture. For `plrust` routines pgy compares and pulls the `src` member of that document, so the YAML holds the Rust source only.
+
 Overloads — functions sharing a name but taking different arguments — are separate declarations: `function area(r float8):` and `function area(w float8, h float8):` are created, compared, granted and commented independently. The same applies to procedures.
 
 Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. `fn(t my_type)` and `fn(t public.my_type)` refer to the same function, `fn(n integer)` and `fn(n pg_catalog.int4)` too, and so do `fn(t my_type)` and `fn(t app.my_type)` while `app` is on the connection's `search_path` (see [Name resolution](#name-resolution)).

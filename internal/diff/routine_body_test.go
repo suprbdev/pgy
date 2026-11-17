@@ -156,3 +156,24 @@ func TestProcedureLanguageChangeReplaces(t *testing.T) {
 		t.Errorf("same language:\n%s", sql)
 	}
 }
+
+func TestRoutineSourcePlrust(t *testing.T) {
+	stored := `{"src":"\nOk(Some(a + b))\n","trusted_pgrx_version":"=1.2.8","lib":{"x86_64-unknown-linux-gnu":{"encoding":"GzBase64","symbol":"plrust_fn_oid_16415_16423","encoded":"H4sI"}}}`
+	for _, c := range []struct{ language, prosrc, want string }{
+		{"plrust", stored, "\nOk(Some(a + b))\n"},
+		{"plrust", `{"src":""}`, ""},
+		{"plrust", "\nOk(Some(a + b))\n", "\nOk(Some(a + b))\n"},
+		{"plrust", "{ Ok(Some(1)) }", "{ Ok(Some(1)) }"},
+		{"plrust", `{"lib":{}}`, `{"lib":{}}`},
+		{"plrust", `{"src":1}`, `{"src":1}`},
+		{"plv8", stored, stored},
+		{"sql", "select 1", "select 1"},
+	} {
+		if got := routineSource(c.language, c.prosrc); got != c.want {
+			t.Errorf("routineSource(%q, %q) = %q, want %q", c.language, c.prosrc, got, c.want)
+		}
+	}
+	if routineBodyChanged("plrust", "Ok(Some(a + b))\n", true, false, routineSource("plrust", stored), false) {
+		t.Error("a plrust body is compared with the source in plrust's JSON document")
+	}
+}

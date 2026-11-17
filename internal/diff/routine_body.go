@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
@@ -47,6 +48,39 @@ func DeclaredRoutineBody(src string) string {
 		return src[1:]
 	}
 	return src + "\n\n\n"
+}
+
+// routineSourceExtractors maps each procedural language whose validator
+// replaces pg_proc.prosrc with something other than the source to a
+// function that recovers the source from it. Only the extension that
+// provides the language knows its format.
+var routineSourceExtractors = map[string]func(prosrc string) string{
+	"plrust": plrustSource,
+}
+
+// routineSource returns the source of a routine written in language, given
+// prosrc, the text PostgreSQL stores for it.
+func routineSource(language, prosrc string) string {
+	if extract := routineSourceExtractors[language]; extract != nil {
+		return extract(prosrc)
+	}
+	return prosrc
+}
+
+// plrustSource returns the src member of the JSON document plrust stores
+// for a compiled function, alongside the compiled library, or prosrc itself
+// when it holds no such document.
+func plrustSource(prosrc string) string {
+	if !strings.HasPrefix(prosrc, "{") {
+		return prosrc
+	}
+	var doc struct {
+		Src *string `json:"src"`
+	}
+	if json.Unmarshal([]byte(prosrc), &doc) != nil || doc.Src == nil {
+		return prosrc
+	}
+	return *doc.Src
 }
 
 // CompiledLanguage reports whether language is one whose functions pgy

@@ -1332,6 +1332,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns, &fullArgs, &language, &transform); err != nil {
                 return err
             }
+            src = routineSource(language, src)
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
                 norm := publicScope.functionSignature(key)
