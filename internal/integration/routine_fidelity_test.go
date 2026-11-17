@@ -264,6 +264,47 @@ schema app:
 	}
 }
 
+func TestIntegrationPulledDefinerSettingsDrift(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		create function %[1]s.owner_only() returns int language sql security definer as 'select 1';
+		create procedure %[1]s.purge() language sql security definer as 'select 1';
+		create function %[1]s.plain() returns int language sql as 'select 1';`, sch)); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, pool)
+	res, err := pull.Build(live, pull.Options{Schemas: []string{sch}, Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	pulled := loadSpellingYAML(t, y)
+	if sql := diff.Render(diff.Plan(live, pulled, false)); sql != "" {
+		t.Fatalf("pulled YAML must diff clean:\n%s\n%s", sql, y)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		alter function %[1]s.owner_only() set search_path = public;
+		alter procedure %[1]s.purge() set work_mem = '1MB';
+		alter function %[1]s.plain() set work_mem = '1MB';`, sch)); err != nil {
+		t.Fatal(err)
+	}
+	plan := diff.Plan(introspectAll(t, pool), pulled, false)
+	sql := diff.Render(plan)
+	if want := fmt.Sprintf(`alter function %q."owner_only"() reset search_path;`, sch); !contains(sql, want) {
+		t.Errorf("a setting added to a SECURITY DEFINER function pulled without any must be reset; want %s in:\n%s\n%s", want, sql, y)
+	}
+	if contains(sql, `"plain"`) {
+		t.Errorf("the settings of a SECURITY INVOKER function pulled without any stay unmanaged:\n%s", sql)
+	}
+	applyPlan(t, pool, plan)
+	var configured string
+	if err := pool.QueryRow(ctx, `select string_agg(proname, ',' order by proname) from pg_proc where pronamespace = $1::regnamespace and proconfig is not null`, sch).Scan(&configured); err != nil || configured != "plain" {
+		t.Errorf("routines with settings = %q, %v; want only plain", configured, err)
+	}
+}
+
 func TestIntegrationRoutineTransform(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()

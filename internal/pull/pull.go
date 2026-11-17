@@ -715,7 +715,7 @@ func (b *builder) routines() {
 			if lp.Security == "definer" {
 				add(m, "security", str("definer"))
 			}
-			addSet(m, lp.Config)
+			addSet(m, lp.Config, lp.Security == "definer")
 			add(m, "body", routineBody(lp.Body, lp.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(deps))
@@ -749,7 +749,7 @@ func (b *builder) routines() {
 			if lf.Rows != 0 && lf.Rows != 1000 {
 				add(m, "rows", floatNum(lf.Rows))
 			}
-			addSet(m, lf.Config)
+			addSet(m, lf.Config, lf.Security == "definer")
 			add(m, "body", routineBody(lf.Body, lf.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(deps))
@@ -856,8 +856,12 @@ func kindOf(r *diff.LiveRoutine) string {
 	return "function"
 }
 
-func addSet(m *node, config map[string]string) {
-	if len(config) == 0 {
+// addSet writes a routine's settings. A SECURITY DEFINER routine without
+// any gets an empty map, so that one set on it later, such as a
+// search_path, is noticed and reset; elsewhere the key is left out and the
+// routine's settings are unmanaged.
+func addSet(m *node, config map[string]string, definer bool) {
+	if len(config) == 0 && !definer {
 		return
 	}
 	set := newMap()
