@@ -94,6 +94,11 @@ type Live struct{
     DefaultACLs    map[string]map[string]map[string]bool
     DefaultACLRows map[string]bool
     CurrentUser    string
+    // OwnerRoles: the roles whose objects the connecting role may drop and
+    // alter as their owner, those whose privileges it has
+    // (pg_has_role(current_user, role, 'USAGE'), itself included, every
+    // role for a superuser); nil when unknown, and then any owner counts.
+    OwnerRoles map[string]bool
     // DatabaseConfig: ALTER DATABASE ... SET settings of the connected
     // database (for all roles): lower-cased name -> value
     DatabaseConfig map[string]string
@@ -336,8 +341,7 @@ type LiveExtension struct {
     Version     string
     Relocatable bool
     Comment     string
-    // Owner is the role that owns the extension, the one that created it.
-    Owner string
+    Owner       string
     // DefaultComment is the comment the extension's control file gives it,
     // which CREATE EXTENSION sets.
     DefaultComment string
@@ -411,6 +415,11 @@ type LiveFunction struct{
     SQLBody bool
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
+    // Dependents lists the objects outside the routine that use it, which
+    // DROP FUNCTION without CASCADE refuses to leave behind. It is nil
+    // until IntrospectExtensions loads it for a routine that pruning may
+    // drop.
+    Dependents []ExtensionDependent
 }
 type LiveProcedure struct{
     Signature string // "schema.name(identity args)" as introspected
@@ -422,6 +431,7 @@ type LiveProcedure struct{
     ConfigOrder []string // the Config names in proconfig order
     Language  string   // pg_language.lanname; "" when unknown
     Transform []string // protrftypes as type names, in declaration order
+    Dependents []ExtensionDependent // see LiveFunction.Dependents
 }
 type LiveTable struct{
     Columns     map[string]*LiveColumn
@@ -1179,8 +1189,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(aggQ, func(aggRows pgx.Rows) error {
         for aggRows.Next() {
@@ -1207,8 +1216,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         cross join lateral aclexplode(t.typacl) a
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         and a.grantee <> t.typowner
     `
     batch.add(typeGrantQ, func(rows pgx.Rows) error {
@@ -1225,8 +1233,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.typnamespace
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         and t.typacl is not null
         and not exists (select from aclexplode(t.typacl) a where a.grantee = 0 and a.privilege_type = 'USAGE')
     `
@@ -1375,8 +1382,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.typname, t.typtype in ('b', 'm')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_type", "t.oid")+`
         and (t.typtype in ('e', 'c', 'r', 'm') or t.typtype = 'b' and t.typcategory <> 'A' and t.typisdefined)
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
@@ -1413,8 +1419,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         join pg_language lang on lang.oid = p.prolang
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
@@ -1584,7 +1589,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case e.evtenabled when 'D' then 'disabled' when 'R' then 'replica' when 'A' then 'always' else 'origin' end,
                coalesce(e.evttags, '{}'), coalesce(d.description, ''),
                exists (select 1 from pg_depend x where x.classid = 'pg_event_trigger'::regclass and x.objid = e.oid and x.deptype = 'e'),
-               coalesce(pg_get_userbyid(e.evtowner), '')
+               pg_get_userbyid(e.evtowner)
         from pg_event_trigger e
         join pg_proc p on p.oid = e.evtfoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -1613,7 +1618,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_ts_dict t
         join pg_namespace n on n.oid = t.dictnamespace
         left join pg_description d on d.objoid = t.oid and d.classoid = 'pg_ts_dict'::regclass
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        where `+userObjects("n", "pg_ts_dict", "t.oid")+`
     `
     batch.add(tsQ, func(tsRows pgx.Rows) error {
         for tsRows.Next() {
@@ -1633,7 +1638,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.dictnamespace
         join pg_ts_template tp on tp.oid = t.dicttemplate
         join pg_namespace tn on tn.oid = tp.tmplnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        where `+userObjects("n", "pg_ts_dict", "t.oid")+`
     `
     batch.add(dictQ, func(rows pgx.Rows) error {
         for rows.Next() {
@@ -1736,8 +1741,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce((select c.conname::text from pg_constraint c where c.contypid = t.oid and c.contype = 'n' limit 1), '')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_type", "t.oid")+`
         and t.typtype = 'd'
     `
     batch.add(domQ, func(domRows pgx.Rows) error {
@@ -1768,7 +1772,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                array(select r.extname::text from pg_depend d join pg_extension r on r.oid = d.refobjid
                      where d.classid = 'pg_extension'::regclass and d.objid = e.oid
                      and d.refclassid = 'pg_extension'::regclass order by 1),
-               coalesce(pg_get_userbyid(e.extowner), '')
+               pg_get_userbyid(e.extowner)
         from pg_extension e
         join pg_namespace n on n.oid = e.extnamespace
         left join pg_available_extensions a on a.name = e.extname
@@ -1918,8 +1922,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         left join lateral aclexplode(p.proacl) a on true
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(fgQ, func(fgRows pgx.Rows) error {
         for fgRows.Next() {
@@ -2177,8 +2180,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_proc p on p.oid = d.objoid
         join pg_namespace n on n.oid = p.pronamespace
         where d.classoid = 'pg_proc'::regclass
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(fcQ, func(fcRows pgx.Rows) error {
         for fcRows.Next() {
@@ -2199,8 +2201,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_type t on t.oid = d.objoid
         join pg_namespace n on n.oid = t.typnamespace
         where d.classoid = 'pg_type'::regclass
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
     `
     batch.add(tcQ, func(tcRows pgx.Rows) error {
         for tcRows.Next() {
@@ -2323,7 +2324,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_type t join pg_namespace n on n.oid = t.typnamespace
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         union all
         select 'schema:' || n.nspname, pg_get_userbyid(n.nspowner)
         from pg_namespace n
@@ -2331,10 +2332,18 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         union all
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
         union all
         select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
         from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
+        where `+userObjects("n", "pg_ts_dict", "d.oid")+`
+        union all
+        select 'tscfg:' || n.nspname || '.' || c.cfgname, pg_get_userbyid(c.cfgowner)
+        from pg_ts_config c join pg_namespace n on n.oid = c.cfgnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'coll:' || n.nspname || '.' || c.collname, pg_get_userbyid(c.collowner)
+        from pg_collation c join pg_namespace n on n.oid = c.collnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(ownerQ, func(ownerRows pgx.Rows) error {
@@ -2397,6 +2406,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var config []string
             if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace, &l.DefaultAccessMethod); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
+        }
+        return nil
+    })
+    batch.add(`select r.rolname from pg_roles r where pg_has_role(current_user, r.oid, 'USAGE')`, func(rows pgx.Rows) error {
+        l.OwnerRoles = map[string]bool{}
+        for rows.Next() {
+            var role string
+            if err := rows.Scan(&role); err != nil { return err }
+            l.OwnerRoles[role] = true
         }
         return nil
     })
@@ -3573,8 +3591,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
-        early, late := planPrune(live, desired, opts.MigrationsTable)
+        early, late, pruneWarnings := planPrune(live, desired, opts.MigrationsTable, plan.Drops)
         plan.Drops = append(append(early, plan.Drops...), late...)
+        plan.Warnings = append(plan.Warnings, pruneWarnings...)
         _, inheritWarnings := keptInheritanceChildren(live, desired, opts.MigrationsTable)
         plan.Warnings = append(plan.Warnings, inheritWarnings...)
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
@@ -4213,8 +4232,9 @@ func isNumericLiteral(s string) bool {
 // desired publication has no members); option changes SET (...). Switching
 // to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
 // every table, so it requires --unsafe, as does --prune dropping
-// publications missing from a present publications block, other than
-// external ones (see externalPublication).
+// publications missing from a present publications block, but for external
+// ones (see externalPublication) and those the connecting role may not drop
+// (see Live.OwnerRoles), which are reported.
 func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.Publications == nil { return }
     for _, name := range sortedKeys(desired.Publications) {
@@ -4276,9 +4296,12 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
     }
     if !opts.Unsafe || !opts.Prune { return }
     for _, name := range sortedKeys(live.Publications) {
-        if lp := live.Publications[name]; desired.Publications[name] == nil && !externalPublication(desired.External, lp) {
-            plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name)))
+        if lp := live.Publications[name]; desired.Publications[name] != nil || externalPublication(desired.External, lp) { continue }
+        if owner := live.Publications[name].Owner; !live.mayDrop(owner) {
+            plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "publication "+name, owner, ""))
+            continue
         }
+        plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name)))
     }
 }
 
@@ -4346,7 +4369,9 @@ func publicationWith(p *schema.Publication, lp *LivePublication) string {
 // behind --unsafe), after every function create. Enabled state and comments
 // are reconciled with ALTER / COMMENT. With a present eventTriggers block,
 // --unsafe --prune drops undeclared ones that no extension or external role
-// owns and whose function is not in an external schema.
+// owns and whose function is in a schema the YAML declares objects in, like
+// the other objects it prunes; one the connecting role may not drop (see
+// Live.OwnerRoles) is reported instead.
 func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.EventTriggers == nil { return }
     for _, name := range sortedKeys(desired.EventTriggers) {
@@ -4379,8 +4404,13 @@ func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opt
         }
     }
     if !opts.Unsafe || !opts.Prune { return }
+    inScope := pruneScope(live, desired)
     for _, name := range sortedKeys(live.EventTriggers) {
-        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil || desired.External.HasRole(le.Owner) || desired.External.InSchema(le.Function) { continue }
+        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil || desired.External.HasRole(le.Owner) || !inScope(le.Function) { continue }
+        if owner := live.EventTriggers[name].Owner; !live.mayDrop(owner) {
+            plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "event trigger "+name, owner, ""))
+            continue
+        }
         plan.Drops = append(plan.Drops, fmt.Sprintf("drop event trigger %s;", quoteIdent(name)))
     }
 }
@@ -5608,9 +5638,11 @@ func planGrants(live *Live, desired *schema.Database) []string {
 //
 // On an object an extension owns, the privileges its script granted (see
 // Live.InitialGrants) are left alone unless the block names their grantee;
-// PublicAuthoritative still covers PUBLIC there. So are the privileges of
-// external roles, and on an object in an external schema those of every
-// grantee the block doesn't name (see withoutExternalGrantees).
+// PublicAuthoritative still covers PUBLIC there, and so does PublicByKind
+// on a routine or type whose extension took PUBLIC's default privilege away
+// (see publicRevokedByExtension). The privileges of external roles are left
+// alone too, and on an object in an external schema those of every grantee
+// the block doesn't name (see withoutExternalGrantees).
 //
 // Every REVOKE is emitted ahead of every GRANT. PostgreSQL's REVOKE ... ON
 // TABLE also drops that role's column-level privileges, so narrowing a
@@ -5645,6 +5677,15 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         kind, name, _ := strings.Cut(key, ":")
         inExternal := kind == "schema" && desired.External.HasSchema(name) || kind != "schema" && desired.External.InSchema(name)
         return withoutExternalGrantees(desired.External, inExternal, memberLiveGrants(live, mode, key, publicDefault, liveG, g), g)
+    }
+    coversMember := func(key, publicDefault string, g map[string][]string) (bool, func(rv, gr []string)) {
+        if why, ok := publicRevokedByExtension(live, mode, key, publicDefault, g); ok {
+            return true, func(rv, gr []string) {
+                warns = append(warns, publicRevokeWarnings(rv, mode, why)...)
+                add(rv, gr)
+            }
+        }
+        return covers(false, g), addFor(g)
     }
 
     for _, name := range sortedKeys(desired.Servers) {
@@ -5725,7 +5766,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             if attributeOnly { liveG = pendingGrants(created(k, "types"), desiredG) }
         }
         liveG = member("type:"+k, "usage", liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, covers(false, desiredG)))
+        cv, addTo := coversMember("type:"+k, "usage", desiredG)
+        addTo(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, cv))
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil {
@@ -5788,7 +5830,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if !f.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), cv))
         }
     }
 
@@ -5814,7 +5857,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if !pr.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), cv))
         }
     }
 
@@ -5837,7 +5881,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if ag.AttributeOnly() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), cv))
         }
     }
     return append(revokes, grants...), warns

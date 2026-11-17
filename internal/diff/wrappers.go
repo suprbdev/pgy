@@ -236,8 +236,9 @@ func wrapperForeignTables(live *Live, name string) []string {
 // wrappers a foreignDataWrappers block does not list. A wrapper an
 // extension owns is never dropped. One that a server still uses once
 // serverDrops, the plan's DROP SERVER statements, have run, or that a
-// declared server is yet to be created on, is kept and reported instead,
-// since dropping it would fail. Without the block, wrappers are unmanaged.
+// declared server is yet to be created on, or that the connecting role may
+// not drop (see Live.OwnerRoles), is kept and reported instead, since
+// dropping it would fail. Without the block, wrappers are unmanaged.
 func pruneWrappers(live *Live, desired *schema.Database, serverDrops []string) (drops []string, warnings []Warning) {
 	if desired.ForeignDataWrappers == nil {
 		return nil, nil
@@ -260,6 +261,10 @@ func pruneWrappers(live *Live, desired *schema.Database, serverDrops []string) (
 		}
 		if left := users[name]; len(left) > 0 {
 			warnings = append(warnings, Warning{Message: fmt.Sprintf("foreign-data wrapper %s is not in the foreignDataWrappers block but servers this plan keeps still use it (%s), so it is not dropped; drop them first, or declare the wrapper", name, strings.Join(left, ", "))})
+			continue
+		}
+		if owner := live.Wrappers[name].Owner; !live.mayDrop(owner) {
+			warnings = append(warnings, notOwnerWarning(live, "foreign-data wrapper "+name, owner, ""))
 			continue
 		}
 		drops = append(drops, fmt.Sprintf("drop foreign data wrapper %s;", quoteIdent(name)))

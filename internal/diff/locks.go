@@ -18,9 +18,10 @@ type Warning struct {
     // Kind classifies the warning for --strict: lock (a statement locks or
     // rewrites a table), public_revoke (a grants block revokes PUBLIC's
     // privileges), dependents (a type change is blocked by objects pgy
-    // can't recreate, an extension is kept because objects still use it,
-    // or an extension update may be blocked by objects that use it), or ""
-    // for the rest.
+    // can't recreate, an extension or a routine is kept because objects
+    // still use it, or an extension update may be blocked by objects that
+    // use it), not_owner (--prune leaves an object alone because the
+    // connecting role may not drop it), or "" for the rest.
     Kind      string `json:"kind,omitempty"`
 }
 

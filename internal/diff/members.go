@@ -44,6 +44,18 @@ const initPrivsQ = `
     and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid, s.oid) is not null
 `
 
+// userObjects returns the condition that keeps the catalog rows of the
+// objects introspection reads, those outside the system schemas, with nsp
+// the alias of their pg_namespace row, plus the extension members in
+// pg_catalog, where extensions whose control file fixes the schema (plv8,
+// plpgsql itself) put their routines and types: oid is the object's OID and
+// class its catalog. Built-in objects have no pg_depend rows, so only the
+// rows of pg_catalog pay for the check.
+func userObjects(nsp, class, oid string) string {
+	return fmt.Sprintf(`(%[1]s.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and %[1]s.nspname !~ '^pg_(toast_)?temp_'
+            or %[1]s.nspname = 'pg_catalog' and exists (select from pg_depend ext_m where ext_m.classid = '%[2]s'::regclass and ext_m.objid = %[3]s and ext_m.deptype = 'e'))`, nsp, class, oid)
+}
+
 // extensionConfigQ lists the configuration tables of extensions
 // (pg_extension_config_dump) with the condition that selects the rows
 // pg_dump keeps of them, those an application added.
@@ -190,6 +202,31 @@ func memberLiveGrants(live *Live, mode PublicGrants, key, publicDefault string, 
 		return liveG
 	}
 	return withoutInitialGrants(liveG, initial, desired, mode == PublicAuthoritative)
+}
+
+// publicRevokedByExtension reports whether a grants block that doesn't list
+// public covers PUBLIC on the extension member key all the same under mode
+// PublicByKind, which otherwise leaves PUBLIC's default privilege on objects
+// of its kind (publicDefault: execute or usage) alone: the extension's
+// script took that privilege away (see InitialGrants), so PUBLIC holding it
+// again is drift, which the block revokes. why says so, for
+// publicRevokeWarnings.
+func publicRevokedByExtension(live *Live, mode PublicGrants, key, publicDefault string, desired map[string][]string) (why string, ok bool) {
+	if mode != PublicByKind || publicDefault == "" {
+		return "", false
+	}
+	if _, listed := desired["public"]; listed {
+		return "", false
+	}
+	initial, member := live.InitialGrants(key, publicDefault)
+	if !member || initial["public"][publicDefault] || initial["public"][publicDefault+"*"] {
+		return "", false
+	}
+	ext := "its extension"
+	if name := live.MemberExtension[key]; name != "" {
+		ext = "extension " + name
+	}
+	return fmt.Sprintf("the script of %s left PUBLIC without them, and a block that doesn't list public keeps it that way", ext), true
 }
 
 // coversPublic reports whether a grants block covers PUBLIC under mode, so

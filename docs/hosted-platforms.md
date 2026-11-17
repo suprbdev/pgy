@@ -160,7 +160,7 @@ On a hosted platform pgy connects as a role that is not a superuser, which chang
 
 - **The migrations table.** `pgy init`, `migrate` and `status` create only what is missing. A role without `CREATE` on the database keeps the table in a schema it owns: `--migrations-table app.pgy_migrations` (`migrations_table` in `.pgy.yml`). An existing table needs no `CREATE` privilege at all.
 - **Extensions.** A role that is not a superuser can create a trusted extension, and the extensions the platform allows through its own hook on `CREATE EXTENSION`: Supabase's allow-list, RDS's `rds.allowed_extensions` parameter, Azure's `azure.extensions` server parameter, the list Cloud SQL supports. pgy emits a plain `CREATE EXTENSION`, so an untrusted extension the platform doesn't allow fails in the migration with `permission denied to create extension`: enable it the platform's way first.
-- **Objects the role doesn't own.** `--prune` cannot drop what another role owns. List such objects under `external:` so it doesn't try, and see [Removing extensions](schema.md#removing-extensions) for extensions.
+- **Objects the role doesn't own.** Only an object's owner (or a member of that role, or a superuser) may drop it, so `--prune` leaves out what a platform role owns, with a warning of kind `not_owner`. Listing that role under `external.roles` leaves those objects out without a warning, and keeps `pgy pull` from writing them.
 
 ## Extensions created by a platform role
 

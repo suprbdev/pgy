@@ -30,6 +30,9 @@ func TestStrictSettings(t *testing.T) {
 	if _, _, err := strictSettings(&CIConfig{FailOn: []string{"locks"}}); err == nil || !strings.Contains(err.Error(), `unknown kind "locks"`) {
 		t.Errorf("unknown kind: %v", err)
 	}
+	if failOn, _, err := strictSettings(&CIConfig{FailOn: []string{"not_owner"}}); err != nil || !failOn["not_owner"] {
+		t.Errorf("not_owner is a kind ci.fail_on accepts: %v %v", failOn, err)
+	}
 }
 
 func strictConfig(t *testing.T, dir string, ci *CIConfig, dsn string) *GlobalConfig {

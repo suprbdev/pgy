@@ -323,3 +323,41 @@ schema plat:
 		t.Errorf("without the block undeclared rows are deleted:\n%s", Render(p))
 	}
 }
+
+func TestExternalOwnerIsNotANotOwnerFinding(t *testing.T) {
+	live := platformLive()
+	live.OwnerRoles = map[string]bool{"app": true}
+	live.ExtensionDefs = map[string]*LiveExtension{"pg_stat_statements": {Schema: "public", Version: "1.10", Owner: "plat_admin"}}
+	live.Extensions["pg_stat_statements"] = true
+	live.EventTriggers = map[string]*LiveEventTrigger{"platform_ddl": {Event: "ddl_command_end", Function: "public.watch", Owner: "plat_admin"}}
+	live.Publications = map[string]*LivePublication{"platform_pub": {Owner: "plat_admin"}}
+	live.Functions["public.platform_fn()"] = true
+	live.FunctionDefs["public.platform_fn()"] = &LiveFunction{Signature: "public.platform_fn()", Kind: "f", Body: "select 1", Language: "sql", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100}
+	live.Owners["proc:public.platform_fn()"] = "plat_admin"
+	live.Tables["public.platform_log"] = newLiveTable()
+	live.Owners["rel:public.platform_log"] = "plat_admin"
+	d := loadYAML(t, `
+extensions: []
+eventTriggers: {}
+publications: {}
+schema public:
+  table todos:
+    columns:
+      id: {type: integer}
+    primaryKey: [id]
+`)
+	p := PlanWith(live, d, Options{Unsafe: true, Prune: true, External: externalPlatform})
+	if len(p.Drops) != 0 || len(p.Warnings) != 0 {
+		t.Errorf("objects an external role owns are left out without a warning, got drops %v, warnings %v", p.Drops, p.Warnings)
+	}
+	p = PlanWith(live, d, Options{Unsafe: true, Prune: true})
+	notOwner := 0
+	for _, w := range p.Warnings {
+		if w.Kind == "not_owner" {
+			notOwner++
+		}
+	}
+	if len(p.Drops) != 0 || notOwner != 5 {
+		t.Errorf("without the block each is a not_owner finding, got drops %v, warnings %v", p.Drops, p.Warnings)
+	}
+}

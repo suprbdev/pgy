@@ -53,6 +53,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Roles](#roles)
 - [Grants](#grants)
   - [Ownership](#ownership)
+  - [Objects of other owners](#objects-of-other-owners)
   - [Default Privileges](#default-privileges)
   - [Column-Level Grants](#column-level-grants)
 - [Comments](#comments)
@@ -404,6 +405,7 @@ Several rules keep this from removing something the database still needs:
 - **`plpgsql`** is never dropped.
 - **Declared objects.** An extension is kept while the YAML declares one of its own objects (see [Objects an extension owns](#objects-an-extension-owns)). `pgy diff` warns (kind `dependents`) and names the declaration.
 - **Requirements.** An extension that one staying installed requires is kept: declaring `earthdistance` without listing `cube` never drops `cube`.
+- **Owner.** An extension created by a role whose privileges the connecting role doesn't have, such as a hosting platform's, is kept, and `pgy diff` warns (kind `not_owner`). See [Objects of other owners](#objects-of-other-owners).
 - **Dependents.** PostgreSQL refuses to drop an extension while objects outside it use its types, functions, operators or operator classes: a column of type `citext`, an index with `gin_trgm_ops`, a view calling `akeys()`. With a connection, pgy looks them up in `pg_depend` for each extension it is about to drop. When the same plan drops all of them (the table is pruned, the column or the index is dropped), `DROP EXTENSION` follows those drops. Otherwise the statement is left out and `pgy diff` warns (kind `dependents`), naming the extension and what still uses it, so the migration always applies. Once nothing uses the extension, the next `pgy diff --unsafe --prune` drops it. That takes two migrations when a dependent is changed instead of dropped: retyping a column from `citext` to `text` and removing `citext` from the block changes the type in the first and drops the extension in the second.
 
 PostgreSQL does not record what a function body written as text (`plpgsql`, or `language sql` with a quoted body) calls, so such a function does not hold an extension back, and fails the next time it runs. SQL-standard bodies (`BEGIN ATOMIC`, `RETURN`) are tracked.
@@ -467,7 +469,7 @@ schema public:
 ```
 
 - **Matching.** A function or procedure is found by its argument types, as PostgreSQL identifies it: `function each(hstore):` is the extension's `each(hs hstore, OUT key text, OUT value text)`. Argument names and `OUT` arguments may be written or left out.
-- **Privileges** are compared with the ones the extension's script set (`pg_init_privs`), which is also what `pg_dump` keeps of an extension's objects. What the extension granted is left alone unless the `grants:` block names the grantee: `pg_buffercache_pages()` is granted to `pg_monitor` by its extension, and the block above adds `monitoring` without revoking that. A named grantee gets exactly the privileges listed, so `pg_monitor: []` revokes. Everything else follows the usual [grants](#grants) rules: privileges that were granted later to roles the block doesn't list are revoked. The same holds for a `grants:` block on any other declared object that an extension owns.
+- **Privileges** are compared with the ones the extension's script set (`pg_init_privs`), which is also what `pg_dump` keeps of an extension's objects. Where the script revoked `PUBLIC`'s default `EXECUTE` or `USAGE`, a `grants:` block that doesn't list `public` keeps `PUBLIC` without it (see [Languages](#languages)). What the extension granted is left alone unless the `grants:` block names the grantee: `pg_buffercache_pages()` is granted to `pg_monitor` by its extension, and the block above adds `monitoring` without revoking that. A named grantee gets exactly the privileges listed, so `pg_monitor: []` revokes. Everything else follows the usual [grants](#grants) rules: privileges that were granted later to roles the block doesn't list are revoked. The same holds for a `grants:` block on any other declared object that an extension owns.
 - **In the migration that creates the extension**, the statements for its objects run after `CREATE EXTENSION`: every declared attribute is set, the listed privileges are granted, and a grantee listed with `[]` is revoked. One migration is enough unless the extension grants a listed role more than the block lists, which the next diff revokes. The same applies when the plan updates an extension (`ALTER EXTENSION ... UPDATE`).
 - **An object that doesn't exist**, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the declaration.
 - **Tables.** A table declared without `columns`, `of`, `partitionOf`, `inherits` and the keys that need columns (`primaryKey`, `indexes`, `constraints`, `triggers`, `rules`, `statistics`, storage and partitioning) is never created, altered or dropped, and prune leaves its columns, keys, indexes, triggers and rules alone. An empty `columns: {}` still declares a table without columns that pgy creates. A table that an extension owns, `CREATE EXTENSION` or `ALTER EXTENSION ... ADD` alike, is treated this way even when the YAML declares its columns, with a warning: its definition is the extension's. Column privileges cannot be declared on it. Its rows can, for a configuration table: see [Reference Data](#reference-data).
@@ -475,8 +477,23 @@ schema public:
 - **Sequences.** A sequence declared without options is created with PostgreSQL's defaults when it doesn't exist, as before. Sequences are created after the extensions, so once an extension has created one, the declaration only manages its privileges, owner and comment.
 - **Aggregates** are granted with `GRANT ... ON FUNCTION`; an ordered-set aggregate is declared as `aggregate percentile(float8 order by anyelement):` and granted on `(float8, anyelement)`. `grants` and `revokePublic` work on every aggregate, not only on one an extension owns.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
+- **`pg_catalog`.** Some extensions install their objects in `pg_catalog`, because their control file fixes that schema: plv8, plls and plcoffee do, and so does `plpgsql` itself with its handler functions. pgy reads the functions, procedures, aggregates, types, domains and text search dictionaries an extension owns there like those in any other schema, while the rest of `pg_catalog` stays out of view. Declare them under `schema pg_catalog:`, as `pgy pull` writes them (see the plv8 example below); their privileges, owner and comment are compared and drift on them is found. PostgreSQL creates no tables, views or sequences in `pg_catalog` unless `allow_system_table_mods` is on, so extensions put none there.
 - **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual. The grants of a schema an extension owns (`pg_search`'s `pdb`) are compared with `pg_init_privs`, like those of its other objects. Schemas are never dropped.
 - **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences, aggregates and schemas are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too; a schema an extension created is never written as the application's, with its owner and comment. PostgreSQL keeps no record of the options an extension's script gave its text search dictionaries, so pull writes the current options of each one that has any (`unaccent`'s `rules: unaccent` included), which a rebuild sets after `CREATE EXTENSION`; `pg_dump` loses them. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
+
+plv8 installs its objects in `pg_catalog`:
+
+```yaml
+extensions:
+  - {name: plv8, schema: pg_catalog}
+roles:
+  app: {}
+schema pg_catalog:
+  function plv8_version():
+    revokePublic: true
+  type plv8_int4array:
+    grants: {app: [usage]}
+```
 
 ### Tables in external schemas
 
@@ -1424,6 +1441,8 @@ schema public:
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
+`--unsafe --prune` drops undeclared functions, procedures and aggregates in the schemas the YAML declares objects in. PostgreSQL refuses `DROP FUNCTION` while another object uses the routine: a trigger, an event trigger, a column default or check constraint, an index, a view, a routine with a SQL-standard body. With a connection, pgy looks these up in `pg_depend` for each routine it is about to drop, like it does for [extensions](#removing-extensions). A routine whose dependents the same plan drops is dropped after them. One that something the plan keeps still uses is kept, and `pgy diff` warns (kind `dependents`), naming what uses it, so the migration applies; the next `pgy diff --unsafe --prune` drops it once nothing does.
+
 ### Transforms
 
 A transform converts a type between its SQL form and a procedural language's native one: with `hstore_plpython3u` a PL/Python function receives an `hstore` argument as a dict instead of a string. PostgreSQL ships transforms as extensions (`hstore_plperl`, `hstore_plpython3u`, `jsonb_plperl`, `jsonb_plpython3u`, `ltree_plpython3u`, `bool_plperl` and the `plperlu` variants), and a function or procedure opts in per type with `TRANSFORM FOR TYPE`, which is the `transform` list:
@@ -1552,8 +1571,8 @@ languages:
 |----------|------|-------------|
 | `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`; `all` stands for `usage`) |
 
-- **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates a language's extension, the grants run after `CREATE EXTENSION`. pgy takes the extension to be the one named like the language (`plperl` for the language `plperl`), which is how the extensions of procedural languages are called. Any other language that does not exist gets no statements, and `pgy diff` warns with the name of the entry.
-- **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
+- **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates or updates an extension, the statements for a language that does not exist yet run after `CREATE EXTENSION`, in a `DO` block that runs them only if the language then exists and is trusted. The extension may be named like the language (`plperl`), or not (`pljava` brings `java` and `javau`, and `bool_plperl` with `cascade: true` brings `plperl`), and an untrusted language (`plsh`) is skipped instead of failing the migration; the next `pgy diff` reports it. A language that does not exist, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the entry.
+- **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. On a language whose extension's script took `PUBLIC`'s `USAGE` away (`pljava` does on `java`, as `pg_init_privs` records), the block keeps `PUBLIC` without it all the same, and revokes a `USAGE` granted to `PUBLIC` later, with a `public_revoke` warning; the same holds for the `EXECUTE` of functions, procedures and aggregates and the `USAGE` of types whose extension revoked it (`pg_buffercache_pages()`, `pg_stat_statements_reset()`). Under `policy.public_grants: explicit`, `PUBLIC` is still left alone unless listed. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
 - **Trusted languages only.** PostgreSQL rejects `GRANT` and `REVOKE` on untrusted languages (`c`, `internal`, `plpython3u`, `plperlu`, `pltclu`), which only superusers can use. `pgy validate` rejects entries for those, and `pgy diff` reports any other untrusted language and plans nothing for it.
 - **Order.** The statements run right after the extension statements and before any function or procedure, so a migration that grants its own role `USAGE` can create routines in that language further down. With `diff --split`, they go into the first group, together with the extensions.
 - **`pgy pull`** writes an entry for each trusted language whose privileges are not its initial ones, with the grantees that changed. The initial privileges are those `pg_init_privs` records for a language an extension owns, which `plpgsql` is, and `PUBLIC`'s `USAGE` for any other. That includes `sql`, whose privileges `pg_dump` leaves out.
@@ -1796,6 +1815,10 @@ schema app:
       id: {type: bigint}
 ```
 
+### Objects of other owners
+
+Only an object's owner, a role that inherits the owner's privileges, or a superuser may drop it. On a hosted database, the platform's own role (`rdsadmin`, `supabase_admin`, `azuresu` and the like) owns event triggers, extensions and sometimes tables and functions in the schemas the application uses, and the role pgy connects as is none of those. `--unsafe --prune` leaves such an object alone instead of planning a `DROP` that PostgreSQL would reject with `must be owner of`, and `pgy diff` warns (kind `not_owner`, which `ci.fail_on` accepts), naming the object and its owner. The undeclared triggers, constraints, indexes, rules and statistics of a declared table or view such a role owns are left alone the same way. This covers everything `--prune` drops: tables, views, routines, sequences, types and domains, collations, text search objects, event triggers, publications, servers, foreign-data wrappers and extensions. Declaring the object silences the warning, and for an extension so does `prune.keep_extensions`. Statements for objects the YAML declares are planned as usual.
+
 ### Default Privileges
 
 A top-level `defaultPrivileges:` list manages `ALTER DEFAULT PRIVILEGES`, the privileges objects receive automatically when they are created later.
@@ -1922,7 +1945,7 @@ publications:
     allTables: true
 ```
 
-Publications are created after every table, so their tables and columns exist. As in PostgreSQL, a table is published with its inheritance children unless it sets `only: true`; list just the parent, not the children too. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments and `owner` are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list. PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
+Publications are created after every table, so their tables and columns exist. As in PostgreSQL, a table is published with its inheritance children unless it sets `only: true`; list just the parent, not the children too. For an existing publication, a changed membership emits `ALTER PUBLICATION ... SET TABLE ..., TABLES IN SCHEMA ...`, or `DROP TABLE`/`DROP TABLES IN SCHEMA` when the YAML leaves it empty. Changed `publish`, `viaPartitionRoot` and `generatedColumns` emit `ALTER PUBLICATION ... SET (...)`, and comments and `owner` are diffed. `generatedColumns` (`none` or `stored`) is PostgreSQL 18's `publish_generated_columns`; on earlier servers `stored` is reported as a warning and left unset. Switching a live publication to or from `allTables` needs `DROP` + `CREATE`, which briefly unpublishes everything, so it requires `--unsafe`. Without a `publications:` block publications are unmanaged. With one, `--unsafe --prune` drops live publications it doesn't list (see [Objects of other owners](#objects-of-other-owners) for those it may not drop). PostgreSQL does not allow column lists in a publication that also publishes whole schemas.
 
 ## Event Triggers
 
@@ -1938,7 +1961,7 @@ eventTriggers:
     comment: DDL audit
 ```
 
-Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension.
+Event triggers are created after every function. A changed `event`, `tags` or `function` drops and recreates the trigger in the same migration (no `--unsafe` needed). `enabled` and `comment` are reconciled with `ALTER EVENT TRIGGER` / `COMMENT ON`. Without an `eventTriggers:` block, event triggers are unmanaged. With one, `--unsafe --prune` drops live event triggers it doesn't list, except those owned by an extension and those whose function is in a schema the YAML declares no objects in, which is the scope `--prune` uses for other objects. A function an event trigger that stays uses is not pruned either: `pgy diff` warns (kind `dependents`) and drops it once the trigger is gone.
 
 ## Reference Data
 

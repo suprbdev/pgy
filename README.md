@@ -158,7 +158,8 @@ ci:
 |------|---------|
 | `lock` | `pgy diff`: a statement locks or rewrites an existing table (see [Lock warnings](#lock-warnings)) |
 | `public_revoke` | `pgy diff`: a grants block revokes PUBLIC's privileges |
-| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column and can't be dropped and added again; a column is not dropped because objects the plan keeps still use it; an extension `--prune` would drop is kept because objects still use it; an extension update may be rejected because views, materialized views or SQL-standard routine bodies use the extension (see [Updating extensions](docs/schema.md#updating-extensions)) |
+| `dependents` | `pgy diff`: a column type change is blocked by an object the YAML doesn't declare, or by a generated column that uses the column and can't be dropped and added again; a column is not dropped because objects the plan keeps still use it; an extension or a routine `--prune` would drop is kept because objects still use it; an extension update may be rejected because views, materialized views or SQL-standard routine bodies use the extension (see [Updating extensions](docs/schema.md#updating-extensions)) |
+| `not_owner` | `pgy diff`: `--prune` leaves an object alone because its owner is a role whose privileges the connecting role doesn't have (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
@@ -231,7 +232,7 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 
 - tables, views, materialized views, functions, procedures, aggregates, sequences, domains, enum/composite/range types, collations, text search configurations and dictionaries
 - triggers, foreign keys, check/unique/exclude constraints and indexes on declared tables, and indexes on declared materialized views
-- event triggers and publications, when the YAML has an `eventTriggers:` / `publications:` block
+- event triggers whose function is in one of those schemas, when the YAML has an `eventTriggers:` block, and publications, when it has a `publications:` block
 - foreign servers and foreign-data wrappers, when the YAML has a `servers:` / `foreignDataWrappers:` block; a server that foreign tables still use and a wrapper that servers still use are kept
 - extensions installed in those schemas, when the YAML has an `extensions:` block that does not list them and nothing that stays uses them (see [Removing extensions](docs/schema.md#removing-extensions))
 - role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
@@ -246,7 +247,7 @@ prune:
   keep_extensions: [pg_stat_statements, postgis]
 ```
 
-Unlike an `external:` entry, `keep_extensions` doesn't stop `pgy pull` from writing the extension; see [`prune.keep_extensions`](docs/hosted-platforms.md#prunekeep_extensions) for when to use which. An undeclared extension that is still in use is not dropped either: `pgy diff` warns and names what uses it, instead of writing a `DROP EXTENSION` that PostgreSQL would reject.
+Unlike an `external:` entry, `keep_extensions` doesn't stop `pgy pull` from writing the extension; see [`prune.keep_extensions`](docs/hosted-platforms.md#prunekeep_extensions) for when to use which. An undeclared extension or routine that is still in use is not dropped either: `pgy diff` warns (kind `dependents`) and names what uses it, such as an event trigger the YAML doesn't manage, instead of writing a `DROP EXTENSION` or `DROP FUNCTION` that PostgreSQL would reject. Nor is an object whose owner is a role whose privileges the connecting role doesn't have (it is not that role, a member that inherits its privileges or a superuser), since only its owner may drop it: `pgy diff` warns (kind `not_owner`), for example about the event triggers, extensions and publications a hosting platform's own role created, unless `external.roles` lists that role, which leaves them out without a warning. The same goes for the triggers, constraints and indexes of a declared table such a role owns.
 
 > **Warning:** run `--prune` with **all** of your schema files. With an explicit `--schemas` subset, it drops every object the subset doesn't mention in the schemas it touches, including whole tables and their data. Always read the buffer before committing it.
 

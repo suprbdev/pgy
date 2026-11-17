@@ -163,7 +163,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         {`select n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_function_arguments(p.oid),
                  coalesce(pg_get_function_result(p.oid), ''), l.lanname, p.prokind = 'p'
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
-          where p.prokind in ('f', 'p', 'w') and ` + nsFilter + `
+          where p.prokind in ('f', 'p', 'w') and ` + userObjects("n", "pg_proc", "p.oid") + `
           and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'i')`,
             func(scan func(...any) error) error {
                 r := &LiveRoutine{}
@@ -293,7 +293,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         {`select n.nspname || '.' || t.dictname, tn.nspname || '.' || tp.tmplname, coalesce(t.dictinitoption, '')
           from pg_ts_dict t join pg_namespace n on n.oid = t.dictnamespace
           join pg_ts_template tp on tp.oid = t.dicttemplate join pg_namespace tn on tn.oid = tp.tmplnamespace
-          where ` + nsFilter,
+          where ` + userObjects("n", "pg_ts_dict", "t.oid"),
             func(scan func(...any) error) error {
                 var key, tmpl, opts string
                 if err := scan(&key, &tmpl, &opts); err != nil { return err }
