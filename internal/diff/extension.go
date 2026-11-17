@@ -408,27 +408,32 @@ func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
 // new schema while the live definitions still have the old one. PostgreSQL
 // moves those references with the extension, so nothing has to be emitted
 // for them. The plan is compared with one made from the YAML in the old
-// spelling: a statement stays when that plan has its counterpart. When the
-// two plans don't line up, plan is returned unchanged.
+// spelling: a statement stays, where plan has it, when that plan has its
+// counterpart anywhere. When the two plans don't line up, plan is returned
+// unchanged.
 func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) *PlanDiff {
     rq := newRequalifier(live, desired)
     if rq == nil { return plan }
     before := planWith(live, rq.database(desired), opts)
+    want, left := map[string]int{}, 0
+    for _, sec := range [][]string{before.Prelude, before.Creates, before.Alters, before.Drops, before.Concurrent} {
+        for _, s := range sec {
+            want[s]++
+            left++
+        }
+    }
     out := &PlanDiff{}
     kept, planned := map[string]bool{}, map[string]bool{}
     for _, sec := range []struct {
-        dst       *[]string
-        got, want []string
+        dst *[]string
+        got []string
     }{
-        {&out.Prelude, plan.Prelude, before.Prelude},
-        {&out.Creates, plan.Creates, before.Creates},
-        {&out.Alters, plan.Alters, before.Alters},
-        {&out.Drops, plan.Drops, before.Drops},
-        {&out.Concurrent, plan.Concurrent, before.Concurrent},
+        {&out.Prelude, plan.Prelude},
+        {&out.Creates, plan.Creates},
+        {&out.Alters, plan.Alters},
+        {&out.Drops, plan.Drops},
+        {&out.Concurrent, plan.Concurrent},
     } {
-        want := map[string]int{}
-        for _, s := range sec.want { want[s]++ }
-        left := len(sec.want)
         for _, s := range sec.got {
             planned[s] = true
             if t := rq.text(s); want[t] > 0 {
@@ -438,8 +443,8 @@ func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opt
                 *sec.dst = append(*sec.dst, s)
             }
         }
-        if left > 0 { return plan }
     }
+    if left > 0 { return plan }
     messages := map[string]int{}
     for _, w := range before.Warnings { messages[w.Message]++ }
     for _, w := range plan.Warnings {
