@@ -12,6 +12,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live.scoped())
     if desired == nil { return out }
     out, _ = applyRenames(out, desired)
+    out = applyExprProbes(out, desired)
     if desired.DatabaseSettings != nil { out.DatabaseConfig = simulateConfig(desired.DatabaseSettings) }
     for role, set := range desired.DatabaseRoleSettings {
         if out.DatabaseRoleConfig == nil { out.DatabaseRoleConfig = map[string]map[string]string{} }
@@ -695,6 +696,7 @@ func cloneLive(l *Live) *Live {
         scope:              l.scope,
         ViewProbes:         cloneMap(l.ViewProbes, nil),
         ViewDependents:     cloneMap(l.ViewDependents, nil),
+        ExprProbes:         l.ExprProbes,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleMemberOptions:  cloneMap(l.RoleMemberOptions, func(m map[string]*LiveMembership) map[string]*LiveMembership {
             return cloneMap(m, func(v *LiveMembership) *LiveMembership { c := *v; return &c })

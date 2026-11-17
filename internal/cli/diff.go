@@ -137,16 +137,20 @@ Exit codes:
                     fmt.Fprintf(os.Stderr, "warning: views and materialized views were not compared with the YAML, so their queries are left as they are: %v\n", err)
                 }
             }
-            var sql string
-            var summary any
-            groups := 0
-            if split != "" {
+            var steps []group.Step
+            var plan *diff.PlanDiff
+            makePlan := func() error {
+                if split == "" {
+                    planner := diff.PlanReportingUnsafe
+                    if fromEmpty { planner = diff.PlanWith }
+                    plan = planner(live, compiled, opts)
+                    return nil
+                }
                 g, err := group.Split(schemaPaths, split)
                 if err != nil {
                     return err
                 }
-                steps, err := group.Plan(live, schemaPaths, g, opts)
-                if err != nil {
+                if steps, err = group.Plan(live, schemaPaths, g, opts); err != nil {
                     return err
                 }
                 if extra := diff.UnsafeOnly(liveOrNil(live, fromEmpty), compiled, opts); len(extra) > 0 {
@@ -154,6 +158,26 @@ Exit codes:
                     last := steps[len(steps)-1].Plan
                     last.Warnings = append(last.Warnings, extra...)
                 }
+                return nil
+            }
+            if err := makePlan(); err != nil {
+                return err
+            }
+            if pool != nil && reportsChanges(plan, steps) {
+                if err := diff.ProbeExpressions(ctx, pool, live, compiled); err != nil {
+                    if !noWarnings {
+                        fmt.Fprintf(os.Stderr, "warning: expressions the YAML spells differently from the database were compared as text only, so some may be reported as changed although PostgreSQL stores them the same way: %v\n", err)
+                    }
+                } else if live.ExprProbes != nil {
+                    if err := makePlan(); err != nil {
+                        return err
+                    }
+                }
+            }
+            var sql string
+            var summary any
+            groups := 0
+            if split != "" {
                 sql = group.Render(steps)
                 summary = splitSummary(steps)
                 for _, s := range steps {
@@ -170,9 +194,6 @@ Exit codes:
                     cfg.indexPolicy(s.Plan.Warnings, strict, noWarnings)
                 }
             } else {
-                planner := diff.PlanReportingUnsafe
-                if fromEmpty { planner = diff.PlanWith }
-                plan := planner(live, compiled, opts)
                 sql = diff.Render(plan)
                 if len(plan.Concurrent)+len(plan.Prelude) > 0 {
                     sql = group.Render([]group.Step{{Plan: plan}})
@@ -283,6 +304,19 @@ func (e *exitCodeError) Error() string { return fmt.Sprintf("exit %d", e.code) }
 func liveOrNil(live *diff.Live, fromEmpty bool) *diff.Live {
     if fromEmpty { return nil }
     return live
+}
+
+// reportsChanges reports whether plan, or a step of a split plan, holds a
+// statement or a warning. A plan that holds neither has nothing
+// diff.ProbeExpressions could take out of it.
+func reportsChanges(plan *diff.PlanDiff, steps []group.Step) bool {
+    reports := func(p *diff.PlanDiff) bool {
+        return p != nil && len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent)+len(p.Warnings) > 0
+    }
+    for _, s := range steps {
+        if reports(s.Plan) { return true }
+    }
+    return reports(plan)
 }
 
 // maxUnsafeWarnings is how many "needs --unsafe" warnings pgy diff prints
