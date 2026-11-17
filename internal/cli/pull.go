@@ -15,8 +15,8 @@ import (
 
 func cmdPull() *cobra.Command {
     var out string
-    var schemas, dataTables []string
-    var owners, roles, force bool
+    var schemas, excluded, dataTables []string
+    var owners, roles, force, settings bool
     c := &cobra.Command{
         Use:   "pull",
         Short: "Generate schema YAML from an existing database",
@@ -28,6 +28,12 @@ Without --out the YAML is printed as one document. With --out, one file per
 schema (<schema>.yml) plus database.yml (extensions, foreign-data wrappers
 and servers, language privileges, publications, event triggers, default
 privileges, roles) is written to that directory.
+
+With --schema or --exclude-schema, database.yml holds only what the pulled
+schemas need: the extensions installed in them or used by their objects
+(and those these require), the publications of their tables, and the event
+triggers whose function is in them. Database settings are left out unless
+--database-settings is given.
 
 Objects pgy cannot express (functions written in C, operators, operator
 classes and families, conversions, base types, text search parsers and
@@ -56,7 +62,7 @@ objects that belong to an extension are not.`,
                 if err != nil { return err }
                 data[fq] = rows
             }
-            res, err := pull.Build(live, pull.Options{Schemas: schemas, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == "", Data: data})
+            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, Roles: roles, Single: out == "", Data: data})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
             strict := &strictFindings{}
@@ -83,6 +89,8 @@ objects that belong to an extension are not.`,
     }
     c.Flags().StringVar(&out, "out", "", "Directory to write one YAML file per schema into (default: print to stdout)")
     c.Flags().StringArrayVar(&schemas, "schema", nil, "Only pull these schemas (repeatable or comma-separated; default: all)")
+    c.Flags().StringArrayVar(&excluded, "exclude-schema", nil, "Leave these schemas out (repeatable or comma-separated)")
+    c.Flags().BoolVar(&settings, "database-settings", false, "Also write the database's settings when --schema or --exclude-schema limits the pull")
     c.Flags().BoolVar(&owners, "owners", false, "Emit owner: for objects not owned by the connecting role")
     c.Flags().BoolVar(&roles, "roles", false, "Emit the cluster's roles")
     c.Flags().BoolVar(&force, "force", false, "Overwrite existing files in --out")

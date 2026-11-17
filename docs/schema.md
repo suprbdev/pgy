@@ -386,7 +386,7 @@ Several rules keep this from removing something the database still needs:
 
 PostgreSQL does not record what a function body written as text (`plpgsql`, or `language sql` with a quoted body) calls, so such a function does not hold an extension back, and fails the next time it runs. SQL-standard bodies (`BEGIN ATOMIC`, `RETURN`) are tracked.
 
-`pgy pull` lists every installed extension, so pulled YAML never plans a drop against the database it came from.
+`pgy pull` lists every installed extension, so pulled YAML never plans a drop against the database it came from. A pull limited with `--schema` or `--exclude-schema` lists those installed in the pulled schemas, which keeps that true within the scope above, and those the pulled schemas' objects use.
 
 ### Objects an extension owns
 

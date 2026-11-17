@@ -182,7 +182,7 @@ policy:
 
 | Command | What it does |
 |---------|--------------|
-| `pgy pull [--out DIR] [--schema S] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, procedural languages and transforms that no extension owns, and changed privileges on an extension's tables, sequences and aggregates. Functions, views, types, languages and foreign-data wrappers of an extension are written when their privileges changed (see [Objects an extension owns](docs/schema.md#objects-an-extension-owns)). |
+| `pgy pull [--out DIR] [--schema S] [--exclude-schema S] [--database-settings] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--schema` pulls only the schemas named and `--exclude-schema` leaves schemas out; `database.yml` then holds only what the pulled schemas need (see [Pulling some schemas](#pulling-some-schemas)). `--data schema.table` also pulls a table's rows. Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, procedural languages and transforms that no extension owns, and changed privileges on an extension's tables, sequences and aggregates. Functions, views, types, languages and foreign-data wrappers of an extension are written when their privileges changed (see [Objects an extension owns](docs/schema.md#objects-an-extension-owns)). |
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations, and warnings such as policies on a table without row-level security. Exits 1 on errors. |
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
@@ -191,6 +191,17 @@ policy:
 | `pgy status [--json]` | Shows the current, last and pending migrations, and history warnings. Exits 2 when some are pending. |
 | `pgy init` | Creates the migrations table. `migrate` and `status` also create it when it is missing. Only what is missing is created: a role without `CREATE` on the database can use a migrations table in a schema it owns (`--migrations-table app.pgy_migrations`), and one that already exists needs no `CREATE` privilege at all. |
 | `pgy mark-applied --force NAME` | Records migrations up to NAME as applied without running them, and removes later records. |
+
+### Pulling some schemas
+
+`pgy pull --schema app` (or `--exclude-schema platform` for everything else) writes the objects of the pulled schemas and only the database-wide objects they need, so that the YAML rebuilds a database without the other schemas:
+
+- **Extensions** installed in a pulled schema or used by an object in one: a column or domain of the extension's type, an index with its operator class, a default, constraint, trigger, view or SQL-standard routine body that calls its functions (calls in bodies written as text are not recorded by PostgreSQL and do not count). The extensions these require, and those that provide the foreign-data wrapper of a pulled server or own a pulled language entry, are written too.
+- **Publications** that publish tables or schemas of the pulled schemas and nothing else. One that also publishes tables of other schemas is left out with a warning, since writing only part of it would take the other tables out of it. `FOR ALL TABLES` publications are left out.
+- **Event triggers** whose function is in a pulled schema.
+- **Database settings** (the `database:` block) are left out, since they belong to the database as a whole and may hold secrets such as a hosting platform's `app.settings.jwt_secret`. `--database-settings` writes them anyway.
+
+Servers, foreign-data wrappers, languages, default privileges for all schemas and, with `--roles`, roles are written as without these flags. `--unsafe --prune` treats `publications:` and `eventTriggers:` as the complete list, so when the pulled YAML has such a block and the pull left other publications or event triggers out, `pgy pull` warns that a pruning diff with this YAML would drop them.
 
 ## Safe changes
 
