@@ -2904,6 +2904,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // name order) — use it as-is; the CLI surfaces the cycle error before
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
+    columnSeqs := desired.ColumnSequences()
     liveFuncs := normalizedLiveFunctions(live)
     createsRelations := plansNewRelations(live, desired)
     // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
@@ -3104,6 +3105,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Alters = append(plan.Alters, sequenceAlterStmts(e.Key, sq, live.SequenceDefs[e.Key])...)
                 continue
             }
+            if columnSeqs[e.Key] != "" { continue }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
             if sq.OwnedBy != "" {
                 // OWNED BY goes into Alters (rendered after all Creates):

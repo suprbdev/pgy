@@ -360,6 +360,28 @@ schema public:
     assertEmittedOnce(t, steps)
 }
 
+func TestPlanColumnSequenceInOtherFile(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "t.yml": `
+schema public:
+  table t:
+    columns:
+      id: {type: bigint, identity: always}
+`,
+        "grants.yml": `
+schema public:
+  sequence t_id_seq:
+    grants: {reader: [usage]}
+`,
+    })
+    steps := planFiles(t, nil, p("grants.yml", "t.yml"), ModeFile, false)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"t", "grants"}) { t.Fatalf("the grants on an identity's sequence must follow its table: %v", steps) }
+    if sql := stepSQL(t, steps, "grants"); strings.Contains(sql, "create sequence") || !strings.Contains(sql, `grant usage on sequence "public"."t_id_seq" to "reader";`) {
+        t.Fatalf("the identity creates its sequence, which only gets the grant:\n%s", sql)
+    }
+    assertEmittedOnce(t, steps)
+}
+
 func TestPlanHoistsExtensionsAndRoles(t *testing.T) {
     _, p := writeSchemas(t, map[string]string{
         "a.yml": "tables:\n  a:\n    columns:\n      id: {type: int}\n",

@@ -464,24 +464,36 @@ schema app:
 	}
 }
 
-func TestValidateSerialSequenceNeedsDependsOn(t *testing.T) {
+func TestValidateColumnSequenceOwner(t *testing.T) {
 	p := write(t, t.TempDir(), "s.yml", `
 schema app:
   table audit:
     columns: {id: {type: bigserial}}
   table events:
-    columns: {id: {type: serial}}
+    columns:
+      id: {type: bigint, identity: {generated: always, sequenceName: event_ids}}
+  table plain:
+    columns: {id: {type: bigint, identity: always}}
   sequence audit_id_seq:
     grants: {public: [usage]}
-  sequence events_id_seq:
+    owner: someone
+  sequence event_ids:
+    owner: someone
+  sequence plain_id_seq:
     grants: {public: [usage]}
-    dependsOn: [table app.events]
+  sequence standalone:
+    owner: someone
 `)
 	got := messages(Files([]string{p}))
-	if !strings.Contains(got, "sequence app.audit_id_seq: is the sequence that serial column app.audit.id creates; add dependsOn: [table app.audit]") {
-		t.Errorf("missing serial sequence warning in:\n%s", got)
+	for _, want := range []string{
+		"sequence app.audit_id_seq: is the sequence of column app.audit.id, which always has the owner of its table; remove owner",
+		"sequence app.event_ids: is the sequence of column app.events.id, which always has the owner of its table; remove owner",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
-	if strings.Contains(got, "events_id_seq") {
-		t.Errorf("a serial sequence with dependsOn must not be flagged:\n%s", got)
+	if strings.Contains(got, "plain_id_seq") || strings.Contains(got, "standalone") || strings.Contains(got, "dependsOn") {
+		t.Errorf("a column's sequence needs no dependsOn, and other sequences may have an owner:\n%s", got)
 	}
 }

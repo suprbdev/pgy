@@ -131,6 +131,9 @@ type builder struct {
 	serials map[string]string
 	// serialSeqs: sequences represented by a serial column
 	serialSeqs map[string]bool
+	// identitySeqs: sequence -> "schema.table.column" of the identity column
+	// it belongs to
+	identitySeqs map[string]string
 }
 
 func (b *builder) warn(format string, args ...any) {
@@ -474,10 +477,13 @@ func serialShaped(ls *diff.LiveSequence, typ string) bool {
 }
 
 func (b *builder) collectSerials() {
-	b.serials, b.serialSeqs = map[string]string{}, map[string]bool{}
+	b.serials, b.serialSeqs, b.identitySeqs = map[string]string{}, map[string]bool{}, map[string]string{}
 	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
 	for fq, lt := range b.live.Tables {
 		for cn, lc := range lt.Columns {
+			if lc.Identity != "" && lc.IdentitySequence != nil {
+				b.identitySeqs[lc.IdentitySequence.Name] = fq + "." + cn
+			}
 			m := nextvalRe.FindStringSubmatch(strings.TrimSpace(lc.Default))
 			if m == nil {
 				continue
@@ -720,7 +726,11 @@ func (b *builder) sequences() {
 			continue
 		}
 		if b.serialSeqs[k] {
-			b.serialSequence(k, ls)
+			b.columnSequence(k, ls.Owner)
+			continue
+		}
+		if column := b.identitySeqs[k]; column != "" {
+			b.columnSequence(k, column)
 			continue
 		}
 		if b.live.OwnedSequences[k] && ls.Owner == "" {
@@ -768,10 +778,10 @@ func (b *builder) sequences() {
 	}
 }
 
-// serialSequence writes the grants and comment of a serial column's
-// sequence, which the column creates, as a sequence block that depends on
-// the column's table, so a rebuild applies them once the table exists.
-func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
+// columnSequence writes the grants and comment of the sequence of a serial
+// or identity column ("schema.table.column"), which the column creates, as
+// a sequence block that depends on the column's table.
+func (b *builder) columnSequence(k, column string) {
 	g := b.grantsFor(b.live.TableGrants[k], k, "sequences")
 	comment := b.live.RelComments[k]
 	if g == nil && comment == "" {
@@ -786,8 +796,8 @@ func (b *builder) serialSequence(k string, ls *diff.LiveSequence) {
 		add(m, "grants", g)
 	}
 	addStr(m, "comment", comment)
-	if strings.Count(ls.Owner, ".") >= 2 {
-		add(m, "dependsOn", list([]string{"table " + diff.ColumnRelation(ls.Owner)}))
+	if strings.Count(column, ".") >= 2 {
+		add(m, "dependsOn", list([]string{"table " + diff.ColumnRelation(column)}))
 	}
 	add(blk, "sequence "+name, m)
 }
