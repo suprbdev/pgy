@@ -401,6 +401,9 @@ func TestExprProbeStatements(t *testing.T) {
 			t.Errorf("want a temporary table LIKE the live relation under its own name, got %+v", r)
 		}
 	}
+	if temps := []string{plan.spec.Relations[0].Temp, plan.spec.Relations[1].Temp, plan.spec.Relations[2].Temp}; !slices.Equal(temps, []string{"pgy_probe_t0", "pgy_probe_t1", "pgy_probe_t2"}) {
+		t.Errorf("each copy is renamed to a name of its own, got %v", temps)
+	}
 	for _, s := range append(plan.spec.Run, plan.spec.Relations[0].Run...) {
 		for _, forbidden := range []string{`"app"."t"`, `"app"."v"`, `"app"."mv"`, `"app"."props"`, `"app"."f"`, `"app"."p"`} {
 			if strings.Contains(s.SQL, forbidden) {
@@ -462,6 +465,9 @@ func TestExprProbeResults(t *testing.T) {
 		switch {
 		case r.key == ExprKey{ExprConstraint, "app.t", "t_box"}:
 			failedID = id
+		case r.key == ExprKey{ExprPolicy, "app.t", "t_p"}:
+			self := "(EXISTS ( SELECT 1 FROM " + plan.spec.Relations[r.relation].Temp + " o WHERE (o.id = t.id)))"
+			reply.Relations[r.relation].Defs = append(reply.Relations[r.relation].Defs, probeDef{Kind: r.attach.kind, Name: r.attach.name, Parts: []string{self, ""}})
 		case r.relation == rels["t"] || r.relation == rels["v"]:
 			reply.Relations[r.relation].Defs = append(reply.Relations[r.relation].Defs, probeDef{Kind: r.attach.kind, Name: r.attach.name, Parts: []string{"read " + r.attach.name}})
 		case r.key.Kind == ExprDomainDefault:
@@ -489,6 +495,9 @@ func TestExprProbeResults(t *testing.T) {
 	}
 	if p := probes[ExprKey{ExprConstraint, "app.t", "t_excl"}]; p.Err != "" {
 		t.Errorf("the other definitions of the table are unaffected, got %+v", p)
+	}
+	if p := probes[ExprKey{ExprPolicy, "app.t", "t_p"}]; p.Err != selfReference || p.Parts != nil {
+		t.Errorf("a definition that reads the probe's copy is not compared, got %+v", p)
 	}
 	if p := probes[ExprKey{ExprIndex, "app.mv", "mv_part"}]; p.Err != `permission denied for materialized view mv` {
 		t.Errorf("a relation that can't be copied fails its definitions, got %+v", p)

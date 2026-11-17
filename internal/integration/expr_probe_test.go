@@ -688,3 +688,123 @@ schema app:
 		t.Errorf("want the session's search_path on the snapshot, got %v", live.SearchPath)
 	}
 }
+
+// TestIntegrationProbeExpressionsNames probes tables whose temporary copy
+// could capture a name: tables of one name in two schemas, a table named
+// like a type its check uses, policies that qualify columns with their own
+// table and read it or its namesake through a qualified name, and names
+// that need quoting.
+func TestIntegrationProbeExpressionsNames(t *testing.T) {
+	pool, d := exprProbeDatabase(t, "pgytest_expr_probe_names", `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  type status:
+    type: enum
+    labels: [new, done]
+  table docs:
+    columns:
+      id: {type: bigint}
+      team_id: {type: int, nullable: true}
+      attrs: {type: hstore, nullable: true, default: "'a=>1'"}
+    primaryKey: [id]
+    rowLevelSecurity: true
+    policies:
+      team: {using: "exists (select 1 from members m where m.team_id = docs.team_id and m.attrs @> 'k=>v') and attrs @> 'x=>y'"}
+      own: {using: "exists (select 1 from public.docs d where d.id = docs.id and d.attrs @> 'k=>v')"}
+  table members:
+    columns:
+      team_id: {type: int}
+      attrs: {type: hstore, nullable: true, default: "'m=>1'"}
+    rowLevelSecurity: true
+    policies:
+      peers: {using: "exists (select 1 from docs d where d.team_id = members.team_id and d.attrs @> 'k=>v')"}
+schema app:
+  function trg():
+    returns: trigger
+    language: plpgsql
+    body: begin return new; end
+  table docs:
+    columns:
+      id: {type: bigint}
+      attrs: {type: hstore, nullable: true, default: "'b=>2'"}
+      st: {type: public.status, default: "'new'::public.status"}
+    primaryKey: [id]
+    constraints:
+      docs_st: {type: check, expression: "st <> 'done' and attrs @> 'ok=>1' and docs is not null"}
+    rowLevelSecurity: true
+    policies:
+      pub: {using: "exists (select 1 from public.docs d where d.id = docs.id and d.attrs @> 'k=>v')"}
+      own: {using: "exists (select 1 from app.docs d where d.id = docs.id and d.attrs @> 'k=>v')"}
+  table status:
+    columns:
+      id: {type: bigint}
+      st: {type: public.status, default: "'new'"}
+      label: {type: text, nullable: true, default: "'a' || 1e1::text"}
+    constraints:
+      status_st: {type: check, expression: "st = 'new'::public.status or label > 'a' || 1e1::text"}
+  table Order Items:
+    columns:
+      id: {type: bigint}
+      "Qty": {type: int, default: "01"}
+      "user": {type: text, nullable: true}
+      attrs: {type: hstore, nullable: true}
+    constraints:
+      qty: {type: check, expression: "\"Qty\" < 1e3", notValid: true}
+    indexes:
+      oi_expr: {columns: ["lower(\"user\")", "(\"Qty\" % 3)"], where: "\"Qty\" > 01"}
+    rowLevelSecurity: true
+    policies:
+      own: {for: update, using: "\"user\" = current_user and \"Order Items\".\"Qty\" > 01", withCheck: "\"Qty\" between 01 and 1e2"}
+    triggers:
+      Check It:
+        timing: after
+        events: [update]
+        level: row
+        when: "old.\"Qty\" > 01"
+        procedure: app.trg('it''s', 1e1)
+`)
+	live := assertExprProbeClean(t, pool, d, diff.ExprDefault, diff.ExprConstraint, diff.ExprIndex, diff.ExprPolicy, diff.ExprTrigger)
+	for _, key := range []diff.ExprKey{
+		{Kind: diff.ExprPolicy, Object: "public.docs", Name: "team"},
+		{Kind: diff.ExprPolicy, Object: "public.docs", Name: "own"},
+		{Kind: diff.ExprPolicy, Object: "public.members", Name: "peers"},
+		{Kind: diff.ExprPolicy, Object: "app.docs", Name: "pub"},
+		{Kind: diff.ExprPolicy, Object: "app.docs", Name: "own"},
+		{Kind: diff.ExprConstraint, Object: "app.docs", Name: "docs_st"},
+		{Kind: diff.ExprConstraint, Object: "app.status", Name: "status_st"},
+		{Kind: diff.ExprPolicy, Object: "app.Order Items", Name: "own"},
+		{Kind: diff.ExprTrigger, Object: "app.Order Items", Name: "Check It"},
+	} {
+		if live.ExprProbes[key] == nil {
+			t.Errorf("%s %s %s was not probed: %v", key.Kind, key.Object, key.Name, exprProbeKeys(live))
+		}
+	}
+
+	selfJoin := loadYAML(t, "app", `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table docs:
+    columns:
+      id: {type: bigint}
+      team_id: {type: int, nullable: true}
+      attrs: {type: hstore, nullable: true, default: "'a=>1'"}
+    primaryKey: [id]
+    rowLevelSecurity: true
+    policies:
+      own: {using: "exists (select 1 from docs d where d.id = docs.id and d.attrs @> 'k=>v')"}
+`)
+	live = probed(t, pool, selfJoin)
+	p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprPolicy, Object: "public.docs", Name: "own"}]
+	if p == nil || !strings.Contains(p.Err, "reads its own table") {
+		t.Fatalf("a policy that reads its own table through an unqualified name is not compared, got %+v", p)
+	}
+	want := []string{
+		`drop policy "own" on "public"."docs";`,
+		`create policy "own" on "public"."docs" using (exists (select 1 from docs d where d.id = docs.id and d.attrs @> 'k=>v'));`,
+	}
+	if got := diff.Plan(live, selfJoin, false); !reflect.DeepEqual(got.Alters, want) {
+		t.Errorf("want the policy planned as the text comparison plans it, and nothing else, got %v", got.Alters)
+	}
+}

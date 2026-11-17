@@ -150,8 +150,8 @@ func (s *generatedSlot) declared() string { return s.c.Generated }
 func (s *generatedSlot) live() []string   { return []string{s.lc.Generated} }
 func (s *generatedSlot) attach(target string, id int) probeAttach {
 	name := fmt.Sprintf("pgy_probe_g%d", id)
-	sql := fmt.Sprintf("alter table %s add column %s ", pqIdent(target), quoteIdent(name)) + "%s" +
-		fmt.Sprintf(" generated always as (%s) stored", strings.ReplaceAll(s.c.Generated, "%", "%%"))
+	sql := fmt.Sprintf("alter table %s add column %s \x00 generated always as (%s) stored", pqIdent(target), quoteIdent(name), s.c.Generated)
+	sql = strings.Replace(strings.ReplaceAll(sql, "%", "%%"), "\x00", "%s", 1)
 	typeQ := fmt.Sprintf("select format_type(a.atttypid, a.atttypmod) from pg_attribute a where a.attrelid = %s::regclass and a.attname = %s and a.attnum > 0 and not a.attisdropped",
 		quoteString(pqIdent(target)), quoteString(s.cn))
 	return probeAttach{stmt: probeStmt{ID: id, SQL: sql, Type: typeQ}, kind: "default", name: name}
@@ -746,14 +746,23 @@ func applyExprProbes(live *Live, desired *schema.Database) *Live {
 }
 
 // probeRelation is a table, view or materialized view whose definitions
-// are probed on a temporary table LIKE it, created under its own name so
-// that the definitions can name it.
+// are probed on a temporary table LIKE it. The copy is created under the
+// relation's own name, so that the definitions can name it, and renamed to
+// Temp before they are read back, so that it hides no object of that name
+// from the deparser.
 type probeRelation struct {
 	Schema string      `json:"schema"`
 	Name   string      `json:"name"`
 	Like   string      `json:"like"`
+	Temp   string      `json:"temp"`
 	Run    []probeStmt `json:"run"`
 }
+
+// selfReference is the error of a definition that still names the probe's
+// copy after it was read back: it reads its own table through a name
+// without a schema, and what that name finds depends on the search_path of
+// the session that runs the migration.
+const selfReference = "it reads its own table through a name without a schema"
 
 // probeSpec is the input of pg_temp.pgy_probe: the relations to copy with
 // the statements to run on each copy, and the statements for domains and
@@ -823,7 +832,7 @@ func (p *exprProbePlan) relation(fq, source string, key ExprKey, slot exprSlot) 
 	if !ok {
 		i = len(p.spec.Relations)
 		p.relations[fq] = i
-		p.spec.Relations = append(p.spec.Relations, &probeRelation{Schema: sch, Name: name, Like: pqIdent(source)})
+		p.spec.Relations = append(p.spec.Relations, &probeRelation{Schema: sch, Name: name, Like: pqIdent(source), Temp: fmt.Sprintf("pgy_probe_t%d", i)})
 	}
 	p.add(key, slot, i, "pg_temp."+name)
 }
@@ -1011,6 +1020,10 @@ func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
 			probe.Err = "no result"
 			continue
 		}
+		if r.relation >= 0 && slices.ContainsFunc(parts, func(part string) bool { return strings.Contains(part, p.spec.Relations[r.relation].Temp) }) {
+			probe.Err = selfReference
+			continue
+		}
 		probe.Parts = parts
 	}
 	return out
@@ -1021,48 +1034,53 @@ func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
 // pgy_probe_defs and pgy_probe_globals read definitions back with the
 // functions and the pinned search_path Introspect uses (see
 // pinSearchPathQ), so the text is comparable with the live snapshot's.
-// pg_get_triggerdef names the trigger's table, which shown replaces with
-// the name the live definition has.
+// The deparser names the table a definition is on in two places: a
+// trigger's ON clause, where shown replaces it with the name the live
+// definition has, and the qualifier of a column or whole-row reference,
+// where own, the quoted name of the live table, replaces tmp.
 //
 // pgy_probe_run executes statements on the session's own search_path,
 // which is how the migration will run them, each in a subtransaction, and
 // returns the errors.
 //
-// pgy_probe copies each relation into a temporary table of the same name,
-// runs its statements, reads the definitions back and renames the copy
-// away, which is cheaper than dropping it, so that the next relation's
-// definitions don't resolve a name to it.
+// pgy_probe copies each relation into a temporary table of the same name
+// and runs its statements. It then renames the copy, which is cheaper than
+// dropping it: a temporary table hides the tables and types of its name in
+// other schemas, from the deparser and from the next relation's
+// definitions.
 var exprProbeFuncs = []string{`
-create function pg_temp.pgy_probe_defs(rel oid, shown text) returns jsonb language sql stable set search_path = public as $f$
+create function pg_temp.pgy_probe_defs(rel oid, tmp text, own text, shown text) returns jsonb language sql stable set search_path = public as $f$
     select coalesce(jsonb_agg(jsonb_build_object('kind', d.kind, 'name', d.name, 'parts', d.parts)), '[]'::jsonb)
     from (
-        select 'default' as kind, a.attname::text as name, jsonb_build_array(pg_get_expr(ad.adbin, ad.adrelid)) as parts
+        select 'default' as kind, a.attname::text as name,
+               jsonb_build_array(replace(pg_get_expr(ad.adbin, ad.adrelid), tmp || '.', own || '.')) as parts
         from pg_attrdef ad
         join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum
         where ad.adrelid = rel
         union all
-        select 'constraint', con.conname::text, jsonb_build_array(pg_get_constraintdef(con.oid))
+        select 'constraint', con.conname::text, jsonb_build_array(replace(pg_get_constraintdef(con.oid), tmp || '.', own || '.'))
         from pg_constraint con
         where con.conrelid = rel and con.contype in ('c', 'x')
         union all
         select 'index', i.relname::text,
-               to_jsonb(array(select case when x.indkey[k - 1] = 0 then pg_get_indexdef(x.indexrelid, k, true)
-                                          else (select quote_ident(a.attname) from pg_attribute a where a.attrelid = x.indrelid and a.attnum = x.indkey[k - 1]) end
+               to_jsonb(array(select replace(case when x.indkey[k - 1] = 0 then pg_get_indexdef(x.indexrelid, k, true)
+                                                  else (select quote_ident(a.attname) from pg_attribute a where a.attrelid = x.indrelid and a.attnum = x.indkey[k - 1]) end,
+                                             tmp || '.', own || '.')
                               from generate_series(1, x.indnkeyatts) k order by k)
-                        || coalesce(pg_get_expr(x.indpred, x.indrelid, true), ''))
+                        || replace(coalesce(pg_get_expr(x.indpred, x.indrelid, true), ''), tmp || '.', own || '.'))
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         where x.indrelid = rel
         union all
         select 'policy', pol.polname::text,
-               jsonb_build_array(coalesce(pg_get_expr(pol.polqual, pol.polrelid), ''), coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''))
+               jsonb_build_array(replace(coalesce(pg_get_expr(pol.polqual, pol.polrelid), ''), tmp || '.', own || '.'),
+                                 replace(coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), tmp || '.', own || '.'))
         from pg_policy pol
         where pol.polrelid = rel
         union all
         select 'trigger', t.tgname::text,
-               jsonb_build_array(replace(pg_get_triggerdef(t.oid), ' ON pg_temp.' || quote_ident(c.relname) || ' ', ' ON ' || shown || ' '))
+               jsonb_build_array(replace(pg_get_triggerdef(t.oid), ' ON pg_temp.' || tmp || ' ', ' ON ' || shown || ' '))
         from pg_trigger t
-        join pg_class c on c.oid = t.tgrelid
         where t.tgrelid = rel and not t.tgisinternal
     ) d
 $f$`, `
@@ -1111,10 +1129,10 @@ $f$`, `
 create function pg_temp.pgy_probe(spec jsonb) returns jsonb language plpgsql as $f$
 declare
     r jsonb;
+    rel oid;
     failure text;
     failed jsonb[] := '{}';
     relations jsonb[] := '{}';
-    done int := 0;
 begin
     for r in select * from jsonb_array_elements(spec->'relations') loop
         failure := null;
@@ -1128,10 +1146,10 @@ begin
             continue;
         end if;
         failed := failed || pg_temp.pgy_probe_run(r->'run');
+        rel := format('pg_temp.%I', r->>'name')::regclass;
+        execute format('alter table pg_temp.%I rename to %I', r->>'name', r->>'temp');
         relations := relations || jsonb_build_object('defs',
-            pg_temp.pgy_probe_defs(format('pg_temp.%I', r->>'name')::regclass, format('%I.%I', r->>'schema', r->>'name')));
-        execute format('alter table pg_temp.%I rename to %I', r->>'name', 'pgy_probe_t' || done);
-        done := done + 1;
+            pg_temp.pgy_probe_defs(rel, r->>'temp', format('%I', r->>'name'), format('%I.%I', r->>'schema', r->>'name')));
     end loop;
     failed := failed || pg_temp.pgy_probe_run(spec->'run');
     return jsonb_build_object('errors', to_jsonb(failed), 'relations', to_jsonb(relations), 'defs', pg_temp.pgy_probe_globals());
