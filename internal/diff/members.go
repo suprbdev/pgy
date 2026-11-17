@@ -44,6 +44,18 @@ const initPrivsQ = `
     and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid, s.oid) is not null
 `
 
+// userObjects returns the condition that keeps the catalog rows of the
+// objects introspection reads, those outside the system schemas, with nsp
+// the alias of their pg_namespace row, plus the extension members in
+// pg_catalog, where extensions whose control file fixes the schema (plv8,
+// plpgsql itself) put their routines and types: oid is the object's OID and
+// class its catalog. Built-in objects have no pg_depend rows, so only the
+// rows of pg_catalog pay for the check.
+func userObjects(nsp, class, oid string) string {
+	return fmt.Sprintf(`(%[1]s.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and %[1]s.nspname !~ '^pg_(toast_)?temp_'
+            or %[1]s.nspname = 'pg_catalog' and exists (select from pg_depend ext_m where ext_m.classid = '%[2]s'::regclass and ext_m.objid = %[3]s and ext_m.deptype = 'e'))`, nsp, class, oid)
+}
+
 // extensionConfigQ lists the configuration tables of extensions
 // (pg_extension_config_dump) with the condition that selects the rows
 // pg_dump keeps of them, those an application added.

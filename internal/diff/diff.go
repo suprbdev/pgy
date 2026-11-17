@@ -1147,8 +1147,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(aggQ, func(aggRows pgx.Rows) error {
         for aggRows.Next() {
@@ -1175,8 +1174,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         cross join lateral aclexplode(t.typacl) a
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         and a.grantee <> t.typowner
     `
     batch.add(typeGrantQ, func(rows pgx.Rows) error {
@@ -1193,8 +1191,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.typnamespace
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         and t.typacl is not null
         and not exists (select from aclexplode(t.typacl) a where a.grantee = 0 and a.privilege_type = 'USAGE')
     `
@@ -1340,8 +1337,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, t.typname, t.typtype in ('b', 'm')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_type", "t.oid")+`
         and (t.typtype in ('e', 'c', 'r', 'm') or t.typtype = 'b' and t.typcategory <> 'A' and t.typisdefined)
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
@@ -1378,8 +1374,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         join pg_language lang on lang.oid = p.prolang
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(funcQ, func(funcRows pgx.Rows) error {
         for funcRows.Next() {
@@ -1578,7 +1573,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_ts_dict t
         join pg_namespace n on n.oid = t.dictnamespace
         left join pg_description d on d.objoid = t.oid and d.classoid = 'pg_ts_dict'::regclass
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        where `+userObjects("n", "pg_ts_dict", "t.oid")+`
     `
     batch.add(tsQ, func(tsRows pgx.Rows) error {
         for tsRows.Next() {
@@ -1598,7 +1593,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace n on n.oid = t.dictnamespace
         join pg_ts_template tp on tp.oid = t.dicttemplate
         join pg_namespace tn on tn.oid = tp.tmplnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        where `+userObjects("n", "pg_ts_dict", "t.oid")+`
     `
     batch.add(dictQ, func(rows pgx.Rows) error {
         for rows.Next() {
@@ -1700,8 +1695,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                coalesce((select c.conname::text from pg_constraint c where c.contypid = t.oid and c.contype = 'n' limit 1), '')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_type", "t.oid")+`
         and t.typtype = 'd'
     `
     batch.add(domQ, func(domRows pgx.Rows) error {
@@ -1882,8 +1876,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         left join lateral aclexplode(p.proacl) a on true
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(fgQ, func(fgRows pgx.Rows) error {
         for fgRows.Next() {
@@ -2141,8 +2134,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_proc p on p.oid = d.objoid
         join pg_namespace n on n.oid = p.pronamespace
         where d.classoid = 'pg_proc'::regclass
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_proc", "p.oid")+`
     `
     batch.add(fcQ, func(fcRows pgx.Rows) error {
         for fcRows.Next() {
@@ -2163,8 +2155,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_type t on t.oid = d.objoid
         join pg_namespace n on n.oid = t.typnamespace
         where d.classoid = 'pg_type'::regclass
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
-        and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
     `
     batch.add(tcQ, func(tcRows pgx.Rows) error {
         for tcRows.Next() {
@@ -2287,7 +2278,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_type t join pg_namespace n on n.oid = t.typnamespace
         where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
-        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        and `+userObjects("n", "pg_type", "t.oid")+`
         union all
         select 'schema:' || n.nspname, pg_get_userbyid(n.nspowner)
         from pg_namespace n
@@ -2295,11 +2286,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         union all
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_proc", "p.oid")+`
         union all
         select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
         from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
-        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        where `+userObjects("n", "pg_ts_dict", "d.oid")+`
         union all
         select 'tscfg:' || n.nspname || '.' || c.cfgname, pg_get_userbyid(c.cfgowner)
         from pg_ts_config c join pg_namespace n on n.oid = c.cfgnamespace

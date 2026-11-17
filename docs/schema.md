@@ -464,8 +464,23 @@ schema public:
 - **Sequences.** A sequence declared without options is created with PostgreSQL's defaults when it doesn't exist, as before. Sequences are created after the extensions, so once an extension has created one, the declaration only manages its privileges, owner and comment.
 - **Aggregates** are granted with `GRANT ... ON FUNCTION`; an ordered-set aggregate is declared as `aggregate percentile(float8 order by anyelement):` and granted on `(float8, anyelement)`. `grants` and `revokePublic` work on every aggregate, not only on one an extension owns.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
+- **`pg_catalog`.** Some extensions install their objects in `pg_catalog`, because their control file fixes that schema: plv8, plls and plcoffee do, and so does `plpgsql` itself with its handler functions. pgy reads the functions, procedures, aggregates, types, domains and text search dictionaries an extension owns there like those in any other schema, while the rest of `pg_catalog` stays out of view. Declare them under `schema pg_catalog:`, as `pgy pull` writes them (see the plv8 example below); their privileges, owner and comment are compared and drift on them is found. PostgreSQL creates no tables, views or sequences in `pg_catalog` unless `allow_system_table_mods` is on, so extensions put none there.
 - **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual. The grants of a schema an extension owns (`pg_search`'s `pdb`) are compared with `pg_init_privs`, like those of its other objects. Schemas are never dropped.
 - **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences, aggregates and schemas are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too; a schema an extension created is never written as the application's, with its owner and comment. PostgreSQL keeps no record of the options an extension's script gave its text search dictionaries, so pull writes the current options of each one that has any (`unaccent`'s `rules: unaccent` included), which a rebuild sets after `CREATE EXTENSION`; `pg_dump` loses them. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
+
+plv8 installs its objects in `pg_catalog`:
+
+```yaml
+extensions:
+  - {name: plv8, schema: pg_catalog}
+roles:
+  app: {}
+schema pg_catalog:
+  function plv8_version():
+    revokePublic: true
+  type plv8_int4array:
+    grants: {app: [usage]}
+```
 
 ## Database Settings
 
