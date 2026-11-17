@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestFunctionReturnTypeChangeRecreates(t *testing.T) {
 	}
 }
 
-func TestRoutineBodiesUnchecked(t *testing.T) {
+func TestRoutineBodiesUncheckedWithNewObjects(t *testing.T) {
 	d := &schema.Database{
 		Tables: map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}}},
 		Functions: map[string]*schema.Function{
@@ -88,30 +89,115 @@ func TestRoutineBodiesUnchecked(t *testing.T) {
 		`create procedure "app"."p"() language plperl as $$return;$$;`,
 		`reset check_function_bodies;`,
 	})
+}
 
+func bodyCheckLive() *Live {
 	live := emptyLive()
 	live.Schemas["app"] = true
 	lt := newLiveTable()
 	lt.Columns["id"] = &LiveColumn{Type: "integer"}
 	live.Tables["app.t"] = lt
-	live.Functions["app.f()"] = true
-	live.FunctionDefs["app.f()"] = &LiveFunction{Signature: "app.f()", Kind: "f", Body: "select 1", Returns: "integer", Language: "sql", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100}
-	d.Tables, d.Procedures = map[string]*schema.Table{"app.t": d.Tables["app.t"]}, nil
-	d.Functions = map[string]*schema.Function{"app.f()": d.Functions["app.f()"]}
-	wantStatements(t, Plan(live, d, false).Creates, []string{
+	for _, name := range []string{"f", "g"} {
+		sig := "app." + name + "()"
+		live.Functions[sig] = true
+		live.FunctionDefs[sig] = &LiveFunction{Signature: sig, Kind: "f", Body: "select 1", Returns: "integer", Language: "sql", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: 100}
+		live.FunctionPublicExec[sig] = true
+	}
+	return live
+}
+
+func bodyCheckDB(bodies map[string]string) *schema.Database {
+	d := &schema.Database{
+		Tables:    map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}}},
+		Functions: map[string]*schema.Function{},
+	}
+	for name, body := range bodies {
+		d.Functions["app."+name+"()"] = &schema.Function{Name: name, ArgsSig: "()", Returns: "int", Language: "plpgsql", Body: body}
+	}
+	return d
+}
+
+func TestRoutineBodyCheckedWhenOnlyRoutineChanges(t *testing.T) {
+	d := bodyCheckDB(map[string]string{"f": "begin return 2; end", "g": "select 1"})
+	d.Functions["app.g()"].Language = "sql"
+	f := d.Functions["app.f()"]
+	f.Comment, f.Owner, f.Grants = "two", "app_owner", map[string][]string{"app_user": {"execute"}}
+	f.Volatility = "stable"
+	p := Plan(bodyCheckLive(), d, false)
+	if sql := Render(p); strings.Contains(sql, "check_function_bodies") || !strings.Contains(sql, `create or replace function "app"."f"()`) {
+		t.Errorf("a plan that replaces one routine and changes only its privileges, comment and owner keeps body checks:\n%s", sql)
+	}
+}
+
+func TestRoutineBodiesUncheckedWithSeveralRoutines(t *testing.T) {
+	d := bodyCheckDB(map[string]string{"f": "begin return 2; end", "g": "begin return app.f(); end"})
+	wantStatements(t, Plan(bodyCheckLive(), d, false).Creates, []string{
 		`set check_function_bodies = off;`,
-		`create or replace function "app"."f"() returns int language sql as $$select count(*)::int from app.t$$;`,
+		`create or replace function "app"."f"() returns int language plpgsql as $$begin return 2; end$$;`,
+		`create or replace function "app"."g"() returns int language plpgsql as $$begin return app.f(); end$$;`,
 		`reset check_function_bodies;`,
 	})
 }
 
+func TestRoutineBodyUncheckedWithOtherChanges(t *testing.T) {
+	for name, change := range map[string]func(*schema.Database){
+		"new table": func(d *schema.Database) {
+			d.Tables["app.u"] = &schema.Table{Name: "u", Columns: map[string]*schema.Column{"id": {Type: "int"}}}
+		},
+		"new column": func(d *schema.Database) {
+			d.Tables["app.t"].Columns["note"] = &schema.Column{Type: "text", Nullable: true}
+		},
+		"new type": func(d *schema.Database) {
+			d.Types = map[string]*schema.TypeDef{"app.mood": {Kind: "enum", Labels: []string{"ok"}}}
+		},
+		"new view":      func(d *schema.Database) { d.Views = map[string]*schema.View{"app.v": {Query: "select id from app.t"}} },
+		"new extension": func(d *schema.Database) { d.Extensions = []*schema.Extension{{Name: "hstore"}} },
+		"SQL-standard routine": func(d *schema.Database) {
+			d.Functions["app.h()"] = &schema.Function{Name: "h", ArgsSig: "()", Returns: "int", Language: "sql", Body: "return 1"}
+		},
+	} {
+		d := bodyCheckDB(map[string]string{"f": "declare r app.t%rowtype; begin return 2; end", "g": "select 1"})
+		d.Functions["app.g()"].Language = "sql"
+		change(d)
+		creates := Plan(bodyCheckLive(), d, false).Creates
+		at := slices.Index(creates, `create or replace function "app"."f"() returns int language plpgsql as $$declare r app.t%rowtype; begin return 2; end$$;`)
+		if at < 1 || creates[at-1] != "set check_function_bodies = off;" || at+1 >= len(creates) || creates[at+1] != "reset check_function_bodies;" {
+			t.Errorf("%s: the replaced routine must be created without body checks:\n%s", name, strings.Join(creates, "\n"))
+		}
+		if strings.Count(strings.Join(creates, "\n"), "check_function_bodies = off") != 1 {
+			t.Errorf("%s: only the string body is unchecked:\n%s", name, strings.Join(creates, "\n"))
+		}
+	}
+}
+
+func TestBodyNeutralStatements(t *testing.T) {
+	for stmt, want := range map[string]bool{
+		`comment on function "app"."f"() is 'x';`:                        true,
+		`grant execute on function "app"."f"() to "r";`:                  true,
+		`revoke all on function "app"."f"() from public;`:                true,
+		`alter function "app"."f"() owner to "o";`:                       true,
+		`alter table "app"."t" owner to "o";`:                            true,
+		`alter function "app"."f"() stable;`:                             true,
+		`drop view "app"."v";`:                                           true,
+		`create table "app"."u" ("id" int);`:                             false,
+		`alter table "app"."t" add column "note" text;`:                  false,
+		`create or replace view "app"."v" as select 1;`:                  false,
+		`alter type "app"."mood" add value 'sad';`:                       false,
+		`create function "app"."h"() returns int language sql return 1;`: false,
+	} {
+		if got := bodyNeutral(stmt); got != want {
+			t.Errorf("bodyNeutral(%q) = %v, want %v", stmt, got, want)
+		}
+	}
+}
+
 func TestSQLStandardBodies(t *testing.T) {
 	for body, want := range map[string]bool{
-		"begin atomic select 1; end": true,
+		"begin atomic select 1; end":    true,
 		"BEGIN\n  ATOMIC select 1; END": true,
-		"return x * 2":               true,
-		"select 1":                   false,
-		"begin return 1; end":        false,
+		"return x * 2":                  true,
+		"select 1":                      false,
+		"begin return 1; end":           false,
 	} {
 		if got := schema.IsSQLStandardBody("sql", body); got != want {
 			t.Errorf("IsSQLStandardBody(%q) = %v", body, got)
@@ -130,9 +216,9 @@ func TestSQLStandardBodies(t *testing.T) {
 		t.Errorf("routineBodySQL = %q", got)
 	}
 	cases := []struct {
-		body, live      string
+		body, live       string
 		replace, liveStd bool
-		want            bool
+		want             bool
 	}{
 		{"begin atomic select 1; end", "BEGIN ATOMIC\n SELECT 1;\nEND", false, true, false},
 		{"begin atomic select 2; end", "BEGIN ATOMIC\n SELECT 1;\nEND", true, true, true},

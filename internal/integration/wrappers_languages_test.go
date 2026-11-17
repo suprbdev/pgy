@@ -553,9 +553,7 @@ schema public:
 		`revoke usage on language "plpgsql" from public;`,
 		fmt.Sprintf(`grant usage on language "plpgsql" to %q;`, dev),
 		fmt.Sprintf(`grant usage on language "sql" to %q with grant option;`, lead),
-		`set check_function_bodies = off;`,
 		`create function "public"."one"() returns integer language plpgsql as $$begin return 1; end$$;`,
-		`reset check_function_bodies;`,
 	}
 	if strings.TrimSpace(sql) != strings.Join(wantLines, "\n") {
 		t.Errorf("got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))
