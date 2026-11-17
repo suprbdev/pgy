@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -450,7 +451,8 @@ schema app:
 
 // TestIntegrationProbeExpressionsUnreadableTable probes as a role that may
 // not read one of the tables: that table can't be copied, so its
-// definitions are compared as text, and the other table's are unaffected.
+// definitions are compared as text and it is reported as denied, and the
+// other table's are unaffected.
 func TestIntegrationProbeExpressionsUnreadableTable(t *testing.T) {
 	pool, d := exprProbeDatabase(t, "pgytest_expr_probe_unreadable", `
 schema app:
@@ -491,12 +493,16 @@ schema app:
 	}
 	defer reader.Close()
 
-	live := probed(t, reader, d)
+	live := introspect(t, reader, d)
+	var denied *diff.DeniedError
+	if err := diff.ProbeExpressions(ctx, reader, live, d); !errors.As(err, &denied) || !reflect.DeepEqual(denied.Objects, []string{"app.closed"}) || !strings.Contains(denied.Reason, "permission denied") {
+		t.Errorf("want the unreadable table reported as denied, got %v", err)
+	}
 	if p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: "app.open", Name: "ttl"}]; p == nil || p.Err != "" {
 		t.Errorf("the readable table's default must be probed, got %+v", p)
 	}
-	if p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: "app.closed", Name: "ttl"}]; p == nil || !strings.Contains(p.Err, "permission denied") {
-		t.Errorf("the unreadable table's default can't be probed, got %+v", p)
+	if p := live.ExprProbes[diff.ExprKey{Kind: diff.ExprDefault, Object: "app.closed", Name: "ttl"}]; p == nil || !strings.Contains(p.Err, "permission denied") || !p.Denied {
+		t.Errorf("the unreadable table's default can't be probed, for a missing privilege, got %+v", p)
 	}
 	want := []string{`alter table "app"."closed" alter column "ttl" set default '2 hours';`}
 	if got := diff.Plan(live, d, true).Alters; !reflect.DeepEqual(got, want) {
@@ -636,8 +642,8 @@ func TestIntegrationProbeExpressionsInSyncOpensNoTransaction(t *testing.T) {
 			if err := diff.ProbeExpressions(ctx, pool, live, d); err != nil {
 				t.Fatal(err)
 			}
-			if n := pool.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil {
-				t.Errorf("a schema that is in sync must not be probed: %d connections used, probes %v", n, exprProbeKeys(live))
+			if n := pool.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil || live.TypeProbes != nil {
+				t.Errorf("a schema that is in sync must not be probed: %d connections used, probes %v, types %v", n, exprProbeKeys(live), live.TypeProbes)
 			}
 			if p := diff.PlanReportingUnsafe(live, d, diff.Options{}); diff.Render(p) != "" || len(p.Warnings) > 0 {
 				t.Errorf("pulled YAML must diff clean, got:\n%s%+v", diff.Render(p), p.Warnings)

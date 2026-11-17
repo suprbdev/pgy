@@ -51,6 +51,12 @@ type Live struct{
     // a schema from one side (see ProbeExpressions); nil when none was
     // probed, and they are compared as text only.
     ExprProbes map[ExprKey]*ExprProbe
+    // TypeProbes maps each declared type of a column, composite attribute
+    // or domain that doesn't match the live one as text, as the YAML
+    // writes it, to the way PostgreSQL prints it (see ProbeExpressions); a
+    // type PostgreSQL couldn't resolve is missing. nil when none was
+    // probed, and types are compared as text only.
+    TypeProbes map[string]string
     // MatViewTables: "schema.matview" -> index state (Indexes, IndexDefs, IndexOpclasses, IndexComments)
     MatViewTables map[string]*LiveTable
     // ViewTables: "schema.view" -> trigger state (Triggers, TriggerComments)

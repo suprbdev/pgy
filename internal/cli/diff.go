@@ -2,9 +2,11 @@ package cli
 
 import (
     "encoding/json"
+    "errors"
     "fmt"
     "os"
     "path/filepath"
+    "strings"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/spf13/cobra"
@@ -39,7 +41,9 @@ Declared expressions (defaults, checks, index expressions and predicates,
 policies, triggers and the like) are compared as text, and through the server
 where the text differs or matches only because a cast or a schema was left
 out on one side. --strict-expressions, or policy.strict_expressions in the
-config, compares every one through the server.
+config, compares every one through the server. Declared types of columns,
+composite attributes and domains are compared through the server where the
+text differs (numeric(10) is the stored numeric(10,0)).
 
 With --buffer - the SQL is printed to stdout instead of written to the
 buffer file, and status messages go to stderr.
@@ -140,13 +144,22 @@ Exit codes:
                 if err := diff.IntrospectDataWith(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }
-                if err := diff.ProbeViews(ctx, pool, live, compiled); err != nil && !noWarnings {
+                var denied []*diff.DeniedError
+                notDenied := func(err error) error {
+                    var d *diff.DeniedError
+                    if errors.As(err, &d) { denied = append(denied, d); return nil }
+                    return err
+                }
+                if err := notDenied(diff.ProbeViews(ctx, pool, live, compiled)); err != nil && !noWarnings {
                     fmt.Fprintf(os.Stderr, "warning: views and materialized views were not compared with the YAML, so their queries are left as they are: %v\n", err)
                 }
                 probe := diff.ProbeExpressions
                 if strictExpressions || !cmd.Flags().Changed("strict-expressions") && cfg.Migrate.StrictExpressions { probe = diff.ProbeEveryExpression }
-                if err := probe(ctx, pool, live, compiled); err != nil && !noWarnings {
-                    fmt.Fprintf(os.Stderr, "warning: expressions were compared as text only, so one PostgreSQL stores the same way as the YAML may be reported as changed, and one that differs only in a cast or a schema as unchanged: %v\n", err)
+                if err := notDenied(probe(ctx, pool, live, compiled)); err != nil && !noWarnings {
+                    fmt.Fprintf(os.Stderr, "warning: expressions and types were compared as text only, so one PostgreSQL stores the same way as the YAML may be reported as changed, and an expression that differs only in a cast or a schema as unchanged: %v\n", err)
+                }
+                if d := diff.JoinDenied(denied...); d != nil && !noWarnings {
+                    fmt.Fprintf(os.Stderr, "warning: the role lacks a privilege to compare these with the YAML through the server (%s), so they were compared as text, where an expression or a type PostgreSQL stores in another spelling may be reported as changed and a view or materialized view is left as it is: %s\n", d.Reason, deniedObjects(d.Objects))
                 }
             }
             var steps []group.Step
@@ -306,6 +319,16 @@ func (e *exitCodeError) Error() string { return fmt.Sprintf("exit %d", e.code) }
 func liveOrNil(live *diff.Live, fromEmpty bool) *diff.Live {
     if fromEmpty { return nil }
     return live
+}
+
+// maxDeniedObjects is how many objects the warning about comparisons the
+// role lacks a privilege for names before it counts the rest.
+const maxDeniedObjects = 10
+
+// deniedObjects lists objects for that warning.
+func deniedObjects(objects []string) string {
+    if len(objects) <= maxDeniedObjects { return strings.Join(objects, ", ") }
+    return fmt.Sprintf("%s and %d more", strings.Join(objects[:maxDeniedObjects], ", "), len(objects)-maxDeniedObjects)
 }
 
 // maxUnsafeWarnings is how many "needs --unsafe" warnings pgy diff prints
