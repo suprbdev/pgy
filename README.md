@@ -189,7 +189,7 @@ policy:
 | `pgy commit NAME` | Turns the buffer into `migrations/NNNN_NAME.sql` with a checksum header. Some changes add files around it: `NNNN_NAME_enum_values.sql` before it for new enum labels, and `NNNN_NAME_concurrent.sql` after it for statements that must run outside a transaction. A split buffer writes several groups. Warns when a schema file changed after `pgy diff` wrote the buffer. |
 | `pgy migrate [--dry-run] [--until N] [--limit N] [--lock-timeout D] [--statement-timeout D] [--retries N] [--retry-wait D]` | Applies pending migrations in order, each in its own transaction, after verifying checksums. `--retries` retries a migration that failed to get a lock. |
 | `pgy status [--json]` | Shows the current, last and pending migrations, and history warnings. Exits 2 when some are pending. |
-| `pgy init` | Creates the migrations table. `migrate` and `status` also create it when it is missing. |
+| `pgy init` | Creates the migrations table. `migrate` and `status` also create it when it is missing. Only what is missing is created: a role without `CREATE` on the database can use a migrations table in a schema it owns (`--migrations-table app.pgy_migrations`), and one that already exists needs no `CREATE` privilege at all. |
 | `pgy mark-applied --force NAME` | Records migrations up to NAME as applied without running them, and removes later records. |
 
 ## Safe changes
