@@ -399,6 +399,7 @@ The functions, aggregates, tables, sequences, views, types, languages and foreig
 | `aggregate <name>(<args>):` | `sfunc`, `stype` and the other options | `grants`, `revokePublic`, `owner`, `comment` |
 | `table <name>:`, `foreign table <name>:` | `columns` (and `of`, `partitionOf`, `inherits`, `server`) | `grants`, `owner`, `comment`, `rowLevelSecurity`, `forceRowLevelSecurity`, `policies`, `data` (with `key`) |
 | `sequence <name>:` | every option | `grants`, `owner`, `comment` |
+| `text search dictionary <name>:` | `template` | `options`, `owner`, `comment`. See [Text Search](#text-search) |
 | `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
 | `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
 | `languages:` entry | | `grants`. See [Languages](#languages) |
@@ -451,7 +452,7 @@ schema public:
 - **Sequences.** A sequence declared without options is created with PostgreSQL's defaults when it doesn't exist, as before. Sequences are created after the extensions, so once an extension has created one, the declaration only manages its privileges, owner and comment.
 - **Aggregates** are granted with `GRANT ... ON FUNCTION`; an ordered-set aggregate is declared as `aggregate percentile(float8 order by anyelement):` and granted on `(float8, anyelement)`. `grants` and `revokePublic` work on every aggregate, not only on one an extension owns.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
-- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences and aggregates are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
+- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences and aggregates are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too. PostgreSQL keeps no record of the options an extension's script gave its text search dictionaries, so pull writes the current options of each one that has any (`unaccent`'s `rules: unaccent` included), which a rebuild sets after `CREATE EXTENSION`; `pg_dump` loses them. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
 
 ## Database Settings
 
@@ -1495,7 +1496,20 @@ schema app:
         generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
 ```
 
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). `owner` is diffed with `ALTER ... OWNER TO`. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+
+A dictionary declared without `template` is never created: it manages the `options`, `owner` and `comment` of one that already exists. That is how to configure the dictionaries that `dict_int` (`intdict`), `dict_xsyn` (`xsyn`) and `unaccent` (`unaccent`) create, as their documentation does with `ALTER TEXT SEARCH DICTIONARY`. In the migration that creates the extension, the options are set right after it; options the extension's script set and the YAML doesn't list are removed by the next diff. See [Objects an extension owns](#objects-an-extension-owns).
+
+```yaml
+extensions:
+  - {name: dict_int, schema: public}
+  - {name: unaccent, schema: public}
+schema public:
+  text search dictionary intdict:
+    options: {maxlen: 4, rejectlong: true}
+  text search dictionary unaccent:
+    options: {rules: my_rules}
+```
 
 ## Row Level Security
 

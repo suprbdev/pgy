@@ -86,6 +86,10 @@ schema public:
     grants: {app: [execute]}
   aggregate percentile(float8 order by anyelement):
     grants: {app: [execute]}
+  text search dictionary unaccent:
+    options: {rules: xsyn_sample}
+    owner: app
+    comment: sample rules
 `)
 	if issues := Files([]string{p}); len(issues) > 0 {
 		t.Errorf("declarations that manage an extension's table, sequence and aggregate are valid:\n%s", messages(issues))

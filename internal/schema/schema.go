@@ -232,7 +232,8 @@ type EventTrigger struct {
     Comment  string
 }
 
-// TSDictionary is a CREATE TEXT SEARCH DICTIONARY declaration (create-only).
+// TSDictionary is a CREATE TEXT SEARCH DICTIONARY declaration; see
+// AttributeOnly for one without a template.
 type TSDictionary struct {
     Schema    string
     Name      string
@@ -240,7 +241,13 @@ type TSDictionary struct {
     Options   map[string]string
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
+    Owner     string // "" = unmanaged
 }
+
+// AttributeOnly reports whether d declares no template. Such a declaration
+// never creates the dictionary: it manages the options, owner and comment
+// of one that already exists, such as one an extension creates.
+func (d *TSDictionary) AttributeOnly() bool { return d.Template == "" }
 
 // TSConfig is a CREATE TEXT SEARCH CONFIGURATION declaration: a copy of an
 // existing configuration or a parser, plus token type -> dictionary mapping
@@ -3054,6 +3061,7 @@ func parseTSDictionary(schemaName, key string, body any) *TSDictionary {
     }
     if dep, ok := m["dependsOn"]; ok { d.DependsOn = parseStringListFromNode(dep) }
     if s, ok := m["comment"].(string); ok { d.Comment = s }
+    if s, ok := m["owner"].(string); ok { d.Owner = strings.TrimSpace(s) }
     return d
 }
 

@@ -292,6 +292,62 @@ schema public:
 	}
 }
 
+func TestIntegrationExtensionDictionaryOptions(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	src := freshDatabase(t, admin, "pgytest_ext_dict_options")
+	dst := freshDatabase(t, admin, "pgytest_ext_dict_options_copy")
+	if _, err := src.Exec(ctx, `
+		create extension dict_int schema public;
+		create extension dict_xsyn schema public;
+		create extension unaccent schema public;
+		alter text search dictionary intdict (maxlen = 4, rejectlong = true);
+		alter text search dictionary unaccent (rules = 'xsyn_sample');`); err != nil {
+		t.Fatal(err)
+	}
+	options := func(db *pgxpool.Pool) map[string]string {
+		rows, err := db.Query(ctx, `select dictname, coalesce(dictinitoption, '') from pg_ts_dict where dictname in ('intdict', 'xsyn', 'unaccent')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, opts string
+			if err := rows.Scan(&name, &opts); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = opts
+		}
+		return out
+	}
+	y := pullAndRebuild(t, src, dst)
+	if !strings.Contains(y, "text search dictionary intdict:\n    options:") || strings.Contains(y, "text search dictionary xsyn") || strings.Contains(y, "template") {
+		t.Errorf("the options of the extensions' dictionaries are pulled without a template, the ones without options left out:\n%s", y)
+	}
+	if want, got := options(src), options(dst); !reflect.DeepEqual(want, got) {
+		t.Errorf("rebuilt dictionary options %v, want %v\n%s", got, want, y)
+	}
+
+	fresh := freshDatabase(t, admin, "pgytest_ext_dict_options_fresh")
+	declared := `
+extensions:
+  - {name: dict_xsyn, schema: public}
+schema public:
+  text search dictionary xsyn:
+    options: {rules: xsyn_sample, keeporig: false, matchsynonyms: true}
+    comment: synonyms
+`
+	opts := diff.Options{Unsafe: true, Prune: true}
+	applyPlan(t, fresh, planExtensionsLive(t, fresh, declared, opts))
+	if sql := diff.Render(planExtensionsLive(t, fresh, declared, opts)); sql != "" {
+		t.Errorf("one migration must converge, got:\n%s", sql)
+	}
+	if got := options(fresh)["xsyn"]; !strings.Contains(got, "matchsynonyms = 'true'") {
+		t.Errorf("xsyn options after the migration: %q", got)
+	}
+}
+
 func TestIntegrationExtensionViewRulesNotPruned(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_view_rules")

@@ -547,24 +547,37 @@ func (b *builder) collations() {
 	}
 }
 
+// textSearch writes the text search dictionaries and configurations. A
+// dictionary an extension creates is written without a template when it
+// has options: PostgreSQL keeps no record of the options the extension's
+// script gave it, so its current ones are written, which a rebuild sets
+// with ALTER after CREATE EXTENSION.
 func (b *builder) textSearch() {
 	for _, k := range sortedKeys(b.live.TSDictionaries) {
 		td := b.d.TSDictionaries[k]
-		if td == nil || b.member("tsdict", k) {
+		if td == nil {
 			continue
 		}
 		blk, name, ok := b.block(k)
 		if !ok {
 			continue
 		}
-		m := newMap()
-		add(m, "template", str(td.Template))
 		opts := flowMap()
 		for _, o := range sortedKeys(td.Options) {
 			add(opts, o, str(td.Options[o]))
 		}
+		m := newMap()
+		if b.member("tsdict", k) {
+			if len(td.Options) > 0 {
+				add(m, "options", opts)
+				add(blk, "text search dictionary "+name, m)
+			}
+			continue
+		}
+		add(m, "template", str(td.Template))
 		add(m, "options", opts)
 		addStr(m, "comment", b.live.TSComments["dict:"+k])
+		b.owner(m, "tsdict:"+k)
 		add(blk, "text search dictionary "+name, m)
 	}
 	for _, k := range sortedKeys(b.live.TSConfigs) {

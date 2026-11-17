@@ -2216,6 +2216,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
+        from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(ownerQ, func(ownerRows pgx.Rows) error {
         for ownerRows.Next() {
@@ -3077,11 +3081,19 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
-            if td == nil || td.Template == "" { continue }
+            if td == nil { continue }
             if live.TSDictionaries[e.Key] {
                 stmts, warn := tsDictionaryAlterStmts(e.Key, td, live.TSDictionaryDefs[e.Key])
                 plan.Alters = append(plan.Alters, stmts...)
                 if warn != "" { plan.Warnings = append(plan.Warnings, Warning{Message: warn}) }
+                continue
+            }
+            if td.AttributeOnly() {
+                if len(td.Options) > 0 {
+                    opts := []string{}
+                    for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
+                }
                 continue
             }
             opts := []string{"template = " + td.Template}
@@ -4840,7 +4852,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
 func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
     if ld == nil { return nil, "" }
     warn := ""
-    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !tsTemplatesEqual(t, ld.Template) {
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !td.AttributeOnly() && !tsTemplatesEqual(t, ld.Template) {
         warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
     }
     if td.Options == nil { return nil, warn }
@@ -5238,6 +5250,9 @@ func planOwners(live *Live, desired *schema.Database) []string {
             name := schema.RoutineName(k)
             owner("procedure", pqIdent(name)+grantFuncArgs(p.ArgsSig), p.Owner, "proc:"+normalizeFunctionSignature(name+p.ArgsSig))
         }
+    }
+    for _, k := range sortedKeys(desired.TSDictionaries) {
+        if td := desired.TSDictionaries[k]; td != nil { owner("text search dictionary", pqIdent(k), td.Owner, "tsdict:"+k) }
     }
     return out
 }

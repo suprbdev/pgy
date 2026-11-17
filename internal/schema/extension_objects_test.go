@@ -75,6 +75,29 @@ func TestTableAttributeOnlyParsed(t *testing.T) {
 	}
 }
 
+func TestDictionaryAttributeOnlyParsed(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema public:
+  text search dictionary intdict:
+    options: {maxlen: 4, rejectlong: true}
+    owner: dict_owner
+    comment: integers
+  text search dictionary english_nostop:
+    template: snowball
+    options: {language: english}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	td := db.TSDictionaries["public.intdict"]
+	if td == nil || !td.AttributeOnly() || td.Owner != "dict_owner" || td.Comment != "integers" || !reflect.DeepEqual(td.Options, map[string]string{"maxlen": "4", "rejectlong": "true"}) {
+		t.Errorf("dictionary without a template: %+v", td)
+	}
+	if td := db.TSDictionaries["public.english_nostop"]; td == nil || td.AttributeOnly() {
+		t.Errorf("dictionary with a template: %+v", td)
+	}
+}
+
 func TestTableAttributeOnlyMergedWithColumns(t *testing.T) {
 	a, err := parseFlexibleDatabase([]byte("schema public:\n  table t:\n    columns: {id: {type: int}}\n"))
 	if err != nil {

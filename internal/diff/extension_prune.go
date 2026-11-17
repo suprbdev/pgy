@@ -185,6 +185,9 @@ func declaredMembers(live *Live, desired *schema.Database) map[string][]string {
 	for _, k := range sortedKeys(desired.Domains) {
 		add("type:"+k, "domain "+k)
 	}
+	for _, k := range sortedKeys(desired.TSDictionaries) {
+		add("tsdict:"+k, "text search dictionary "+k)
+	}
 	for _, k := range sortedKeys(desired.Languages) {
 		add("language:"+k, "language "+k)
 	}

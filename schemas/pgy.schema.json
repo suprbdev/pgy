@@ -1147,15 +1147,15 @@
       "additionalProperties": false
     },
     "tsDictionary": {
-      "description": "Body of a `text search dictionary <name>:` declaration (create-only).",
+      "description": "Body of a `text search dictionary <name>:` declaration. Without template the declaration creates nothing: it manages the options, owner and comment of a dictionary that already exists, such as intdict, xsyn or unaccent, which their extensions create.",
       "type": "object",
       "properties": {
-        "template": { "type": "string", "minLength": 1, "description": "e.g. simple, snowball, ispell, synonym, thesaurus." },
-        "options": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "template": { "type": "string", "minLength": 1, "description": "e.g. simple, snowball, ispell, synonym, thesaurus. A changed template is reported, since ALTER cannot change it." },
+        "options": { "type": "object", "description": "Options (ALTER TEXT SEARCH DICTIONARY), authoritative when present: options not listed are removed. Omitted = unmanaged.", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["template"],
       "additionalProperties": false
     },
     "identityOptions": {

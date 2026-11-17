@@ -258,7 +258,8 @@ func membersPending(live *Live, stmts []string) bool {
 // resolveAttributeOnly lines up the declarations of desired that manage an
 // object pgy doesn't create (a function or procedure without a body, a view
 // without a query, a type without a kind, a table without columns, an
-// aggregate without sfunc and stype) with the live objects they are about.
+// aggregate without sfunc and stype, a text search dictionary without a
+// template) with the live objects they are about.
 // A routine declared in another spelling than the live one (argument types
 // only, other argument names) is rewritten to the live signature, so that
 // everything compared by signature finds it. A declaration whose object
@@ -436,6 +437,19 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 	}
 	if desired.Aggregates != nil {
 		out.Aggregates = aggregates
+	}
+
+	dictionaries := cloneMap(desired.TSDictionaries, nil)
+	for _, k := range sortedKeys(desired.TSDictionaries) {
+		td := desired.TSDictionaries[k]
+		if td == nil || !td.AttributeOnly() || pending || live.TSDictionaries[k] {
+			continue
+		}
+		missing("text search dictionary", k, "template")
+		dictionaries[k] = &schema.TSDictionary{Schema: td.Schema, Name: td.Name}
+	}
+	if desired.TSDictionaries != nil {
+		out.TSDictionaries = dictionaries
 	}
 	return &out, warns
 }

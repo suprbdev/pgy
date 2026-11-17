@@ -192,11 +192,14 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for k, td := range desired.TSDictionaries {
-        if td == nil || td.Template == "" { continue }
+        if td == nil { continue }
         out.TSDictionaries[k] = true
         if td.Comment != "" { out.TSComments["dict:"+k] = td.Comment }
         ld := &schema.TSDictionary{Template: strings.TrimPrefix(td.Template, "pg_catalog.")}
-        if prev := out.TSDictionaryDefs[k]; prev != nil { ld.Options = prev.Options }
+        if prev := out.TSDictionaryDefs[k]; prev != nil {
+            ld.Options = prev.Options
+            if td.AttributeOnly() { ld.Template = prev.Template }
+        }
         if td.Options != nil {
             ld.Options = map[string]string{}
             for o, v := range td.Options { ld.Options[strings.ToLower(o)] = v }
@@ -833,6 +836,7 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
     for k, p := range desired.Procedures {
         if p != nil { set("proc:"+normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig), p.Owner) }
     }
+    for k, td := range desired.TSDictionaries { if td != nil { set("tsdict:"+k, td.Owner) } }
     for _, dp := range desired.DefaultPrivileges {
         if dp != nil {
             for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }
