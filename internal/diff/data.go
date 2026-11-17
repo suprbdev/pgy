@@ -293,13 +293,20 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
 // is written differently (a citext key in another case) is reported as
 // changed, and two declared rows with equal keys are an error, as is a key
 // column whose type has no default btree operator class (see
-// dataKeyTypeError). Tables whose key columns do not exist yet (they are
-// renamed or added by the plan) are skipped and get upserts, as are tables
-// whose rows use enum labels the plan has yet to add. The rows of tables
-// that do not exist yet are only checked (see checkNewTableData).
+// dataKeyTypeError). A column whose type the plan changes is compared in
+// its declared type (without its type modifier), so rows that only fit the
+// new type are found; when that type does not exist yet or the column is a
+// key column, the table is skipped. Tables whose key columns do not exist
+// yet (they are renamed or added by the plan) are skipped too, as are
+// tables whose rows use enum labels the plan has yet to add, and skipped
+// tables get upserts. The rows of tables that do not exist yet are only
+// checked (see checkNewTableData).
 func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
+    if rq := newRequalifier(l, desired); rq != nil { desired = rq.database(desired) }
+    desired = withUnmovedExtensions(l, desired)
+    sc := scopeFor(l.SearchPath)
     newLabels := addsEnumLabels(l, desired)
     for _, fq := range sortedKeys(desired.Tables) {
         dt := desired.Tables[fq]
@@ -321,6 +328,18 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         used := dataUsedColumns(key, dt.Data.Rows)
         for col := range used {
             if _, ok := types[col]; !ok { delete(used, col) }
+        }
+        names, typs := []string{}, []string{}
+        for _, col := range sortedKeys(used) {
+            if dc, lc := dt.Columns[col], lt.Columns[col]; dc != nil && lc != nil && dc.Type != "" && sc.columnType(dc.Type) != sc.columnType(lc.Type) {
+                names, typs = append(names, col), append(typs, dc.Type)
+            }
+        }
+        if len(names) > 0 {
+            declared, err := declaredDataColumnTypes(ctx, pool, names, typs)
+            if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
+            if !hasDataColumns(declared, names) || slices.ContainsFunc(key, func(k string) bool { return slices.Contains(names, k) }) { continue }
+            for _, col := range names { types[col] = declared[col] }
         }
         from := dataTarget(fq, lt.Partitioned || dt.PartitionBy != nil)
         rec := "pgy_rec"

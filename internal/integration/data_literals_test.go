@@ -74,6 +74,91 @@ func TestIntegrationDataKeysWithTypmods(t *testing.T) {
 	}
 }
 
+const dataTypeChange = `
+schema SCH:
+  table t:
+    columns:
+      id: {type: T_ID}
+      code: {type: T_CODE}
+      price: {type: T_PRICE}
+    primaryKey: [id]
+    data:
+      rows:
+        - {id: 1, code: V_CODE, price: V_PRICE}
+`
+
+// TestIntegrationDataTypeChange changes column types in the same plan as
+// data rows that only fit the new types: the rows are compared in the
+// declared types and written after the change, and a changed key column
+// type gets an upsert.
+func TestIntegrationDataTypeChange(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	opts := diff.Options{Unsafe: true, Prune: true}
+	yaml := func(pairs ...string) string { return strings.NewReplacer(pairs...).Replace(dataTypeChange) }
+	convergeYAMLWith(t, pool, sch, yaml("T_ID", "int", "T_CODE", "varchar(3)", "T_PRICE", `"numeric(6,2)"`, "V_CODE", "abc", "V_PRICE", `"1.25"`), opts)
+	applied := convergeYAMLWith(t, pool, sch, yaml("T_ID", "int", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "abcde", "V_PRICE", `"1.0005"`), opts)
+	if !strings.Contains(applied, `update only "`+sch+`"."t" set "code" = 'abcde', "price" = '1.0005' where "id" = 1;`) {
+		t.Errorf("want an update after the type change, got:\n%s", applied)
+	}
+	applied = convergeYAMLWith(t, pool, sch, yaml("T_ID", "bigint", "T_CODE", "varchar(5)", "T_PRICE", `"numeric(8,3)"`, "V_CODE", "xyz", "V_PRICE", `"2"`), opts)
+	if !strings.Contains(applied, `on conflict ("id") do update set "code" = excluded."code", "price" = excluded."price";`) {
+		t.Errorf("want an upsert when the key column's type changes, got:\n%s", applied)
+	}
+	if got := rowTexts(t, pool, fmt.Sprintf(`select concat_ws(' ', id, code, price) from %q.t`, sch)); len(got) != 1 || got[0] != "1 xyz 2.000" {
+		t.Errorf("rows = %q", got)
+	}
+}
+
+// TestIntegrationDataFollowsMovedExtension moves an extension whose type a
+// data table's columns use, the key included: the column types follow the
+// extension, so the rows are compared as usual and nothing is written.
+func TestIntegrationDataFollowsMovedExtension(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_data_ext_move")
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `
+		create extension citext schema public;
+		create schema app;
+		create table app.t (code citext primary key, name citext);
+		insert into app.t values ('a', 'A');`); err != nil {
+		t.Fatal(err)
+	}
+	d := loadSpellingYAML(t, `
+extensions:
+  - {name: citext, schema: ext}
+schema app:
+  table t:
+    columns:
+      code: {type: ext.citext, primaryKey: true}
+      name: {type: ext.citext, nullable: true}
+    data:
+      rows:
+        - {code: a, name: A}
+`)
+	plan := func() *diff.PlanDiff {
+		live, err := diff.Introspect(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := diff.IntrospectExtensions(ctx, db, live, d, diff.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := diff.IntrospectData(ctx, db, live, d); err != nil {
+			t.Fatal(err)
+		}
+		return diff.PlanWith(live, d, diff.Options{Unsafe: true, Prune: true})
+	}
+	p := plan()
+	if sql := strings.TrimSpace(diff.Render(p)); sql != "create schema if not exists \"ext\";\nalter extension \"citext\" set schema \"ext\";" {
+		t.Errorf("only the extension moves, got:\n%s", sql)
+	}
+	applyPlan(t, db, p)
+	if sql := diff.Render(plan()); sql != "" {
+		t.Errorf("the next diff is clean, got:\n%s", sql)
+	}
+}
+
 const dataListsForOtherTypes = `
 schema SCH:
   domain ints:
