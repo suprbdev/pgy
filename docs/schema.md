@@ -10,6 +10,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Format 1: `schema <name>:` blocks (recommended)](#format-1-schema-name-blocks-recommended)
   - [Format 2: `tables:` map](#format-2-tables-map)
   - [Format 3: `tables:` list](#format-3-tables-list)
+  - [Names](#names)
 - [Merging across files](#merging-across-files)
 - [Extensions](#extensions)
 - [Database Settings](#database-settings)
@@ -188,6 +189,15 @@ tables:
         type: text
         nullable: true
 ```
+
+### Names
+
+Names are written unquoted and pgy quotes them in SQL, so `Order Items`, `user` or `a.b` need no SQL quotes in YAML.
+
+- **A key is always a name.** YAML reads an unquoted `2024`, `1.5`, `true`, `null` or `~` as a number, a boolean or null. pgy takes such a key as the text you wrote: `2024: {type: numeric}` declares the column `2024`, and `null: "NULL"` under a foreign table's `options` is file_fdw's `null` option. Quoting them (`"2024":`) is equivalent, and is what `pgy pull` writes so that other YAML tools read the file the same way.
+- **In a list of names**, such as `primaryKey: [id, 2024]` or an enum's `labels: [1, 2]`, such an entry is taken as a name too. YAML has already normalised a number by then (`1.0` becomes `1`, `0x10` becomes `16`), and the JSON Schema asks for strings there, so quote these: `primaryKey: [id, "2024"]`.
+- **Column, attribute, constraint, index, trigger, rule, policy and statistics names may contain dots**: `a.b: {type: integer}` is the column `"a.b"`. A sequence's `ownedBy` is read as `schema.table.column` (or `table.column`), with everything after the table being the column.
+- **Table, view, type, function and other schema-level names cannot contain a dot.** In those a dot separates the schema from the name: `table x.y:` inside `schema app:` declares table `y` in schema `x`.
 
 ## Merging across files
 
@@ -1048,7 +1058,7 @@ schema public:
 | `parallel` | string | `safe`, `restricted` or `unsafe` → `PARALLEL ...`. PostgreSQL's default is `unsafe`, which keeps any query calling the function off parallel plans. Omitted = unmanaged |
 | `cost` | number | Planner cost estimate (`COST`, in `cpu_operator_cost` units; default 100). Omitted = unmanaged |
 | `rows` | number | Estimated result rows for set-returning functions (`ROWS`; default 1000). `pgy validate` rejects it on functions that don't return `setof` or `table`. Omitted = unmanaged |
-| `set` | map | `SET` configuration options (e.g. `search_path`), values as SQL. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
+| `set` | map | `SET` configuration options (e.g. `search_path`). Values are written and quoted as for [role settings](#roles): strings, numbers or booleans, one value each unless the parameter is a list such as `search_path`. Diffed against live `proconfig`: changed or missing settings emit `ALTER FUNCTION ... SET`, live settings absent from the map emit `RESET`. Quotes, whitespace around list commas and parameter name case are ignored when comparing. Omitted = unmanaged; `set: {}` resets every setting |
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
 | *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`) emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
@@ -1274,7 +1284,11 @@ Behavior:
 - `validUntil` is compared with `rolvaliduntil`. Give it a zone (`2030-01-01T00:00:00Z`), since a value without one is read in the server's time zone when it's set but compared as UTC. `infinity` removes the expiry.
 - Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
 - `comment` is diffed against `pg_shdescription` like other object comments.
-- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you (the same applies to function and procedure `set:`).
+- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you, and so are words SQL reserves, such as `all` (the same applies to function and procedure `set:`, and to `database:`).
+  - A value is one value, commas included: `application_name: "a,b"` sets `a,b`. Only PostgreSQL's quoted-list parameters are split on commas into elements: `search_path`, `temp_tablespaces`, `session_preload_libraries`, `shared_preload_libraries`, `local_preload_libraries` and `unix_socket_directories`.
+  - An empty string sets an empty value (`search_path: ""` is `SET search_path = ''`).
+  - YAML numbers and booleans are fine (`statement_timeout: 0`, `jit: false`).
+  - A value you quote yourself as one SQL string is used as it is: `datestyle: "'ISO, MDY'"`. `pgy pull` writes a value that contains quotes this way.
 
 | Property | Type | Description |
 |----------|------|-------------|

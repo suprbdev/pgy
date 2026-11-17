@@ -861,8 +861,8 @@
         "rows": { "type": "number", "exclusiveMinimum": 0, "description": "ROWS estimate (set-returning functions only). Omit to leave unmanaged." },
         "set": {
           "type": "object",
-          "description": "SET parameter = value clauses, e.g. search_path: public.",
-          "additionalProperties": { "type": "string" }
+          "description": "SET parameter = value clauses, e.g. search_path: public. Values are quoted when needed; only list parameters such as search_path are split on commas.",
+          "additionalProperties": { "$ref": "#/definitions/scalar" }
         },
         "body": { "type": "string", "description": "Function body SQL." },
         "grants": { "$ref": "#/definitions/grants" },
@@ -887,7 +887,8 @@
         "security": { "type": "string", "enum": ["definer", "invoker"] },
         "set": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "description": "SET parameter = value clauses, as for functions.",
+          "additionalProperties": { "$ref": "#/definitions/scalar" }
         },
         "body": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },

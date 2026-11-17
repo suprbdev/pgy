@@ -96,3 +96,12 @@ func LiveUniqueKeyName(fq, col string, live map[string]bool) string {
     }
     return name
 }
+
+// ColumnRelation returns the schema.table part of a schema.table.column
+// reference. Everything after the table is the column name, which may
+// contain dots.
+func ColumnRelation(ref string) string {
+    schemaName, rest, _ := strings.Cut(ref, ".")
+    table, _, _ := strings.Cut(rest, ".")
+    return schemaName + "." + table
+}

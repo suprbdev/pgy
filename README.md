@@ -270,5 +270,5 @@ References inside SQL text are found by name. A name that only looks like a refe
 
 - Forward-only: there are no down migrations. To undo a change, write the reverse change as a new migration.
 - `pgy init` and `pgy migrate` take an advisory lock, so concurrent runs wait for each other.
-- Committed migrations carry a checksum, which `pgy migrate` verifies before applying them. `pgy migrate` and `pgy status` also warn when an applied migration's file has changed or disappeared since it ran, and when a pending migration is numbered below the latest applied one, which usually means a merge from another branch. Such a migration still runs, just out of order.
+- Committed migrations carry a checksum, which `pgy migrate` verifies before applying them. It treats CR LF line endings as LF, so a checkout that converts line endings doesn't invalidate it. `pgy migrate` and `pgy status` also warn when an applied migration's file has changed or disappeared since it ran, and when a pending migration is numbered below the latest applied one, which usually means a merge from another branch. Such a migration still runs, just out of order.
 - SQL is split into statements with single and double quotes, `E'...'` strings, dollar quotes and comments respected.

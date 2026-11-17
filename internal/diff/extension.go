@@ -99,12 +99,12 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     }
     cascaded := false
     for _, ext := range orderedExtensions(live, desired) {
-        name := pqIdent(ext.Name)
+        name := quoteIdent(ext.Name)
         if live.Extensions[ext.Name] {
             le := live.ExtensionDefs[ext.Name]
             if le == nil { continue }
             if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable {
-                plan.Creates = append(plan.Creates, fmt.Sprintf("alter extension %s set schema %s;", name, pqIdent(ext.Schema)))
+                plan.Creates = append(plan.Creates, fmt.Sprintf("alter extension %s set schema %s;", name, quoteIdent(ext.Schema)))
             }
             if ext.Version != "" && ext.Version != le.Version {
                 if le.UpdateTargets != nil && !le.UpdateTargets[ext.Version] {
