@@ -350,7 +350,7 @@
       "additionalProperties": { "$ref": "#/definitions/table" }
     },
     "schemaBlock": {
-      "description": "A `schema <name>:` block containing table/function/procedure/type/view/sequence/domain declarations.",
+      "description": "A `schema <name>:` block containing table/function/procedure/type/view/sequence/domain declarations. A dot in a declared name separates a schema from it; write a name that contains a dot in double quotes: `table \"x.y\":`.",
       "type": "object",
       "properties": {
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },

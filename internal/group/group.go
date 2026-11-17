@@ -341,10 +341,10 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         for _, e := range dm.Checks { exprs = append(exprs, e) }
         hard(ix.mentions(strings.Join(exprs, " "), exprKinds))
     }
-    for _, sq := range d.Sequences {
+    for k, sq := range d.Sequences {
         if sq == nil { continue }
         hard(ix.resolveDeps(sq.DependsOn))
-        if t := ownedByTable(sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
+        if t := ownedByTable(k, sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
     }
     for _, co := range d.Collations {
         if co != nil { hard(ix.resolveDeps(co.DependsOn)) }

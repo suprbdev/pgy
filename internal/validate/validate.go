@@ -99,6 +99,7 @@ func Files(paths []string) []Issue {
 		} else if verr := compiled.Validate(v); verr != nil {
 			issues = append(issues, schemaIssues(p, verr)...)
 		}
+		issues = append(issues, dottedSchemaIssues(p, doc)...)
 		l := <-load
 		d, err := l.d, l.err
 		if err != nil {
@@ -560,17 +561,9 @@ func Database(d *schema.Database) []Issue {
 			if table := serialSeqs[k]; table != "" && !dependsOnTable(sq.DependsOn, table) {
 				add(Warning, "sequence "+k, "is the sequence that serial column %s.%s creates; add dependsOn: [table %s] so a fresh build applies it after the table instead of creating a separate sequence first", table, strings.TrimSuffix(strings.TrimPrefix(k, table+"_"), "_seq"), table)
 			}
-			if owner := sq.OwnedBy; owner != "" && !strings.EqualFold(owner, "none") {
-				parts := strings.SplitN(owner, ".", 3)
-				if len(parts) >= 2 {
-					table := strings.Join(parts[:len(parts)-1], ".")
-					if len(parts) == 2 {
-						seqSchema, _, _ := strings.Cut(k, ".")
-						table = seqSchema + "." + table
-					}
-					if t := d.Tables[table]; t != nil && len(t.Columns) > 0 && t.Columns[parts[len(parts)-1]] == nil {
-						add(Error, "sequence "+k, "owned by unknown column %s", owner)
-					}
+			if s, table, column, ok := schema.OwnedByParts(k, sq.OwnedBy); ok {
+				if t := d.Tables[s+"."+table]; t != nil && len(t.Columns) > 0 && t.Columns[column] == nil {
+					add(Error, "sequence "+k, "owned by unknown column %s", sq.OwnedBy)
 				}
 			}
 		}
@@ -818,6 +811,40 @@ func toJSON(v any) (any, error) {
 	}
 	var out any
 	return out, json.Unmarshal(b, &out)
+}
+
+// dottedSchemaIssues reports the schemas file declares, as `schema <name>:`
+// blocks or under `schemas:`, whose name contains a dot. pgy keys every
+// object as schema.name and reads the first dot as the separator, so it
+// cannot manage the objects of such a schema.
+func dottedSchemaIssues(file string, doc any) []Issue {
+	root, ok := doc.(map[string]any)
+	if !ok {
+		return nil
+	}
+	names := []string{}
+	for k := range root {
+		if name, ok := strings.CutPrefix(k, "schema "); ok {
+			names = append(names, strings.TrimSpace(name))
+		}
+	}
+	if m, ok := root["schemas"].(map[string]any); ok {
+		for name := range m {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var out []Issue
+	for _, name := range names {
+		bare := name
+		if parts, ok := schema.SplitName(name); ok && len(parts) == 1 {
+			bare = parts[0]
+		}
+		if strings.Contains(bare, ".") {
+			out = append(out, Issue{Severity: Error, File: file, Object: "schema " + name, Message: "the schema's name contains a dot, which pgy reads as the separator between a schema and an object's name, so it cannot manage the objects of this schema"})
+		}
+	}
+	return out
 }
 
 // schemaIssues flattens a JSON Schema validation error to its leaf causes.
@@ -1446,8 +1473,8 @@ func checkNameLengths(d *schema.Database, add func(Severity, string, string, ...
 			add(Error, obj, "%s %q is %d bytes; PostgreSQL truncates names to %d bytes, so pgy would never find it again", what, name, len(name), maxIdentifier)
 		}
 	}
-	last := func(fq string) string {
-		if i := strings.LastIndexByte(fq, '.'); i >= 0 {
+	objectName := func(fq string) string {
+		if i := strings.IndexByte(fq, '.'); i >= 0 {
 			return fq[i+1:]
 		}
 		return fq
@@ -1458,7 +1485,7 @@ func checkNameLengths(d *schema.Database, add func(Severity, string, string, ...
 		if i := strings.IndexByte(fq, '.'); i >= 0 {
 			schemas[fq[:i]] = true
 		}
-		check(obj, kind, last(fq))
+		check(obj, kind, objectName(fq))
 	}
 	for _, fq := range sortedKeys(d.Tables) {
 		t := d.Tables[fq]
@@ -1547,7 +1574,7 @@ func checkNameLengths(d *schema.Database, add func(Severity, string, string, ...
 			if i := strings.IndexByte(name, '.'); i >= 0 {
 				schemas[name[:i]] = true
 			}
-			check(kind+" "+k, kind, last(name))
+			check(kind+" "+k, kind, objectName(name))
 		}
 	}
 	routine("function", sortedKeys(d.Functions))

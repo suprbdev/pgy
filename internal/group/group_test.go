@@ -891,3 +891,20 @@ schema public:
         if got := strings.Count(sql, stmt); got != 1 { t.Errorf("expected %q once, got %d:\n%s", stmt, got, sql) }
     }
 }
+
+func TestPlanDottedNamesOrderGroups(t *testing.T) {
+    for _, uses := range []string{
+        "schema app:\n  sequence s:\n    ownedBy: app.\"x.y\".n\n",
+        "schema app:\n  view v:\n    query: select n from app.\"x.y\"\n",
+        "schema app:\n  table c:\n    inherits: [app.\"x.y\"]\n    columns:\n      e: {type: int}\n",
+    } {
+        _, p := writeSchemas(t, map[string]string{
+            "a.yml": uses,
+            "b.yml": "schema app:\n  table \"x.y\":\n    columns:\n      n: {type: int}\n",
+        })
+        steps := planFiles(t, nil, p("a.yml", "b.yml"), ModeFile, false)
+        if got := stepNames(steps); !reflect.DeepEqual(got, []string{"b", "a"}) {
+            t.Errorf("the group that declares app.\"x.y\" comes first, got %v for\n%s", got, uses)
+        }
+    }
+}

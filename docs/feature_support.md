@@ -9,7 +9,7 @@ Supported servers: PostgreSQL 15, 16, 17 and 18 (the integration suite runs agai
 ## Level 1: Basic Schema & Tables
 These are the foundational elements required for almost any relational database application.
 
-- [x] **Schemas** (Custom namespaces)
+- [x] **Schemas** (Custom namespaces; schema-level names containing a dot declared in double quotes, `table "x.y":`, and pulled that way; schema names containing a dot are rejected by `pgy validate`, left out by `pgy pull` with a warning and never pruned)
 - [x] **Tables** (Base tables)
 - [x] **Columns** (Data types, nullability, defaults)
 - [x] **Primary Keys** (column `primaryKey: true`, a column list, or a named block that renames a live key and takes `include`, `with` and a `comment`)

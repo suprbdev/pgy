@@ -1593,7 +1593,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     attrQ := `
         select n.nspname, t.typname, a.attname, format_type(a.atttypid, a.atttypmod),
-               coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname
+               coalesce((select case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || case when strpos(co.collname, '.') > 0 then quote_ident(co.collname) else co.collname::text end
                          from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace join pg_type ty on ty.oid = a.atttypid
                          where co.oid = a.attcollation and a.attcollation <> ty.typcollation), ''),
                coalesce(col_description(c.oid, a.attnum), '')
@@ -3639,13 +3639,9 @@ func sequenceAlterStmts(fq string, sq *schema.Sequence, ls *LiveSequence) []stri
 // "schema.table.column" (in seq's schema when unqualified, since PostgreSQL
 // requires the two to share a schema), or "" for none.
 func qualifyOwnedBy(seq, s string) string {
-    s = strings.TrimSpace(s)
-    if strings.EqualFold(s, "none") { return "" }
-    if strings.Count(s, ".") == 1 {
-        seqSchema, _, _ := strings.Cut(seq, ".")
-        return seqSchema + "." + s
-    }
-    return s
+    schemaName, table, column, ok := schema.OwnedByParts(seq, s)
+    if !ok { return "" }
+    return schemaName + "." + table + "." + column
 }
 
 // domainCheckName is the name of a domain's single check: constraintName, or
@@ -4725,8 +4721,13 @@ func dollarQuoteInline(body string) string {
     return tag + " " + body + " " + tag
 }
 
-// qualifyName qualifies an unqualified object name with public.
+// qualifyName qualifies an unqualified object name with public. A name in
+// double quotes is read with schema.SplitName.
 func qualifyName(s string) string {
+    if parts, ok := schema.SplitName(s); ok && len(parts) <= 2 {
+        if len(parts) == 1 { return "public." + parts[0] }
+        return parts[0] + "." + parts[1]
+    }
     if strings.Contains(s, ".") { return s }
     return "public." + s
 }
@@ -4883,15 +4884,26 @@ func tsConfigStmts(fq string, tc *schema.TSConfig, live map[string][]string) []s
 
 func joinTSDicts(dicts []string) string {
     parts := make([]string, len(dicts))
-    for i, d := range dicts { parts[i] = pqIdent(strings.TrimSpace(d)) }
+    for i, d := range dicts {
+        if names, ok := schema.SplitName(d); ok {
+            for j, n := range names { names[j] = quoteIdent(n) }
+            parts[i] = strings.Join(names, ".")
+            continue
+        }
+        parts[i] = pqIdent(strings.TrimSpace(d))
+    }
     return strings.Join(parts, ", ")
 }
 
 // sameTSDicts compares dictionary lists by unqualified name, in order.
 func sameTSDicts(want, have []string) bool {
     if len(want) != len(have) { return false }
+    plain := func(d string) string {
+        if names, ok := schema.SplitName(d); ok { return strings.Join(names, ".") }
+        return d
+    }
     for i := range want {
-        if collationName(want[i]) != collationName(have[i]) { return false }
+        if collationName(plain(want[i])) != collationName(plain(have[i])) { return false }
     }
     return true
 }
@@ -4929,13 +4941,11 @@ func renderDomain(fq string, dm *schema.Domain) string {
 }
 
 // ownedByIdent quotes sequence seq's table.column (or schema.table.column)
-// OWNED BY target, schema-qualified. Everything after the table is the
-// column name, which may itself contain dots.
+// OWNED BY target, schema-qualified, read as schema.OwnedByParts reads it.
 func ownedByIdent(seq, s string) string {
-    if strings.EqualFold(strings.TrimSpace(s), "none") { return "none" }
-    parts := strings.SplitN(qualifyOwnedBy(seq, s), ".", 3)
-    for i := range parts { parts[i] = quoteIdent(parts[i]) }
-    return strings.Join(parts, ".")
+    schemaName, table, column, ok := schema.OwnedByParts(seq, s)
+    if !ok { return "none" }
+    return quoteIdent(schemaName) + "." + quoteIdent(table) + "." + quoteIdent(column)
 }
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
@@ -6463,6 +6473,10 @@ func identityOptionsClause(o *schema.Sequence) string {
 // collationIdent quotes a COLLATE target ("C", app.ci), accepting parts the
 // YAML already double-quoted.
 func collationIdent(s string) string {
+    if parts, ok := schema.SplitName(s); ok {
+        for i, p := range parts { parts[i] = quoteIdent(p) }
+        return strings.Join(parts, ".")
+    }
     parts := strings.Split(strings.TrimSpace(s), ".")
     for i, p := range parts { parts[i] = `"` + strings.Trim(strings.TrimSpace(p), `"`) + `"` }
     return strings.Join(parts, ".")
@@ -6471,6 +6485,7 @@ func collationIdent(s string) string {
 // collationName returns a COLLATE target's unqualified, unquoted name, as
 // pg_collation.collname reports it.
 func collationName(s string) string {
+    if parts, ok := schema.SplitName(s); ok { return parts[len(parts)-1] }
     s = strings.ReplaceAll(strings.TrimSpace(s), `"`, "")
     if i := strings.LastIndexByte(s, '.'); i >= 0 { s = s[i+1:] }
     return s
