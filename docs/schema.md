@@ -988,7 +988,7 @@ servers:
 | `validator` | string | `VALIDATOR` function, optionally schema-qualified. `""` = `NO VALIDATOR`. Omitted = unmanaged, like `handler`. Not allowed on a wrapper an extension owns |
 | `options` | map | Wrapper options. Authoritative when present (`options: {}` means none); omitted = unmanaged. Values are passed on as written |
 | `owner` | string | Owner role, diffed against live. PostgreSQL requires the owner of a wrapper to be a superuser |
-| `grants` | map | Role → privileges (`usage`). See below |
+| `grants` | map | Role → privileges (`usage`; `all` stands for it). See below |
 | `comment` | string | `COMMENT ON FOREIGN DATA WRAPPER` |
 | `renamedFrom` | string | Previous name: `ALTER FOREIGN DATA WRAPPER ... RENAME TO` when only that name exists live. Its servers follow |
 
@@ -1401,7 +1401,7 @@ languages:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`) |
+| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`; `all` stands for `usage`) |
 
 - **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates a language's extension, the grants run after `CREATE EXTENSION`. pgy takes the extension to be the one named like the language (`plperl` for the language `plperl`), which is how the extensions of procedural languages are called. Any other language that does not exist gets no statements, and `pgy diff` warns with the name of the entry.
 - **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
@@ -1569,6 +1569,19 @@ Behavior:
 ## Grants
 
 Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, foreign servers, [foreign-data wrappers](#foreign-data-wrappers) and [languages](#languages) (`usage`), and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump). A privilege written as `insert with grant option` is granted `WITH GRANT OPTION`, which lets the role grant it on. Removing the suffix later emits `REVOKE GRANT OPTION FOR insert ...` and keeps the privilege itself.
+
+`all` (or `all privileges`, optionally `with grant option`) stands for every privilege of the object's kind, which is how PostgreSQL stores `GRANT ALL`. `pgy diff` expands it before comparing, using the server's version, and writes the expanded list in the migration:
+
+| Kind | `all` stands for |
+|------|------------------|
+| Tables, views, materialized views, foreign tables | `select`, `insert`, `update`, `delete`, `truncate`, `references`, `trigger`, and `maintain` on PostgreSQL 17 and later |
+| Columns | `select`, `insert`, `update`, `references` |
+| Sequences | `usage`, `select`, `update` |
+| Functions, procedures | `execute` |
+| Schemas | `usage`, `create` |
+| Types, domains, foreign servers, foreign-data wrappers, languages | `usage` |
+
+The same holds for the kinds of [default privileges](#default-privileges). So `all` on a table grants `MAINTAIN` on PostgreSQL 17 and 18, and a database upgraded to 17 gets it with the next migration. Without a server, as in `diff --from-empty`, `all` stays in the migration as `GRANT ALL`. `pgy pull` writes the expanded list, as PostgreSQL reports it.
 
 ```yaml
 schema app:

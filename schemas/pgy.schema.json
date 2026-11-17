@@ -130,7 +130,7 @@
             "type": "string",
             "description": "Owner role (ALTER FOREIGN DATA WRAPPER ... OWNER TO), diffed against live. PostgreSQL requires it to be a superuser."
           },
-          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the wrapper (usage), e.g. {app_owner: [usage]}, which a role that is not a superuser needs to create or own a server. On an extension's wrapper, what the extension granted is left alone unless its grantee is listed." },
+          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the wrapper (usage, or all, which stands for it), e.g. {app_owner: [usage]}, which a role that is not a superuser needs to create or own a server. On an extension's wrapper, what the extension granted is left alone unless its grantee is listed." },
           "comment": {
             "type": "string",
             "description": "COMMENT ON FOREIGN DATA WRAPPER."
@@ -153,7 +153,7 @@
           "grants"
         ],
         "properties": {
-          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the language (usage), e.g. {app_dev: [usage], public: []}. PUBLIC's default USAGE is left alone unless public is listed; public: [] revokes it." }
+          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the language (usage, or all, which stands for it), e.g. {app_dev: [usage], public: []}. PUBLIC's default USAGE is left alone unless public is listed; public: [] revokes it." }
         }
       }
     },
@@ -290,7 +290,7 @@
       ]
     },
     "grants": {
-      "description": "Privileges per role: `{ <role>: [select, insert, ...] }`. An empty list revokes all privileges for that role; omitting the grants block leaves live privileges unmanaged.",
+      "description": "Privileges per role: `{ <role>: [select, insert, ...] }`. `all` (or `all privileges`) stands for every privilege of the object's kind on the server's PostgreSQL version. An empty list revokes all privileges for that role; omitting the grants block leaves live privileges unmanaged.",
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/stringList" }
     },

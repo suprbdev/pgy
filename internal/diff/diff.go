@@ -2751,6 +2751,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live = live.scoped()
+    desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))

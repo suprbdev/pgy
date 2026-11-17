@@ -1058,13 +1058,16 @@ var untrustedLanguages = map[string]bool{"internal": true, "c": true, "plperlu":
 // checkWrappersAndLanguages reports foreignDataWrappers entries that define
 // or rename a wrapper a declared extension creates, renames that clash,
 // languages entries for a language that takes no privileges, and grants of
-// anything but USAGE, the only privilege wrappers and languages have.
+// anything but USAGE, the only privilege wrappers and languages have, or
+// ALL, which stands for it.
 func checkWrappersAndLanguages(d *schema.Database, add func(Severity, string, string, ...any)) {
 	usageOnly := func(obj string, grants map[string][]string) {
 		for _, role := range sortedKeys(grants) {
 			for _, priv := range grants[role] {
-				if strings.TrimSuffix(priv, "*") != "usage" {
-					add(Error, obj, "grants %s to %s; write usage, the only privilege there is here and the form pgy compares with the database", strings.TrimSuffix(priv, "*"), role)
+				switch strings.TrimSuffix(priv, "*") {
+				case "usage", "all", "all privileges":
+				default:
+					add(Error, obj, "grants %s to %s; write usage (or all), the only privilege there is here", strings.TrimSuffix(priv, "*"), role)
 				}
 			}
 		}
