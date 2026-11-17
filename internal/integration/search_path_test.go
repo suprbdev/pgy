@@ -143,11 +143,12 @@ func sessionPool(t *testing.T, name string, params map[string]string) *pgxpool.P
 func planLikeDiff(t *testing.T, pool *pgxpool.Pool, d *schema.Database) (*diff.Live, *diff.PlanDiff) {
 	t.Helper()
 	ctx := context.Background()
+	opts := diff.Options{Unsafe: true, Prune: true}
 	live, err := diff.Introspect(ctx, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := diff.IntrospectExtensions(ctx, pool, live, d); err != nil {
+	if err := diff.IntrospectExtensions(ctx, pool, live, d, opts); err != nil {
 		t.Fatal(err)
 	}
 	if err := diff.IntrospectData(ctx, pool, live, d); err != nil {
@@ -156,7 +157,7 @@ func planLikeDiff(t *testing.T, pool *pgxpool.Pool, d *schema.Database) (*diff.L
 	if err := diff.ProbeViews(ctx, pool, live, d); err != nil {
 		t.Fatal(err)
 	}
-	return live, diff.PlanWith(live, d, diff.Options{Unsafe: true, Prune: true})
+	return live, diff.PlanWith(live, d, opts)
 }
 
 func requireNoChanges(t *testing.T, session string, p *diff.PlanDiff) {
