@@ -1327,8 +1327,14 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 	idx := newMap()
 	for _, name := range sortedKeys(lt.IndexDefs) {
 		li := lt.IndexDefs[name]
-		if li == nil || li.Constraint || li.Inherited {
+		if li == nil || li.Constraint {
 			continue
+		}
+		if li.Inherited && name == diff.PartitionIndexName(fq, li, lt.IndexOpclasses[name], lt.Columns) && lt.IndexComments[name] == "" {
+			continue
+		}
+		if li.Invalid {
+			b.warn("table %s: index %s is invalid, as an interrupted build or an index on only some partitions leaves it; it is pulled as a complete index", fq, name)
 		}
 		m := newMap()
 		cols := make([]string, len(li.Keys))

@@ -513,6 +513,7 @@ type LiveIndex struct {
     Options          map[string]string // reloptions: lower-cased name -> value
     Constraint       bool              // backs a primary key, unique or exclusion constraint
     Inherited        bool              // a partition's copy of an index on its parent
+    Parent           string            // schema.name of the index it is attached to as a partition; "" = none
     Invalid          bool              // indisvalid is false (interrupted concurrent build, or a partitioned index missing partitions)
     Tablespace       string            // the index's own tablespace; "" = the database default
 }
@@ -530,6 +531,10 @@ type LiveIndexOpclass struct {
     // KeyCollation is the collation the key column is indexed with, written
     // out or not; "" for a type without collations.
     KeyCollation string
+    // Column is the index column's own name: that of the table column when
+    // the index was created, or for an expression the one PostgreSQL made
+    // up for it (lower for lower(name), expr when it found none).
+    Column string
     // StatisticsTarget is the index column's attstattarget; -1 = default.
     StatisticsTarget int
     // Params holds the operator class parameters of the key column as
@@ -916,6 +921,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, 0, true) else '' end,
                case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, k.ord + 1, true) else '' end,
                k.ord,
+               coalesce(ia.attname::text, ''),
                coalesce(ia.attstattarget::int, -1),
                coalesce(ia.attoptions, '{}'::text[])
         from pg_index x
@@ -935,17 +941,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
-            var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef string
+            var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef, column string
             var opcDefault, columnCollated bool
             var ord, target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
                 return err
             }
             collation := ""
             if columnCollated || (indexDef != "" && indexKeyCollated(indexDef, keyDef, ord)) { collation = keyCollation }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -965,10 +971,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                i.relispartition,
                x.indisclustered,
                not x.indisvalid,
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''),
+               coalesce(pn.nspname || '.' || pi.relname, '')
         from pg_index x
         join pg_class i on i.oid = x.indexrelid
         left join pg_tablespace ts on ts.oid = i.reltablespace
+        left join pg_inherits ih on ih.inhrelid = x.indexrelid
+        left join pg_class pi on pi.oid = ih.inhparent
+        left join pg_namespace pn on pn.oid = pi.relnamespace
         join pg_class t on t.oid = x.indrelid
         join pg_am am on am.oid = i.relam
         join pg_namespace n on n.oid = t.relnamespace
@@ -977,17 +987,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(idefQ, func(idefRows pgx.Rows) error {
         for idefRows.Next() {
-            var schemaName, tableName, idxName, method, predicate, tablespace string
+            var schemaName, tableName, idxName, method, predicate, tablespace, parent string
             var unique, nullsNotDistinct, constraint, inherited, clustered, invalid bool
             var nKey int16
             var cols, reloptions []string
             var indoption []int16
-            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid, &tablespace); err != nil {
+            if err := idefRows.Scan(&schemaName, &tableName, &idxName, &unique, &method, &nKey, &cols, &indoption, &predicate, &nullsNotDistinct, &reloptions, &constraint, &inherited, &clustered, &invalid, &tablespace, &parent); err != nil {
                 return err
             }
             t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
             if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Invalid: invalid, Tablespace: tablespace}
+            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Parent: parent, Invalid: invalid, Tablespace: tablespace}
             for _, opt := range indoption[:nKey] {
                 li.Descending = append(li.Descending, opt&1 != 0)
                 li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
@@ -2728,6 +2738,9 @@ type PlanDiff struct{
     Concurrent []string
     // Warnings flags statements that lock or rewrite existing tables.
     Warnings []Warning
+    // parts coordinates the indexes of partition trees while the plan is
+    // built.
+    parts *partitionIndexPlan
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -2786,7 +2799,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SQL-language bodies, which are validated at CREATE time) without forming
     // a table->function->table cycle.
     deferredTriggers := []string{}
-    plan := &PlanDiff{Warnings: recreateWarnings}
+    plan := &PlanDiff{Warnings: recreateWarnings, parts: newPartitionIndexPlan(live, desired)}
 
     // ROLES HAVE HIGHEST PRIORITY - cluster-level, referenced by grants,
     // policies, and memberships later in the plan
@@ -3330,6 +3343,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(plan.Creates[:routineAlterAt:routineAlterAt], append(routineAlters, plan.Creates[routineAlterAt:]...)...)
+    plan.Creates = append(plan.Creates, plan.parts.heldStmts()...)
+    plan.Alters = append(plan.Alters, plan.parts.heldAlterStmts()...)
+    plan.parts = nil
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
@@ -5813,6 +5829,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     }
 
     // Indexes (always use IF NOT EXISTS)
+    adopted := map[string]bool{}
     for _, ix := range dt.Indexes {
         if ix == nil || len(ix.Columns) == 0 { continue }
         name := LiveIndexName(fq, ix, liveIndexes)
@@ -5822,7 +5839,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         if ix.Using != "" && !strings.EqualFold(ix.Using, "btree") { using = " using " + strings.ToLower(ix.Using) }
         concurrent := ix.Concurrently && lt != nil && dt.PartitionBy == nil
         partitioned := ix.Concurrently && lt != nil && dt.PartitionBy != nil
-        foreignParts := partitioned && hasForeignPartition(live, fq)
+        foreignParts := partitioned && (hasForeignPartition(live, fq) || plan.parts.hasForeignPartition(fq))
         if foreignParts {
             partitioned = false
             if !liveIndexes[name] || (lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid) {
@@ -5862,13 +5879,42 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             }
             return out
         }
+        rebuildMain := func(drop string) {
+            if dt.PartitionBy != nil && plan.parts.attachedBelow(fq, idxFq) {
+                plan.parts.dropped[idxFq] = true
+                plan.Alters = append(plan.Alters, drop)
+                plan.parts.hold(fq, true, append([]string{stmt}, indexComment(true)...)...)
+                return
+            }
+            plan.Alters = append(append(plan.Alters, drop, stmt), indexComment(true)...)
+        }
+        if li := liveIndexDef(lt, name); li != nil && li.Parent != "" && plan.parts != nil {
+            if parent, ok := plan.parts.rebuilt[li.Parent]; ok {
+                if sameIndexDefinition(ix, parent) {
+                    plan.parts.rebuilt[idxFq] = ix
+                    plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
+                } else {
+                    plan.Concurrent = append(append(plan.Concurrent, build(idxFq, fq, false, dt.PartitionBy == nil)), indexComment(true)...)
+                }
+                continue
+            }
+            if plan.parts.dropped[li.Parent] {
+                plan.parts.dropped[idxFq] = true
+                if dt.PartitionBy != nil && plan.parts.attachedBelow(fq, idxFq) {
+                    plan.parts.hold(fq, true, append([]string{stmt}, indexComment(true)...)...)
+                } else {
+                    plan.Alters = append(append(plan.Alters, stmt), indexComment(true)...)
+                }
+                continue
+            }
+        }
         if foreignParts && liveIndexes[name] && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
-            plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
+            rebuildMain(fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq)))
             continue
         }
         if liveIndexes[name] && (concurrent || partitioned) && lt.IndexDefs[name] != nil && lt.IndexDefs[name].Invalid {
             if partitioned {
-                plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...)
+                plan.Concurrent = append(plan.Concurrent, partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, false, build)...)
             } else {
                 plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
             }
@@ -5880,6 +5926,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             // expensive and briefly leaves queries without it, so gate behind
             // --unsafe. Without live definition data the index is adopted by name.
             changed := indexChanged(ix, lt, name)
+            if li := lt.IndexDefs[name]; changed && li != nil && li.Parent != "" {
+                if unsafe { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("index %s is attached to index %s of a parent table, so it is not dropped on its own; change %s to the same definition, which recreates both", name, li.Parent, li.Parent)}) }
+                changed = false
+            }
             switch {
             case !unsafe || !changed:
                 plan.Alters = append(plan.Alters, indexComment(false)...)
@@ -5895,21 +5945,45 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
                     }
                 }
             case partitioned:
-                plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
+                if plan.parts != nil { plan.parts.rebuilt[idxFq] = ix }
+                plan.Concurrent = append(append(append(plan.Concurrent, fmt.Sprintf("drop index if exists %s;", pqIdent(idxFq))), partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, true, build)...), indexComment(true)...)
             case concurrent:
                 plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("drop index concurrently if exists %s;", pqIdent(idxFq)), stmt)
                 plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
             default:
-                plan.Alters = append(append(plan.Alters, fmt.Sprintf("drop index %s;", pqIdent(idxFq)), stmt), indexComment(true)...)
+                rebuildMain(fmt.Sprintf("drop index %s;", pqIdent(idxFq)))
             }
             continue
         }
+        if dt.PartitionOf != "" && lt != nil {
+            if x := adoptableIndex(fq, dt, lt, ix, adopted); x != "" {
+                adopted[x] = true
+                plan.Alters = append(append(plan.Alters, fmt.Sprintf("alter index %s rename to %s;", pqIdent(schemaPrefixOf(fq)+x), quoteIdent(name))), indexComment(true)...)
+                continue
+            }
+        }
+        if dt.PartitionOf != "" && lt == nil {
+            clone, ok := plan.parts.clonedIndex(fq, ix, adopted)
+            if !ok {
+                plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("index %s: creating partition %s gives it a copy of an index of %s that %s describes, under a name pgy cannot tell in advance; %s is left to the next pgy diff, which renames that copy", name, fq, dt.PartitionOf, name, name)})
+                continue
+            }
+            if clone != "" {
+                adopted[clone] = true
+                plan.Creates = append(plan.Creates, fmt.Sprintf("alter index %s rename to %s;", pqIdent(schemaPrefixOf(fq)+clone), quoteIdent(name)))
+                plan.Alters = append(plan.Alters, indexComment(true)...)
+                continue
+            }
+        }
         switch {
         case partitioned:
-            plan.Concurrent = append(append(plan.Concurrent, partitionedIndexStmts(live, fq, idxFq, build)...), indexComment(true)...)
+            plan.Concurrent = append(append(plan.Concurrent, partitionedIndexStmts(live, plan.parts, fq, idxFq, ix, false, build)...), indexComment(true)...)
         case concurrent:
             plan.Concurrent = append(plan.Concurrent, stmt)
             plan.Concurrent = append(plan.Concurrent, indexComment(true)...)
+        case dt.PartitionBy != nil && plan.parts.holds(fq):
+            plan.parts.hold(fq, false, stmt)
+            plan.Alters = append(plan.Alters, indexComment(true)...)
         default:
             plan.Creates = append(plan.Creates, stmt)
             plan.Alters = append(plan.Alters, indexComment(true)...)
@@ -7144,18 +7218,27 @@ func quoteIdent(s string) string {
 // is created ON ONLY the parent (invalid until complete), built
 // concurrently on each leaf partition, created ON ONLY each sub-partitioned
 // partition, and attached bottom-up, which makes the parent valid once
-// every partition is attached. Every statement is safe to rerun after an
+// every partition is attached. A partition's index takes the name of the
+// index the partition declares with ix's definition, if any; a partition
+// whose index is attached already is left as it is, unless dropped says
+// that idxFq is dropped first, which drops those too. Partitions the plan
+// creates are included. Every statement is safe to rerun after an
 // interruption. build renders a CREATE INDEX for (index, table, only,
 // concurrently).
-func partitionedIndexStmts(live *Live, table, idxFq string, build func(idx, table string, only, concurrently bool) string) []string {
+func partitionedIndexStmts(live *Live, parts *partitionIndexPlan, table, idxFq string, ix *schema.Index, dropped bool, build func(idx, table string, only, concurrently bool) string) []string {
     out := []string{build(idxFq, table, true, false)}
     var attach func(table, idxFq string)
     attach = func(table, idxFq string) {
         _, parentIdx := splitQualified(idxFq)
-        for _, child := range live.Partitions[table] {
+        for _, child := range parts.partitions(live, table) {
             sch, rel := splitQualified(child)
+            if own := attachedIndex(live.Tables[child], idxFq); own != "" && !dropped {
+                if parts.partitioned(live, child) { attach(child, sch+"."+own) }
+                continue
+            }
             childIdx := sch + "." + truncateIdent(rel+"_"+parentIdx)
-            if lt := live.Tables[child]; lt != nil && lt.Partitioned {
+            if own := parts.declaredMatch(child, ix); own != "" { childIdx = sch + "." + own }
+            if parts.partitioned(live, child) {
                 out = append(out, build(childIdx, child, true, false))
                 attach(child, childIdx)
             } else {
