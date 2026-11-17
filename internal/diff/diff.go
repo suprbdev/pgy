@@ -2902,7 +2902,6 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
     liveFuncs := normalizedLiveFunctions(live)
-    createsRelations := plansNewRelations(live, desired)
     // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
     // here, not Alters: an index or generated column created below may need
     // the function to be immutable already.
@@ -3011,7 +3010,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace function" }
             if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, routineLanguageSQL(f.Language, f.Transform, liveTransforms[normalizedDesired]), attrsStr+setClauses, routineBodySQL(f.Language, body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, body, stmt, createsRelations)...)
+            plan.Creates = appendRoutineCreate(plan.Creates, f.Language, body, stmt)
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
             if !ok || pr == nil { continue }
@@ -3048,7 +3047,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace procedure" }
             if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, routineLanguageSQL(pr.Language, pr.Transform, liveTransforms[norm]), attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, pr.Body, stmt, createsRelations)...)
+            plan.Creates = appendRoutineCreate(plan.Creates, pr.Language, pr.Body, stmt)
         case "aggregate":
             ag := desired.Aggregates[e.Key]
             if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
@@ -4436,28 +4435,21 @@ func serialConversionStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []st
     }
 }
 
-// plansNewRelations reports whether desired declares a table, view or
-// materialized view that live lacks.
-func plansNewRelations(live *Live, desired *schema.Database) bool {
-    for k, t := range desired.Tables {
-        if t != nil && live.Tables[k] == nil { return true }
-    }
-    for k, v := range desired.Views {
-        if v != nil && !live.Views[k] && !live.MatViews[k] { return true }
-    }
-    return false
-}
+const resetCheckFunctionBodies = "reset check_function_bodies;"
 
-// routineCreateStmts returns stmt, the CREATE of a function or procedure
-// written in language. PostgreSQL checks a SQL-language string body against
-// the catalog at CREATE time, so when the plan also creates relations the
-// body may read, stmt is wrapped in SET / RESET check_function_bodies, as
-// pg_dump does; the body is then checked when the routine first runs.
-// SQL-standard bodies are always parsed at CREATE, so they are not wrapped:
-// their dependencies must be created first.
-func routineCreateStmts(language, body, stmt string, createsRelations bool) []string {
-    if !createsRelations || !strings.EqualFold(strings.TrimSpace(language), "sql") || schema.IsSQLStandardBody(language, body) { return []string{stmt} }
-    return []string{"set check_function_bodies = off;", stmt, "reset check_function_bodies;"}
+// appendRoutineCreate appends stmt, the CREATE of a function or procedure
+// written in language, to creates. As pg_dump does, a string body is
+// created between SET check_function_bodies = off and RESET, whatever the
+// language: its validator then leaves alone what the body refers to, such
+// as a relation or routine created later in the same migration, or a class
+// a PL/Java jar provides, and the body is checked when the routine first
+// runs. Routines created one after another share one SET and RESET.
+// SQL-standard bodies are parsed at CREATE whatever the setting, so they
+// are not wrapped: their dependencies must be created first.
+func appendRoutineCreate(creates []string, language, body, stmt string) []string {
+    if schema.IsSQLStandardBody(language, body) { return append(creates, stmt) }
+    if n := len(creates); n > 0 && creates[n-1] == resetCheckFunctionBodies { return append(creates[:n-1], stmt, resetCheckFunctionBodies) }
+    return append(creates, "set check_function_bodies = off;", stmt, resetCheckFunctionBodies)
 }
 
 // recreateChangedFunctions finds desired functions whose return type differs

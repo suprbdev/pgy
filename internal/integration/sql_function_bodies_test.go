@@ -31,3 +31,35 @@ schema SCH:
 `,
 	})
 }
+
+func TestIntegrationRoutineBodiesUncheckedAtCreate(t *testing.T) {
+	assertYAMLIdempotent(t, map[string]string{
+		"plpgsql_rowtype_of_later_table": `
+schema SCH:
+  function first_id():
+    returns: int
+    language: plpgsql
+    body: |
+      declare
+        r SCH.items%rowtype;
+      begin
+        select * into r from SCH.items order by id limit 1;
+        return r.id;
+      end;
+  table items:
+    columns:
+      id: {type: int, primaryKey: true}
+`,
+		"sql_calls_later_routine": `
+schema SCH:
+  function a_total():
+    returns: int
+    language: sql
+    body: select SCH.b_part() + 1
+  function b_part():
+    returns: int
+    language: sql
+    body: select 1
+`,
+	})
+}

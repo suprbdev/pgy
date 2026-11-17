@@ -2038,7 +2038,7 @@ func TestFunctionOverloadsCreatedIndependently(t *testing.T) {
 		},
 	}
 	p := Plan(l, desired, false)
-	if len(p.Creates) != 1 || !findCreate(p, `create function "app"."area"(w float8, h float8) returns float8`) {
+	if len(p.Creates) != 3 || !findCreate(p, `create function "app"."area"(w float8, h float8) returns float8`) {
 		t.Errorf("only the missing overload should be created, got %+v", p.Creates)
 	}
 	for _, want := range []string{

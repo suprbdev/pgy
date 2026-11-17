@@ -126,7 +126,9 @@ func TestLanguageGrantsBeforeRoutines(t *testing.T) {
 		`revoke all on language "plperl" from "nobody";`,
 		`revoke all on language "plperl" from public;`,
 		`grant usage on language "plperl" to "app_dev";`,
+		`set check_function_bodies = off;`,
 		`create function "public"."f"() returns int language plperl as $$return 1;$$;`,
+		`reset check_function_bodies;`,
 	)
 	if len(warns) > 0 {
 		t.Errorf("unexpected warnings: %v", warns)
