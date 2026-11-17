@@ -14,6 +14,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Name resolution](#name-resolution)
 - [Merging across files](#merging-across-files)
 - [Extensions](#extensions)
+  - [Updating extensions](#updating-extensions)
   - [Objects an extension owns](#objects-an-extension-owns)
 - [Database Settings](#database-settings)
 - [Tables](#tables)
@@ -311,7 +312,7 @@ extensions: [pg_trgm, pgcrypto]
 | `name` | string | Extension name |
 | `ifNotExists` | boolean | Adds `IF NOT EXISTS` to the SQL statement |
 | `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
-| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO`. Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
+| `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO` (see [Updating extensions](#updating-extensions)). Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
 | `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
 | `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
@@ -331,6 +332,20 @@ With a connection, `pgy diff` also warns about an extension the server does not 
 Give every extension a `schema:`. Without one, an extension whose control file names no schema goes into the first schema of the `search_path`, and PostgreSQL's default `search_path` is `"$user", public`. That matters most for a role named like the schema of pgy's migrations table: `pgy init` creates the schema `pgy`, so for a role called `pgy` it comes first, `extensions: [citext]` installs the extension into `pgy`, and the objects a hand-written migration creates without a schema land there too. Connect as a role with another name, or keep the migrations table in another schema with `--migrations-table` (`migrations_table` in `.pgy.yml`).
 
 Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
+
+### Updating extensions
+
+Raising `version:` emits `ALTER EXTENSION ... UPDATE TO`. Many update scripts drop one of the extension's objects and create it again: every `pg_stat_statements` update recreates the `pg_stat_statements` view, and `postgres_fdw` 1.2 replaces `postgres_fdw_get_connections()`. PostgreSQL rejects that while something outside the extension uses the object (`cannot drop view pg_stat_statements because other objects depend on it`), and the migration fails. The update scripts live on the server, so pgy cannot know which objects an update replaces. With a connection, it looks up in `pg_depend` the views, materialized views and SQL-standard routine bodies that use an object of each extension it is about to update, directly or through other views, and treats all of them as possibly in the way:
+
+- **Declared views.** With `--unsafe`, they are dropped right before the update, dependents first, and recreated from the YAML after it, in the same migration. Their declared triggers and rules come back with them, and the live grants, comment, column comments, column defaults and owner that the YAML leaves unmanaged are restored, as around a [column type change](#columns). Without `--unsafe` the plan is the update alone, and `pgy diff` warns (kind `dependents`), naming the views. The statements `--unsafe` would add are reported as left out, like every other unsafe change.
+- **Materialized views** are never dropped for an update, because recreating one rebuilds its data and its indexes. `pgy diff` warns (kind `dependents`), naming the materialized view and the extension. If the update replaces an object it uses, the migration fails until the materialized view is dropped in a hand-written migration. The next `pgy diff` creates a declared one again.
+- **Functions and procedures with a SQL-standard body** (`BEGIN ATOMIC`, `RETURN`) are reported the same way and never dropped. PostgreSQL does not record what a body written as text uses, so such a routine neither blocks the update nor is reported.
+- **Views the YAML doesn't declare** can't be recreated, so they stay and are reported too. With `--unsafe --prune`, a view or materialized view that pruning drops anyway is dropped before the update instead of after it.
+- **Views that something of the above uses** stay as well, since dropping them would fail: a view a materialized view selects from, or one that a policy, a column of its row type or a SQL-standard body refers to. The warning names what holds them back.
+
+An extension that none of these use is updated with the single statement. Other users of an extension's objects, such as a column default that calls `uuid_generate_v4()`, an index with `gin_trgm_ops` or a trigger on an extension's function, are not looked at: update scripts rarely replace what those use, and if one does, PostgreSQL's error names them.
+
+With `--split`, extensions are updated in the first migration, where only the views of the first group count as declared.
 
 ### Removing extensions
 

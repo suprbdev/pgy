@@ -327,6 +327,13 @@ type LiveExtension struct {
     // behind. It is nil until IntrospectExtensions loads it for an
     // extension that pruning may drop.
     Dependents []ExtensionDependent
+    // UpdateDependents lists the views, materialized views and routines
+    // with a SQL-standard body outside the extension that use its objects,
+    // directly or through other views, and whatever else uses those views.
+    // An update that replaces what one of them uses fails while it exists.
+    // It is nil until IntrospectExtensions loads it for an extension whose
+    // version changes.
+    UpdateDependents []UpdateDependent
 }
 
 // AvailableExtension is an extension the server can install: its default
@@ -2755,6 +2762,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         recreated[k] = v
     }
     recreateWarnings = append(recreateWarnings, argWarnings...)
+    live, updatePost, updateWarnings := recreateUpdateDependents(extensions, live, desired, opts)
+    recreateWarnings = append(recreateWarnings, updateWarnings...)
     live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
@@ -3323,6 +3332,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
     plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
