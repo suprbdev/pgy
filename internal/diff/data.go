@@ -314,6 +314,8 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
             if _, ok := types[col]; !ok { delete(used, col) }
         }
         from := dataTarget(fq, lt.Partitioned || dt.PartitionBy != nil)
+        rec := "pgy_rec"
+        for used[rec] { rec += "_" }
         join := make([]string, len(key))
         sameKey := make([]string, len(key))
         liveKey := make([]string, len(key))
@@ -321,21 +323,21 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         textKey := make([]string, len(key))
         for i, k := range key {
             q := quoteIdent(k)
-            join[i] = fmt.Sprintf("pgy_row.%s %s (r.v).%s", q, types[k].eq, q)
+            join[i] = fmt.Sprintf("pgy_row.%s %s (r.%s).%s", q, types[k].eq, rec, q)
             sameKey[i] = fmt.Sprintf("pgy_row.%s %s v.%s", q, types[k].eq, q)
             liveKey[i] = "pgy_row." + q
-            declKey[i] = "v." + q
+            declKey[i] = rec + "." + q
             textKey[i] = fmt.Sprintf("%s, pgy_row.%s::text", quoteString(k), q)
         }
         diffQ := `
             with d as (select e.j, e.i - 1 as i from jsonb_array_elements($1::jsonb) with ordinality e(j, i)),
-                 r as (select d.i, d.j, v, min(d.i) over (partition by ` + strings.Join(declKey, ", ") + `) as first
-                       from d cross join lateral jsonb_to_record(d.j) as v(` + dataColumnDefs(sortedKeys(used), types) + `))
+                 r as (select d.i, d.j, ` + rec + `, min(d.i) over (partition by ` + strings.Join(declKey, ", ") + `) as first
+                       from d cross join lateral jsonb_to_record(d.j) as ` + rec + `(` + dataColumnDefs(sortedKeys(used), types) + `))
             select r.i, pgy_row.` + quoteIdent(key[0]) + ` is null, r.first,
-                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k), '{}')
+                   coalesce((select array_agg(k order by k) from jsonb_object_keys(r.j) k where to_jsonb(pgy_row.*) -> k is distinct from to_jsonb(r.` + rec + `) -> k), '{}')
             from r left join ` + from + ` pgy_row on ` + strings.Join(join, " and ") + `
             where pgy_row.` + quoteIdent(key[0]) + ` is null or r.first <> r.i
-               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row) -> k is distinct from to_jsonb(r.v) -> k)`
+               or exists (select 1 from jsonb_object_keys(r.j) k where to_jsonb(pgy_row.*) -> k is distinct from to_jsonb(r.` + rec + `) -> k)`
         ld := &LiveTableData{Changed: map[int][]string{}}
         missing := map[int]bool{}
         qr, err := pool.Query(ctx, diffQ, string(rows))
