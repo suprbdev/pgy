@@ -168,8 +168,13 @@ func TestSimulateFunctionArgumentDefaultConverges(t *testing.T) {
             t.Errorf("%s: a plan after the simulated one must be empty, got:\n%s", c.name, Render(p))
         }
         lf := sim.FunctionDefs[norm]
-        if lf == nil || lf.Volatility != "volatile" || lf.Parallel != "unsafe" || lf.Cost != 100 {
-            t.Errorf("%s: the new definition resets the attributes the YAML leaves out, got %+v", c.name, lf)
+        switch {
+        case lf == nil:
+            t.Errorf("%s: the function must be simulated", c.name)
+        case c.unsafe && (lf.Volatility != "volatile" || lf.Parallel != "unsafe" || lf.Cost != 100):
+            t.Errorf("%s: DROP and CREATE reset the attributes the YAML leaves out, got %+v", c.name, lf)
+        case !c.unsafe && (lf.Volatility != "stable" || lf.Parallel != "safe" || lf.Cost != 5):
+            t.Errorf("%s: CREATE OR REPLACE keeps the attributes the YAML leaves out, got %+v", c.name, lf)
         }
     }
 }
@@ -189,7 +194,7 @@ func TestSimulateProcedureArgumentDefaultConverges(t *testing.T) {
     if p := Plan(sim, d, false); planSize(p) != 0 {
         t.Errorf("a plan after the simulated one must be empty, got:\n%s", Render(p))
     }
-    if lp := sim.ProcedureDefs[norm]; lp == nil || lp.Args != "a int default 2" || lp.Security != "invoker" {
-        t.Errorf("CREATE OR REPLACE sets the arguments and resets security, got %+v", lp)
+    if lp := sim.ProcedureDefs[norm]; lp == nil || lp.Args != "a int default 2" || lp.Security != "definer" {
+        t.Errorf("CREATE OR REPLACE sets the arguments and keeps the security the YAML leaves out, got %+v", lp)
     }
 }
