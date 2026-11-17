@@ -21,11 +21,15 @@ type ViewProbe struct {
     // Err is why the declared query couldn't be deparsed, such as a
     // relation or column this plan creates; "" when it was.
     Err string
+    // Denied marks an Err that is a missing privilege, such as USAGE on a
+    // schema the query names. Such a query was compared with LiveDef as
+    // text only (see DeniedError).
+    Denied bool
 }
 
 // Changed reports whether the declared query differs from the live one, or
-// couldn't be compared.
-func (p *ViewProbe) Changed() bool { return p.Err != "" || p.DesiredDef != p.LiveDef }
+// couldn't be compared for another reason than a missing privilege.
+func (p *ViewProbe) Changed() bool { return !p.Denied && (p.Err != "" || p.DesiredDef != p.LiveDef) }
 
 // ColumnsCompatible reports whether CREATE OR REPLACE VIEW can switch the
 // live view to the declared query: the live columns, with their names and
@@ -47,13 +51,13 @@ create function pg_temp.pgy_deparse(v oid, OUT def text, OUT cols text[]) langua
            array(select quote_ident(a.attname) || ' ' || format_type(a.atttypid, a.atttypmod)
                  from pg_attribute a where a.attrelid = v and a.attnum > 0 and not a.attisdropped order by a.attnum)
 $f$;
-create function pg_temp.pgy_viewdef(q text, OUT def text, OUT cols text[], OUT err text) language plpgsql as $f$
+create function pg_temp.pgy_viewdef(q text, OUT def text, OUT cols text[], OUT err text, OUT code text) language plpgsql as $f$
 begin
     execute 'create temp view pgy_probe as ' || q;
     select d.def, d.cols into def, cols from pg_temp.pgy_deparse('pgy_probe'::regclass) d;
     execute 'drop view pgy_probe';
 exception when others then
-    def := null; cols := null; err := sqlerrm;
+    def := null; cols := null; err := sqlerrm; code := sqlstate;
 end
 $f$`
 
@@ -67,7 +71,10 @@ $f$`
 // are still in. The
 // results go to live.ViewProbes. A server that can't run the probe, such as
 // a read-only standby, leaves it empty, and views stay create-only; the
-// error is returned for the caller to report.
+// error is returned for the caller to report. A query the role lacks a
+// privilege to parse, such as USAGE on a schema it names, is compared with
+// the live definition as text: one that differs is left as it is and
+// listed in the *DeniedError returned, next to the results of the others.
 func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
     if live == nil || desired == nil || pool == nil { return nil }
     keys, queries, schemas, names := []string{}, []string{}, []string{}, []string{}
@@ -108,7 +115,11 @@ func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *sc
     }
     if firstErr != nil { return firstErr }
     live.ViewProbes = probes
-    return nil
+    denied := denials{}
+    for i, k := range keys {
+        if p := probes[k]; p != nil && p.Denied && !sameViewText(queries[i], p.LiveDef) { denied.add(k, p.Err) }
+    }
+    return denied.err()
 }
 
 // viewProbeWorkers is how many connections ProbeViews splits the views
@@ -127,7 +138,7 @@ func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, sche
     defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
     if _, err := tx.Exec(ctx, viewProbeFuncs); err != nil { return nil, fmt.Errorf("view probe: %w", err) }
     rows, err := tx.Query(ctx, `
-        select t.k, d.def, d.cols, d.err, l.def, l.cols
+        select t.k, d.def, d.cols, d.err, d.code, l.def, l.cols
         from unnest($1::text[], $2::text[], $3::text[], $4::text[]) with ordinality t(k, q, s, n, i)
         join pg_namespace ns on ns.nspname = t.s
         join pg_class c on c.relnamespace = ns.oid and c.relname = t.n
@@ -138,15 +149,16 @@ func probeViewChunk(ctx context.Context, pool *pgxpool.Pool, keys, queries, sche
     probes := map[string]*ViewProbe{}
     for rows.Next() {
         var k string
-        var def, errText *string
+        var def, errText, code *string
         var cols []string
         p := &ViewProbe{}
-        if err := rows.Scan(&k, &def, &cols, &errText, &p.LiveDef, &p.LiveCols); err != nil {
+        if err := rows.Scan(&k, &def, &cols, &errText, &code, &p.LiveDef, &p.LiveCols); err != nil {
             rows.Close()
             return nil, fmt.Errorf("view probe: %w", err)
         }
         if def != nil { p.DesiredDef = *def }
         if errText != nil { p.Err = *errText }
+        p.Denied = code != nil && *code == insufficientPrivilege
         p.DesiredCols = cols
         probes[k] = p
     }

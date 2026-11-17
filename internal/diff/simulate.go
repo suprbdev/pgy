@@ -796,6 +796,7 @@ func cloneLive(l *Live) *Live {
         ViewProbes:         cloneMap(l.ViewProbes, nil),
         ViewDependents:     cloneMap(l.ViewDependents, nil),
         ExprProbes:         l.ExprProbes,
+        TypeProbes:         l.TypeProbes,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleMemberOptions:  cloneMap(l.RoleMemberOptions, func(m map[string]*LiveMembership) map[string]*LiveMembership {
             return cloneMap(m, func(v *LiveMembership) *LiveMembership { c := *v; return &c })
