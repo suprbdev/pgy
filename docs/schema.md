@@ -13,6 +13,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Names](#names)
 - [Merging across files](#merging-across-files)
 - [Extensions](#extensions)
+  - [Objects an extension owns](#objects-an-extension-owns)
 - [Database Settings](#database-settings)
 - [Tables](#tables)
   - [Columns](#columns)
@@ -295,6 +296,48 @@ With a connection, `pgy diff` also warns about an extension the server does not 
 Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
 
 Extensions are never dropped by pgy, not even with `--unsafe --prune`: remove one with a hand-written migration.
+
+### Objects an extension owns
+
+pgy never creates, replaces or drops the functions, views and types that `CREATE EXTENSION` installs, but their privileges and a few attributes can be declared. Leave out the part that defines the object, and the declaration manages one that already exists:
+
+| Declaration | Left out | Managed |
+|-------------|----------|---------|
+| `function <name>(<args>):` | `body`, `returns`, `language` | `security`, `stable`/`volatile`/`immutable`, `strict`, `leakproof`, `parallel`, `cost`, `rows`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
+| `procedure <name>(<args>):` | `body`, `language` | `security`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
+| `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
+| `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
+
+```yaml
+extensions:
+  - {name: pgcrypto, schema: public}
+  - {name: hstore, schema: public}
+  - {name: pg_stat_statements, schema: public}
+  - {name: pg_buffercache, schema: public}
+roles:
+  app: {}
+  monitoring: {}
+schema public:
+  function gen_random_bytes(integer):
+    revokePublic: true
+    grants: {app: [execute]}
+  function each(hstore):
+    rows: 50
+  function pg_buffercache_pages():
+    grants: {monitoring: [execute]}
+  view pg_stat_statements:
+    grants: {monitoring: [select], public: []}
+  type hstore:
+    revokePublic: true
+    grants: {app: [usage]}
+```
+
+- **Matching.** A function or procedure is found by its argument types, as PostgreSQL identifies it: `function each(hstore):` is the extension's `each(hs hstore, OUT key text, OUT value text)`. Argument names and `OUT` arguments may be written or left out.
+- **Privileges** are compared with the ones the extension's script set (`pg_init_privs`), which is also what `pg_dump` keeps of an extension's objects. What the extension granted is left alone unless the `grants:` block names the grantee: `pg_buffercache_pages()` is granted to `pg_monitor` by its extension, and the block above adds `monitoring` without revoking that. A named grantee gets exactly the privileges listed, so `pg_monitor: []` revokes. Everything else follows the usual [grants](#grants) rules: privileges that were granted later to roles the block doesn't list are revoked. The same holds for a `grants:` block on any other declared object that an extension owns.
+- **In the migration that creates the extension**, the statements for its objects run after `CREATE EXTENSION`: every declared attribute is set, the listed privileges are granted, and a grantee listed with `[]` is revoked. One migration is enough unless the extension grants a listed role more than the block lists, which the next diff revokes. The same applies when the plan updates an extension (`ALTER EXTENSION ... UPDATE`).
+- **An object that doesn't exist**, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the declaration.
+- **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
+- **`pgy pull`** writes such a declaration for each function, procedure, view and type of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default, `role: []` for a grantee that lost its privileges. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were. Tables, sequences and aggregates of an extension cannot be declared this way; pull reports the ones whose privileges changed.
 
 ## Database Settings
 
@@ -844,6 +887,8 @@ schema public:
 
 `securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
 
+A view or materialized view declared without `query` is never created: the declaration manages the `grants`, `owner`, `comment` and `columnComments` of one that already exists, such as an extension's `pg_stat_statements`. See [Objects an extension owns](#objects-an-extension-owns).
+
 ### Materialized Views
 
 Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`; a changed query is handled as described under [Views](#views) (there is no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
@@ -881,7 +926,7 @@ schema public:
 
 ## Types
 
-Types are defined inside `schema <name>:` blocks.
+Types are defined inside `schema <name>:` blocks. A `type <name>:` declaration without `type` creates nothing: it manages the `grants`, `revokePublic`, `owner` and `comment` of a type that already exists, whatever its kind, such as an extension's `hstore`. See [Objects an extension owns](#objects-an-extension-owns).
 
 ### Enum
 
@@ -1087,7 +1132,7 @@ schema public:
 | `body` | string | Function body (dollar-quoted in output SQL) |
 | `grants` | map | Role → privilege list. See [Grants](#grants) |
 | *(replace-on-change)* | — | Existing functions are compared against the live definition. A body change (via `prosrc`), a language change or a changed `transform` list emits `CREATE OR REPLACE FUNCTION`. When only attributes differ (volatility, security, strict, leakproof, parallel, cost, rows, set), `ALTER FUNCTION` is emitted instead — no body replacement. A return type change cannot be made in place, so with `--unsafe` it emits `DROP FUNCTION` and `CREATE FUNCTION` and restores the comment, grants and owner (the drop fails while views, triggers or defaults use the function); without it, `pgy diff` warns. Changing the argument types declares a different function: the old one stays, or is dropped with `--unsafe --prune`. Renaming arguments or changing their modes while the types stay the same is still the same function to PostgreSQL, and `CREATE OR REPLACE` can't do it, so it is handled like a return type change: `DROP` and `CREATE` with `--unsafe`, a warning without. Argument defaults (`a int default 1` or `a int = 1`) are compared too: a changed or added default emits `CREATE OR REPLACE`, while a removed one needs `DROP` and `CREATE`, as above. Procedures work the same way. To rename a function and keep its arguments, use [`renamedFrom`](#renames) |
-| *(attribute-only declarations)* | — | Omitting `body` leaves the body unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). If the function doesn't exist in the live DB yet (extension not installed), the declaration is skipped |
+| *(attribute-only declarations)* | — | Omitting `body`, `returns` and `language` leaves the function itself unmanaged: pgy emits `ALTER FUNCTION` for managed attributes that differ from live and never `CREATE OR REPLACE`. Use this to manage attributes and privileges of extension-owned functions (e.g. marking PostGIS's `geometry_overlaps(geometry, geometry)` leakproof — a `LANGUAGE c` function whose body pgy cannot express). The function is found by its argument types. If it doesn't exist and the plan creates no extension, the declaration is skipped with a warning. See [Objects an extension owns](#objects-an-extension-owns) |
 | `revokePublic` | boolean | Emit `REVOKE ALL ... FROM PUBLIC` (security-definer pattern) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -1196,6 +1241,8 @@ schema public:
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
 Signature changes are not supported. Create a new procedure instead. To rename a procedure and keep its arguments, use [`renamedFrom`](#renames).
+
+A procedure declared without `body` and `language` is never created: the declaration manages the `security`, `set`, `grants`, `revokePublic`, `owner` and `comment` of one that already exists, with `ALTER PROCEDURE` for the first two. See [Objects an extension owns](#objects-an-extension-owns).
 
 ## Collations
 
@@ -1389,6 +1436,7 @@ Behavior:
   - **Functions, procedures, types, domains and the `public` schema** come with `PUBLIC` privileges (`EXECUTE`, `USAGE`). Their grants block leaves `PUBLIC` alone unless it lists `public`. `public: []` revokes the default, and `public: [execute]` keeps it. `revokePublic: true` does the same as `public: []` (recommended for `security: definer` functions); it is emitted for new objects and whenever the live database still grants the default.
   - Before v0.43.0 a grants block never revoked `PUBLIC` privileges, so an upgrade can revoke `PUBLIC` grants that were made by hand; the warnings name each one.
   - `policy.public_grants` in the config changes this: `authoritative` makes every grants block cover `PUBLIC`, routines, types, domains and the `public` schema included, and `explicit` makes only blocks that list `public` cover it. See [Strict mode](../README.md#strict-mode).
+- On **objects an extension owns**, the privileges the extension's own script granted are left alone unless the block names their grantee. See [Objects an extension owns](#objects-an-extension-owns).
 - Grant/revoke statements are emitted after all object creation and FK alters.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
@@ -1634,6 +1682,8 @@ pgy also infers the dependencies it can read from the YAML, so these need no `de
 - in view queries and SQL-standard routine bodies, relations after `FROM` or `JOIN` and any schema-qualified relation or function call
 
 Unqualified names only match objects in `public`. Other references, such as an unqualified table in a comma join or a non-public table named only in a string-literal function body, still need `dependsOn`.
+
+Functions, views and types that an extension owns need no `dependsOn` either: extensions are created before everything else. `pgy pull` leaves them out of the `dependsOn` lists it writes.
 
 Two kinds of `dependsOn` are never needed (and can only manufacture cycles):
 

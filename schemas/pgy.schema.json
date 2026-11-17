@@ -854,7 +854,7 @@
       ]
     },
     "function": {
-      "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body.",
+      "description": "Body of a `function <name>(args):` declaration. Arguments belong in the key, not the body. Without body, returns and language the declaration creates nothing: it manages the attributes, privileges, owner and comment of a function that already exists, such as one an extension owns, and is matched by its argument types.",
       "type": "object",
       "properties": {
         "replace": { "type": "boolean", "description": "Re-emit a SQL-standard body (BEGIN ATOMIC ... END or RETURN expr) with CREATE OR REPLACE. PostgreSQL stores such bodies rewritten, so pgy does not compare them; set this while changing one." },
@@ -886,11 +886,17 @@
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["returns", "language", "body"],
+      "dependencies": {
+        "body": ["returns", "language"],
+        "returns": ["body"],
+        "language": ["body"],
+        "transform": ["body"],
+        "replace": ["body"]
+      },
       "additionalProperties": false
     },
     "procedure": {
-      "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL.",
+      "description": "Body of a `procedure <name>(args):` declaration. Procedures have no return type or volatility; invoked with CALL. Without body and language the declaration creates nothing: it manages the security, set, privileges, owner and comment of a procedure that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "replace": { "type": "boolean", "description": "Re-emit a SQL-standard body (BEGIN ATOMIC ... END or RETURN expr) with CREATE OR REPLACE. PostgreSQL stores such bodies rewritten, so pgy does not compare them; set this while changing one." },
@@ -910,11 +916,16 @@
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["language", "body"],
+      "dependencies": {
+        "body": ["language"],
+        "language": ["body"],
+        "transform": ["body"],
+        "replace": ["body"]
+      },
       "additionalProperties": false
     },
     "typeDef": {
-      "description": "Body of a `type <name>:` declaration (enum, composite or range).",
+      "description": "Body of a `type <name>:` declaration (enum, composite or range). Without `type` the declaration creates nothing: it manages the privileges, owner and comment of a type that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "renamedLabels": { "type": "object", "description": "Enums: new label -> previous label (ALTER TYPE ... RENAME VALUE).", "additionalProperties": { "type": "string", "minLength": 1 } },
@@ -955,11 +966,22 @@
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["type"],
+      "dependencies": {
+        "labels": ["type"],
+        "renamedLabels": ["type"],
+        "attributes": ["type"],
+        "subtype": ["type"],
+        "subtypeOpclass": ["type"],
+        "collation": ["type"],
+        "canonical": ["type"],
+        "subtypeDiff": ["type"],
+        "multirangeTypeName": ["type"],
+        "renamedFrom": ["type"]
+      },
       "additionalProperties": false
     },
     "view": {
-      "description": "Body of a `view <name>:` or `materialized view <name>:` declaration.",
+      "description": "Body of a `view <name>:` or `materialized view <name>:` declaration. Without query the declaration creates nothing: it manages the privileges, owner, comment and column comments of a view that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
@@ -1008,7 +1030,20 @@
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["query"],
+      "dependencies": {
+        "replace": ["query"],
+        "renamedFrom": ["query"],
+        "securityInvoker": ["query"],
+        "securityBarrier": ["query"],
+        "checkOption": ["query"],
+        "withData": ["query"],
+        "tablespace": ["query"],
+        "with": ["query"],
+        "indexes": ["query"],
+        "triggers": ["query"],
+        "rules": ["query"],
+        "columnDefaults": ["query"]
+      },
       "additionalProperties": false
     },
     "sequence": {

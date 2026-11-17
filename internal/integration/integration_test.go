@@ -2698,8 +2698,8 @@ func TestIntegrationFunctionSetClauses(t *testing.T) {
 
 	second := map[string]string{"search_path": "public", "work_mem": "'64MB'"}
 	p := plan(mkDesired(second))
-	if len(p.Creates) != 0 || len(p.Alters) != 1 ||
-		!strings.Contains(p.Alters[0], "set search_path = public") || !strings.Contains(p.Alters[0], "reset myapp.flag") {
+	if len(p.Creates) != 1 || len(p.Alters) != 0 ||
+		!strings.Contains(p.Creates[0], "set search_path = public") || !strings.Contains(p.Creates[0], "reset myapp.flag") {
 		t.Fatalf("expected one ALTER FUNCTION with SET and RESET; creates=%v alters=%v", p.Creates, p.Alters)
 	}
 	applyPlan(t, pool, p)

@@ -142,9 +142,19 @@ type Live struct{
     // CompositeComments: "schema.type" -> attribute -> comment
     CompositeComments map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
-    // pruned. Keys are "rel:schema.name", "type:schema.name" and
-    // "proc:<normalized signature>".
+    // pruned. Keys are "rel:schema.name", "type:schema.name",
+    // "proc:<normalized signature>", "language:name" and "fdw:name".
     ExtensionMembers map[string]bool
+    // InitPrivs: the privileges CREATE EXTENSION left on the extension's
+    // objects (pg_init_privs), by the object's ExtensionMembers key ->
+    // grantee -> privilege set, the owner's entries excluded. A member
+    // without a key kept the default privileges of its kind. See
+    // InitialGrants.
+    InitPrivs map[string]map[string]map[string]bool
+    // BaseTypes: base and multirange types ("schema.type"), which pgy never
+    // creates; a type declaration without a kind manages their owner,
+    // privileges and comment.
+    BaseTypes map[string]bool
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
@@ -290,6 +300,9 @@ type LiveExtension struct {
     // IntrospectExtensions loads them for an extension that has to move.
     Members   map[string]bool
     Operators map[string]bool
+    // Created marks an extension that an earlier step of the same plan
+    // creates (see Simulate), so the snapshot doesn't have its objects.
+    Created bool
 }
 
 // AvailableExtension is an extension the server can install: its default
@@ -633,6 +646,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         CompositeCollations: map[string]map[string]string{},
         CompositeComments: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
+        InitPrivs: map[string]map[string]map[string]bool{},
+        BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
     }
     batch := &queryBatch{}
@@ -1075,7 +1090,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         cross join lateral aclexplode(t.typacl) a
-        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
+        and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and a.grantee <> t.typowner
@@ -1092,7 +1108,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname || '.' || t.typname
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
-        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
+        and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
         and t.typacl is not null
@@ -1237,21 +1254,26 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query existing types
     typeQ := `
-        select n.nspname, t.typname
+        select n.nspname, t.typname, t.typtype in ('b', 'm')
         from pg_type t
         join pg_namespace n on n.oid = t.typnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
-        and t.typtype in ('e', 'c', 'r')
+        and (t.typtype in ('e', 'c', 'r', 'm') or t.typtype = 'b' and t.typcategory <> 'A' and t.typisdefined)
         and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
     `
     batch.add(typeQ, func(typeRows pgx.Rows) error {
         for typeRows.Next() {
             var schemaName, typeName string
-            if err := typeRows.Scan(&schemaName, &typeName); err != nil {
+            var base bool
+            if err := typeRows.Scan(&schemaName, &typeName, &base); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, typeName)
+            if base {
+                l.BaseTypes[key] = true
+                continue
+            }
             l.Types[key] = true
         }
         return nil
@@ -2151,7 +2173,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         union all
         select 'type:' || n.nspname || '.' || t.typname, pg_get_userbyid(t.typowner)
         from pg_type t join pg_namespace n on n.oid = t.typnamespace
-        where t.typtype in ('e', 'c', 'r', 'd') and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
+        where (t.typtype in ('e', 'c', 'r', 'd', 'm') or t.typtype = 'b' and t.typcategory <> 'A')
+        and (t.typrelid = 0 or (select c.relkind from pg_class c where c.oid = t.typrelid) = 'c')
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
         union all
         select 'schema:' || n.nspname, pg_get_userbyid(n.nspowner)
@@ -2249,6 +2272,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
         from pg_depend d join pg_proc p on p.oid = d.objid join pg_namespace n on n.oid = p.pronamespace
         where d.deptype = 'e' and d.classid = 'pg_proc'::regclass
+        union all
+        select 'language:' || l.lanname
+        from pg_depend d join pg_language l on l.oid = d.objid
+        where d.deptype = 'e' and d.classid = 'pg_language'::regclass
+        union all
+        select 'fdw:' || w.fdwname
+        from pg_depend d join pg_foreign_data_wrapper w on w.oid = d.objid
+        where d.deptype = 'e' and d.classid = 'pg_foreign_data_wrapper'::regclass
     `
     batch.add(extMemQ, func(extMemRows pgx.Rows) error {
         for extMemRows.Next() {
@@ -2261,6 +2292,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
+    batch.add(initPrivsQ, l.scanInitPrivs)
 
     ownedQ := `
         select n.nspname || '.' || s.relname
@@ -2488,23 +2520,27 @@ func configClauses(desired map[string]string, live map[string]string) []string {
 // strict/leakproof/set) that differ from live. Used when the body is unchanged
 // (or unmanaged) so an attribute flip doesn't require CREATE OR REPLACE —
 // essential for extension-owned functions (e.g. PostGIS LANGUAGE c) whose
-// bodies pgy cannot express.
+// bodies pgy cannot express. A nil lf stands for a function whose
+// attributes are unknown (an extension of the same plan creates it), so
+// every attribute the YAML manages is set.
 func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
     out := []string{}
+    unknown := lf == nil
+    if unknown { lf = &LiveFunction{} }
     if f.Volatility != "" && strings.ToLower(f.Volatility) != lf.Volatility {
         out = append(out, strings.ToLower(f.Volatility))
     }
     if f.Security != "" && strings.ToLower(f.Security) != lf.Security {
         out = append(out, "security "+strings.ToLower(f.Security))
     }
-    if f.Strict != nil && *f.Strict != lf.Strict {
+    if f.Strict != nil && (unknown || *f.Strict != lf.Strict) {
         if *f.Strict {
             out = append(out, "strict")
         } else {
             out = append(out, "called on null input")
         }
     }
-    if f.Leakproof != nil && *f.Leakproof != lf.Leakproof {
+    if f.Leakproof != nil && (unknown || *f.Leakproof != lf.Leakproof) {
         if *f.Leakproof {
             out = append(out, "leakproof")
         } else {
@@ -2514,14 +2550,27 @@ func functionAttrClauses(f *schema.Function, lf *LiveFunction) []string {
     if f.Parallel != "" && f.Parallel != lf.Parallel {
         out = append(out, "parallel "+f.Parallel)
     }
-    if f.Cost != nil && !float4Equal(*f.Cost, lf.Cost) {
+    if f.Cost != nil && (unknown || !float4Equal(*f.Cost, lf.Cost)) {
         out = append(out, "cost "+formatFloat(*f.Cost))
     }
-    if f.Rows != nil && !float4Equal(*f.Rows, lf.Rows) {
+    if f.Rows != nil && (unknown || !float4Equal(*f.Rows, lf.Rows)) {
         out = append(out, "rows "+formatFloat(*f.Rows))
     }
     out = append(out, configClauses(f.Set, lf.Config)...)
     return out
+}
+
+// procedureAttrClauses returns the ALTER PROCEDURE action clauses for the
+// security and settings that p, a procedure declared without a body, sets
+// and that differ from lp. A nil lp stands for a procedure whose attributes
+// are unknown, as in functionAttrClauses.
+func procedureAttrClauses(p *schema.Procedure, lp *LiveProcedure) []string {
+    out := []string{}
+    if lp == nil { lp = &LiveProcedure{} }
+    if p.Security != "" && strings.ToLower(p.Security) != lp.Security {
+        out = append(out, "security "+strings.ToLower(p.Security))
+    }
+    return append(out, configClauses(p.Set, lp.Config)...)
 }
 
 // float4Equal compares a YAML number with a value PostgreSQL stored as real,
@@ -2663,6 +2712,9 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    extensions := &PlanDiff{}
+    planExtensions(extensions, live, desired)
+    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
     live, renames := applyRenames(live, desired)
     liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
@@ -2677,6 +2729,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     recreateWarnings = append(recreateWarnings, argWarnings...)
     live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
+    recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -2784,7 +2837,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
-    planExtensions(plan, live, desired)
+    plan.Creates = append(plan.Creates, extensions.Creates...)
+    plan.Alters = append(plan.Alters, extensions.Alters...)
+    plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
     }
@@ -2798,7 +2853,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     sorted, _ := schema.TopologicalSort(desired)
     liveFuncs := normalizedLiveFunctions(live)
     createsRelations := plansNewRelations(live, desired)
-    
+    // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
+    // here, not Alters: an index or generated column created below may need
+    // the function to be immutable already.
+    routineAlterAt := len(plan.Creates)
+    routineAlters := []string{}
+
     // Generate SQL in dependency order (excluding extensions, already handled above)
     for _, e := range sorted {
         switch e.Kind {
@@ -2861,7 +2921,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     f.HasBody() && (defaultsChanged || routineLanguageChanged(f.Language, lf.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), lf.Transform))
                 if !bodyChanged {
                     if clauses := functionAttrClauses(f, lf); len(clauses) > 0 {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter function %s %s;",
+                        routineAlters = append(routineAlters, fmt.Sprintf("alter function %s %s;",
                             pqIdent(fname)+grantFuncArgs(f.ArgsSig), strings.Join(clauses, " ")))
                     }
                     continue
@@ -2869,7 +2929,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 // fall through: body changed, emit CREATE OR REPLACE
             } else if !f.HasBody() {
                 // Attribute-only declaration for a function that doesn't exist
-                // yet (extension not installed on this DB) — nothing to create.
+                // yet: an extension of this plan creates it, or
+                // resolveAttributeOnly emptied the declaration.
+                if clauses := functionAttrClauses(f, nil); len(clauses) > 0 {
+                    routineAlters = append(routineAlters, fmt.Sprintf("alter function %s %s;",
+                        pqIdent(fname)+grantFuncArgs(f.ArgsSig), strings.Join(clauses, " ")))
+                }
                 continue
             }
             setClauses := ""
@@ -2904,6 +2969,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             norm := normalizeFunctionSignature(prname + pr.ArgsSig)
             if blockedRoutines[norm] { continue }
             found := live.Procedures[norm]
+            if !pr.HasBody() {
+                lp := live.ProcedureDefs[norm]
+                if found && lp == nil { continue }
+                if clauses := procedureAttrClauses(pr, lp); len(clauses) > 0 {
+                    routineAlters = append(routineAlters, fmt.Sprintf("alter procedure %s %s;",
+                        pqIdent(prname)+grantFuncArgs(pr.ArgsSig), strings.Join(clauses, " ")))
+                }
+                continue
+            }
             if found {
                 lp := live.ProcedureDefs[norm]
                 if lp == nil || !procedureChanged(pr, lp) { continue }
@@ -3198,6 +3272,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             }
         }
     }
+    plan.Creates = append(plan.Creates[:routineAlterAt:routineAlterAt], append(routineAlters, plan.Creates[routineAlterAt:]...)...)
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
@@ -4329,7 +4404,7 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
     }
     for _, k := range sortedKeys(desired.Procedures) {
         p := desired.Procedures[k]
-        if p == nil { continue }
+        if p == nil || !p.HasBody() { continue }
         pname := schema.RoutineName(k)
         norm := normalizeFunctionSignature(pname + p.ArgsSig)
         lp := live.ProcedureDefs[norm]
@@ -4481,7 +4556,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
         if f := desired.Functions[k]; f != nil && f.HasBody() { check("function", schema.RoutineName(k), f.ArgsSig) }
     }
     for _, k := range sortedKeys(desired.Procedures) {
-        if p := desired.Procedures[k]; p != nil { check("procedure", schema.RoutineName(k), p.ArgsSig) }
+        if p := desired.Procedures[k]; p != nil && p.HasBody() { check("procedure", schema.RoutineName(k), p.ArgsSig) }
     }
     return out, recreated, blocked, warns
 }
@@ -5130,6 +5205,10 @@ func planGrants(live *Live, desired *schema.Database) []string {
 // every block cover PUBLIC (PublicAuthoritative) or only blocks that list it
 // (PublicExplicit).
 //
+// On an object an extension owns, the privileges its script granted (see
+// Live.InitialGrants) are left alone unless the block names their grantee;
+// PublicAuthoritative still covers PUBLIC there.
+//
 // Every REVOKE is emitted ahead of every GRANT. PostgreSQL's REVOKE ... ON
 // TABLE also drops that role's column-level privileges, so narrowing a
 // table-wide grant to per-column grants in one migration must revoke first or
@@ -5173,6 +5252,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     if rows == nil { rows = map[string]bool{} }
     applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
     created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
+    member := func(key, publicDefault string, liveG map[string]map[string]bool, g map[string][]string) map[string]map[string]bool {
+        initial, ok := live.InitialGrants(key, publicDefault)
+        if !ok { return liveG }
+        return withoutInitialGrants(liveG, initial, g, mode == PublicAuthoritative)
+    }
 
     for _, name := range sortedKeys(desired.Servers) {
         s := desired.Servers[name]
@@ -5204,6 +5288,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             liveG := live.TableGrants[k]
             if live.Tables[k] == nil { liveG = created(k, "tables") }
             desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
+            liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
         }
@@ -5223,28 +5308,33 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             liveG := live.TableGrants[k]
             if !live.Sequences[k] { liveG = created(k, "sequences") }
             desiredG := resolveGrantRoles(sq.Grants, live.CurrentUser)
+            liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("sequence "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, sq.Owner), covers(true, desiredG)))
         }
     }
-    typeGrants := func(kind, k string, grantsBlock map[string][]string, revokePublic, isLive bool, owner string) {
+    typeGrants := func(kind, k string, grantsBlock map[string][]string, revokePublic, isLive, attributeOnly bool, owner string) {
         desiredG := resolveGrantRoles(grantsBlock, live.CurrentUser)
         defaultUsage := !isLive || !live.TypePublicRevoked[k]
         if revokePublic && (grantsBlock == nil || !covers(false, desiredG)) && defaultUsage {
             revokes = append(revokes, fmt.Sprintf("revoke usage on %s %s from public;", kind, pqIdent(k)))
         }
         if grantsBlock == nil { return }
-        liveG := live.TypeGrants[k]
-        if !isLive { liveG = created(k, "types") }
-        addFor(desiredG)(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, withPublicDefault(liveG, "usage", defaultUsage), owner, covers(false, desiredG)))
+        liveG := withPublicDefault(live.TypeGrants[k], "usage", defaultUsage)
+        if !isLive {
+            liveG = withPublicDefault(created(k, "types"), "usage", true)
+            if attributeOnly { liveG = pendingGrants(created(k, "types"), desiredG) }
+        }
+        liveG = member("type:"+k, "usage", liveG, desiredG)
+        addFor(desiredG)(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, covers(false, desiredG)))
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil {
-            typeGrants("type", k, td.Grants, td.RevokePublic, live.Types[k], objectOwner(live, "type:"+k, td.Owner))
+            typeGrants("type", k, td.Grants, td.RevokePublic, live.Types[k] || td.Kind == "" && liveType(live, k), td.Kind == "", objectOwner(live, "type:"+k, td.Owner))
         }
     }
     for _, k := range sortedKeys(desired.Domains) {
         if dm := desired.Domains[k]; dm != nil {
-            typeGrants("domain", k, dm.Grants, dm.RevokePublic, live.Domains[k], objectOwner(live, "type:"+k, dm.Owner))
+            typeGrants("domain", k, dm.Grants, dm.RevokePublic, live.Domains[k], false, objectOwner(live, "type:"+k, dm.Owner))
         }
     }
 
@@ -5258,8 +5348,12 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         vw := desired.Views[k]
         if vw == nil || vw.Grants == nil { continue }
         liveG := live.TableGrants[k]
-        if !live.Views[k] && !live.MatViews[k] { liveG = created(k, "tables") }
         desiredG := resolveGrantRoles(vw.Grants, live.CurrentUser)
+        if !live.Views[k] && !live.MatViews[k] {
+            liveG = created(k, "tables")
+            if strings.TrimSpace(vw.Query) == "" { liveG = pendingGrants(liveG, desiredG) }
+        }
+        liveG = member("rel:"+k, "", liveG, desiredG)
         addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, vw.Owner), covers(true, desiredG)))
     }
 
@@ -5278,9 +5372,13 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
         }
         if f.Grants != nil {
-            liveG := live.FunctionGrants[norm]
-            if !liveFuncs[norm] { liveG = created(name, "functions") }
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, withPublicDefault(liveG, "execute", defaultExec), objectOwner(live, "proc:"+norm, f.Owner), covers(false, desiredG)))
+            liveG := withPublicDefault(live.FunctionGrants[norm], "execute", defaultExec)
+            if !liveFuncs[norm] {
+                liveG = withPublicDefault(created(name, "functions"), "execute", true)
+                if !f.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
+            }
+            liveG = member("proc:"+norm, "execute", liveG, desiredG)
+            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), covers(false, desiredG)))
         }
     }
 
@@ -5300,9 +5398,13 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
         }
         if pr.Grants != nil {
-            liveG := live.FunctionGrants[norm]
-            if !live.Procedures[norm] { liveG = created(name, "functions") }
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, withPublicDefault(liveG, "execute", defaultExec), objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
+            liveG := withPublicDefault(live.FunctionGrants[norm], "execute", defaultExec)
+            if !live.Procedures[norm] {
+                liveG = withPublicDefault(created(name, "functions"), "execute", true)
+                if !pr.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
+            }
+            liveG = member("proc:"+norm, "execute", liveG, desiredG)
+            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
         }
     }
     return append(revokes, grants...), warns

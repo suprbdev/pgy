@@ -1538,10 +1538,10 @@ func TestFunctionAlterOnVolatilityChange(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) stable;`) {
-		t.Errorf("expected ALTER FUNCTION on volatility-only change; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) stable;`) {
+		t.Errorf("expected ALTER FUNCTION on volatility-only change; creates: %v", p.Creates)
 	}
-	if findCreate(p, "function") {
+	if findCreate(p, "create or replace") {
 		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
 	}
 }
@@ -1560,8 +1560,8 @@ func TestFunctionAlterStripsArgDefaults(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) stable;`) {
-		t.Errorf("expected ALTER FUNCTION without arg defaults; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) stable;`) {
+		t.Errorf("expected ALTER FUNCTION without arg defaults; creates: %v", p.Creates)
 	}
 }
 
@@ -2182,10 +2182,10 @@ func TestFunctionAlterOnLeakproofChange(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) leakproof;`) {
-		t.Errorf("expected ALTER FUNCTION LEAKPROOF; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) leakproof;`) {
+		t.Errorf("expected ALTER FUNCTION LEAKPROOF; creates: %v", p.Creates)
 	}
-	if findCreate(p, "function") {
+	if findCreate(p, "create or replace") {
 		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
 	}
 }
@@ -2200,8 +2200,8 @@ func TestFunctionAlterNotLeakproof(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, "not leakproof") {
-		t.Errorf("expected ALTER FUNCTION NOT LEAKPROOF; alters: %v", p.Alters)
+	if !findCreate(p, "not leakproof") {
+		t.Errorf("expected ALTER FUNCTION NOT LEAKPROOF; creates: %v", p.Creates)
 	}
 }
 
@@ -2246,10 +2246,10 @@ func TestFunctionAlterOnSetChange(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) set pg_trgm.word_similarity_threshold = 0.5;`) {
-		t.Errorf("expected ALTER FUNCTION SET; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) set pg_trgm.word_similarity_threshold = 0.5;`) {
+		t.Errorf("expected ALTER FUNCTION SET; creates: %v", p.Creates)
 	}
-	if findCreate(p, "function") {
+	if findCreate(p, "create or replace") {
 		t.Errorf("body unchanged, should not replace; creates: %v", p.Creates)
 	}
 }
@@ -2264,8 +2264,8 @@ func TestFunctionAlterOnSetValueChange(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) set work_mem = '128MB';`) {
-		t.Errorf("expected ALTER FUNCTION SET with the new value; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) set work_mem = '128MB';`) {
+		t.Errorf("expected ALTER FUNCTION SET with the new value; creates: %v", p.Creates)
 	}
 }
 
@@ -2298,8 +2298,8 @@ func TestFunctionSetResetsRemovedSetting(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) reset work_mem;`) {
-		t.Errorf("expected ALTER FUNCTION RESET for the removed setting; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) reset work_mem;`) {
+		t.Errorf("expected ALTER FUNCTION RESET for the removed setting; creates: %v", p.Creates)
 	}
 }
 
@@ -2313,8 +2313,8 @@ func TestFunctionSetEmptyResetsAll(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) reset search_path reset work_mem;`) {
-		t.Errorf("expected every live setting reset, sorted; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) reset search_path reset work_mem;`) {
+		t.Errorf("expected every live setting reset, sorted; creates: %v", p.Creates)
 	}
 }
 
@@ -2341,8 +2341,8 @@ func TestFunctionSetCombinedWithAttributeAlter(t *testing.T) {
 		Functions: map[string]*schema.Function{"public.login": f},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."login"(email text) stable set work_mem = '64MB';`) {
-		t.Errorf("expected one ALTER FUNCTION with both actions; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."login"(email text) stable set work_mem = '64MB';`) {
+		t.Errorf("expected one ALTER FUNCTION with both actions; creates: %v", p.Creates)
 	}
 }
 
@@ -2391,14 +2391,14 @@ func TestFunctionBodylessAltersExtensionFunction(t *testing.T) {
 		},
 	}
 	p := Plan(live, desired, false)
-	if !findAlter(p, `alter function "public"."geometry_overlaps"(geom1 geometry, geom2 geometry) leakproof;`) {
-		t.Errorf("expected attribute-only ALTER; alters: %v", p.Alters)
+	if !findCreate(p, `alter function "public"."geometry_overlaps"(geom1 geometry, geom2 geometry) leakproof;`) {
+		t.Errorf("expected attribute-only ALTER; creates: %v", p.Creates)
 	}
-	if findCreate(p, "geometry_overlaps") {
+	if findCreate(p, "create or replace") {
 		t.Errorf("bodyless declaration must never CREATE OR REPLACE; creates: %v", p.Creates)
 	}
-	if findAlter(p, "null input") || findAlter(p, "strict") {
-		t.Errorf("strict unset in YAML, must not touch strictness; alters: %v", p.Alters)
+	if findCreate(p, "null input") || findCreate(p, "strict") {
+		t.Errorf("strict unset in YAML, must not touch strictness; creates: %v", p.Creates)
 	}
 }
 
