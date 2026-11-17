@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -74,30 +75,23 @@ func liveLanguage(live *Live, name string) *LiveLanguage {
 	return nil
 }
 
-// languagePending reports whether the language name, which live lacks,
-// comes with an extension that is not installed yet: the declared extension
-// of that name, which is how the extensions of procedural languages are
-// called.
-func languagePending(live *Live, desired *schema.Database, name string) bool {
-	if !desired.DeclaresExtension(name) {
-		return false
-	}
-	le := live.ExtensionDefs[name]
-	return !live.Extensions[name] || le != nil && le.Created
-}
-
 // planLanguages reconciles the privileges of the declared languages. The
 // statements go to plan.Creates, after the extension statements that create
 // languages and ahead of the routines written in them. Languages are never
 // created or dropped. One the database lacks is reported, unless the plan
-// installs its extension (see languagePending). PUBLIC's USAGE is a default
+// creates or updates an extension, which may bring it under any name
+// (pljava brings java): its statements then run in a DO block that skips
+// them unless the language exists and is trusted, since PostgreSQL rejects
+// GRANT and REVOKE on an untrusted one. PUBLIC's USAGE is a default
 // privilege, so a block covers PUBLIC only when it lists it, as for
-// routines and types in planGrantsWarned.
+// routines and types in planGrantsWarned, or when the language's extension
+// took that USAGE away (see publicRevokedByExtension).
 func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode PublicGrants) {
 	warn := func(format string, args ...any) {
 		plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})
 	}
-	allRevokes, allGrants := []string{}, []string{}
+	pending := membersPending(live, plan.Creates)
+	allRevokes, allGrants, guarded := []string{}, []string{}, []string{}
 	for _, name := range sortedKeys(desired.Languages) {
 		l := desired.Languages[name]
 		if l == nil {
@@ -106,9 +100,10 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		desiredG := resolveGrantRoles(l.Grants, live.CurrentUser)
 		owner := live.CurrentUser
 		var liveG map[string]map[string]bool
-		switch ll := liveLanguage(live, name); {
-		case ll == nil && !languagePending(live, desired, name):
-			warn("language %s is declared under languages, which manages the privileges of a language that exists already (pgy creates no languages), but the database has no such language and this plan creates no extension %s that would bring it; nothing is planned for it", name, name)
+		ll := liveLanguage(live, name)
+		switch {
+		case ll == nil && !pending:
+			warn("language %s is declared under languages, which manages the privileges of a language that exists already (pgy creates no languages), but the database has no such language and this plan creates or updates no extension that would bring it; nothing is planned for it", name)
 			continue
 		case ll == nil:
 			liveG = pendingGrants(nil, desiredG)
@@ -121,13 +116,31 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		if l.Grants == nil {
 			continue
 		}
-		revokes, grants := ownedGrantDiff("language "+quoteIdent(name), desiredG, liveG, owner, coversPublic(mode, false, desiredG))
+		covers, why := coversPublic(mode, false, desiredG), ""
+		if reason, ok := publicRevokedByExtension(live, mode, "language:"+name, "usage", desiredG); ok {
+			covers, why = true, reason
+		}
+		revokes, grants := ownedGrantDiff("language "+quoteIdent(name), desiredG, liveG, owner, covers)
 		if _, listed := desiredG["public"]; !listed {
-			plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, "")...)
+			plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, why)...)
+		}
+		if ll == nil {
+			if stmts := append(revokes, grants...); len(stmts) > 0 {
+				guarded = append(guarded, ifTrustedLanguage(name, stmts))
+			}
+			continue
 		}
 		allRevokes, allGrants = append(allRevokes, revokes...), append(allGrants, grants...)
 	}
-	plan.Creates = append(append(plan.Creates, allRevokes...), allGrants...)
+	plan.Creates = append(append(append(plan.Creates, allRevokes...), allGrants...), guarded...)
+}
+
+// ifTrustedLanguage wraps stmts, the GRANT and REVOKE statements on language
+// name, in a DO block that runs them only once the language exists and is
+// trusted.
+func ifTrustedLanguage(name string, stmts []string) string {
+	body := fmt.Sprintf("begin if exists (select from pg_catalog.pg_language where lanname = %s and lanpltrusted) then %s end if; end", quoteString(name), strings.Join(stmts, " "))
+	return "do " + dollarQuoteInline(body) + ";"
 }
 
 // simulateLanguages records in out the language privileges a plan for

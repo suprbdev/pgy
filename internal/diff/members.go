@@ -204,6 +204,31 @@ func memberLiveGrants(live *Live, mode PublicGrants, key, publicDefault string, 
 	return withoutInitialGrants(liveG, initial, desired, mode == PublicAuthoritative)
 }
 
+// publicRevokedByExtension reports whether a grants block that doesn't list
+// public covers PUBLIC on the extension member key all the same under mode
+// PublicByKind, which otherwise leaves PUBLIC's default privilege on objects
+// of its kind (publicDefault: execute or usage) alone: the extension's
+// script took that privilege away (see InitialGrants), so PUBLIC holding it
+// again is drift, which the block revokes. why says so, for
+// publicRevokeWarnings.
+func publicRevokedByExtension(live *Live, mode PublicGrants, key, publicDefault string, desired map[string][]string) (why string, ok bool) {
+	if mode != PublicByKind || publicDefault == "" {
+		return "", false
+	}
+	if _, listed := desired["public"]; listed {
+		return "", false
+	}
+	initial, member := live.InitialGrants(key, publicDefault)
+	if !member || initial["public"][publicDefault] || initial["public"][publicDefault+"*"] {
+		return "", false
+	}
+	ext := "its extension"
+	if name := live.MemberExtension[key]; name != "" {
+		ext = "extension " + name
+	}
+	return fmt.Sprintf("the script of %s left PUBLIC without them, and a block that doesn't list public keeps it that way", ext), true
+}
+
 // coversPublic reports whether a grants block covers PUBLIC under mode, so
 // that PUBLIC's privileges it doesn't list are revoked. byKind is whether
 // PostgreSQL gives PUBLIC nothing by default on that kind of object.

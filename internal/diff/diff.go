@@ -5515,7 +5515,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
 //
 // On an object an extension owns, the privileges its script granted (see
 // Live.InitialGrants) are left alone unless the block names their grantee;
-// PublicAuthoritative still covers PUBLIC there.
+// PublicAuthoritative still covers PUBLIC there, and so does PublicByKind
+// on a routine or type whose extension took PUBLIC's default privilege away
+// (see publicRevokedByExtension).
 //
 // Every REVOKE is emitted ahead of every GRANT. PostgreSQL's REVOKE ... ON
 // TABLE also drops that role's column-level privileges, so narrowing a
@@ -5548,6 +5550,15 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
     member := func(key, publicDefault string, liveG map[string]map[string]bool, g map[string][]string) map[string]map[string]bool {
         return memberLiveGrants(live, mode, key, publicDefault, liveG, g)
+    }
+    coversMember := func(key, publicDefault string, g map[string][]string) (bool, func(rv, gr []string)) {
+        if why, ok := publicRevokedByExtension(live, mode, key, publicDefault, g); ok {
+            return true, func(rv, gr []string) {
+                warns = append(warns, publicRevokeWarnings(rv, mode, why)...)
+                add(rv, gr)
+            }
+        }
+        return covers(false, g), addFor(g)
     }
 
     for _, name := range sortedKeys(desired.Servers) {
@@ -5626,7 +5637,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             if attributeOnly { liveG = pendingGrants(created(k, "types"), desiredG) }
         }
         liveG = member("type:"+k, "usage", liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, covers(false, desiredG)))
+        cv, addTo := coversMember("type:"+k, "usage", desiredG)
+        addTo(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, cv))
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil {
@@ -5679,7 +5691,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if !f.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), cv))
         }
     }
 
@@ -5705,7 +5718,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if !pr.HasBody() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), cv))
         }
     }
 
@@ -5728,7 +5742,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if ag.AttributeOnly() { liveG = pendingGrants(created(name, "functions"), desiredG) }
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), covers(false, desiredG)))
+            cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
+            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), cv))
         }
     }
     return append(revokes, grants...), warns

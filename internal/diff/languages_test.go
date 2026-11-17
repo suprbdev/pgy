@@ -123,9 +123,7 @@ func TestLanguageGrantsBeforeRoutines(t *testing.T) {
 	wantSQL(t, sql,
 		`do $$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'app_dev') then create role "app_dev"; end if; end $$;`,
 		`create extension "plperl";`,
-		`revoke all on language "plperl" from "nobody";`,
-		`revoke all on language "plperl" from public;`,
-		`grant usage on language "plperl" to "app_dev";`,
+		`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plperl' and lanpltrusted) then revoke all on language "plperl" from "nobody"; revoke all on language "plperl" from public; grant usage on language "plperl" to "app_dev"; end if; end $$;`,
 		`set check_function_bodies = off;`,
 		`create function "public"."f"() returns int language plperl as $$return 1;$$;`,
 		`reset check_function_bodies;`,
@@ -145,14 +143,14 @@ func TestLanguageAbsentWarns(t *testing.T) {
 		t.Errorf("want one warning naming the declaration, got %v", warns)
 	}
 
+	live := languageLive()
+	live.Extensions["hstore"] = true
 	d.Extensions = []*schema.Extension{{Name: "hstore"}}
-	sql, warns = planSQL(t, languageLive(), d, Options{})
-	wantSQL(t, sql, `create extension "hstore";`)
-	if len(warns) != 1 || !strings.Contains(warns[0].Message, "this plan creates no extension plperl") {
-		t.Errorf("another extension of the plan does not create the language, got %v", warns)
+	if sql, warns := planSQL(t, live, d, Options{}); sql != "" || len(warns) != 1 || !strings.Contains(warns[0].Message, "this plan creates or updates no extension") {
+		t.Errorf("an installed extension brings no language, got:\n%s%v", sql, warns)
 	}
 
-	live := languageLive()
+	live = languageLive()
 	live.Extensions["plperl"] = true
 	d.Extensions = []*schema.Extension{{Name: "plperl"}}
 	if sql, warns := planSQL(t, live, d, Options{}); sql != "" || len(warns) != 1 {
@@ -185,9 +183,9 @@ func TestLanguageGrantsFromEmpty(t *testing.T) {
 	wantSQL(t, sql,
 		`create extension "plperl";`,
 		`revoke usage on language "plpgsql" from public;`,
-		`grant usage on language "plperl" to "app_dev";`,
 		`grant usage on language "plpgsql" to "app_dev";`,
 		`grant usage on language "sql" to "app_dev";`,
+		`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plperl' and lanpltrusted) then grant usage on language "plperl" to "app_dev"; end if; end $$;`,
 	)
 	if len(warns) > 0 {
 		t.Errorf("unexpected warnings: %v", warns)
@@ -234,5 +232,63 @@ func TestLanguageGrantsSimulated(t *testing.T) {
 	}
 	if len(live.Languages["plpgsql"].Grants["public"]) != 1 || live.Languages["plperl"] != nil {
 		t.Errorf("Simulate must not modify its input")
+	}
+}
+
+func TestLanguagePendingUnderAnotherName(t *testing.T) {
+	d := languageDB(map[string]map[string][]string{"java": {"app_dev": {"usage"}}, "plsh": {"app_dev": {"usage"}}})
+	d.Extensions = []*schema.Extension{{Name: "pljava", Schema: "sqlj"}, {Name: "plsh", Schema: "public"}}
+	sql, warns := planSQL(t, languageLive(), d, Options{})
+	wantSQL(t, sql,
+		`create schema if not exists "sqlj";`,
+		`create extension "pljava" schema "sqlj";`,
+		`create extension "plsh" schema "public";`,
+		`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'java' and lanpltrusted) then grant usage on language "java" to "app_dev"; end if; end $$;`,
+		`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plsh' and lanpltrusted) then grant usage on language "plsh" to "app_dev"; end if; end $$;`,
+	)
+	if len(warns) > 0 {
+		t.Errorf("a language an extension of the plan may bring is not reported, got %v", warns)
+	}
+}
+
+func TestLanguagePublicRevokedByExtension(t *testing.T) {
+	live := languageLive()
+	live.Languages["java"] = &LiveLanguage{Owner: "owner", Trusted: true, Grants: map[string]map[string]bool{"app_dev": {"usage": true}, "public": {"usage": true}}}
+	live.ExtensionMembers["language:java"], live.MemberExtension["language:java"] = true, "pljava"
+	live.InitPrivs["language:java"] = map[string]map[string]bool{}
+	d := languageDB(map[string]map[string][]string{"java": {"app_dev": {"usage"}}})
+	sql, warns := planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `revoke usage on language "java" from public;`)
+	if len(warns) != 1 || warns[0].Kind != "public_revoke" || !strings.Contains(warns[0].Message, "the script of extension pljava left PUBLIC without them") {
+		t.Errorf("want a public_revoke warning naming the extension, got %v", warns)
+	}
+	if sql, _ := planSQL(t, live, d, Options{PublicGrants: PublicExplicit}); sql != "" {
+		t.Errorf("policy.public_grants: explicit covers PUBLIC only where a block lists it, got:\n%s", sql)
+	}
+	delete(live.InitPrivs, "language:java")
+	if sql, _ := planSQL(t, live, d, Options{}); sql != "" {
+		t.Errorf("PUBLIC's USAGE is left alone where the extension kept it, got:\n%s", sql)
+	}
+}
+
+func TestRoutinePublicRevokedByExtension(t *testing.T) {
+	live := memberLive()
+	sig := "public.ext_admin()"
+	live.Functions[sig] = true
+	live.FunctionDefs[normalizeFunctionSignature(sig)] = &LiveFunction{Signature: sig, Kind: "f", Language: "c"}
+	live.ExtensionMembers["proc:"+sig] = true
+	live.MemberExtension = map[string]string{"proc:" + sig: "adminpack"}
+	live.InitPrivs["proc:"+sig] = map[string]map[string]bool{}
+	live.FunctionPublicExec[sig] = true
+	live.FunctionGrants[sig] = map[string]map[string]bool{"app_dev": {"execute": true}}
+	d := &schema.Database{Functions: map[string]*schema.Function{sig: {Schema: "public", Name: "ext_admin", ArgsSig: "()", Grants: map[string][]string{"app_dev": {"execute"}}}}}
+	sql, warns := planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `revoke execute on function "public"."ext_admin"() from public;`)
+	if len(warns) != 1 || warns[0].Kind != "public_revoke" || !strings.Contains(warns[0].Message, "the script of extension adminpack left PUBLIC without them") {
+		t.Errorf("want a public_revoke warning naming the extension, got %v", warns)
+	}
+	live.FunctionPublicExec[sig] = false
+	if sql, warns := planSQL(t, live, d, Options{}); sql != "" || len(warns) > 0 {
+		t.Errorf("a function PUBLIC still can't execute needs nothing, got:\n%s%v", sql, warns)
 	}
 }
