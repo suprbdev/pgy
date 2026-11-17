@@ -240,3 +240,33 @@ func TestCompiledRoutinesNotPulled(t *testing.T) {
 		}
 	}
 }
+
+func TestPulledSecurityDefinerSettings(t *testing.T) {
+	live := routineLive()
+	addFunction(live, "plain", "", "plpgsql", "begin return 1; end", nil)
+	addFunction(live, "definer", "", "plpgsql", "begin return 1; end", nil)
+	live.FunctionDefs["app.definer()"].Security = "definer"
+	addFunction(live, "pinned", "", "plpgsql", "begin return 1; end", nil)
+	live.FunctionDefs["app.pinned()"].Security = "definer"
+	live.FunctionDefs["app.pinned()"].Config = map[string]string{"search_path": "app"}
+	live.Procedures["app.proc()"] = true
+	live.ProcedureDefs["app.proc()"] = &diff.LiveProcedure{Signature: "app.proc()", Body: "select 1", Language: "sql", Security: "definer"}
+	live.FunctionPublicExec["app.proc()"] = true
+	live.Details.Routines["app.proc()"] = &diff.LiveRoutine{Schema: "app", Name: "proc", Language: "sql", Procedure: true}
+	out, d, _ := buildSingle(t, live)
+	if f := d.Functions["app.plain()"]; f == nil || f.Set != nil {
+		t.Errorf("a SECURITY INVOKER function without settings gets no set key:\n%s", out)
+	}
+	if f := d.Functions["app.definer()"]; f == nil || f.Set == nil || len(f.Set) != 0 {
+		t.Errorf("a SECURITY DEFINER function without settings gets set: {}:\n%s", out)
+	}
+	if f := d.Functions["app.pinned()"]; f == nil || len(f.Set) != 1 || f.Set["search_path"] != "app" {
+		t.Errorf("a SECURITY DEFINER function keeps its settings:\n%s", out)
+	}
+	if p := d.Procedures["app.proc()"]; p == nil || p.Set == nil || len(p.Set) != 0 {
+		t.Errorf("a SECURITY DEFINER procedure without settings gets set: {}:\n%s", out)
+	}
+	if strings.Count(out, "set: {}\n") != 2 {
+		t.Errorf("want set: {} on the two SECURITY DEFINER routines without settings:\n%s", out)
+	}
+}

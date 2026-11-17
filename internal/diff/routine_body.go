@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
@@ -47,6 +48,39 @@ func DeclaredRoutineBody(src string) string {
 		return src[1:]
 	}
 	return src + "\n\n\n"
+}
+
+// routineSourceExtractors maps each procedural language whose validator
+// replaces pg_proc.prosrc with something other than the source to a
+// function that recovers the source from it. Only the extension that
+// provides the language knows its format.
+var routineSourceExtractors = map[string]func(prosrc string) string{
+	"plrust": plrustSource,
+}
+
+// routineSource returns the source of a routine written in language, given
+// prosrc, the text PostgreSQL stores for it.
+func routineSource(language, prosrc string) string {
+	if extract := routineSourceExtractors[language]; extract != nil {
+		return extract(prosrc)
+	}
+	return prosrc
+}
+
+// plrustSource returns the src member of the JSON document plrust stores
+// for a compiled function, alongside the compiled library, or prosrc itself
+// when it holds no such document.
+func plrustSource(prosrc string) string {
+	if !strings.HasPrefix(prosrc, "{") {
+		return prosrc
+	}
+	var doc struct {
+		Src *string `json:"src"`
+	}
+	if json.Unmarshal([]byte(prosrc), &doc) != nil || doc.Src == nil {
+		return prosrc
+	}
+	return *doc.Src
 }
 
 // CompiledLanguage reports whether language is one whose functions pgy
@@ -108,6 +142,76 @@ func routineLanguageSQL(language string, transform, live []string) string {
 		parts[i] = "for type " + t
 	}
 	return name + " transform " + strings.Join(parts, ", ")
+}
+
+// keepLiveFunctionAttributes returns f with each attribute it leaves
+// unmanaged taken from lf, the live function a CREATE OR REPLACE of f
+// replaces: PostgreSQL resets every attribute the statement does not give.
+// Live attributes at PostgreSQL's defaults are left out. f itself is not
+// modified.
+func keepLiveFunctionAttributes(f *schema.Function, lf *LiveFunction) *schema.Function {
+	if lf == nil {
+		return f
+	}
+	out := *f
+	if out.Security == "" && lf.Security == "definer" {
+		out.Security = lf.Security
+	}
+	if out.Volatility == "" && lf.Volatility != "" && lf.Volatility != "volatile" {
+		out.Volatility = lf.Volatility
+	}
+	if out.Strict == nil && lf.Strict {
+		out.Strict = ptr(true)
+	}
+	if out.Leakproof == nil && lf.Leakproof {
+		out.Leakproof = ptr(true)
+	}
+	if out.Parallel == "" && lf.Parallel != "" && lf.Parallel != "unsafe" {
+		out.Parallel = lf.Parallel
+	}
+	if out.Cost == nil && lf.Cost > 0 && !float4Equal(defaultFunctionCost(f.Language), lf.Cost) {
+		out.Cost = ptr(lf.Cost)
+	}
+	if rows := defaultFunctionRows(f.Returns); out.Rows == nil && rows > 0 && lf.Rows > 0 && !float4Equal(rows, lf.Rows) {
+		out.Rows = ptr(lf.Rows)
+	}
+	if out.Set == nil {
+		out.Set = liveSettings(lf.Config)
+	}
+	return &out
+}
+
+// keepLiveProcedureAttributes returns p with its security and settings,
+// when it leaves them unmanaged, taken from lp, the live procedure a CREATE
+// OR REPLACE of p replaces, as keepLiveFunctionAttributes does.
+func keepLiveProcedureAttributes(p *schema.Procedure, lp *LiveProcedure) *schema.Procedure {
+	if lp == nil {
+		return p
+	}
+	out := *p
+	if out.Security == "" && lp.Security == "definer" {
+		out.Security = lp.Security
+	}
+	if out.Set == nil {
+		out.Set = liveSettings(lp.Config)
+	}
+	return &out
+}
+
+// ptr returns a pointer to a copy of v.
+func ptr[T any](v T) *T { return &v }
+
+// liveSettings returns a routine's live settings, config, as the set block
+// that declares them, or nil when it has none.
+func liveSettings(config map[string]string) map[string]string {
+	if len(config) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(config))
+	for k, v := range config {
+		out[k] = ConfigValueYAML(k, v)
+	}
+	return out
 }
 
 // routineTransforms maps the normalized signature of each live function and

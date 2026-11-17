@@ -273,6 +273,9 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Signature: schema.RoutineName(k) + pr.ArgsSig, Security: "invoker"}
         prev := out.ProcedureDefs[norm]
+        if prev != nil {
+            if _, removed := argDefaultsDiff(pr.ArgsSig, prev.Args); !removed { pr = keepLiveProcedureAttributes(pr, prev) }
+        }
         replaced := prev == nil || pr.HasBody() && (procedureChanged(pr, prev) || routineArgsReplaced(pr.ArgsSig, prev.Args))
         if prev != nil && !replaced { lp.Security = prev.Security }
         if replaced || procedureChanged(pr, prev) {
@@ -421,6 +424,9 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
             routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform) ||
             routineArgsReplaced(f.ArgsSig, prev.Args) || returnsChanged(f.Returns, prev.Returns))
         if prev != nil && !replaced { *lf = *prev }
+        if prev != nil && replaced && !returnsChanged(f.Returns, prev.Returns) {
+            if _, removed := argDefaultsDiff(f.ArgsSig, prev.Args); !removed { f = keepLiveFunctionAttributes(f, prev) }
+        }
         if hasBody {
             lf.Args = simulatedArgs(f.ArgsSig)
             lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body)
