@@ -778,7 +778,7 @@
         "nullsNotDistinct": { "type": "boolean", "description": "Unique only: NULLS NOT DISTINCT (PostgreSQL 15+)." },
         "include": { "$ref": "#/definitions/stringList", "description": "Unique only: INCLUDE (non-key) columns of the constraint's index." },
         "tablespace": { "type": "string", "minLength": 1, "description": "Unique and exclude: the tablespace of the constraint's index (USING INDEX TABLESPACE)." },
-        "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" }, "description": "Unique only: storage parameters of the constraint's index." },
+        "with": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" }, "description": "Unique and exclude: storage parameters of the constraint's index. For an exclusion constraint they override those in the expression's own WITH (...) clause." },
         "deferrable": { "type": "boolean", "description": "Unique/exclude only." },
         "initiallyDeferred": { "type": "boolean", "description": "Unique/exclude only. Implies deferrable." },
         "noInherit": { "type": "boolean", "description": "Check only: NO INHERIT." },
