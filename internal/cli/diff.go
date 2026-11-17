@@ -264,7 +264,7 @@ Exit codes:
         },
     }
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
-    c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in, and the extensions there that a present extensions block does not list (except those in the config's prune.keep_extensions). Run it with ALL schema files: objects declared only in files left out are dropped")
+    c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in, and the extensions there that a present extensions block does not list (except those in the config's prune.keep_extensions), leaving alone what the config's external: block lists. Run it with ALL schema files: objects declared only in files left out are dropped")
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
     c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report schema problems or statements that lock or rewrite existing tables")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")
