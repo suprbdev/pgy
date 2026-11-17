@@ -525,8 +525,11 @@ type LiveIndexOpclass struct {
     Name    string
     Default bool
     // Collation is the key column's COLLATE when it differs from the
-    // column's (or, for an expression, its type's) default; "" otherwise.
+    // collation of the column or expression itself; "" otherwise.
     Collation string
+    // KeyCollation is the collation the key column is indexed with, written
+    // out or not; "" for a type without collations.
+    KeyCollation string
     // StatisticsTarget is the index column's attstattarget; -1 = default.
     StatisticsTarget int
     // Params holds the operator class parameters of the key column as
@@ -898,19 +901,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     // Query per-key-column operator classes so redefined opclasses can be
     // detected (drop+recreate, gated behind --unsafe). Default opclasses are
-    // flagged so a desired index without an explicit opclass matches. An
-    // expression key's default collation is that of the opclass input type
-    // when the opclass stores another type (gin_trgm_ops indexes text but
-    // stores int4), else that of the stored type. A polymorphic input type
-    // (array_ops takes anyarray) has no collation of its own, so the stored
-    // type decides there too. Operator class parameters are the index
-    // column's attoptions.
+    // flagged so a desired index without an explicit opclass matches. A
+    // column key's collation is explicit when it differs from the column's.
+    // An expression key's is explicit when pg_get_indexdef prints COLLATE
+    // for it, which it does when the collation differs from the
+    // expression's own. Operator class parameters are the index column's
+    // attoptions.
     opcQ := `
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
-               case when x.indcollation[k.ord] = 0 or x.indcollation[k.ord] = coalesce(case when x.indkey[k.ord] > 0 then ta.attcollation end, case when op.opckeytype <> 0 and oty.typtype <> 'p' then oty.typcollation end, ity.typcollation)
-                    then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
+               case when x.indcollation[k.ord] = 0 then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
+               x.indkey[k.ord] > 0 and x.indcollation[k.ord] <> ta.attcollation,
+               case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, 0, true) else '' end,
+               case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, k.ord + 1, true) else '' end,
+               k.ord,
                coalesce(ia.attstattarget::int, -1),
                coalesce(ia.attoptions, '{}'::text[])
         from pg_index x
@@ -922,8 +927,6 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         join pg_namespace opn on opn.oid = op.opcnamespace
         left join pg_attribute ta on ta.attrelid = x.indrelid and ta.attnum = x.indkey[k.ord]
         left join pg_attribute ia on ia.attrelid = x.indexrelid and ia.attnum = k.ord + 1
-        left join pg_type ity on ity.oid = ia.atttypid
-        left join pg_type oty on oty.oid = op.opcintype
         left join pg_collation co on co.oid = x.indcollation[k.ord]
         left join pg_namespace cn on cn.oid = co.collnamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
@@ -932,15 +935,17 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     `
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
-            var schemaName, tableName, idxName, opcName, collation string
-            var opcDefault bool
-            var target int
+            var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef string
+            var opcDefault, columnCollated bool
+            var ord, target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &collation, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &target, &params); err != nil {
                 return err
             }
+            collation := ""
+            if columnCollated || (indexDef != "" && indexKeyCollated(indexDef, keyDef, ord)) { collation = keyCollation }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -7306,11 +7311,58 @@ func indexOpclassesDiffer(ix *schema.Index, live []LiveIndexOpclass) bool {
             return true
         }
         if !opclassParamsEqual(params, parseProconfig(live[i].Params)) { return true }
-        want := collationName(indexColumnCollation(ix, c))
-        if base, _ := splitIndexOrdering(c); want == "default" && live[i].Collation == "" && isIndexExpression(base) { want = "" }
-        if want != collationName(live[i].Collation) { return true }
+        want, have := collationName(indexColumnCollation(ix, c)), live[i].Collation
+        if want != "" && have == "" { have = live[i].KeyCollation }
+        if want != collationName(have) { return true }
     }
     return false
+}
+
+// indexKeyCollated reports whether key column n (from 0) of def, an index
+// definition as pg_get_indexdef prints it, has a COLLATE clause. key is the
+// column as pg_get_indexdef prints it on its own. PostgreSQL prints the
+// clause only for a collation other than the column's or expression's own.
+func indexKeyCollated(def, key string, n int) bool {
+    keys := indexDefKeys(def)
+    if n >= len(keys) { return false }
+    rest, ok := strings.CutPrefix(keys[n], key)
+    return ok && strings.HasPrefix(rest, " COLLATE ")
+}
+
+// indexDefKeys splits the key column list of an index definition printed by
+// pg_get_indexdef into its entries, each with its COLLATE, operator class
+// and ordering.
+func indexDefKeys(def string) []string {
+    var out []string
+    depth, start := 0, -1
+    var quote byte
+    for i := 0; i < len(def); i++ {
+        c := def[i]
+        if quote != 0 {
+            if c == quote && i+1 < len(def) && def[i+1] == quote {
+                i++
+            } else if c == quote {
+                quote = 0
+            }
+            continue
+        }
+        switch c {
+        case '\'', '"':
+            quote = c
+        case '(':
+            depth++
+            if depth == 1 && start < 0 { start = i + 1 }
+        case ')':
+            depth--
+            if depth == 0 && start >= 0 { return append(out, strings.TrimSpace(def[start:i])) }
+        case ',':
+            if depth == 1 && start >= 0 {
+                out = append(out, strings.TrimSpace(def[start:i]))
+                start = i + 1
+            }
+        }
+    }
+    return nil
 }
 
 // splitOpclass separates an operator class reference into its name and its
