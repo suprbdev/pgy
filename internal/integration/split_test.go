@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -150,5 +151,65 @@ func TestIntegrationSplitMatchesSingleMigration(t *testing.T) {
 	sort.Strings(expected)
 	if strings.Join(regrouped, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("re-planning an up-to-date database should match the single plan\nsplit:\n%s\nsingle:\n%s", group.Render(again), diff.Render(p))
+	}
+}
+
+func TestIntegrationSplitArgumentDefaultReplacedOnce(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	pool := freshDatabase(t, admin, "pgytest_split_arg_default")
+	if _, err := pool.Exec(ctx, `
+		create schema app;
+		create function app.f(a int default 1) returns int language sql stable as $$select a$$;
+		create procedure app.p(a int default 1, b int default 1) language sql as $$select a$$;`); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	files := map[string]string{
+		"a.yml": "schema app:\n  function f(a int default 2):\n    returns: int\n    language: sql\n    body: select a\n  procedure p(a int, b int default 2):\n    language: sql\n    body: select a\n",
+		"b.yml": "schema app:\n  table b:\n    columns:\n      id: {type: int}\n",
+		"c.yml": "schema app:\n  table c:\n    columns:\n      id: {type: int}\n",
+	}
+	var paths []string
+	for _, name := range []string{"a.yml", "b.yml", "c.yml"} {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(files[name]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	live, err := diff.Introspect(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := group.Split(paths, group.ModeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps, err := group.Plan(live, paths, groups, diff.Options{Unsafe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := group.Render(steps)
+	for _, s := range steps {
+		got := diff.Render(s.Plan)
+		if s.Name != "a" && (strings.Contains(got, `"app"."f"`) || strings.Contains(got, `"app"."p"`)) || s.Name == "a" && !strings.Contains(got, `default 2`) {
+			t.Errorf("the routines belong in the group of a.yml only, got:\n%s", sql)
+		}
+	}
+	for _, s := range steps {
+		if err := db.ApplyInTx(ctx, pool, diff.Render(s.Plan)); err != nil {
+			t.Fatalf("step %s: %v\n%s", s.Name, err, diff.Render(s.Plan))
+		}
+	}
+	full, err := schema.LoadAndMerge(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live, err = diff.Introspect(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if rest := diff.Render(diff.Plan(live, full, true)); rest != "" {
+		t.Errorf("the split migrations must converge, left:\n%s", rest)
 	}
 }
