@@ -577,7 +577,13 @@ func innerArgs(args string) string {
     return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(args), "("), ")")
 }
 
-func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
+// copyValue copies src to dst, rewriting strings with text unless verbatim
+// is set. Map keys are rewritten where they hold signatures or
+// expressions: the keys of the routine maps, and those of an index's
+// per-column maps, which match its rewritten columns entries.
+func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) { rq.copyKeyed(dst, src, verbatim, false) }
+
+func (rq *requalifier) copyKeyed(dst, src reflect.Value, verbatim, keyed bool) {
     switch src.Kind() {
     case reflect.Pointer:
         if src.IsNil() { return }
@@ -585,10 +591,12 @@ func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
         rq.copyValue(dst.Elem(), src.Elem(), verbatim)
     case reflect.Struct:
         dst.Set(src)
+        index := src.Type() == reflect.TypeOf(schema.Index{})
         for i := 0; i < src.NumField(); i++ {
             f := src.Type().Field(i)
             if !f.IsExported() { continue }
-            rq.copyValue(dst.Field(i), src.Field(i), verbatim || strings.Contains(f.Name, "Body") || strings.Contains(f.Name, "Comment") || f.Name == "Data")
+            keyed := index && (f.Name == "Opclasses" || f.Name == "Collations" || f.Name == "StatisticsTargets")
+            rq.copyKeyed(dst.Field(i), src.Field(i), verbatim || strings.Contains(f.Name, "Body") || strings.Contains(f.Name, "Comment") || f.Name == "Data", keyed)
         }
     case reflect.Map:
         if src.IsNil() { return }
@@ -597,7 +605,7 @@ func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
         iter := src.MapRange()
         for iter.Next() {
             key := iter.Key()
-            if routines { key = reflect.ValueOf(rq.text(key.String())) }
+            if routines || keyed && !verbatim { key = reflect.ValueOf(rq.text(key.String())) }
             val := reflect.New(src.Type().Elem()).Elem()
             rq.copyValue(val, iter.Value(), verbatim)
             dst.SetMapIndex(key, val)
