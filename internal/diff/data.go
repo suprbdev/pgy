@@ -307,7 +307,9 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
 // (they are renamed or added by the plan) are skipped too, as are tables
 // whose rows use enum labels the plan has yet to add, and skipped tables
 // get upserts. The rows of tables that do not exist yet are only checked
-// (see checkNewTableData).
+// (see checkNewTableData). Of an extension's configuration table, only the
+// live rows its condition selects (Live.ExtensionConfig), the ones pg_dump
+// keeps, can be extra: the rest are the extension's.
 func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database, opts Options) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
@@ -414,9 +416,13 @@ func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desire
             sort.Strings(ld.Changed[i])
             if len(ld.Changed[i]) == 0 { delete(ld.Changed, i) }
         }
+        extraFrom := from
+        if cond := strings.TrimSpace(l.ExtensionConfig[fq]); cond != "" {
+            extraFrom = "(select * from " + from + " " + cond + ")"
+        }
         extraQ := `
             select jsonb_build_object(` + strings.Join(textKey, ", ") + `)
-            from ` + from + ` pgy_row
+            from ` + extraFrom + ` pgy_row
             where not exists (select 1 from jsonb_array_elements($1::jsonb) e(j)
                               cross join lateral jsonb_to_record(e.j) as v(` + dataColumnDefs(key, types) + `)
                               where ` + strings.Join(sameKey, " and ") + `)
@@ -688,7 +694,8 @@ func dataKeyWhere(key []string, equals, types map[string]string, value func(stri
 }
 
 // dataTableOrder returns the tables of desired that declare data, ordered so
-// that a table comes after the data tables its foreign keys reference.
+// that a table comes after the data tables its foreign keys reference, or,
+// for a table declared without columns, the tables its dependsOn names.
 func dataTableOrder(desired *schema.Database) []string {
     out := []string{}
     state := map[string]int{}
@@ -699,6 +706,11 @@ func dataTableOrder(desired *schema.Database) []string {
         state[fq] = 1
         for _, fk := range dt.ForeignKeys {
             if fk != nil { visit(qualifyName(fk.RefTable)) }
+        }
+        if dt.AttributeOnly() {
+            for _, dep := range dt.DependsOn {
+                if ref, ok := strings.CutPrefix(strings.TrimSpace(dep), "table "); ok { visit(qualifyName(strings.TrimSpace(ref))) }
+            }
         }
         state[fq] = 2
         out = append(out, fq)
@@ -819,6 +831,13 @@ const dataTextColumnsQ = `
 // load back (see dataTextColumnsQ) is returned in its text form instead, or
 // as a list of its elements' text forms for an array.
 func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned bool) ([]map[string]any, error) {
+    return TableRowsWhere(ctx, pool, fq, partitioned, "")
+}
+
+// TableRowsWhere is TableRows for the rows that where, a WHERE clause on
+// the table's columns such as an extension configuration table's condition
+// (see Live.ExtensionConfig), selects; "" selects every row.
+func TableRowsWhere(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned bool, where string) ([]map[string]any, error) {
     text := []string{}
     columns := &queryBatch{}
     columns.add(dataTextColumnsQ, func(tr pgx.Rows) error {
@@ -837,7 +856,9 @@ func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned b
     if len(text) > 0 { row = "(to_jsonb(pgy_row.*) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
     out := []map[string]any{}
     values := &queryBatch{}
-    values.add("select "+row+"::text from "+dataTarget(fq, partitioned)+" pgy_row", func(rows pgx.Rows) error {
+    from := dataTarget(fq, partitioned)
+    if where = strings.TrimSpace(where); where != "" { from = "(select * from " + from + " " + where + ")" }
+    values.add("select "+row+"::text from "+from+" pgy_row", func(rows pgx.Rows) error {
         for rows.Next() {
             var raw string
             if err := rows.Scan(&raw); err != nil { return err }

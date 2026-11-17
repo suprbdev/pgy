@@ -343,7 +343,7 @@ extensions: [pg_trgm, pgcrypto]
 | `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are, and `pgy diff` warns (see [moving an extension](#extensions)). Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
 | `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO` (see [Updating extensions](#updating-extensions)). Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
-| `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
+| `comment` | string or `null` | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted (or `""`) = unmanaged. `comment: null` means no comment: `COMMENT ON EXTENSION ... IS NULL` after `CREATE EXTENSION`, and whenever one is set again. `pgy pull` writes the comment when it differs from the control file's and `null` when there is none, so a rebuild matches; a comment equal to the control file's is left out and stays unmanaged, as the `public` schema's default comment does. `null` is only for extensions, the one kind of object that gets a comment it wasn't declared with |
 | `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
 
 ```yaml
@@ -399,12 +399,17 @@ PostgreSQL does not record what a function body written as text (`plpgsql`, or `
 
 ### Objects an extension owns
 
-The functions, views, types, languages and foreign-data wrappers that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
+The functions, aggregates, tables, sequences, views, types, text search dictionaries, schemas, languages and foreign-data wrappers that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
 
 | Declaration | Left out | Managed |
 |-------------|----------|---------|
 | `function <name>(<args>):` | `body`, `returns`, `language` | `security`, `stable`/`volatile`/`immutable`, `strict`, `leakproof`, `parallel`, `cost`, `rows`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
 | `procedure <name>(<args>):` | `body`, `language` | `security`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
+| `aggregate <name>(<args>):` | `sfunc`, `stype` and the other options | `grants`, `revokePublic`, `owner`, `comment` |
+| `table <name>:`, `foreign table <name>:` | `columns` (and `of`, `partitionOf`, `inherits`, `server`) | `grants`, `owner`, `comment`, `rowLevelSecurity`, `forceRowLevelSecurity`, `policies`, `data` (with `key`) |
+| `sequence <name>:` | every option | `grants`, `owner`, `comment` |
+| `text search dictionary <name>:` | `template` | `options`, `owner`, `comment`. See [Text Search](#text-search) |
+| `schema <name>:` | | `grants`, `owner`, `comment` of a schema the extension's script creates, such as `pg_search`'s `pdb` |
 | `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
 | `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
 | `languages:` entry | | `grants`. See [Languages](#languages) |
@@ -434,13 +439,31 @@ schema public:
     grants: {app: [usage]}
 ```
 
+PostGIS's configuration table and aggregates:
+
+```yaml
+extensions:
+  - {name: postgis, schema: public}
+roles:
+  app: {}
+schema public:
+  table spatial_ref_sys:
+    grants: {app: [select, insert]}
+  aggregate st_union(geometry):
+    grants: {app: [execute]}
+```
+
 - **Matching.** A function or procedure is found by its argument types, as PostgreSQL identifies it: `function each(hstore):` is the extension's `each(hs hstore, OUT key text, OUT value text)`. Argument names and `OUT` arguments may be written or left out.
 - **Privileges** are compared with the ones the extension's script set (`pg_init_privs`), which is also what `pg_dump` keeps of an extension's objects. What the extension granted is left alone unless the `grants:` block names the grantee: `pg_buffercache_pages()` is granted to `pg_monitor` by its extension, and the block above adds `monitoring` without revoking that. A named grantee gets exactly the privileges listed, so `pg_monitor: []` revokes. Everything else follows the usual [grants](#grants) rules: privileges that were granted later to roles the block doesn't list are revoked. The same holds for a `grants:` block on any other declared object that an extension owns.
 - **In the migration that creates the extension**, the statements for its objects run after `CREATE EXTENSION`: every declared attribute is set, the listed privileges are granted, and a grantee listed with `[]` is revoked. One migration is enough unless the extension grants a listed role more than the block lists, which the next diff revokes. The same applies when the plan updates an extension (`ALTER EXTENSION ... UPDATE`).
 - **An object that doesn't exist**, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the declaration.
+- **Tables.** A table declared without `columns`, `of`, `partitionOf`, `inherits` and the keys that need columns (`primaryKey`, `indexes`, `constraints`, `triggers`, `rules`, `statistics`, storage and partitioning) is never created, altered or dropped, and prune leaves its columns, keys, indexes, triggers and rules alone. An empty `columns: {}` still declares a table without columns that pgy creates. A table that an extension owns, `CREATE EXTENSION` or `ALTER EXTENSION ... ADD` alike, is treated this way even when the YAML declares its columns, with a warning: its definition is the extension's. Column privileges cannot be declared on it. Its rows can, for a configuration table: see [Reference Data](#reference-data).
+- **Rules and triggers** of a table or view that an extension owns, or of one declared without columns or `query`, are never pruned. PostGIS's `geometry_columns` view keeps its rules when the YAML declares its grants.
+- **Sequences.** A sequence declared without options is created with PostgreSQL's defaults when it doesn't exist, as before. Sequences are created after the extensions, so once an extension has created one, the declaration only manages its privileges, owner and comment.
+- **Aggregates** are granted with `GRANT ... ON FUNCTION`; an ordered-set aggregate is declared as `aggregate percentile(float8 order by anyelement):` and granted on `(float8, anyelement)`. `grants` and `revokePublic` work on every aggregate, not only on one an extension owns.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
-- **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual.
-- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were. Tables, sequences and aggregates of an extension cannot be declared this way; pull reports the ones whose privileges changed.
+- **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual. The grants of a schema an extension owns (`pg_search`'s `pdb`) are compared with `pg_init_privs`, like those of its other objects. Schemas are never dropped.
+- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences, aggregates and schemas are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too; a schema an extension created is never written as the application's, with its owner and comment. PostgreSQL keeps no record of the options an extension's script gave its text search dictionaries, so pull writes the current options of each one that has any (`unaccent`'s `rules: unaccent` included), which a rebuild sets after `CREATE EXTENSION`; `pg_dump` loses them. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
 
 ## Database Settings
 
@@ -472,6 +495,8 @@ PostgreSQL knows such a parameter only in a session that has loaded the extensio
 - **Load the library first.** Add a statement that uses the extension at the top of the migration, by hand: a call to one of its functions (`select show_limit();` for `pg_trgm`) or a cast to one of its types (`select '[1]'::vector;` for pgvector). Edit the buffer before `pgy commit`, since a committed migration's checksum covers its text.
 
 ## Tables
+
+A table declared without `columns`, `of`, `partitionOf` and `inherits` (nor the keys that only a table pgy creates can have) is never created: it manages the `grants`, `owner`, `comment`, `rowLevelSecurity`, `forceRowLevelSecurity`, `policies` and `data` of one that already exists, such as an extension's configuration table. See [Objects an extension owns](#objects-an-extension-owns). `columns: {}` declares a table without columns.
 
 ### Columns
 
@@ -1212,7 +1237,7 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ## Sequences
 
-Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `unlogged` emits `ALTER SEQUENCE ... SET UNLOGGED` or `SET LOGGED`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `unlogged` emits `ALTER SEQUENCE ... SET UNLOGGED` or `SET LOGGED`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise). A sequence declared without options can also be one an extension creates: sequences are created after the extensions, so the declaration then only manages its `grants`, `owner` and `comment`. See [Objects an extension owns](#objects-an-extension-owns).
 
 ```yaml
 schema public:
@@ -1408,6 +1433,8 @@ schema app:
     hypothetical: true
 ```
 
+`grants` (role -> `[execute]`) and `revokePublic` work as on [functions](#functions); the statements are `GRANT ... ON FUNCTION`, with the direct and aggregated arguments of an ordered-set aggregate in one list. An aggregate declared without `sfunc`, `stype` and the other options creates nothing: it manages the `grants`, `revokePublic`, `owner` and `comment` of one that already exists, such as PostGIS's `st_union(geometry)`. See [Objects an extension owns](#objects-an-extension-owns).
+
 ## Procedures
 
 Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, language, `transform`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted, with the live `security` and `set` when the YAML leaves them out. Bodies are stored and pulled as described under [Functions](#functions), and `body: ""` is an empty body.
@@ -1530,7 +1557,20 @@ schema app:
         generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
 ```
 
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). `owner` is diffed with `ALTER ... OWNER TO`. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+
+A dictionary declared without `template` is never created: it manages the `options`, `owner` and `comment` of one that already exists. That is how to configure the dictionaries that `dict_int` (`intdict`), `dict_xsyn` (`xsyn`) and `unaccent` (`unaccent`) create, as their documentation does with `ALTER TEXT SEARCH DICTIONARY`. In the migration that creates the extension, the options are set right after it; options the extension's script set and the YAML doesn't list are removed by the next diff. See [Objects an extension owns](#objects-an-extension-owns).
+
+```yaml
+extensions:
+  - {name: dict_int, schema: public}
+  - {name: unaccent, schema: public}
+schema public:
+  text search dictionary intdict:
+    options: {maxlen: 4, rejectlong: true}
+  text search dictionary unaccent:
+    options: {rules: my_rules}
+```
 
 ## Row Level Security
 
@@ -1784,7 +1824,7 @@ Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named in
 Behavior:
 
 - Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
-- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
+- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually. The exception is an extension, which `CREATE EXTENSION` gives its control file's comment: there `comment: null` removes it (see [Extensions](#extensions)).
 - Single quotes are escaped automatically.
 
 ## Publications
@@ -1859,6 +1899,18 @@ schema app:
 - A column whose type the same plan changes (`varchar(3)` to `varchar(5)`, with `--unsafe`) is compared in its declared type, without its modifier, so rows that only fit the new type are updated after the change. When a key column's type changes, or the new type does not exist in the database yet, the rows are written with `INSERT ... ON CONFLICT (key) DO UPDATE` instead. Without `--unsafe` the type change is left out, so rows are compared in the live type, and a row that only fits the new type is an error in `pgy diff`.
 - Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
 - `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
+- **An extension's configuration tables** (the ones its script marks with `pg_extension_config_dump`, such as PostGIS's `spatial_ref_sys` or `topology.topology`) hold rows of the extension and rows an application added, which `pg_dump` tells apart by the table's condition (`pg_extension.extcondition`). Declare such a table without columns and with `data.key`. Its rows are inserted and updated as declared, after the extension is created, but `--unsafe --prune` only deletes rows the condition selects, so the extension's own rows stay. `pgy pull --data` writes only those rows too, with the key and a `dependsOn` on the configuration tables with rows that its foreign keys reference, whose rows are then inserted first. It warns instead of writing the rows of an extension's table that is not a configuration table. See [Objects an extension owns](#objects-an-extension-owns).
+
+```yaml
+extensions:
+  - {name: postgis, schema: public}
+schema public:
+  table spatial_ref_sys:
+    data:
+      key: [srid]
+      rows:
+        - {srid: 990001, auth_name: local, auth_srid: 990001, srtext: 'LOCAL_CS["local",UNIT["metre",1]]', proj4text: +proj=longlat +datum=WGS84 +no_defs}
+```
 - `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`. A `key` that isn't the primary key or a unique constraint gets a warning.
 
 ## Renames
