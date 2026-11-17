@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 	"reflect"
-	"sort"
 	"testing"
 )
 
@@ -38,14 +37,8 @@ func TestIntegrationStorageParamStringValues(t *testing.T) {
 		if err := pool.QueryRow(context.Background(), `select reloptions from pg_class where oid = $1::regclass`, `"`+sch+`".`+rel).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(sortedCopy(got), sortedCopy(want)) {
-			t.Errorf("%s: reloptions %v, want the values as written %v, after:\n%s", rel, got, want, sql)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: reloptions %v, want the values as written and in the declared order %v, after:\n%s", rel, got, want, sql)
 		}
 	}
-}
-
-func sortedCopy(s []string) []string {
-	out := append([]string{}, s...)
-	sort.Strings(out)
-	return out
 }

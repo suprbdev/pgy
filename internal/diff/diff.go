@@ -418,6 +418,7 @@ type LiveTable struct{
     Unlogged    bool            // relpersistence = 'u'
     Tablespace  string          // the relation's own tablespace; "" = the database default
     Options     map[string]string // reloptions: lower-cased name -> value
+    OptionOrder []string        // the names in Options in catalog order
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
     Foreign     *LiveForeignTable // set for foreign tables (relkind 'f')
     HasPK       bool            // whether a primary key constraint exists
@@ -511,6 +512,7 @@ type LiveIndex struct {
     Predicate        string
     NullsNotDistinct bool
     Options          map[string]string // reloptions: lower-cased name -> value
+    OptionOrder      []string          // the names in Options in catalog order
     Constraint       bool              // backs a primary key, unique or exclusion constraint
     Inherited        bool              // a partition's copy of an index on its parent
     Parent           string            // schema.name of the index it is attached to as a partition; "" = none
@@ -752,6 +754,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt.NoToast = noToast
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
+            lt.OptionOrder = proconfigNames(reloptions)
             lt.Tablespace = tablespace
             l.Tables[key] = lt
         }
@@ -783,7 +786,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             l.MatViews[key] = true
             lt := newLiveTable()
             lt.NoToast = noToast
-            lt.Options = parseProconfig(reloptions)
+            lt.Options, lt.OptionOrder = parseProconfig(reloptions), proconfigNames(reloptions)
             lt.Tablespace = tablespace
             l.MatViewTables[key] = lt
         }
@@ -997,7 +1000,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             }
             t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName))
             if t == nil || int(nKey) > len(cols) || int(nKey) > len(indoption) { continue }
-            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), Constraint: constraint, Inherited: inherited, Parent: parent, Invalid: invalid, Tablespace: tablespace}
+            li := &LiveIndex{Unique: unique, Method: method, Keys: cols[:nKey], Include: cols[nKey:], Predicate: predicate, NullsNotDistinct: nullsNotDistinct, Options: parseProconfig(reloptions), OptionOrder: proconfigNames(reloptions), Constraint: constraint, Inherited: inherited, Parent: parent, Invalid: invalid, Tablespace: tablespace}
             for _, opt := range indoption[:nKey] {
                 li.Descending = append(li.Descending, opt&1 != 0)
                 li.NullsFirst = append(li.NullsFirst, opt&2 != 0)
@@ -2396,6 +2399,16 @@ func parseProconfig(entries []string) map[string]string {
     return out
 }
 
+// proconfigNames returns the lower-cased names of name=value entries in
+// their order.
+func proconfigNames(entries []string) []string {
+    out := make([]string, 0, len(entries))
+    for _, e := range entries {
+        if k, _, ok := strings.Cut(e, "="); ok { out = append(out, strings.ToLower(k)) }
+    }
+    return out
+}
+
 var configCommaRe = regexp.MustCompile(`\s*,\s*`)
 
 var configQuoteReplacer = strings.NewReplacer("'", "", `"`, "")
@@ -3126,13 +3139,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With), tablespaceClause(vw.Tablespace), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With, vw.WithOrder), tablespaceClause(vw.Tablespace), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
                 } else {
                     lt := live.MatViewTables[e.Key]
                     if lt == nil { lt = newLiveTable() }
-                    if vw.With != nil { plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, lt)...) }
+                    if vw.With != nil { plan.Alters = append(plan.Alters, storageParamStmts("materialized view", e.Key, vw.With, vw.WithOrder, lt)...) }
                     if tablespaceDiffers(vw.Tablespace, lt.Tablespace, live) {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter materialized view %s set tablespace %s;", pqIdent(e.Key), quoteIdent(vw.Tablespace)))
                         plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("materialized view "+e.Key, e.Key))
@@ -3172,7 +3185,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         sub, unlogged := "", ""
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With), tablespaceClause(dt.Tablespace)))
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
@@ -3237,7 +3250,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
-                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With)+tablespaceClause(dt.Tablespace)+";")
+                plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
@@ -5766,7 +5779,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     if dt.PrimaryKeyName != "" { pkAdd = "add constraint " + quoteIdent(truncateIdent(dt.PrimaryKeyName)) + " primary key" }
     if !livePK {
         if len(dt.PrimaryKey) > 0 {
-            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith, dt.PrimaryKeyTablespace)))
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s %s (%s)%s;", pqIdent(fq), pkAdd, constraintColumns(dt.PrimaryKey), indexParameters(dt.PrimaryKeyInclude, dt.PrimaryKeyWith, dt.PrimaryKeyWithOrder, dt.PrimaryKeyTablespace)))
         } else {
             // derive from column PrimaryKey flags
             pkCols := []string{}
@@ -5783,7 +5796,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(have), quoteIdent(want)))
             name = want
         }
-        if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, lt.IndexDefs[have])...) }
+        if have != "" { plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+name, dt.PrimaryKeyWith, dt.PrimaryKeyWithOrder, lt.IndexDefs[have])...) }
         if li := lt.IndexDefs[have]; have != "" && li != nil && tablespaceDiffers(dt.PrimaryKeyTablespace, li.Tablespace, live) {
             plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, name, dt.PrimaryKeyTablespace))
             if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("primary key index "+name, fq)) }
@@ -6013,7 +6026,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
-                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), lt.IndexDefs[ctName])...)
+                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), ct.WithOrder, lt.IndexDefs[ctName])...)
                 if li := lt.IndexDefs[ctName]; li != nil && tablespaceDiffers(ct.Tablespace, li.Tablespace, live) {
                     plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, ctName, ct.Tablespace))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("constraint "+ctName+"'s index", fq)) }
@@ -6554,16 +6567,31 @@ func collationName(s string) string {
     return s
 }
 
-// renderStorageParams renders a table's WITH (...) storage parameters, sorted,
-// or "" when there are none.
-func renderStorageParams(with map[string]string) string {
+// renderStorageParams renders a WITH (...) clause of storage parameters in
+// the order given (see orderedKeys), or "" when there are none.
+func renderStorageParams(with map[string]string, order []string) string {
     if len(with) == 0 { return "" }
-    keys := make([]string, 0, len(with))
-    for k := range with { keys = append(keys, k) }
-    sort.Strings(keys)
+    keys := orderedKeys(with, order)
     parts := make([]string, len(keys))
     for i, k := range keys { parts[i] = k + " = " + storageParamValue(with[k]) }
     return " with (" + strings.Join(parts, ", ") + ")"
+}
+
+// orderedKeys returns the keys of m, those listed in order first and in
+// that order, then the others sorted.
+func orderedKeys(m map[string]string, order []string) []string {
+    out := make([]string, 0, len(m))
+    seen := map[string]bool{}
+    for _, k := range order {
+        if _, ok := m[k]; ok && !seen[k] {
+            seen[k] = true
+            out = append(out, k)
+        }
+    }
+    for _, k := range sortedKeys(m) {
+        if !seen[k] { out = append(out, k) }
+    }
+    return out
 }
 
 // storageParamValue renders the value of a storage parameter for WITH (...)
@@ -6653,19 +6681,19 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
         out = append(out, fmt.Sprintf("alter table %s set %s;", pqIdent(fq), mode))
     }
     if dt.With == nil { return out }
-    return append(out, storageParamStmts("table", fq, dt.With, lt)...)
+    return append(out, storageParamStmts("table", fq, dt.With, dt.WithOrder, lt)...)
 }
 
 // storageParamStmts emits ALTER <kind> ... SET (...) / RESET (...) so the
 // relation's storage parameters match with exactly: live parameters with
 // does not list are reset. toast.* parameters are skipped while the
 // relation has no TOAST table, since PostgreSQL silently discards them.
-func storageParamStmts(kind, fq string, with map[string]string, lt *LiveTable) []string {
+func storageParamStmts(kind, fq string, with map[string]string, order []string, lt *LiveTable) []string {
     out := []string{}
     set, reset := []string{}, []string{}
     want := map[string]bool{}
     live := lt.Options
-    for _, k := range sortedKeys(with) {
+    for _, k := range orderedKeys(with, order) {
         want[strings.ToLower(k)] = true
         if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
         lv, ok := live[strings.ToLower(k)]
@@ -6910,10 +6938,10 @@ func deferralClause(deferrable, initiallyDeferred bool) string {
 // exclude constraint. Returns "" for unknown constraint types.
 // indexParameters renders the INCLUDE, WITH and USING INDEX TABLESPACE
 // clauses of a primary key or unique constraint's index.
-func indexParameters(include []string, with map[string]string, tablespace string) string {
+func indexParameters(include []string, with map[string]string, order []string, tablespace string) string {
     out := ""
     if len(include) > 0 { out = " include (" + constraintColumns(include) + ")" }
-    out += renderStorageParams(with)
+    out += renderStorageParams(with, order)
     if tablespace != "" { out += " using index tablespace " + quoteIdent(tablespace) }
     return out
 }
@@ -6974,7 +7002,7 @@ func renderConstraintDef(ct *schema.Constraint) string {
     case "unique":
         nulls := ""
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
-        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.WithOrder, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
         return fmt.Sprintf("exclude %s", excludeWithTablespace(excludeExpression(ct), ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
@@ -7281,19 +7309,13 @@ func renderIndexElems(ix *schema.Index, cols map[string]*schema.Column) string {
 }
 
 // renderIndexTail renders the clauses after an index's column list: INCLUDE,
-// NULLS NOT DISTINCT, WITH (storage parameters, sorted), TABLESPACE and WHERE.
+// NULLS NOT DISTINCT, WITH (storage parameters in declaration order),
+// TABLESPACE and WHERE.
 func renderIndexTail(ix *schema.Index) string {
     out := ""
     if len(ix.Include) > 0 { out += " include (" + joinIdentList(ix.Include) + ")" }
     if ix.NullsNotDistinct { out += " nulls not distinct" }
-    if len(ix.With) > 0 {
-        keys := make([]string, 0, len(ix.With))
-        for k := range ix.With { keys = append(keys, k) }
-        sort.Strings(keys)
-        parts := make([]string, 0, len(keys))
-        for _, k := range keys { parts = append(parts, k+" = "+storageParamValue(ix.With[k])) }
-        out += " with (" + strings.Join(parts, ", ") + ")"
-    }
+    out += renderStorageParams(ix.With, ix.WithOrder)
     if ix.Tablespace != "" { out += " tablespace " + quoteIdent(ix.Tablespace) }
     if ix.Where != "" { out += fmt.Sprintf(" where (%s)", ix.Where) }
     return out
@@ -7354,11 +7376,11 @@ func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bo
 // keyIndexStorageStmts changes the storage parameters of index idxFq, which
 // backs a primary key or unique constraint, from live to want with ALTER
 // INDEX ... SET / RESET. A nil want leaves them unmanaged.
-func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) []string {
+func keyIndexStorageStmts(idxFq string, want map[string]string, order []string, li *LiveIndex) []string {
     if want == nil || li == nil || storageOptionsEqual(want, li.Options) { return nil }
     set, reset := []string{}, []string{}
     keys := map[string]bool{}
-    for _, k := range sortedKeys(want) {
+    for _, k := range orderedKeys(want, order) {
         keys[strings.ToLower(k)] = true
         if lv, ok := li.Options[strings.ToLower(k)]; !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(want[k])) {
             set = append(set, k+" = "+storageParamValue(want[k]))

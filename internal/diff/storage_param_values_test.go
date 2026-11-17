@@ -61,3 +61,42 @@ func TestStorageParamStringValuesQuoted(t *testing.T) {
 		t.Errorf("changed table storage parameter not quoted: %v", p.Alters)
 	}
 }
+
+func TestStorageParamsInDeclarationOrder(t *testing.T) {
+	d := &schema.Database{
+		Tables: map[string]*schema.Table{"public.t": {
+			Name:                "t",
+			Columns:             map[string]*schema.Column{"id": {Type: "int"}, "k": {Type: "int"}},
+			With:                map[string]string{"toast_tuple_target": "4000", "fillfactor": "90", "autovacuum_enabled": "false"},
+			WithOrder:           []string{"toast_tuple_target", "fillfactor", "autovacuum_enabled"},
+			PrimaryKey:          []string{"id"},
+			PrimaryKeyName:      "t_pkey",
+			PrimaryKeyWith:      map[string]string{"fillfactor": "80", "deduplicate_items": "off"},
+			PrimaryKeyWithOrder: []string{"fillfactor", "deduplicate_items"},
+			Constraints: []*schema.Constraint{{Name: "t_k_key", Type: "unique", Columns: []string{"k"},
+				With: map[string]string{"fillfactor": "70", "deduplicate_items": "off"}, WithOrder: []string{"fillfactor", "deduplicate_items"}}},
+			Indexes: []*schema.Index{{Name: "t_k", Columns: []string{"k"},
+				With: map[string]string{"fillfactor": "50", "deduplicate_items": "off", "a_not_in_order": "1"}, WithOrder: []string{"fillfactor", "deduplicate_items"}}},
+		}},
+		Views: map[string]*schema.View{"public.mv": {Name: "mv", Schema: "public", Materialized: true, Query: "select 1",
+			With: map[string]string{"fillfactor": "60", "autovacuum_enabled": "false"}, WithOrder: []string{"fillfactor", "autovacuum_enabled"}}},
+	}
+	p := Plan(emptyLive(), d, false)
+	for _, want := range []string{
+		`with (toast_tuple_target = 4000, fillfactor = 90, autovacuum_enabled = false);`,
+		`primary key ("id") with (fillfactor = 80, deduplicate_items = off);`,
+		`unique ("k") with (fillfactor = 70, deduplicate_items = off);`,
+		`("k") with (fillfactor = 50, deduplicate_items = off, a_not_in_order = 1);`,
+		`create materialized view if not exists "public"."mv" with (fillfactor = 60, autovacuum_enabled = false)`,
+	} {
+		if !findCreate(p, want) && !findAlter(p, want) {
+			t.Errorf("missing %q in:\n%s", want, Render(p))
+		}
+	}
+
+	live := liveWithTable("public.t", map[string]*LiveColumn{"id": {Type: "integer"}, "k": {Type: "integer"}})
+	live.Tables["public.t"].Options = map[string]string{"fillfactor": "10"}
+	if got := storageParamStmts("table", "public.t", d.Tables["public.t"].With, d.Tables["public.t"].WithOrder, live.Tables["public.t"]); len(got) != 1 || got[0] != `alter table "public"."t" set (toast_tuple_target = 4000, fillfactor = 90, autovacuum_enabled = false);` {
+		t.Errorf("SET follows the declaration order, got %v", got)
+	}
+}

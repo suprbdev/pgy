@@ -936,11 +936,7 @@ func (b *builder) tables() {
 			add(t, "unlogged", boolean(true))
 		}
 		if len(lt.Options) > 0 {
-			w := flowMap()
-			for _, k := range sortedKeys(lt.Options) {
-				add(w, k, str(lt.Options[k]))
-			}
-			add(t, "with", w)
+			add(t, "with", storageParams(lt.Options, lt.OptionOrder))
 		}
 		if lt.Foreign == nil {
 			addStr(t, "tablespace", lt.Tablespace)
@@ -1200,13 +1196,23 @@ func indexParameters(m *node, li *diff.LiveIndex) {
 		add(m, "include", list(plainIdents(li.Include)))
 	}
 	if len(li.Options) > 0 {
-		w := flowMap()
-		for _, k := range sortedKeys(li.Options) {
-			add(w, k, str(li.Options[k]))
-		}
-		add(m, "with", w)
+		add(m, "with", storageParams(li.Options, li.OptionOrder))
 	}
 	addStr(m, "tablespace", li.Tablespace)
+}
+
+// storageParams writes storage parameters as a flow mapping, those named in
+// order first and in that order, then the others sorted.
+func storageParams(options map[string]string, order []string) *node {
+	w := flowMap()
+	seen := map[string]bool{}
+	for _, k := range append(append([]string{}, order...), sortedKeys(options)...) {
+		if v, ok := options[k]; ok && !seen[k] {
+			seen[k] = true
+			add(w, k, str(v))
+		}
+	}
+	return w
 }
 
 func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
@@ -1393,11 +1399,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 			add(m, "nullsNotDistinct", boolean(true))
 		}
 		if len(li.Options) > 0 {
-			w := flowMap()
-			for _, k := range sortedKeys(li.Options) {
-				add(w, k, str(li.Options[k]))
-			}
-			add(m, "with", w)
+			add(m, "with", storageParams(li.Options, li.OptionOrder))
 		}
 		addStr(m, "tablespace", li.Tablespace)
 		addStr(m, "where", li.Predicate)
@@ -1807,11 +1809,7 @@ func (b *builder) views() {
 			}
 			if lt := b.live.MatViewTables[k]; lt != nil {
 				if len(lt.Options) > 0 {
-					w := flowMap()
-					for _, o := range sortedKeys(lt.Options) {
-						add(w, o, str(lt.Options[o]))
-					}
-					add(m, "with", w)
+					add(m, "with", storageParams(lt.Options, lt.OptionOrder))
 				}
 				addStr(m, "tablespace", lt.Tablespace)
 				b.indexes(m, k, lt)

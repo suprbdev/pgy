@@ -130,11 +130,11 @@ func TestStorageParamsSkipToastWithoutToastTable(t *testing.T) {
 	lt := newLiveTable()
 	lt.Options = map[string]string{"fillfactor": "70"}
 	with := map[string]string{"fillfactor": "70", "toast.autovacuum_enabled": "false"}
-	if got := storageParamStmts("table", "public.t", with, lt); len(got) != 1 || got[0] != `alter table "public"."t" set (toast.autovacuum_enabled = false);` {
+	if got := storageParamStmts("table", "public.t", with, nil, lt); len(got) != 1 || got[0] != `alter table "public"."t" set (toast.autovacuum_enabled = false);` {
 		t.Errorf("with a TOAST table the toast parameter must be set, got %v", got)
 	}
 	lt.NoToast = true
-	if got := storageParamStmts("table", "public.t", with, lt); len(got) != 0 {
+	if got := storageParamStmts("table", "public.t", with, nil, lt); len(got) != 0 {
 		t.Errorf("without a TOAST table toast parameters are discarded by PostgreSQL, got %v", got)
 	}
 }
