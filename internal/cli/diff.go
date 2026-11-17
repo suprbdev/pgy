@@ -130,7 +130,7 @@ Exit codes:
                 if err := diff.IntrospectExtensions(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }
-                if err := diff.IntrospectData(ctx, pool, live, compiled); err != nil {
+                if err := diff.IntrospectDataWith(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }
                 if err := diff.ProbeViews(ctx, pool, live, compiled); err != nil && !noWarnings {

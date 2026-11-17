@@ -2,6 +2,8 @@ package cli
 
 import (
     "context"
+    "errors"
+    "net/url"
     "os"
     "path/filepath"
     "testing"
@@ -64,4 +66,56 @@ func TestMigrateWithCustomMigrationsTable(t *testing.T) {
     }
     status := cmdStatus()
     if err := run(status); err != nil { t.Errorf("status with everything applied should exit 0, got %v", err) }
+}
+
+// TestMigrationsTableWithoutCreateOnDatabase runs init, status and migrate
+// as a role that owns its schema but has no CREATE on the database: init
+// creates only the table, and the other commands create nothing.
+func TestMigrationsTableWithoutCreateOnDatabase(t *testing.T) {
+    dsn := os.Getenv("PGY_TEST_DSN")
+    if dsn == "" { t.Skip("PGY_TEST_DSN not set") }
+    u, err := url.Parse(dsn)
+    if err != nil || u.Scheme == "" { t.Skip("PGY_TEST_DSN is not a URL") }
+    ctx := context.Background()
+    admin, err := pgxpool.New(ctx, dsn)
+    if err != nil { t.Fatal(err) }
+    t.Cleanup(admin.Close)
+    const name, role = "pgytest_cli_nocreate", "pgytest_cli_nocreate_owner"
+    drop := func() {
+        admin.Exec(context.Background(), `drop database if exists `+name+` with (force)`) //nolint
+        admin.Exec(context.Background(), `drop role if exists `+role)                     //nolint
+    }
+    drop()
+    t.Cleanup(drop)
+    for _, stmt := range []string{`create database ` + name, `create role ` + role + ` login password 'pgy'`} {
+        if _, err := admin.Exec(ctx, stmt); err != nil { t.Fatalf("%s: %v", stmt, err) }
+    }
+    u.Path = "/" + name
+    db, err := pgxpool.New(ctx, u.String())
+    if err != nil { t.Fatal(err) }
+    defer db.Close()
+    if _, err := db.Exec(ctx, `create schema app authorization `+role); err != nil { t.Fatal(err) }
+
+    limited := *u
+    limited.User = url.UserPassword(role, "pgy")
+    dir := t.TempDir()
+    writeFiles(t, dir, map[string]string{"9301_a.sql": "create table app.t (id int);\n"})
+    cfg := &GlobalConfig{DSN: limited.String(), MigrationsDir: dir, MigrationsTable: "app.pgy_migrations", Quiet: true}
+    run := func(c interface {
+        SetArgs([]string)
+        ExecuteContext(context.Context) error
+    }, args ...string) error {
+        c.SetArgs(args)
+        return c.ExecuteContext(context.WithValue(ctx, ctxKey{}, cfg))
+    }
+    if err := run(cmdInit()); err != nil { t.Fatalf("init in a schema the role owns: %v", err) }
+    var owner string
+    if err := db.QueryRow(ctx, `select tableowner from pg_tables where schemaname = 'app' and tablename = 'pgy_migrations'`).Scan(&owner); err != nil || owner != role {
+        t.Fatalf("init should create app.pgy_migrations as %s: owner %q, err %v", role, owner, err)
+    }
+    var code *exitCodeError
+    if err := run(cmdStatus()); !errors.As(err, &code) || code.code != 2 { t.Errorf("status with a pending migration: want exit 2, got %v", err) }
+    if err := run(cmdMigrate()); err != nil { t.Fatalf("migrate: %v", err) }
+    if err := run(cmdStatus()); err != nil { t.Errorf("status with everything applied: want exit 0, got %v", err) }
+    if err := run(cmdInit()); err != nil { t.Errorf("init with the table in place: %v", err) }
 }

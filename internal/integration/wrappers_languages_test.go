@@ -658,7 +658,9 @@ schema public:
 		`create extension if not exists "plperl";`,
 		`revoke all on language "plperl" from public;`,
 		fmt.Sprintf(`grant usage on language "plperl" to %q;`, dev),
+		`set check_function_bodies = off;`,
 		`create function "public"."two"() returns integer language plperl as $$return 2;$$;`,
+		`reset check_function_bodies;`,
 	}
 	if strings.TrimSpace(sql) != strings.Join(wantLines, "\n") {
 		t.Errorf("got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))

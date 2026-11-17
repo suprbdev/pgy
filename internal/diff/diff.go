@@ -254,6 +254,20 @@ type LiveRole struct {
     ConnectionLimit int
     ValidUntil string // UTC RFC 3339, "infinity", or "" when unset
     Config map[string]string // ALTER ROLE ... SET settings for all databases: lower-cased name -> value
+    Bootstrap bool // the bootstrap superuser, which initdb created (oid 10)
+}
+
+// CreatorGrant reports whether member's membership in parent is the one
+// PostgreSQL 16 and later gives a role that is not a superuser when it
+// runs CREATE ROLE parent (with createrole_self_grant unset): WITH ADMIN
+// OPTION, without INHERIT and SET, granted by the bootstrap superuser
+// alone. It is how that role manages the roles it created.
+func (l *Live) CreatorGrant(member, parent string) bool {
+    if l == nil || l.ServerVersion < 160000 { return false }
+    lm := l.RoleMemberOptions[member][parent]
+    if lm == nil || !lm.Admin || lm.Inherit || lm.Set || len(lm.Grantors) != 1 { return false }
+    lr := l.RoleDefs[lm.Grantors[0]]
+    return lr != nil && lr.Bootstrap
 }
 
 // ColumnDependent is an object whose definition uses a column: a view or
@@ -325,8 +339,8 @@ type LiveExtension struct {
     // owns, and Operators those of its operators. Builtins holds the names
     // of its routines that pg_catalog has a routine of too, so that an
     // unqualified call may well mean the built-in one. All three are nil
-    // until IntrospectExtensions loads them for an extension that has to
-    // move.
+    // until IntrospectExtensions loads them for an extension declared in
+    // another schema.
     Members   map[string]bool
     Operators map[string]bool
     Builtins  map[string]bool
@@ -349,10 +363,12 @@ type LiveExtension struct {
 
 // AvailableExtension is an extension the server can install: its default
 // version and, for every version it can install or update to, the
-// extensions that version requires.
+// extensions that version requires, and for the versions whose control
+// file names the schema they have to be installed in, that schema.
 type AvailableExtension struct {
     DefaultVersion string
     Requires       map[string][]string
+    Schemas        map[string]string
 }
 
 type LiveFunction struct{
@@ -1891,7 +1907,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit, rolconnlimit,
                case when rolvaliduntil is null then '' when rolvaliduntil = 'infinity' then 'infinity'
                     else to_char(rolvaliduntil at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') end,
-               coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[])
+               coalesce((select s.setconfig from pg_db_role_setting s where s.setrole = r.oid and s.setdatabase = 0), '{}'::text[]),
+               r.oid = 10
         from pg_roles r where rolname not like 'pg\_%'
     `
     batch.add(roleQ, func(roleRows pgx.Rows) error {
@@ -1899,7 +1916,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var roleName string
             lr := &LiveRole{}
             var config []string
-            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &lr.ValidUntil, &config); err != nil {
+            if err := roleRows.Scan(&roleName, &lr.Login, &lr.Superuser, &lr.CreateDB, &lr.CreateRole, &lr.Replication, &lr.BypassRLS, &lr.Inherit, &lr.ConnectionLimit, &lr.ValidUntil, &config, &lr.Bootstrap); err != nil {
                 return err
             }
             lr.Config = parseProconfig(config)
@@ -2813,6 +2830,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
@@ -2858,14 +2876,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
-    for k := range desired.Types {
+    for k, td := range desired.Types {
+        if td != nil && td.Kind == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Functions {
+    for k, f := range desired.Functions {
+        if f != nil && !f.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2875,7 +2895,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for k := range desired.Aggregates {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
-    for k := range desired.Procedures {
+    for k, p := range desired.Procedures {
+        if p != nil && !p.HasBody() { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2889,7 +2910,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Views {
+    for k, vw := range desired.Views {
+        if vw != nil && strings.TrimSpace(vw.Query) == "" { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2962,6 +2984,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // name order) — use it as-is; the CLI surfaces the cycle error before
     // planning, so reaching here with err != nil means the caller opted in.
     sorted, _ := schema.TopologicalSort(desired)
+    columnSeqs := desired.ColumnSequences()
     liveFuncs := normalizedLiveFunctions(live)
     // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
     // here, not Alters: an index or generated column created below may need
@@ -3166,6 +3189,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 plan.Alters = append(plan.Alters, sequenceAlterStmts(e.Key, sq, live.SequenceDefs[e.Key])...)
                 continue
             }
+            if _, ok := columnSeqs[e.Key]; ok { continue }
             plan.Creates = append(plan.Creates, renderSequence(e.Key, sq))
             if sq.OwnedBy != "" {
                 // OWNED BY goes into Alters (rendered after all Creates):
@@ -3475,13 +3499,14 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
 // revokeMembershipStmts revokes member's live memberships in roles that
 // declared doesn't list. PostgreSQL 16+ records a grant per grantor, and
 // REVOKE only removes the current user's unless GRANTED BY names another,
-// so it emits one REVOKE per grantor there.
+// so it emits one REVOKE per grantor there. The connecting role keeps the
+// memberships it got by creating a role (see Live.CreatorGrant).
 func revokeMembershipStmts(live *Live, member string, declared []string) []string {
     keep := map[string]bool{}
     for _, p := range declared { keep[p] = true }
     out := []string{}
     for _, parent := range sortedKeys(live.RoleMembers[member]) {
-        if keep[parent] { continue }
+        if keep[parent] || member == live.CurrentUser && live.CreatorGrant(member, parent) { continue }
         target := fmt.Sprintf("revoke %s from %s", grantRole(parent), grantRole(member))
         lm := live.RoleMemberOptions[member][parent]
         if live.ServerVersion < 160000 || lm == nil || len(lm.Grantors) == 0 {
@@ -4778,7 +4803,7 @@ func routineIdentity(sig string, procedure bool) string {
         }
         if mode == "out" && !procedure { continue }
         if len(words) > 1 && !isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) { words = words[1:] }
-        types = append(types, normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public.")))
+        types = append(types, withoutArgTypmods(normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public."))))
     }
     return name + "(" + strings.Join(types, ", ") + ")"
 }
@@ -7763,7 +7788,8 @@ func (sc *nameScope) functionArg(arg string) string {
     return sc.functionArgNoDefault(decl)
 }
 
-// functionArgNoDefault normalizes an argument without default clause
+// functionArgNoDefault normalizes an argument without default clause. Type
+// modifiers are left out: PostgreSQL discards them from argument types.
 func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Format: "param_name type_name", "param_name schema.type_name", or an
     // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
@@ -7774,7 +7800,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     }
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
-        return sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
+        return withoutArgTypmods(sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public.")))
     }
 
     // Unnamed multi-word type: pg_get_function_identity_arguments prints
@@ -7782,7 +7808,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // zone[]" must not be parsed as param "timestamp" + type "with time
     // zone[]" — it would never match the YAML's "timestamptz[]" spelling.
     if isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) {
-        return sc.columnType(arg)
+        return withoutArgTypmods(sc.columnType(arg))
     }
 
     // Parameter name (first word) - lowercase for comparison
@@ -7802,10 +7828,19 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Canonicalize through the same alias table as column types so alias
     // spellings (timestamptz[]) and live canonical forms (timestamp with
     // time zone[]) compare equal instead of re-emitting the function forever.
-    typeName = sc.columnType(typeName)
+    typeName = withoutArgTypmods(sc.columnType(typeName))
 
     return paramName + " " + typeName
 }
+
+// withoutArgTypmods drops the type modifiers, interval fields included,
+// from a normalized argument type: PostgreSQL keeps neither in a routine's
+// argument types, so f(x varchar(10)) is f(x character varying) live.
+func withoutArgTypmods(t string) string {
+    return intervalFieldsRe.ReplaceAllString(typmodRe.ReplaceAllString(t, ""), "interval")
+}
+
+var intervalFieldsRe = regexp.MustCompile(`\binterval\s+(?:year|month|day|hour|minute|second)(?:\s+to\s+(?:month|hour|minute|second))?\b`)
 
 // isMultiWordTypeStart reports whether the first two tokens of an argument
 // begin a multi-word Postgres type name rather than "param_name type_name".
