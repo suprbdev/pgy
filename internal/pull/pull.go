@@ -82,7 +82,6 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.aggregates()
 	b.tables()
 	b.views()
-	b.undeclaredMemberGrants()
 
 	single := newMap()
 	emit := func(name string, doc *node) error {
@@ -338,29 +337,49 @@ func (b *builder) memberGrants(key, publicDefault string, current map[string]map
 	return m
 }
 
-// undeclaredMemberGrants warns about the tables, sequences and aggregates of
-// extensions whose privileges changed: pgy has no declaration that manages
-// an object of those kinds without creating it.
-func (b *builder) undeclaredMemberGrants() {
-	report := func(kind, key, name, publicDefault string, current map[string]map[string]bool) {
-		if b.wantSchema(schemaOf(name)) && b.memberGrants(key, publicDefault, current) != nil {
-			b.warn("%s %s belongs to an extension and its privileges are no longer the ones the extension set; pgy cannot declare them and they were left out", kind, name)
-		}
+// memberTable declares a table of an extension without columns when its
+// privileges are no longer the ones the extension set, it has row level
+// security or policies, or --data asks for the rows of a configuration
+// table, which is what pg_dump keeps of an extension's table.
+func (b *builder) memberTable(fq string, lt *diff.LiveTable) {
+	blk, name, ok := b.block(fq)
+	if !ok {
+		return
 	}
-	for _, k := range sortedKeys(b.live.Tables) {
-		kind := "table"
-		if lt := b.live.Tables[k]; lt != nil && lt.Foreign != nil {
-			kind = "foreign table"
-		}
-		report(kind, "rel:"+k, k, "", b.live.TableGrants[k])
+	m := b.memberGrants("rel:"+fq, "", b.live.TableGrants[fq])
+	if m == nil {
+		m = newMap()
 	}
-	for _, k := range sortedKeys(b.live.Sequences) {
-		report("sequence", "rel:"+k, k, "", b.live.TableGrants[k])
+	if lt.RLSEnabled {
+		add(m, "rowLevelSecurity", boolean(true))
 	}
-	for _, norm := range sortedKeys(b.live.AggregateDefs) {
-		if lf := b.live.FunctionDefs[norm]; lf != nil {
-			report("aggregate", "proc:"+norm, lf.Signature, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm]))
-		}
+	if lt.RLSForced {
+		add(m, "forceRowLevelSecurity", boolean(true))
+	}
+	b.policies(m, lt)
+	b.memberData(m, fq, lt)
+	if len(b.live.ColumnGrants[fq]) > 0 {
+		b.warn("table %s belongs to an extension and has column privileges, which a table declared without columns cannot hold; they were left out", fq)
+	}
+	if len(m.Content) == 0 {
+		return
+	}
+	key := "table "
+	if lt.Foreign != nil {
+		key = "foreign table "
+	}
+	add(blk, key+schema.QuoteName(name), m)
+}
+
+// memberSequence declares a sequence of an extension without options when
+// its privileges changed.
+func (b *builder) memberSequence(k string) {
+	blk, name, ok := b.block(k)
+	if !ok {
+		return
+	}
+	if m := b.memberGrants("rel:"+k, "", b.live.TableGrants[k]); m != nil {
+		add(blk, "sequence "+schema.QuoteName(name), m)
 	}
 }
 
@@ -436,6 +455,12 @@ func (b *builder) schemas() {
 		}
 		if strings.Contains(s, ".") {
 			b.warn("schema %s was left out with its objects: pgy reads a dot as the separator between a schema and an object's name, so it cannot manage a schema whose name contains one", s)
+			continue
+		}
+		if b.member("schema", s) {
+			if m := b.memberGrants("schema:"+s, "", b.live.SchemaGrants[s]); m != nil {
+				b.blocks[s] = m
+			}
 			continue
 		}
 		blk := newMap()
@@ -663,24 +688,37 @@ func (b *builder) collations() {
 	}
 }
 
+// textSearch writes the text search dictionaries and configurations. A
+// dictionary an extension creates is written without a template when it
+// has options: PostgreSQL keeps no record of the options the extension's
+// script gave it, so its current ones are written, which a rebuild sets
+// with ALTER after CREATE EXTENSION.
 func (b *builder) textSearch() {
 	for _, k := range sortedKeys(b.live.TSDictionaries) {
 		td := b.d.TSDictionaries[k]
-		if td == nil || b.member("tsdict", k) {
+		if td == nil {
 			continue
 		}
 		blk, name, ok := b.block(k)
 		if !ok {
 			continue
 		}
-		m := newMap()
-		add(m, "template", str(td.Template))
 		opts := flowMap()
 		for _, o := range sortedKeys(td.Options) {
 			add(opts, o, str(td.Options[o]))
 		}
+		m := newMap()
+		if b.member("tsdict", k) {
+			if len(td.Options) > 0 {
+				add(m, "options", opts)
+				add(blk, "text search dictionary "+schema.QuoteName(name), m)
+			}
+			continue
+		}
+		add(m, "template", str(td.Template))
 		add(m, "options", opts)
 		addStr(m, "comment", b.live.TSComments["dict:"+k])
+		b.owner(m, "text search dictionaries", "tsdict:"+k)
 		add(blk, "text search dictionary "+schema.QuoteName(name), m)
 	}
 	for _, k := range sortedKeys(b.live.TSConfigs) {
@@ -744,7 +782,11 @@ func identityOptionsNode(fq, cn string, lc *diff.LiveColumn) *node {
 func (b *builder) sequences() {
 	for _, k := range sortedKeys(b.live.Sequences) {
 		ls := b.live.SequenceDefs[k]
-		if ls == nil || b.member("rel", k) {
+		if ls == nil {
+			continue
+		}
+		if b.member("rel", k) {
+			b.memberSequence(k)
 			continue
 		}
 		if b.serialSeqs[k] {
@@ -936,7 +978,7 @@ func (b *builder) aggregates() {
 	for _, norm := range sortedKeys(b.live.AggregateDefs) {
 		la := b.live.AggregateDefs[norm]
 		lf := b.live.FunctionDefs[norm]
-		if lf == nil || b.member("proc", norm) {
+		if lf == nil {
 			continue
 		}
 		name := aggregateArgKeywordRe.ReplaceAllStringFunc(lf.Signature, strings.ToLower)
@@ -949,6 +991,12 @@ func (b *builder) aggregates() {
 		}
 		blk, short, ok := b.block(name)
 		if !ok {
+			continue
+		}
+		if b.member("proc", norm) {
+			if m := b.memberGrants("proc:"+norm, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm])); m != nil {
+				add(blk, "aggregate "+schema.QuoteName(short)+args, m)
+			}
 			continue
 		}
 		m := newMap()
@@ -984,6 +1032,12 @@ func (b *builder) aggregates() {
 			default:
 				addStr(m, o[0], v)
 			}
+		}
+		if !b.live.FunctionPublicExec[norm] {
+			add(m, "revokePublic", boolean(true))
+		}
+		if g := b.grantsFor(b.live.FunctionGrants[norm], name, "functions"); g != nil {
+			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "aggregates", "proc:"+norm)
@@ -1027,7 +1081,11 @@ func setting(name, value string) *node {
 func (b *builder) tables() {
 	for _, fq := range sortedKeys(b.live.Tables) {
 		lt := b.live.Tables[fq]
-		if lt == nil || fq == b.opts.MigrationsTable || b.member("rel", fq) {
+		if lt == nil || fq == b.opts.MigrationsTable {
+			continue
+		}
+		if b.member("rel", fq) {
+			b.memberTable(fq, lt)
 			continue
 		}
 		blk, name, ok := b.block(fq)
@@ -1633,6 +1691,43 @@ func (b *builder) triggers(t *node, fq string, lt *diff.LiveTable) {
 // data emits the rows requested with Options.Data as a data: block, keyed
 // by the primary key and sorted by it. Generated columns are left out.
 func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
+	b.dataRows(t, fq, lt, false)
+}
+
+// memberData writes the rows of an extension's table that --data asks for:
+// those of a configuration table, as pg_dump keeps them (the caller reads
+// only the rows its condition selects), with the key that a table declared
+// without columns needs, and dependsOn for the configuration tables with
+// rows that its foreign keys reference, so the rows are inserted after
+// theirs. The rows of any other table of an extension are the extension's
+// and are left out, with a warning.
+func (b *builder) memberData(t *node, fq string, lt *diff.LiveTable) {
+	if _, ok := b.opts.Data[fq]; !ok {
+		return
+	}
+	if _, config := b.live.ExtensionConfig[fq]; !config {
+		b.warn("table %s belongs to an extension and is not one of its configuration tables, so its rows are the extension's and were not pulled", fq)
+		return
+	}
+	b.dataRows(t, fq, lt, true)
+	deps := []string{}
+	for _, name := range sortedKeys(lt.ConstraintDefs) {
+		m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+		if m == nil {
+			continue
+		}
+		ref := relationKey(m[2])
+		_, config := b.live.ExtensionConfig[ref]
+		if _, rows := b.opts.Data[ref]; rows && config && ref != fq && !slices.Contains(deps, "table "+schema.QualifiedName(ref)) {
+			deps = append(deps, "table "+schema.QualifiedName(ref))
+		}
+	}
+	if len(deps) > 0 {
+		add(t, "dependsOn", list(deps))
+	}
+}
+
+func (b *builder) dataRows(t *node, fq string, lt *diff.LiveTable, withKey bool) {
 	rows, ok := b.opts.Data[fq]
 	if !ok {
 		return
@@ -1651,7 +1746,11 @@ func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
 		}
 		return false
 	})
-	list := &node{Kind: yaml.SequenceNode}
+	d := newMap()
+	if withKey {
+		add(d, "key", list(key))
+	}
+	out := &node{Kind: yaml.SequenceNode}
 	for _, row := range sorted {
 		m := flowMap()
 		for _, cn := range b.d.ColumnOrder[fq] {
@@ -1663,10 +1762,9 @@ func (b *builder) data(t *node, fq string, lt *diff.LiveTable) {
 				add(m, cn, dataNode(v, lc.Type))
 			}
 		}
-		list.Content = append(list.Content, m)
+		out.Content = append(out.Content, m)
 	}
-	d := newMap()
-	add(d, "rows", list)
+	add(d, "rows", out)
 	add(t, "data", d)
 }
 
@@ -2024,6 +2122,9 @@ func (b *builder) database() *node {
 			}
 			if le.Comment != "" && le.Comment != le.DefaultComment {
 				add(e, "comment", str(le.Comment))
+			}
+			if le.Comment == "" && le.DefaultComment != "" {
+				add(e, "comment", &node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"})
 			}
 			deps := []string{}
 			for _, r := range le.Requires {

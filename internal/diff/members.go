@@ -24,6 +24,7 @@ const initPrivsQ = `
              when 'pg_type'::regclass then 'type:' || tn.nspname || '.' || t.typname
              when 'pg_language'::regclass then 'language:' || l.lanname
              when 'pg_foreign_data_wrapper'::regclass then 'fdw:' || w.fdwname
+             when 'pg_namespace'::regclass then 'schema:' || s.nspname
            end,
            case when a.grantee = 0 then 'public' else coalesce(r.rolname::text, '') end,
            coalesce(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, '')
@@ -36,10 +37,22 @@ const initPrivsQ = `
     left join pg_namespace tn on tn.oid = t.typnamespace
     left join pg_language l on ip.classoid = 'pg_language'::regclass and l.oid = ip.objoid
     left join pg_foreign_data_wrapper w on ip.classoid = 'pg_foreign_data_wrapper'::regclass and w.oid = ip.objoid
-    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner) and a.grantee <> a.grantor
+    left join pg_namespace s on ip.classoid = 'pg_namespace'::regclass and s.oid = ip.objoid
+    left join lateral aclexplode(ip.initprivs) a on a.grantee <> coalesce(p.proowner, c.relowner, t.typowner, l.lanowner, w.fdwowner, s.nspowner) and a.grantee <> a.grantor
     left join pg_roles r on r.oid = a.grantee
     where ip.privtype = 'e' and ip.objsubid = 0
-    and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid) is not null
+    and coalesce(p.oid, c.oid, t.oid, l.oid, w.oid, s.oid) is not null
+`
+
+// extensionConfigQ lists the configuration tables of extensions
+// (pg_extension_config_dump) with the condition that selects the rows
+// pg_dump keeps of them, those an application added.
+const extensionConfigQ = `
+    select n.nspname || '.' || c.relname, coalesce(u.condition, '')
+    from pg_extension x
+    cross join lateral unnest(x.extconfig, x.extcondition) u(rel, condition)
+    join pg_class c on c.oid = u.rel and c.relkind in ('r', 'p')
+    join pg_namespace n on n.oid = c.relnamespace
 `
 
 func (l *Live) scanInitPrivs(rows pgx.Rows) error {
@@ -246,13 +259,16 @@ func membersPending(live *Live, stmts []string) bool {
 
 // resolveAttributeOnly lines up the declarations of desired that manage an
 // object pgy doesn't create (a function or procedure without a body, a view
-// without a query, a type without a kind) with the live objects they are
-// about. A routine declared in another spelling than the live one (argument
-// types only, other argument names) is rewritten to the live signature, so
-// that everything compared by signature finds it. A declaration whose
-// object doesn't exist is emptied, with a warning, unless pending says an
-// extension of this plan may still create it. desired itself is not
-// modified.
+// without a query, a type without a kind, a table without columns, an
+// aggregate without sfunc and stype, a text search dictionary without a
+// template) with the live objects they are about.
+// A routine declared in another spelling than the live one (argument types
+// only, other argument names) is rewritten to the live signature, so that
+// everything compared by signature finds it. A declaration whose object
+// doesn't exist is emptied, with a warning, unless pending says an
+// extension of this plan may still create it. A table declared with columns
+// that an extension owns is cut down to what an attribute-only declaration
+// manages, with a warning. desired itself is not modified.
 func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*schema.Database, []Warning) {
 	if live == nil || desired == nil {
 		return desired, nil
@@ -263,7 +279,11 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 		warns = append(warns, Warning{Message: fmt.Sprintf(format, args...)})
 	}
 	missing := func(kind, name, lacks string) {
-		warn("%s %s has no %s, so it only manages a %s that already exists (one an extension owns, for example), but the database has no such %s and this plan creates or updates no extension; nothing is planned for it", kind, name, lacks, kind, kind)
+		article := "a"
+		if strings.ContainsRune("aeiou", rune(kind[0])) {
+			article = "an"
+		}
+		warn("%s %s has no %s, so it only manages %s %s that already exists (one an extension owns, for example), but the database has no such %s and this plan creates or updates no extension; nothing is planned for it", kind, name, lacks, article, kind, kind)
 	}
 
 	liveFuncs := normalizedLiveFunctions(live)
@@ -385,7 +405,102 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 	if desired.Types != nil {
 		out.Types = types
 	}
+
+	tables := cloneMap(desired.Tables, nil)
+	for _, k := range sortedKeys(desired.Tables) {
+		dt := desired.Tables[k]
+		switch {
+		case dt == nil:
+		case !dt.AttributeOnly() && live.Tables[k] != nil && live.ExtensionMembers["rel:"+k]:
+			warn("table %s belongs to extension %s, which defines its columns, keys and indexes, so pgy manages only its privileges, owner, comment, row level security, policies and rows; declare it without columns", k, live.MemberExtension["rel:"+k])
+			tables[k] = memberTable(dt)
+		case !dt.AttributeOnly() || live.Tables[k] != nil || pending:
+		default:
+			missing("table", k, "columns")
+			tables[k] = &schema.Table{Name: dt.Name}
+		}
+	}
+	if desired.Tables != nil {
+		out.Tables = tables
+	}
+
+	aggregates := cloneMap(desired.Aggregates, nil)
+	for _, k := range sortedKeys(desired.Aggregates) {
+		ag := desired.Aggregates[k]
+		if ag == nil || !ag.AttributeOnly() || pending {
+			continue
+		}
+		name := schema.RoutineName(k)
+		if live.AggregateDefs[normalizeFunctionSignature(name+aggregateArgs(ag.ArgsSig))] != nil {
+			continue
+		}
+		missing("aggregate", name+ag.ArgsSig, "sfunc and stype")
+		aggregates[k] = &schema.Aggregate{Schema: ag.Schema, Name: ag.Name, ArgsSig: ag.ArgsSig}
+	}
+	if desired.Aggregates != nil {
+		out.Aggregates = aggregates
+	}
+
+	dictionaries := cloneMap(desired.TSDictionaries, nil)
+	for _, k := range sortedKeys(desired.TSDictionaries) {
+		td := desired.TSDictionaries[k]
+		if td == nil || !td.AttributeOnly() || pending || live.TSDictionaries[k] {
+			continue
+		}
+		missing("text search dictionary", k, "template")
+		dictionaries[k] = &schema.TSDictionary{Schema: td.Schema, Name: td.Name}
+	}
+	if desired.TSDictionaries != nil {
+		out.TSDictionaries = dictionaries
+	}
 	return &out, warns
+}
+
+// memberTable returns the part of dt that applies to a table an extension
+// owns: everything an attribute-only declaration manages (see
+// schema.Table.AttributeOnly).
+func memberTable(dt *schema.Table) *schema.Table {
+	out := &schema.Table{Name: dt.Name, Grants: dt.Grants, Owner: dt.Owner, Comment: dt.Comment, DependsOn: dt.DependsOn,
+		RowLevelSecurity: dt.RowLevelSecurity, ForceRowLevelSecurity: dt.ForceRowLevelSecurity, Policies: dt.Policies, Data: dt.Data}
+	if dt.Foreign != nil {
+		out.Foreign = &schema.ForeignTable{}
+	}
+	if out.Data != nil && len(out.Data.Key) == 0 {
+		out.Data = &schema.TableData{Key: dt.DataKey(), Rows: dt.Data.Rows}
+	}
+	return out
+}
+
+// attributeOnly reports whether desired's declaration of kind (type,
+// function, procedure, aggregate, table, view or tsdictionary) with key k
+// manages an object that already exists instead of one pgy creates (see
+// resolveAttributeOnly). Such a declaration doesn't make pgy create its
+// schema: the extension that creates the object may create the schema too.
+func attributeOnly(desired *schema.Database, kind, k string) bool {
+	switch kind {
+	case "type":
+		td := desired.Types[k]
+		return td != nil && td.Kind == ""
+	case "function":
+		f := desired.Functions[k]
+		return f != nil && !f.HasBody()
+	case "procedure":
+		p := desired.Procedures[k]
+		return p != nil && !p.HasBody()
+	case "aggregate":
+		ag := desired.Aggregates[k]
+		return ag != nil && ag.AttributeOnly()
+	case "table":
+		dt := desired.Tables[k]
+		return dt != nil && dt.AttributeOnly()
+	case "view":
+		vw := desired.Views[k]
+		return vw != nil && strings.TrimSpace(vw.Query) == ""
+	case "tsdictionary":
+		td := desired.TSDictionaries[k]
+		return td != nil && td.AttributeOnly()
+	}
+	return false
 }
 
 // signatureArgs returns the parenthesized argument list of a routine

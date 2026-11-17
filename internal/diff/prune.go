@@ -50,7 +50,9 @@ type Options struct {
 // are considered, and extension members, partitions, inheritance children of
 // kept tables (see keptInheritanceChildren), inherited constraints,
 // triggers and indexes, constraint-backed indexes, primary keys, sequences
-// owned by a column and pgy's migrations table are never dropped.
+// owned by a column and pgy's migrations table are never dropped, nor is
+// anything on a relation an extension owns, a table declared without
+// columns or a view declared without a query.
 //
 // early holds the drops that must precede column drops (triggers,
 // constraints, indexes, views); late holds the drops of objects other
@@ -67,12 +69,12 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
+        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {
         vw := desired.Views[fq]
-        if vw == nil { continue }
+        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] { continue }
         if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
             early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
         }

@@ -186,6 +186,8 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		grant execute on function each(hstore) to "APP";
 		revoke usage on type citext from public;
 		grant usage on type hstore to "APP";
+		revoke execute on function min(citext) from public;
+		grant execute on function max(citext) to "APP";
 		create view slow as select queryid, calls from pg_stat_statements;
 		create function sha(x text) returns bytea language sql immutable return ext.digest(x, 'sha256');`)); err != nil {
 		t.Fatal(err)
@@ -201,6 +203,8 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		"view pg_stat_statements:\n    grants: {public: [insert, select]}\n",
 		"type citext:\n    revokePublic: true\n",
 		"type hstore:\n    grants: {" + app + ": [usage]}\n",
+		"aggregate min(citext):\n    revokePublic: true\n",
+		"aggregate max(citext):\n    grants: {" + app + ": [execute]}\n",
 	} {
 		if !strings.Contains(y, want) {
 			t.Errorf("missing %q in the pulled YAML:\n%s", want, y)
@@ -216,6 +220,308 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 		if got[object] != acl {
 			t.Errorf("%s: ACL %q was rebuilt as %q\n%s", object, acl, got[object], y)
 		}
+	}
+}
+
+func TestIntegrationExtensionTablesAndSequences(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_ext_member_tables")
+	if _, err := db.Exec(ctx, strings.NewReplacer("APP", app).Replace(`
+		create extension hstore schema public;
+		create table public.cfg (id integer primary key, name text check (name <> ''));
+		create sequence public.cfg_seq;
+		create rule cfg_keep as on delete to public.cfg do instead nothing;
+		alter extension hstore add table public.cfg;
+		alter extension hstore add sequence public.cfg_seq;
+		create index cfg_name on public.cfg (name);
+		grant select, insert on public.cfg to "APP";
+		grant usage on sequence public.cfg_seq to "APP";`)); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	res, err := pull.Build(live, pull.Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	for _, want := range []string{
+		"table cfg:\n    grants: {" + app + ": [insert, select]}\n",
+		"sequence cfg_seq:\n    grants: {" + app + ": [usage]}\n",
+	} {
+		if !strings.Contains(y, want) {
+			t.Errorf("missing %q in the pulled YAML:\n%s", want, y)
+		}
+	}
+	for _, w := range res.Warnings {
+		t.Errorf("unexpected pull warning: %s", w)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the pulled YAML must diff clean, without touching the table's columns, keys, rule or index:\n%s\n%s", sql, y)
+	}
+
+	changed := strings.NewReplacer("APP", app).Replace(`
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table cfg:
+    grants: {APP: [select]}
+    comment: settings
+  sequence cfg_seq:
+    grants: {APP: [usage, select]}
+`)
+	plan := planExtensionsLive(t, db, changed, opts)
+	sql := diff.Render(plan)
+	for _, want := range []string{
+		`revoke insert on table "public"."cfg" from "` + app + `";`,
+		`grant select on sequence "public"."cfg_seq" to "` + app + `";`,
+		`comment on table "public"."cfg" is 'settings';`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %q in:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "drop") || strings.Contains(sql, "alter table \"public\".\"cfg\" add") {
+		t.Errorf("an extension's table is never altered or pruned:\n%s", sql)
+	}
+	applyPlan(t, db, plan)
+	if sql := diff.Render(planExtensionsLive(t, db, changed, opts)); sql != "" {
+		t.Errorf("one migration must converge, got:\n%s", sql)
+	}
+}
+
+func TestIntegrationExtensionDictionaryOptions(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	src := freshDatabase(t, admin, "pgytest_ext_dict_options")
+	dst := freshDatabase(t, admin, "pgytest_ext_dict_options_copy")
+	if _, err := src.Exec(ctx, `
+		create extension dict_int schema public;
+		create extension dict_xsyn schema public;
+		create extension unaccent schema public;
+		alter text search dictionary intdict (maxlen = 4, rejectlong = true);
+		alter text search dictionary unaccent (rules = 'xsyn_sample');`); err != nil {
+		t.Fatal(err)
+	}
+	options := func(db *pgxpool.Pool) map[string]string {
+		rows, err := db.Query(ctx, `select dictname, coalesce(dictinitoption, '') from pg_ts_dict where dictname in ('intdict', 'xsyn', 'unaccent')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, opts string
+			if err := rows.Scan(&name, &opts); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = opts
+		}
+		return out
+	}
+	y := pullAndRebuild(t, src, dst)
+	if !strings.Contains(y, "text search dictionary intdict:\n    options:") || strings.Contains(y, "text search dictionary xsyn") || strings.Contains(y, "template") {
+		t.Errorf("the options of the extensions' dictionaries are pulled without a template, the ones without options left out:\n%s", y)
+	}
+	if want, got := options(src), options(dst); !reflect.DeepEqual(want, got) {
+		t.Errorf("rebuilt dictionary options %v, want %v\n%s", got, want, y)
+	}
+
+	fresh := freshDatabase(t, admin, "pgytest_ext_dict_options_fresh")
+	declared := `
+extensions:
+  - {name: dict_xsyn, schema: public}
+schema public:
+  text search dictionary xsyn:
+    options: {rules: xsyn_sample, keeporig: false, matchsynonyms: true}
+    comment: synonyms
+`
+	opts := diff.Options{Unsafe: true, Prune: true}
+	applyPlan(t, fresh, planExtensionsLive(t, fresh, declared, opts))
+	if sql := diff.Render(planExtensionsLive(t, fresh, declared, opts)); sql != "" {
+		t.Errorf("one migration must converge, got:\n%s", sql)
+	}
+	if got := options(fresh)["xsyn"]; !strings.Contains(got, "matchsynonyms = 'true'") {
+		t.Errorf("xsyn options after the migration: %q", got)
+	}
+}
+
+func TestIntegrationExtensionCommentNull(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	src := freshDatabase(t, admin, "pgytest_ext_comment_null")
+	dst := freshDatabase(t, admin, "pgytest_ext_comment_null_copy")
+	if _, err := src.Exec(ctx, `
+		create extension hstore schema public;
+		create extension citext schema public;
+		comment on extension hstore is null;
+		comment on extension citext is 'case-insensitive text';`); err != nil {
+		t.Fatal(err)
+	}
+	comments := func(db *pgxpool.Pool) map[string]string {
+		rows, err := db.Query(ctx, `select extname, coalesce(obj_description(oid, 'pg_extension'), '<null>') from pg_extension where extname in ('hstore', 'citext')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, c string
+			if err := rows.Scan(&name, &c); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = c
+		}
+		return out
+	}
+	y := pullAndRebuild(t, src, dst)
+	if !strings.Contains(y, "{name: hstore, ifNotExists: true, schema: public, comment: null}") {
+		t.Errorf("an extension without a comment is pulled with comment: null:\n%s", y)
+	}
+	if want, got := comments(src), comments(dst); !reflect.DeepEqual(want, got) || got["hstore"] != "<null>" {
+		t.Errorf("rebuilt extension comments %v, want %v", got, want)
+	}
+	if _, err := dst.Exec(ctx, `comment on extension hstore is 'added by hand'`); err != nil {
+		t.Fatal(err)
+	}
+	if sql := strings.TrimSpace(diff.Render(planExtensionsLive(t, dst, y, diff.Options{}))); sql != `comment on extension "hstore" is null;` {
+		t.Errorf("a comment added by hand is removed again, got:\n%s", sql)
+	}
+}
+
+func TestIntegrationExtensionSchema(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_ext_schema")
+	if _, err := db.Exec(ctx, strings.NewReplacer("APP", app).Replace(`
+		create extension hstore schema public;
+		create schema ext_objects;
+		grant usage on schema ext_objects to public;
+		comment on schema ext_objects is 'made by the extension';
+		alter extension hstore add schema ext_objects;
+		create schema ext_untouched;
+		alter extension hstore add schema ext_untouched;
+		revoke usage on schema ext_objects from public;
+		grant usage on schema ext_objects to "APP";`)); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	if !live.ExtensionMembers["schema:ext_objects"] || live.MemberExtension["schema:ext_objects"] != "hstore" {
+		t.Fatalf("ExtensionMembers lacks schema:ext_objects: %v", live.MemberExtension)
+	}
+	res, err := pull.Build(live, pull.Options{Single: true, Owners: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	if want := "schema ext_objects:\n  grants: {" + app + ": [usage], public: []}\n"; !strings.Contains(y, want) {
+		t.Errorf("want %q in the pulled YAML:\n%s", want, y)
+	}
+	if strings.Contains(y, "ext_untouched") || strings.Contains(y, "made by the extension") {
+		t.Errorf("an extension's schemas are not pulled as the application's:\n%s", y)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	if sql := diff.Render(planExtensionsLive(t, db, y, opts)); sql != "" {
+		t.Errorf("the pulled YAML must diff clean:\n%s", sql)
+	}
+	if _, err := db.Exec(ctx, `grant create on schema ext_objects to public`); err != nil {
+		t.Fatal(err)
+	}
+	if sql := strings.TrimSpace(diff.Render(planExtensionsLive(t, db, y, opts))); sql != `revoke create on schema "ext_objects" from public;` {
+		t.Errorf("drift on the extension's schema is repaired, got:\n%s", sql)
+	}
+}
+
+func TestIntegrationExtensionViewRulesNotPruned(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_ext_view_rules")
+	if _, err := db.Exec(context.Background(), `
+		create extension hstore schema public;
+		create table public.store (id integer);
+		create view public.cols as select id from public.store;
+		create rule cols_insert as on insert to public.cols do instead insert into public.store values (new.id);
+		alter extension hstore add view public.cols;
+		create view public.mine as select id from public.store;
+		create rule mine_delete as on delete to public.mine do instead nothing;
+		grant select on public.cols, public.mine to public;`); err != nil {
+		t.Fatal(err)
+	}
+	y := `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table store:
+    columns:
+      id: {type: integer, nullable: true}
+  view cols:
+    grants: {public: [select]}
+  view mine:
+    grants: {public: [select]}
+`
+	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+		t.Errorf("rules of an extension's view and of a view declared without a query are never pruned, got:\n%s", sql)
+	}
+}
+
+// TestIntegrationExtensionConfigTableRows makes a configuration table by
+// hand, as pg_extension_config_dump does from an extension's script, since
+// none of PostgreSQL's own extensions has one.
+func TestIntegrationExtensionConfigTableRows(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_config_rows")
+	if _, err := db.Exec(ctx, `
+		create extension hstore schema public;
+		create table public.cfg (id integer primary key, name text);
+		insert into public.cfg values (1, 'shipped'), (2, 'shipped'), (100, 'mine');
+		alter extension hstore add table public.cfg;
+		update pg_extension set extconfig = array['public.cfg'::regclass::oid], extcondition = array['WHERE id >= 100'] where extname = 'hstore';`); err != nil {
+		t.Fatal(err)
+	}
+	live := introspectAll(t, db)
+	if cond, ok := live.ExtensionConfig["public.cfg"]; !ok || cond != "WHERE id >= 100" {
+		t.Fatalf("ExtensionConfig = %v", live.ExtensionConfig)
+	}
+	rows, err := diff.TableRowsWhere(ctx, db, "public.cfg", false, live.ExtensionConfig["public.cfg"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := pull.Build(live, pull.Options{Single: true, Data: map[string][]map[string]any{"public.cfg": rows}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := string(res.Files[0].Content)
+	if want := "table cfg:\n    data:\n      key: [id]\n      rows:\n        - {id: 100, name: mine}\n"; !strings.Contains(y, want) {
+		t.Errorf("pull --data writes the rows pg_dump keeps, want %q in:\n%s", want, y)
+	}
+	opts := diff.Options{Unsafe: true, Prune: true}
+	planData := func(y string) string {
+		d, err := schema.LoadAndMerge([]string{writeYAML(t, y)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(diff.Render(diff.PlanWith(introspect(t, db, d), d, opts)))
+	}
+	if sql := planData(y); sql != "" {
+		t.Errorf("the pulled YAML must diff clean:\n%s", sql)
+	}
+
+	declared := `
+extensions:
+  - {name: hstore, schema: public}
+schema public:
+  table cfg:
+    data:
+      key: [id]
+      rows:
+        - {id: 101, name: added}
+`
+	sql := planData(declared)
+	if want := `insert into "public"."cfg" ("id", "name") values (101, 'added');` + "\n" + `delete from only "public"."cfg" where "id" = '100';`; sql != want {
+		t.Errorf("only the rows the condition selects are pruned, got:\n%s\nwant:\n%s", sql, want)
 	}
 }
 

@@ -179,6 +179,7 @@ func expandAllPrivileges(desired *schema.Database, version int) *schema.Database
 	out.Sequences = expandGrantsField(desired.Sequences, func(v *schema.Sequence) *map[string][]string { return &v.Grants }, set("sequence"))
 	out.Functions = expandGrantsField(desired.Functions, func(v *schema.Function) *map[string][]string { return &v.Grants }, set("routine"))
 	out.Procedures = expandGrantsField(desired.Procedures, func(v *schema.Procedure) *map[string][]string { return &v.Grants }, set("routine"))
+	out.Aggregates = expandGrantsField(desired.Aggregates, func(v *schema.Aggregate) *map[string][]string { return &v.Grants }, set("routine"))
 	out.Types = expandGrantsField(desired.Types, func(v *schema.TypeDef) *map[string][]string { return &v.Grants }, set("type"))
 	out.Domains = expandGrantsField(desired.Domains, func(v *schema.Domain) *map[string][]string { return &v.Grants }, set("type"))
 	out.Servers = expandGrantsField(desired.Servers, func(v *schema.Server) *map[string][]string { return &v.Grants }, set("server"))

@@ -19,7 +19,7 @@
               "schema": { "type": "string", "minLength": 1, "description": "Schema to install the extension's objects into (WITH SCHEMA). Created if missing, unless it is a system schema such as pg_catalog; a relocatable extension living elsewhere is moved with ALTER EXTENSION ... SET SCHEMA. Omitted = the schema of the extension's control file, or the first schema of the search_path." },
               "version": { "type": "string", "minLength": 1, "description": "Extension version (VERSION). A live extension on another version is updated with ALTER EXTENSION ... UPDATE TO when PostgreSQL has an update path to it." },
               "cascade": { "type": "boolean", "description": "CASCADE: also install extensions this one requires." },
-              "comment": { "type": "string", "description": "COMMENT ON EXTENSION, replacing the one its control file sets. Omitted = unmanaged." },
+              "comment": { "type": ["string", "null"], "description": "COMMENT ON EXTENSION, replacing the one its control file sets; null removes the comment (COMMENT ... IS NULL). Omitted = unmanaged." },
               "dependsOn": { "$ref": "#/definitions/stringList", "description": "extension <name> entries: extensions this one is created after." }
             },
             "required": ["name"],
@@ -375,11 +375,12 @@
       "additionalProperties": false
     },
     "table": {
+      "description": "Body of a `table <name>:` declaration. Without columns, of, partitionOf and inherits the declaration creates nothing: it manages the privileges, owner, comment, row level security, policies and rows of a table that already exists, such as one an extension owns, and its keys, indexes, constraints, triggers and storage are left alone.",
       "type": "object",
       "properties": {
         "data": {
           "type": "object",
-          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted; required on a table declared without columns).",
           "properties": {
             "key": { "$ref": "#/definitions/stringList" },
             "rows": { "type": "array", "items": { "type": "object" } }
@@ -486,7 +487,7 @@
       "properties": {
         "data": {
           "type": "object",
-          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted).",
+          "description": "Managed rows. Each row lists the columns it sets; rows are matched by key (the primary key when key is omitted; required on a table declared without columns).",
           "properties": {
             "key": { "$ref": "#/definitions/stringList" },
             "rows": { "type": "array", "items": { "type": "object" } }
@@ -1120,7 +1121,7 @@
       "additionalProperties": false
     },
     "sequence": {
-      "description": "Body of a `sequence <name>:` declaration.",
+      "description": "Body of a `sequence <name>:` declaration. Without options (as, increment, minValue, maxValue, start, cache, cycle, unlogged, ownedBy) the sequence is created with PostgreSQL's defaults when it doesn't exist, after the extensions, so the declaration can also manage the privileges, owner and comment of a sequence an extension owns.",
       "type": "object",
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
@@ -1160,15 +1161,15 @@
       "additionalProperties": false
     },
     "tsDictionary": {
-      "description": "Body of a `text search dictionary <name>:` declaration (create-only).",
+      "description": "Body of a `text search dictionary <name>:` declaration. Without template the declaration creates nothing: it manages the options, owner and comment of a dictionary that already exists, such as intdict, xsyn or unaccent, which their extensions create.",
       "type": "object",
       "properties": {
-        "template": { "type": "string", "minLength": 1, "description": "e.g. simple, snowball, ispell, synonym, thesaurus." },
-        "options": { "type": "object", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "template": { "type": "string", "minLength": 1, "description": "e.g. simple, snowball, ispell, synonym, thesaurus. A changed template is reported, since ALTER cannot change it." },
+        "options": { "type": "object", "description": "Options (ALTER TEXT SEARCH DICTIONARY), authoritative when present: options not listed are removed. Omitted = unmanaged.", "additionalProperties": { "$ref": "#/definitions/scalar" } },
+        "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
-      "required": ["template"],
       "additionalProperties": false
     },
     "identityOptions": {
@@ -1187,7 +1188,7 @@
       "additionalProperties": false
     },
     "aggregate": {
-      "description": "Body of an `aggregate <name>(args):` declaration (CREATE OR REPLACE AGGREGATE). Use (*) for count(*)-style aggregates.",
+      "description": "Body of an `aggregate <name>(args):` declaration (CREATE OR REPLACE AGGREGATE). Use (*) for count(*)-style aggregates. Without sfunc and stype the declaration creates nothing: it manages the privileges, owner and comment of an aggregate that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "sfunc": { "type": "string", "minLength": 1, "description": "State transition function." },
@@ -1213,9 +1214,16 @@
         "hypothetical": { "type": "boolean", "description": "HYPOTHETICAL: an ordered-set aggregate whose direct arguments are matched to the aggregated ones, as rank and dense_rank are (the args must use ORDER BY)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
-        "owner": { "type": "string" }
+        "owner": { "type": "string" },
+        "grants": { "$ref": "#/definitions/grants", "description": "Role -> privileges (execute), granted ON FUNCTION." },
+        "revokePublic": { "type": "boolean", "description": "Revoke PUBLIC's default EXECUTE." }
       },
-      "required": ["sfunc", "stype"],
+      "dependencies": {
+        "sfunc": ["stype"], "stype": ["sfunc"], "finalfunc": ["sfunc"], "combinefunc": ["sfunc"], "initcond": ["sfunc"], "parallel": ["sfunc"],
+        "sspace": ["sfunc"], "finalfuncExtra": ["sfunc"], "finalfuncModify": ["sfunc"], "serialfunc": ["sfunc"], "deserialfunc": ["sfunc"],
+        "msfunc": ["sfunc"], "minvfunc": ["sfunc"], "mstype": ["sfunc"], "msspace": ["sfunc"], "mfinalfunc": ["sfunc"], "mfinalfuncExtra": ["sfunc"],
+        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "hypothetical": ["sfunc"]
+      },
       "additionalProperties": false
     },
     "collation": {

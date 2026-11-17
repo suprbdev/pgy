@@ -172,6 +172,9 @@ func Database(d *schema.Database) []Issue {
 		}
 		obj := "table " + fq
 		checkDeps(d, obj, t.DependsOn, add)
+		if keys := t.DefinitionKeys(); len(keys) > 0 && !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil && (t.Foreign == nil || t.Foreign.Server == "") {
+			add(Warning, obj, "has %s but no columns, so it is created as a table without columns; without those keys a declaration without columns, of, partitionOf or inherits manages only a table that already exists, such as one an extension owns", strings.Join(keys, ", "))
+		}
 		hasCols := t.PartitionOf == "" && (len(t.Columns) > 0 || d.Types[t.Of] != nil)
 		colExists := func(c string) bool { return tableHasColumn(d, fq, c, 0) }
 		need := func(what string, cols []string) {
@@ -1155,6 +1158,13 @@ func tableHasColumn(d *schema.Database, fq, c string, depth int) bool {
 func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity, string, string, ...any)) {
 	obj := "table " + fq
 	key := t.DataKey()
+	if t.AttributeOnly() {
+		if len(t.Data.Key) == 0 {
+			add(Error, obj, "data needs data.key on a table declared without columns")
+		}
+		checkDataKeys(obj, key, t.Data.Rows, add)
+		return
+	}
 	if len(key) == 0 {
 		add(Error, obj, "data needs a key: declare data.key or a primary key")
 		return
@@ -1169,8 +1179,23 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 	if len(t.Data.Key) > 0 && !uniqueOn(t, key) {
 		add(Warning, obj, "data key (%s) is not the primary key or a unique constraint; rows cannot be upserted, and duplicates are not prevented", strings.Join(key, ", "))
 	}
-	seen := map[string]int{}
+	checkDataKeys(obj, key, t.Data.Rows, add)
 	for i, row := range t.Data.Rows {
+		for _, col := range sortedKeys(row) {
+			if !tableHasColumn(d, fq, col, 0) {
+				add(Error, obj, "data row %d sets undeclared column %s", i+1, col)
+			} else if c := t.Columns[col]; c != nil && c.Generated != "" {
+				add(Error, obj, "data row %d sets generated column %s", i+1, col)
+			}
+		}
+	}
+}
+
+// checkDataKeys checks that each data row has a value for every key column
+// and that no two rows have the same key.
+func checkDataKeys(obj string, key []string, rows []map[string]any, add func(Severity, string, string, ...any)) {
+	seen := map[string]int{}
+	for i, row := range rows {
 		parts := []string{}
 		for _, k := range key {
 			v, ok := row[k]
@@ -1184,13 +1209,6 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 			add(Error, obj, "data rows %d and %d have the same key", prev, i+1)
 		}
 		seen[id] = i + 1
-		for _, col := range sortedKeys(row) {
-			if !tableHasColumn(d, fq, col, 0) {
-				add(Error, obj, "data row %d sets undeclared column %s", i+1, col)
-			} else if c := t.Columns[col]; c != nil && c.Generated != "" {
-				add(Error, obj, "data row %d sets generated column %s", i+1, col)
-			}
-		}
 	}
 }
 
@@ -1282,6 +1300,11 @@ func checkOwnerGrants(d *schema.Database, add func(Severity, string, string, ...
 	for _, k := range sortedKeys(d.Procedures) {
 		if p := d.Procedures[k]; p != nil {
 			check("procedure "+k, p.Owner, p.Grants)
+		}
+	}
+	for _, k := range sortedKeys(d.Aggregates) {
+		if ag := d.Aggregates[k]; ag != nil {
+			check("aggregate "+k, ag.Owner, ag.Grants)
 		}
 	}
 	for _, s := range sortedKeys(d.SchemaGrants) {

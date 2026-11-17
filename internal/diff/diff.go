@@ -171,7 +171,8 @@ type Live struct{
     CompositeComments map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name",
-    // "proc:<normalized signature>", "language:name" and "fdw:name".
+    // "proc:<normalized signature>", "language:name", "fdw:name" and
+    // "schema:name".
     ExtensionMembers map[string]bool
     // MemberExtension: ExtensionMembers key -> the name of the extension
     // the object belongs to.
@@ -186,6 +187,10 @@ type Live struct{
     // creates; a type declaration without a kind manages their owner,
     // privileges and comment.
     BaseTypes map[string]bool
+    // ExtensionConfig: the configuration tables of extensions
+    // (pg_extension.extconfig), "schema.table" -> the WHERE clause that
+    // selects the rows pg_dump keeps (extcondition), "" for all of them.
+    ExtensionConfig map[string]string
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
@@ -727,6 +732,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         InitPrivs: map[string]map[string]map[string]bool{},
         BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
+        ExtensionConfig: map[string]string{},
     }
     batch := &queryBatch{}
     
@@ -2282,6 +2288,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
+        from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(ownerQ, func(ownerRows pgx.Rows) error {
         for ownerRows.Next() {
@@ -2381,6 +2391,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'fdw:' || w.fdwname, d.refobjid
         from pg_depend d join pg_foreign_data_wrapper w on w.oid = d.objid
         where d.deptype = 'e' and d.classid = 'pg_foreign_data_wrapper'::regclass
+        union all
+        select 'schema:' || n.nspname, d.refobjid
+        from pg_depend d join pg_namespace n on n.oid = d.objid
+        where d.deptype = 'e' and d.classid = 'pg_namespace'::regclass
         ) m(key, extension)
         join pg_extension x on x.oid = m.extension
     `
@@ -2397,6 +2411,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
     batch.add(initPrivsQ, l.scanInitPrivs)
+    batch.add(extensionConfigQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var table, condition string
+            if err := rows.Scan(&table, &condition); err != nil { return err }
+            l.ExtensionConfig[table] = condition
+        }
+        return nil
+    })
 
     ownedQ := `
         select n.nspname || '.' || s.relname
@@ -2894,16 +2916,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
-    for k, td := range desired.Types {
-        if td != nil && td.Kind == "" { continue }
+    for k := range desired.Types {
+        if attributeOnly(desired, "type", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k, f := range desired.Functions {
-        if f != nil && !f.HasBody() { continue }
+    for k := range desired.Functions {
+        if attributeOnly(desired, "function", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2911,10 +2933,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Aggregates {
+        if attributeOnly(desired, "aggregate", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
-    for k, p := range desired.Procedures {
-        if p != nil && !p.HasBody() { continue }
+    for k := range desired.Procedures {
+        if attributeOnly(desired, "procedure", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2922,14 +2945,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Tables {
+        if attributeOnly(desired, "table", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k, vw := range desired.Views {
-        if vw != nil && strings.TrimSpace(vw.Query) == "" { continue }
+    for k := range desired.Views {
+        if attributeOnly(desired, "view", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2956,6 +2980,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     for _, keys := range [][]string{sortedKeys(desired.Collations), sortedKeys(desired.TSConfigs), sortedKeys(desired.TSDictionaries)} {
         for _, k := range keys {
+            if attributeOnly(desired, "tsdictionary", k) { continue }
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
         }
     }
@@ -3173,11 +3198,19 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
-            if td == nil || td.Template == "" { continue }
+            if td == nil { continue }
             if live.TSDictionaries[e.Key] {
                 stmts, warn := tsDictionaryAlterStmts(e.Key, td, live.TSDictionaryDefs[e.Key])
                 plan.Alters = append(plan.Alters, stmts...)
                 if warn != "" { plan.Warnings = append(plan.Warnings, Warning{Message: warn}) }
+                continue
+            }
+            if td.AttributeOnly() {
+                if len(td.Options) > 0 {
+                    opts := []string{}
+                    for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
+                }
                 continue
             }
             opts := []string{"template = " + td.Template}
@@ -3257,7 +3290,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         case "table":
             // Handle tables in dependency order
             dt, ok := desired.Tables[e.Key]
-            if !ok || dt == nil { continue }
+            if !ok || dt == nil || dt.AttributeOnly() { continue }
             fq := e.Key
             lt := live.Tables[fq]
             if lt == nil {
@@ -4988,7 +5021,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
 func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
     if ld == nil { return nil, "" }
     warn := ""
-    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !tsTemplatesEqual(t, ld.Template) {
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !td.AttributeOnly() && !tsTemplatesEqual(t, ld.Template) {
         warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
     }
     if td.Options == nil { return nil, warn }
@@ -5396,6 +5429,9 @@ func planOwners(live *Live, desired *schema.Database) []string {
             owner("procedure", pqIdent(name)+grantFuncArgs(p.ArgsSig), p.Owner, "proc:"+normalizeFunctionSignature(name+p.ArgsSig))
         }
     }
+    for _, k := range sortedKeys(desired.TSDictionaries) {
+        if td := desired.TSDictionaries[k]; td != nil { owner("text search dictionary", pqIdent(k), td.Owner, "tsdict:"+k) }
+    }
     return out
 }
 
@@ -5519,7 +5555,10 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
         desiredG := resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser)
-        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
+        liveG := live.SchemaGrants[s]
+        if !live.Schemas[s] { liveG = pendingGrants(liveG, desiredG) }
+        liveG = member("schema:"+s, "", liveG, desiredG)
+        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, liveG, objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -5531,8 +5570,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         var revoked map[string]map[string]bool
         if dt.Grants != nil {
             liveG := live.TableGrants[k]
-            if live.Tables[k] == nil { liveG = created(k, "tables") }
             desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
+            if live.Tables[k] == nil {
+                liveG = created(k, "tables")
+                if dt.AttributeOnly() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
@@ -5551,8 +5593,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
             liveG := live.TableGrants[k]
-            if !live.Sequences[k] { liveG = created(k, "sequences") }
             desiredG := resolveGrantRoles(sq.Grants, live.CurrentUser)
+            if !live.Sequences[k] {
+                liveG = created(k, "sequences")
+                if !sq.DeclaresOptions() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("sequence "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, sq.Owner), covers(true, desiredG)))
         }
@@ -5652,7 +5697,43 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
         }
     }
+
+    for _, k := range sortedKeys(desired.Aggregates) {
+        ag := desired.Aggregates[k]
+        if ag == nil { continue }
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + aggregateArgs(ag.ArgsSig))
+        target := "function " + pqIdent(name) + aggregateGrantArgs(ag.ArgsSig)
+        desiredG := resolveGrantRoles(ag.Grants, live.CurrentUser)
+        exists := live.AggregateDefs[norm] != nil
+        defaultExec := !exists || live.FunctionPublicExec[norm]
+        if ag.RevokePublic && (ag.Grants == nil || !covers(false, desiredG)) && defaultExec {
+            revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
+        }
+        if ag.Grants != nil {
+            liveG := withPublicDefault(live.FunctionGrants[norm], "execute", defaultExec)
+            if !exists {
+                liveG = withPublicDefault(created(name, "functions"), "execute", true)
+                if ag.AttributeOnly() { liveG = pendingGrants(created(name, "functions"), desiredG) }
+            }
+            liveG = member("proc:"+norm, "execute", liveG, desiredG)
+            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), covers(false, desiredG)))
+        }
+    }
     return append(revokes, grants...), warns
+}
+
+// aggregateGrantArgs returns the argument types of an aggregate declared
+// with args as GRANT ... ON FUNCTION takes them: (*) as (), and the direct
+// and aggregated arguments of an ordered-set aggregate as one list.
+func aggregateGrantArgs(args string) string {
+    inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(aggregateArgs(args)), "("), ")"))
+    if loc := orderByRe.FindStringIndex(inner); loc != nil {
+        direct, aggregated := strings.TrimSpace(inner[:loc[0]]), strings.TrimSpace(inner[loc[1]:])
+        inner = aggregated
+        if direct != "" { inner = direct + ", " + aggregated }
+    }
+    return grantFuncArgs("(" + inner + ")")
 }
 
 // withPublicDefault returns liveG with PUBLIC holding priv when present
