@@ -301,6 +301,11 @@ type LiveExtension struct {
     // IntrospectExtensions loads them for an extension that has to move.
     Members   map[string]bool
     Operators map[string]bool
+    // Dependents lists the objects outside the extension that use its
+    // members, which DROP EXTENSION without CASCADE refuses to leave
+    // behind. It is nil until IntrospectExtensions loads it for an
+    // extension that pruning may drop.
+    Dependents []ExtensionDependent
 }
 
 // AvailableExtension is an extension the server can install: its default
@@ -3237,6 +3242,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
         plan.Drops = append(plan.Drops, serverDrops...)
         plan.Warnings = append(plan.Warnings, serverWarnings...)
+        planExtensionDrops(plan, live, desired, opts)
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)

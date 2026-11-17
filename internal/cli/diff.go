@@ -57,7 +57,7 @@ Exit codes:
                 return fmt.Errorf("--strict refuses --unsafe and --prune (set ci.forbid_unsafe: false in the config to allow them)")
             }
             strict := &strictFindings{}
-            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants}
+            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants, KeepExtensions: cfg.KeepExtensions}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err
@@ -127,7 +127,7 @@ Exit codes:
                 return err
             }
             if pool != nil {
-                if err := diff.IntrospectExtensions(ctx, pool, live, compiled); err != nil {
+                if err := diff.IntrospectExtensions(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }
                 if err := diff.IntrospectData(ctx, pool, live, compiled); err != nil {
@@ -228,7 +228,7 @@ Exit codes:
         },
     }
     c.Flags().BoolVar(&unsafe, "unsafe", false, "Allow destructive changes (drops/alters)")
-    c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in. Run it with ALL schema files: objects declared only in files left out are dropped")
+    c.Flags().BoolVar(&prune, "prune", false, "With --unsafe: drop tables, views, functions, types, sequences, indexes, constraints and triggers that the YAML no longer declares, in every schema it declares objects in, and the extensions there that a present extensions block does not list (except those in the config's prune.keep_extensions). Run it with ALL schema files: objects declared only in files left out are dropped")
     c.Flags().BoolVar(&jsonOut, "json", false, "Output machine-readable diff summary")
     c.Flags().BoolVar(&noWarnings, "no-warnings", false, "Do not report schema problems or statements that lock or rewrite existing tables")
     c.Flags().BoolVar(&fromEmpty, "from-empty", false, "Generate diff from an empty database (no DSN required)")

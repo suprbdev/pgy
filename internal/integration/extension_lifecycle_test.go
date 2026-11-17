@@ -25,7 +25,7 @@ func planExtensionsLive(t *testing.T, pool *pgxpool.Pool, y string, opts diff.Op
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := diff.IntrospectExtensions(ctx, pool, live, d); err != nil {
+	if err := diff.IntrospectExtensions(ctx, pool, live, d, opts); err != nil {
 		t.Fatal(err)
 	}
 	if err := diff.ProbeViews(ctx, pool, live, d); err != nil {

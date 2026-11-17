@@ -18,7 +18,8 @@ type Warning struct {
     // Kind classifies the warning for --strict: lock (a statement locks or
     // rewrites a table), public_revoke (a grants block revokes PUBLIC's
     // privileges), dependents (a type change is blocked by objects pgy
-    // can't recreate), or "" for the rest.
+    // can't recreate, or an extension is kept because objects still use
+    // it), or "" for the rest.
     Kind      string `json:"kind,omitempty"`
 }
 

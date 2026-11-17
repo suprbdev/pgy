@@ -16,6 +16,9 @@ import (
 // Minimal schema model: schemas -> tables -> columns
 type Database struct {
     Tables map[string]*Table `yaml:"tables"`
+    // Extensions is nil when the YAML has no extensions block (installed
+    // extensions are never dropped) and authoritative for pruning when
+    // present, even when empty.
     Extensions []*Extension `yaml:"extensions"`
     Types map[string]*TypeDef `yaml:"-"`
     Functions map[string]*Function `yaml:"-"`
@@ -777,6 +780,7 @@ func Merge(dbs []*Database) *Database {
             }
         }
         // merge extensions (dedupe by name; first declaration wins)
+        if d.Extensions != nil && merged.Extensions == nil { merged.Extensions = []*Extension{} }
         for _, ext := range d.Extensions {
             if ext == nil { continue }
             dup := false
@@ -927,6 +931,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     out.TSConfigs = map[string]*TSConfig{}
     // extensions top-level
     if extsRaw, ok := root["extensions"]; ok {
+        out.Extensions = []*Extension{}
         if arr, ok := extsRaw.([]any); ok {
             for _, it := range arr {
                 switch v := it.(type) {
