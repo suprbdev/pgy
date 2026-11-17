@@ -103,11 +103,13 @@ type View struct {
     With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
     WithOrder       []string          // materialized views: order of the With keys in the YAML (filled from node tree)
     Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
+    AccessMethod    string            // materialized views: USING table access method; "" = unmanaged
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
     ColumnDefaults  map[string]string // plain views: column -> DEFAULT expression, used by inserts through the view
+    ColumnGrants    map[string]map[string][]string // view column -> role -> column privileges; a column not listed is unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -300,6 +302,10 @@ type TSDictionary struct {
     Name      string
     Template  string
     Options   map[string]string
+    // OptionOrder is the order of the Options keys: as the YAML lists them
+    // (filled from node tree), or as PostgreSQL stores them for a live
+    // dictionary.
+    OptionOrder []string `yaml:"-"`
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
     Owner     string // "" = unmanaged
@@ -484,7 +490,31 @@ type Table struct {
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
     WithOrder   []string          `yaml:"-"` // order of the With keys in the YAML (filled from node tree)
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
+    AccessMethod string           `yaml:"-"` // USING: table access method; "" = unmanaged
+    Validate    string            `yaml:"-"` // how check constraints, foreign keys and NOT NULL added to the existing table are validated: ValidateImmediate or ValidateLater; "" = ValidateLater
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
+}
+
+// Values of the validate key of tables, check constraints, foreign keys and
+// columns: how a constraint added to a table that already exists is
+// validated.
+const (
+    // ValidateLater adds the constraint NOT VALID and validates it in the
+    // no-transaction migration, which doesn't block writes. The default.
+    ValidateLater = "later"
+    // ValidateImmediate adds the constraint validated in one step, which
+    // checks the existing rows under the stronger lock of ADD CONSTRAINT
+    // (SET NOT NULL for a column), for tables that refuse VALIDATE
+    // CONSTRAINT.
+    ValidateImmediate = "immediate"
+)
+
+// ValidatesImmediately reports whether a constraint with validate value own
+// on table t is added validated in one step: own, or else t's validate, is
+// ValidateImmediate.
+func ValidatesImmediately(t *Table, own string) bool {
+    if own == "" && t != nil { own = t.Validate }
+    return own == ValidateImmediate
 }
 
 // AttributeOnly reports whether t declares nothing that defines a table:
@@ -509,7 +539,7 @@ func (t *Table) DefinitionKeys() []string {
         {"primaryKey", len(t.PrimaryKey) > 0}, {"indexes", len(t.Indexes) > 0}, {"foreignKeys", len(t.ForeignKeys) > 0},
         {"constraints", len(t.Constraints) > 0}, {"triggers", len(t.Triggers) > 0}, {"rules", len(t.Rules) > 0},
         {"statistics", len(t.Statistics) > 0}, {"partitionBy", t.PartitionBy != nil}, {"forValues", t.Partition != nil},
-        {"unlogged", t.Unlogged != nil}, {"with", t.With != nil}, {"tablespace", t.Tablespace != ""},
+        {"unlogged", t.Unlogged != nil}, {"with", t.With != nil}, {"tablespace", t.Tablespace != ""}, {"accessMethod", t.AccessMethod != ""},
         {"replicaIdentity", t.ReplicaIdentity != ""}, {"clusterOn", t.ClusterOn != ""}, {"renamedFrom", t.RenamedFrom != ""},
     } {
         if k.set { out = append(out, k.key) }
@@ -560,6 +590,7 @@ type Constraint struct {
     InitiallyDeferred bool     // unique/exclude; implies Deferrable
     NoInherit         bool     // check: NO INHERIT
     NotValid          bool     // check: added NOT VALID (existing rows not checked)
+    Validate          string   // check: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotEnforced       bool     // check: NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string   // empty means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -578,6 +609,7 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    Validate string `yaml:"validate"` // NOT NULL on an existing column: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
@@ -622,6 +654,7 @@ type ForeignKey struct {
     Deferrable        bool
     InitiallyDeferred bool   // implies Deferrable
     NotValid          bool   // added NOT VALID (existing rows not checked)
+    Validate          string // ValidateImmediate or ValidateLater; "" = the table's Validate
     NotEnforced       bool   // NOT ENFORCED (PostgreSQL 18+); yaml `enforced: false`
     Comment           string // empty means unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -648,6 +681,7 @@ type Trigger struct {
 // expressions.
 type Statistic struct {
     Name    string
+    Schema  string // the schema the object is in; "" = its table's
     Kinds   []string
     Columns []string
     Comment string
@@ -726,6 +760,7 @@ type Function struct {
     Cost *float64   // nil = unmanaged
     Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body string
     // BodySet reports a body key in the YAML, so that an empty body can be
     // told from a declaration without one (which manages only attributes).
@@ -801,6 +836,7 @@ type Procedure struct {
     Language string
     Security string // definer/invoker
     Set      map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body     string
     BodySet  bool `yaml:"-"` // a body key is present; see Function.BodySet
     Transform []string // TRANSFORM FOR TYPE types; see Function.Transform
@@ -944,6 +980,12 @@ func Merge(dbs []*Database) *Database {
                 }
                 if t.Tablespace != "" {
                     existing.Tablespace = t.Tablespace
+                }
+                if t.AccessMethod != "" {
+                    existing.AccessMethod = t.AccessMethod
+                }
+                if t.Validate != "" {
+                    existing.Validate = t.Validate
                 }
                 if t.Foreign != nil {
                     existing.Foreign = t.Foreign
@@ -1602,6 +1644,7 @@ func parseColumnSpec(spec any) *Column {
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
@@ -1980,6 +2023,7 @@ func parseForeignKeys(v any) []*ForeignKey {
                 if b, ok := dm["deferrable"].(bool); ok { fk.Deferrable = b }
                 if b, ok := dm["initiallyDeferred"].(bool); ok { fk.InitiallyDeferred = b }
                 if b, ok := dm["notValid"].(bool); ok { fk.NotValid = b }
+                if v, ok := dm["validate"].(string); ok { fk.Validate = strings.ToLower(strings.TrimSpace(v)) }
                 if b, ok := dm["enforced"].(bool); ok { fk.NotEnforced = !b }
                 if cm, ok := dm["comment"].(string); ok { fk.Comment = cm }
             }
@@ -2035,6 +2079,7 @@ func parseStatistics(v any) []*Statistic {
                 for _, kind := range parseStringListFromNode(k) { st.Kinds = append(st.Kinds, strings.ToLower(strings.TrimSpace(kind))) }
             }
             if c, ok := dm["columns"]; ok { st.Columns = parseStringListFromNode(c) }
+            if s, ok := dm["schema"].(string); ok { st.Schema = strings.TrimSpace(s) }
             if s, ok := dm["comment"].(string); ok { st.Comment = s }
             if n, ok := dm["statisticsTarget"].(int); ok { st.StatisticsTarget = &n }
         }
@@ -2100,6 +2145,7 @@ func parseConstraints(v any) []*Constraint {
                 if b, ok := dm["initiallyDeferred"].(bool); ok { c.InitiallyDeferred = b }
                 if b, ok := dm["noInherit"].(bool); ok { c.NoInherit = b }
                 if b, ok := dm["notValid"].(bool); ok { c.NotValid = b }
+                if v, ok := dm["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
                 if b, ok := dm["enforced"].(bool); ok { c.NotEnforced = !b }
                 if cm, ok := dm["comment"].(string); ok { c.Comment = cm }
             }
@@ -2112,11 +2158,13 @@ func parseConstraints(v any) []*Constraint {
 
 // parseTablePartitioning fills partitioning properties from a table's YAML map:
 // `partitionBy` (parent), `partitionOf` + `forValues`/`default` (child).
-// parseTableStorage fills a table's unlogged flag and `with` storage
-// parameters from its YAML map.
+// parseTableStorage fills a table's unlogged flag, tablespace, access method,
+// `with` storage parameters and validate mode from its YAML map.
 func parseTableStorage(t *Table, m map[string]any) {
     if b, ok := m["unlogged"].(bool); ok { t.Unlogged = &b }
     if ts, ok := m["tablespace"].(string); ok { t.Tablespace = strings.TrimSpace(ts) }
+    if am, ok := m["accessMethod"].(string); ok { t.AccessMethod = strings.TrimSpace(am) }
+    if v, ok := m["validate"].(string); ok { t.Validate = strings.ToLower(strings.TrimSpace(v)) }
     if w, ok := m["with"].(map[string]any); ok {
         t.With = map[string]string{}
         for k, v := range w { t.With[k] = scalarToString(v) }
@@ -2943,6 +2991,7 @@ func parseView(schemaName, key string, body any) *View {
     if co, ok := m["checkOption"].(string); ok { vw.CheckOption = strings.ToLower(strings.TrimSpace(co)) }
     if b, ok := m["withData"].(bool); ok { vw.WithData = &b }
     if ts, ok := m["tablespace"].(string); ok { vw.Tablespace = strings.TrimSpace(ts) }
+    if am, ok := m["accessMethod"].(string); ok { vw.AccessMethod = strings.TrimSpace(am) }
     if w, ok := m["with"].(map[string]any); ok {
         vw.With = map[string]string{}
         for k, v := range w { vw.With[k] = scalarToString(v) }
@@ -2960,6 +3009,12 @@ func parseView(schemaName, key string, body any) *View {
         vw.ColumnDefaults = map[string]string{}
         for col, v := range cd {
             if s := defaultToString(v); s != "" { vw.ColumnDefaults[col] = s }
+        }
+    }
+    if cg, ok := m["columnGrants"].(map[string]any); ok {
+        vw.ColumnGrants = map[string]map[string][]string{}
+        for col, v := range cg {
+            if g := parseGrants(v); g != nil { vw.ColumnGrants[col] = g }
         }
     }
     return vw

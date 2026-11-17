@@ -90,7 +90,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 	warn := func(format string, args ...any) {
 		plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})
 	}
-	pending := membersPending(live, plan.Creates)
+	pending := membersPending(live, append(append([]string{}, plan.ExtensionUpdates...), plan.Creates...))
 	allRevokes, allGrants, guarded := []string{}, []string{}, []string{}
 	for _, name := range sortedKeys(desired.Languages) {
 		l := desired.Languages[name]

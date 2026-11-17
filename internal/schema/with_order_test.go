@@ -53,3 +53,38 @@ schema app:
 		}
 	}
 }
+
+func TestOptionAndSettingOrderParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  text search dictionary "My Dict":
+    template: simple
+    options: {stopwords: english, accept: false}
+  function f(a int, b text):
+    returns: int
+    language: sql
+    set: {work_mem: 1MB, search_path: "app, public", Statement_Timeout: 5s}
+    body: select 1
+  function g():
+    returns: int
+    language: sql
+    body: select 1
+  procedure p():
+    language: sql
+    set: {statement_timeout: 5s, lock_timeout: 1s}
+    body: select 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for what, c := range map[string]struct{ got, want []string }{
+		"dictionary":           {db.TSDictionaries["app.My Dict"].OptionOrder, []string{"stopwords", "accept"}},
+		"function":             {db.Functions["app.f(a int, b text)"].SetOrder, []string{"work_mem", "search_path", "Statement_Timeout"}},
+		"function without set": {db.Functions["app.g()"].SetOrder, nil},
+		"procedure":            {db.Procedures["app.p()"].SetOrder, []string{"statement_timeout", "lock_timeout"}},
+	} {
+		if !reflect.DeepEqual(c.got, c.want) {
+			t.Errorf("%s: order %v, want %v", what, c.got, c.want)
+		}
+	}
+}

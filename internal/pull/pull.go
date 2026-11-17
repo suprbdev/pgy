@@ -143,6 +143,15 @@ func (b *builder) warn(format string, args ...any) {
 	b.res.Warnings = append(b.res.Warnings, fmt.Sprintf(format, args...))
 }
 
+// accessMethod writes the access method of a table or materialized view
+// unless it is the session's default_table_access_method, which CREATE
+// TABLE without USING picks.
+func (b *builder) accessMethod(m *node, lt *diff.LiveTable) {
+	if lt.AccessMethod != "" && lt.AccessMethod != b.live.DefaultAccessMethod {
+		add(m, "accessMethod", str(lt.AccessMethod))
+	}
+}
+
 func (b *builder) wantSchema(s string) bool {
 	if slices.Contains(b.opts.ExcludeSchemas, s) {
 		return false
@@ -695,7 +704,7 @@ func (b *builder) textSearch() {
 			continue
 		}
 		opts := flowMap()
-		for _, o := range sortedKeys(td.Options) {
+		for _, o := range inOrder(td.Options, td.OptionOrder) {
 			add(opts, o, str(td.Options[o]))
 		}
 		m := newMap()
@@ -890,7 +899,7 @@ func (b *builder) routines() {
 			if lp.Security == "definer" {
 				add(m, "security", str("definer"))
 			}
-			addSet(m, lp.Config, lp.Security == "definer")
+			addSet(m, lp.Config, lp.ConfigOrder, lp.Security == "definer")
 			add(m, "body", routineBody(lp.Body, lp.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(dependencies(deps)))
@@ -924,7 +933,7 @@ func (b *builder) routines() {
 			if lf.Rows != 0 && lf.Rows != 1000 {
 				add(m, "rows", floatNum(lf.Rows))
 			}
-			addSet(m, lf.Config, lf.Security == "definer")
+			addSet(m, lf.Config, lf.ConfigOrder, lf.Security == "definer")
 			add(m, "body", routineBody(lf.Body, lf.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(dependencies(deps)))
@@ -1043,19 +1052,33 @@ func kindOf(r *diff.LiveRoutine) string {
 	return "function"
 }
 
-// addSet writes a routine's settings. A SECURITY DEFINER routine without
-// any gets an empty map, so that one set on it later, such as a
-// search_path, is noticed and reset; elsewhere the key is left out and the
-// routine's settings are unmanaged.
-func addSet(m *node, config map[string]string, definer bool) {
+// addSet writes a routine's settings, those named in order first and in
+// that order. A SECURITY DEFINER routine without any gets an empty map, so
+// that one set on it later, such as a search_path, is noticed and reset;
+// elsewhere the key is left out and the routine's settings are unmanaged.
+func addSet(m *node, config map[string]string, order []string, definer bool) {
 	if len(config) == 0 && !definer {
 		return
 	}
 	set := newMap()
-	for _, k := range sortedKeys(config) {
+	for _, k := range inOrder(config, order) {
 		add(set, k, setting(k, config[k]))
 	}
 	add(m, "set", set)
+}
+
+// inOrder returns the keys of m, those named in order first and in that
+// order, then the others sorted.
+func inOrder(m map[string]string, order []string) []string {
+	out := make([]string, 0, len(m))
+	seen := map[string]bool{}
+	for _, k := range append(append([]string{}, order...), sortedKeys(m)...) {
+		if _, ok := m[k]; ok && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // setting is the YAML value of a stored setting of the parameter name. A
@@ -1135,13 +1158,14 @@ func (b *builder) tables() {
 		}
 		if lt.Foreign == nil {
 			addStr(t, "tablespace", lt.Tablespace)
+			b.accessMethod(t, lt)
 		}
 		b.data(t, fq, lt)
 		b.indexes(t, fq, lt)
 		b.constraints(t, fq, lt)
 		b.triggers(t, fq, lt)
 		b.rules(t, lt)
-		b.statistics(t, lt)
+		b.statistics(t, fq, lt)
 		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" && lt.Foreign == nil {
 			add(t, "replicaIdentity", str(ri))
 		}
@@ -1846,14 +1870,30 @@ func jsonNode(v any) *node {
 	return str(fmt.Sprint(v))
 }
 
-func (b *builder) statistics(t *node, lt *diff.LiveTable) {
+// statistics writes the extended statistics of table fq, with the schema of
+// those in another schema than the table's.
+func (b *builder) statistics(t *node, fq string, lt *diff.LiveTable) {
 	if len(lt.Statistics) == 0 {
 		return
 	}
 	sts := newMap()
-	for _, name := range sortedKeys(lt.Statistics) {
-		ls := lt.Statistics[name]
+	written := map[string]bool{}
+	keys := sortedKeys(lt.Statistics)
+	sort.SliceStable(keys, func(i, j int) bool { return lt.Statistics[keys[i]].Schema == "" && lt.Statistics[keys[j]].Schema != "" })
+	for _, key := range keys {
+		ls, name := lt.Statistics[key], key
+		if ls.Schema != "" {
+			name = ls.Name
+		}
+		if written[name] {
+			b.warn("table %s: statistics %s.%s was left out: the table has another statistics object named %s, and the YAML names a table's statistics objects by name alone", fq, ls.Schema, name, name)
+			continue
+		}
+		written[name] = true
 		m := newMap()
+		if ls.Schema != "" {
+			add(m, "schema", str(ls.Schema))
+		}
 		if len(ls.Kinds) > 0 && len(ls.Kinds) < 3 {
 			add(m, "kinds", list(ls.Kinds))
 		}
@@ -2045,6 +2085,7 @@ func (b *builder) views() {
 					add(m, "with", storageParams(lt.Options, lt.OptionOrder))
 				}
 				addStr(m, "tablespace", lt.Tablespace)
+				b.accessMethod(m, lt)
 				b.indexes(m, k, lt)
 			}
 		} else {
@@ -2063,6 +2104,17 @@ func (b *builder) views() {
 		}
 		if g := b.grantsFor(b.live.TableGrants[k], k, "tables"); g != nil {
 			add(m, "grants", g)
+		}
+		if cg := b.live.ColumnGrants[k]; len(cg) > 0 {
+			gm := newMap()
+			for _, col := range sortedKeys(cg) {
+				if g := grantsNode(cg[col]); g != nil {
+					add(gm, col, g)
+				}
+			}
+			if len(gm.Content) > 0 {
+				add(m, "columnGrants", gm)
+			}
 		}
 		addStr(m, "comment", b.live.RelComments[k])
 		if cc := b.live.ViewColumnComments[k]; len(cc) > 0 {

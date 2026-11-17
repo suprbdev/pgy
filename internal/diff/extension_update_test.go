@@ -399,3 +399,48 @@ func TestColumnTypeChangeViewRecreatedForItsColumns(t *testing.T) {
 		`create or replace view "app"."v" as select b from app.t;`,
 	})
 }
+
+func TestExtensionUpdateRunsInASessionOfItsOwn(t *testing.T) {
+	live := extensionUpdateLive(UpdateDependent{Kind: "matview", Name: "app.agg"}, UpdateDependent{Kind: "view", Name: "app.kept"})
+	d := extensionUpdateDesired(nil)
+	d.Tables = map[string]*schema.Table{"app.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}}}
+	p := Plan(live, d, true)
+	wantStatements(t, p.ExtensionUpdates, []string{updateToOneTen})
+	for _, s := range p.Creates {
+		if strings.Contains(s, "alter extension") {
+			t.Errorf("the update runs before the rest of the plan, not in it: %v", p.Creates)
+		}
+	}
+	if sql := Render(p); !strings.HasPrefix(sql, updateToOneTen+"\n") {
+		t.Errorf("Render starts with the update:\n%s", sql)
+	}
+	if got := RenderExtensionUpdates(p); got != "-- pgy:new-session\n"+updateToOneTen+"\n" {
+		t.Errorf("RenderExtensionUpdates: %q", got)
+	}
+}
+
+func TestExtensionUpdateWithDroppedViewsStaysInTheMigration(t *testing.T) {
+	live := extensionUpdateLive(UpdateDependent{Kind: "view", Name: "app.slow"})
+	d := extensionUpdateDesired(map[string]string{"app.slow": "select query, calls from pg_stat_statements"})
+	if p := Plan(live, d, true); len(p.ExtensionUpdates) != 0 {
+		t.Errorf("an update pgy drops views for shares their transaction: %v", p.ExtensionUpdates)
+	}
+	if p := Plan(live, d, false); len(p.ExtensionUpdates) != 1 {
+		t.Errorf("without --unsafe nothing is dropped, so the update runs on its own: %v", p.Creates)
+	}
+}
+
+func TestExtensionUpdateNeedingANewExtensionStaysInTheMigration(t *testing.T) {
+	live := extensionUpdateLive()
+	live.AvailableExtensions = map[string]*AvailableExtension{
+		"pg_stat_statements": {DefaultVersion: "1.10", Requires: map[string][]string{"1.6": nil, "1.10": {"helper"}}},
+		"helper":             {DefaultVersion: "1.0", Requires: map[string][]string{"1.0": nil}},
+	}
+	d := extensionUpdateDesired(nil)
+	d.Extensions = append(d.Extensions, &schema.Extension{Name: "helper"})
+	p := Plan(live, d, false)
+	if len(p.ExtensionUpdates) != 0 {
+		t.Errorf("the update needs helper, which the migration creates: %v", p.ExtensionUpdates)
+	}
+	wantStatements(t, p.Creates, []string{`create extension "helper";`, updateToOneTen})
+}

@@ -157,3 +157,21 @@ func TestPruneKeepsRoutinesKeptRoutinesUse(t *testing.T) {
 		t.Errorf("both kept routines are reported, the inner one for the outer one: %v", kept)
 	}
 }
+
+func TestPruneKeepsChildrenOfTablesOfOtherOwners(t *testing.T) {
+	live := ownerPruneLive()
+	live.Tables["app.gone_child"] = newLiveTable()
+	live.Tables["app.gone_child"].Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["app.gone_child"].Inherits = []string{"app.gone"}
+	p := PlanWith(live, ownerPruneDesired(), Options{Unsafe: true, Prune: true})
+	if strings.Contains(strings.Join(p.Drops, "\n"), "gone_child") {
+		t.Errorf("an inheritance child of a table --prune leaves to its owner is kept, got %v", p.Drops)
+	}
+	found := false
+	for _, w := range p.Warnings {
+		found = found || strings.Contains(w.Message, "its undeclared inheritance children are not dropped: app.gone_child")
+	}
+	if !found {
+		t.Errorf("want the inheritance warning for app.gone_child, got %+v", p.Warnings)
+	}
+}

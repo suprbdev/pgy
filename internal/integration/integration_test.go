@@ -66,10 +66,16 @@ func applyPlan(t *testing.T, pool *pgxpool.Pool, p *diff.PlanDiff) {
 }
 
 // applyAsMigrations applies p the way pgy migrate applies the migrations
-// pgy commit writes for it: the prelude in one transaction, the creates,
-// alters and drops in another, then each concurrent statement on its own.
-// It returns the first failing statement and its error.
+// pgy commit writes for it: each extension update on its own, the prelude
+// in one transaction, the creates, alters and drops in another, then each
+// concurrent statement on its own. It returns the first failing statement
+// and its error.
 func applyAsMigrations(ctx context.Context, pool *pgxpool.Pool, p *diff.PlanDiff) (string, error) {
+	for _, s := range p.ExtensionUpdates {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			return s, err
+		}
+	}
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return "", err

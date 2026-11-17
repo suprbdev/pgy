@@ -26,6 +26,27 @@ schema app:
 	}
 }
 
+func TestStatisticsSchemaParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  table t:
+    columns: {a: {type: int}, b: {type: int}}
+    statistics:
+      s: {schema: public, columns: [a, b]}
+      a.b: {columns: [a, b]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, st := range db.Tables["app.t"].Statistics {
+		got[st.Name] = st.Schema
+	}
+	if len(got) != 2 || got["s"] != "public" || got["a.b"] != "" {
+		t.Errorf("statistics schemas = %v", got)
+	}
+}
+
 func TestTableOptionsParse(t *testing.T) {
 	d, err := parseFlexibleDatabase([]byte(`
 schema app:

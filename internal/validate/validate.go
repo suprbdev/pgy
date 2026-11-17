@@ -159,6 +159,9 @@ func Database(d *schema.Database) []Issue {
 		if v := d.Views[fq]; v != nil && !v.Materialized && v.Tablespace != "" {
 			add(Error, "view "+fq, "only materialized views have storage, so a plain view can't have a tablespace")
 		}
+		if v := d.Views[fq]; v != nil && !v.Materialized && v.AccessMethod != "" {
+			add(Error, "view "+fq, "only materialized views have storage, so a plain view can't have an access method")
+		}
 	}
 	checkNameLengths(d, add)
 
@@ -265,6 +268,10 @@ func Database(d *schema.Database) []Issue {
 		if t.Foreign != nil && t.Tablespace != "" {
 			add(Error, obj, "a foreign table has no storage, so it can't have a tablespace")
 		}
+		if t.Foreign != nil && t.AccessMethod != "" {
+			add(Error, obj, "a foreign table has no storage, so it can't have an access method")
+		}
+		checkValidateModes(t, obj, add)
 		for _, fk := range t.ForeignKeys {
 			if fk == nil {
 				continue
@@ -1619,6 +1626,26 @@ func setNullColumns(action string, cols []string) []string {
 		}
 	}
 	return out
+}
+
+// checkValidateModes reports constraints of t that ask to be validated
+// immediately while notValid leaves them unvalidated.
+func checkValidateModes(t *schema.Table, obj string, add func(Severity, string, string, ...any)) {
+	for _, ct := range t.Constraints {
+		if ct != nil && ct.NotValid && ct.Validate == schema.ValidateImmediate {
+			add(Error, obj, "constraint %s sets both notValid: true and validate: immediate; notValid leaves it unvalidated, so drop one of them", ct.Name)
+		}
+	}
+	for _, fk := range t.ForeignKeys {
+		if fk != nil && fk.NotValid && fk.Validate == schema.ValidateImmediate {
+			add(Error, obj, "foreign key %s sets both notValid: true and validate: immediate; notValid leaves it unvalidated, so drop one of them", fk.Name)
+		}
+	}
+	for _, cn := range sortedKeys(t.Columns) {
+		if c := t.Columns[cn]; c != nil && c.NotValid && c.Validate == schema.ValidateImmediate {
+			add(Error, obj, "column %s sets both notValid: true and validate: immediate; notValid leaves its NOT NULL unvalidated, so drop one of them", cn)
+		}
+	}
 }
 
 // checkPartitionKeys reports primary keys, unique constraints and unique

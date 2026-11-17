@@ -292,3 +292,18 @@ func TestRoutinePublicRevokedByExtension(t *testing.T) {
 		t.Errorf("a function PUBLIC still can't execute needs nothing, got:\n%s%v", sql, warns)
 	}
 }
+
+func TestLanguagePendingOnExtensionUpdate(t *testing.T) {
+	live := languageLive()
+	live.Extensions["pljava"] = true
+	live.Schemas["sqlj"] = true
+	live.ExtensionDefs = map[string]*LiveExtension{"pljava": {Schema: "sqlj", Version: "1.6.6", UpdateTargets: map[string]bool{"1.6.7": true}}}
+	d := languageDB(map[string]map[string][]string{"java": {"app_dev": {"usage"}}})
+	d.Extensions = []*schema.Extension{{Name: "pljava", Schema: "sqlj", Version: "1.6.7"}}
+	p := PlanWith(live, d, Options{})
+	wantStatements(t, p.ExtensionUpdates, []string{`alter extension "pljava" update to '1.6.7';`})
+	wantStatements(t, p.Creates, []string{`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'java' and lanpltrusted) then grant usage on language "java" to "app_dev"; end if; end $$;`})
+	if len(p.Warnings) > 0 {
+		t.Errorf("an extension update may bring the language, got %v", p.Warnings)
+	}
+}

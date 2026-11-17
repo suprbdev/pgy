@@ -127,3 +127,48 @@ schema SCH:
 		t.Error("extension types must be kept")
 	}
 }
+
+func TestIntegrationPruneKeepsInheritanceChildren(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+	setup := strings.ReplaceAll(`
+create table "SCH".metrics (at timestamptz not null, v int);
+create table "SCH".metrics_chunk_1 () inherits ("SCH".metrics);
+create table "SCH".metrics_chunk_2 () inherits ("SCH".metrics);
+insert into "SCH".metrics_chunk_1 values (now(), 1), (now(), 2);
+insert into "SCH".metrics_chunk_2 values (now(), 3);
+create table "SCH".old_parent (id int);
+create table "SCH".old_child () inherits ("SCH".old_parent);
+`, "SCH", sch)
+	if _, err := pool.Exec(ctx, setup); err != nil {
+		t.Fatal(err)
+	}
+	desired := loadYAML(t, sch, `
+schema SCH:
+  table metrics:
+    columns:
+      at: {type: timestamptz}
+      v: {type: int, nullable: true}
+`)
+	plan := diff.PlanWith(introspect(t, pool, desired), desired, diff.Options{Unsafe: true, Prune: true})
+	sql := diff.Render(plan)
+	if strings.Contains(sql, "metrics_chunk") {
+		t.Fatalf("inheritance children of a declared table must not be pruned:\n%s", sql)
+	}
+	if !strings.Contains(sql, "old_child") || !strings.Contains(sql, "old_parent") {
+		t.Fatalf("an undeclared parent and its child are still pruned:\n%s", sql)
+	}
+	warned := false
+	for _, w := range plan.Warnings {
+		warned = warned || strings.Contains(w.Message, fmt.Sprintf("%s.metrics_chunk_1, %s.metrics_chunk_2", sch, sch))
+	}
+	if !warned {
+		t.Errorf("want a warning naming the kept children, got %v", plan.Warnings)
+	}
+	applyPlan(t, pool, plan)
+	var n int
+	if err := pool.QueryRow(ctx, fmt.Sprintf(`select count(*) from %q.metrics`, sch)).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("rows of the declared parent: %d, %v; want 3", n, err)
+	}
+}
