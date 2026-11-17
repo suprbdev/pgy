@@ -165,6 +165,13 @@ func filterUntil(files []string, until string) ([]string, error) {
     return nil, fmt.Errorf("no migration matches %q", until)
 }
 
+// sqlChecksum is the checksum of a migration's SQL. CR LF counts as LF, so
+// a checkout that converts line endings keeps the checksum valid.
+func sqlChecksum(sql string) string {
+    sum := sha256.Sum256([]byte(strings.ReplaceAll(sql, "\r\n", "\n")))
+    return hex.EncodeToString(sum[:])
+}
+
 func checksumBody(b []byte) string {
     // ignore header comment lines starting with -- up to first blank line
     s := strings.ReplaceAll(string(b), "\r\n", "\n")
@@ -182,8 +189,7 @@ func checksumBody(b []byte) string {
         headerDone = true
         body = append(body, ln)
     }
-    sum := sha256.Sum256([]byte(strings.Join(body, "\n")))
-    return hex.EncodeToString(sum[:])
+    return sqlChecksum(strings.Join(body, "\n"))
 }
 
 func parseChecksumHeader(s string) string {
