@@ -879,7 +879,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 				parent = &diff.LiveColumn{Nullable: true, Storage: lc.TypeStorage}
 			}
 			c := inheritedColumnNode(lc, parent)
-			if lt.Foreign != nil {
+			if len(lc.FDWOptions) > 0 {
 				if c == nil {
 					c = flowMap()
 				}
@@ -909,7 +909,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		if lc.StatisticsTarget != nil {
 			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
 		}
-		if lt.Foreign != nil {
+		if len(lc.FDWOptions) > 0 {
 			add(c, "options", stringsNode(lc.FDWOptions))
 		}
 		for _, o := range [][2]string{{"n_distinct", "nDistinct"}, {"n_distinct_inherited", "nDistinctInherited"}} {

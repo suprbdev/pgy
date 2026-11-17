@@ -7,7 +7,7 @@ import (
 	"github.com/suprbdev/pgy/internal/diff"
 )
 
-func TestBuildForeignTablesWriteEveryOptionsBlock(t *testing.T) {
+func TestBuildForeignServerAndTableOptions(t *testing.T) {
 	events := &diff.LiveTable{Partitioned: true, Columns: map[string]*diff.LiveColumn{"id": {Type: "bigint"}, "region": {Type: "text"}}}
 	parent := &diff.LiveTable{Columns: map[string]*diff.LiveColumn{"id": {Type: "integer", Storage: "plain", TypeStorage: "plain"}}}
 	live := &diff.Live{
@@ -51,16 +51,18 @@ func TestBuildForeignTablesWriteEveryOptionsBlock(t *testing.T) {
 		"  bare:\n    wrapper: postgres_fdw\n    options: {}\n",
 		"    options: {dbname: x}\n    owner: other\n",
 		"  foreign table plain:\n    server: bare\n    options: {}\n",
-		"id: {type: integer, options: {}}",
+		"id: {type: integer}",
 		"v: {type: text, options: {column_name: val}, nullable: true}",
-		"id: {options: {column_name: event_id}}",
-		"region: {options: {}}",
-		"inherits: [rep.parent]",
-		"id: {options: {}}",
-		"extra: {type: integer, options: {}, nullable: true}",
+		"    columns:\n      id: {options: {column_name: event_id}}\n",
+		"    inherits: [rep.parent]\n    columns:\n      extra: {type: integer, nullable: true}\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"region: {options", "options: {}}", "options: {},"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("a column without options gets no options block, found %q in:\n%s", unwanted, got)
 		}
 	}
 	if strings.Contains(got, "owner: admin") {

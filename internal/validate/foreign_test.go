@@ -19,9 +19,9 @@ schema rep:
     server: wh
     options: {}
     columns:
-      qty: {type: int, nullable: true, options: {}}
-      dbl: {type: int, generated: qty * 2, options: {}}
-      big: {type: text, storage: external, nullable: true, options: {}}
+      qty: {type: int, nullable: true, options: {column_name: quantity}}
+      dbl: {type: int, generated: qty * 2}
+      big: {type: text, storage: external, nullable: true}
   foreign table events_us:
     server: wh
     options: {table_name: events}
@@ -35,9 +35,8 @@ schema rep:
     options: {}
     inherits: [rep.parent]
     columns:
-      id: {options: {}}
-      name: {options: {}}
-      extra: {type: int, nullable: true, options: {}}
+      name: {default: "'x'"}
+      extra: {type: int, nullable: true}
 `)
 	if issues := Files([]string{p}); len(issues) != 0 {
 		t.Errorf("expected no findings, got:\n%s", messages(issues))

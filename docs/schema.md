@@ -776,7 +776,7 @@ Foreign table columns are diffed like table columns (added, dropped under `--uns
 
 A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. It can also be an inheritance child (`inherits`, as for [inheritance](#inheritance)): `CREATE FOREIGN TABLE ... INHERITS (...) SERVER ...`. In both cases the columns it gets from its parent are left to the parent. List one without a `type` to set what the foreign table keeps of its own for it, such as the wrapper's column `options`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or table storage parameters, and cannot be partitioned themselves.
 
-`pgy pull` writes servers to `database.yml` and foreign tables to their schema's file. It writes every `options` block, as `options: {}` when there are none, so the pulled YAML also notices options added later.
+`pgy pull` writes servers to `database.yml` and foreign tables to their schema's file. It writes the `options` block of every server and foreign table, as `options: {}` when there are none, so the pulled YAML also notices options added to them later. A column gets an `options` block only when it has options: an option added later to a column without one goes unnoticed unless the YAML lists `options: {}` for that column.
 
 Server properties:
 
