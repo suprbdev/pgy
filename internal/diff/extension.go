@@ -1,6 +1,7 @@
 package diff
 
 import (
+    "cmp"
     "context"
     "fmt"
     "reflect"
@@ -112,6 +113,10 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
                     if len(uses) > 10 { uses = append(uses[:10], fmt.Sprintf("%d more", len(uses)-10)) }
                     if len(uses) > 0 { warn("extension %s moves to schema %s, which is not on the search_path, while the YAML still names its objects without a schema in %s; those names will not resolve once it has moved, so qualify them with the schema", ext.Name, ext.Schema, strings.Join(uses, ", ")) }
                 }
+            } else if ext.Schema != "" && ext.Schema != le.Schema {
+                refs := ""
+                if le.Members != nil { refs = fmt.Sprintf(", and references to them qualified with %s are planned as references to %s", ext.Schema, le.Schema) }
+                warn("extension %s is not relocatable, so it stays in schema %s with its objects instead of moving to schema %s%s; declare schema: %s, or drop the extension and create it in %s by hand", ext.Name, le.Schema, ext.Schema, refs, le.Schema, ext.Schema)
             }
             if ext.Version != "" && ext.Version != le.Version {
                 if le.UpdateTargets != nil && !le.UpdateTargets[ext.Version] {
@@ -140,6 +145,8 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
                 warn("extension %s is not available on this server, so CREATE EXTENSION will fail until it is installed there", ext.Name)
             } else if _, ok := av.Requires[ext.Version]; ext.Version != "" && !ok {
                 warn("extension %s: version %s is not available on this server (available: %s), so CREATE EXTENSION will fail", ext.Name, ext.Version, strings.Join(sortedVersions(av.Requires), ", "))
+            } else if version := cmp.Or(ext.Version, av.DefaultVersion); ext.Schema != "" && av.Schemas[version] != "" && av.Schemas[version] != ext.Schema {
+                warn("extension %s can only be installed in schema %s, which its control file names, so CREATE EXTENSION with schema %s will fail; declare schema: %s, or leave schema out", ext.Name, av.Schemas[version], ext.Schema, av.Schemas[version])
             }
         }
         create := *ext
@@ -303,8 +310,8 @@ func versionLess(a, b string) bool {
 // Introspect, and only when it is needed: the server's available
 // extensions and their requirements when one has to be created or updated,
 // the update paths of the installed ones and the views and routines that
-// use them when a version differs, the member names of extensions that
-// have to move to another schema, and the objects that use an extension
+// use them when a version differs, the member names of extensions declared
+// in another schema than they are in, and the objects that use an extension
 // opts lets pruning drop. Without it the plan is still valid: statements
 // are ordered by dependsOn and the requirements of PostgreSQL's own
 // extensions, nothing is checked against the server, objects that follow a
@@ -324,7 +331,7 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
         case le == nil:
         default:
             if ext.Version != "" && ext.Version != le.Version { update, updating = true, append(updating, ext.Name) }
-            if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable { moving = append(moving, quoteString(ext.Name)) }
+            if ext.Schema != "" && ext.Schema != le.Schema { moving = append(moving, quoteString(ext.Name)) }
         }
     }
     prunable := sortedKeys(prunableExtensions(live, desired, opts))
@@ -333,20 +340,21 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
     if create || update {
         available := map[string]*AvailableExtension{}
         batch.add(`
-            select a.name::text, coalesce(a.default_version, ''), v.version, coalesce(v.requires, '{}')::text[]
+            select a.name::text, coalesce(a.default_version, ''), v.version, coalesce(v.requires, '{}')::text[], coalesce(v.schema::text, '')
             from pg_available_extensions a
             left join pg_available_extension_versions v on v.name = a.name`, func(rows pgx.Rows) error {
             for rows.Next() {
-                var name, def string
+                var name, def, fixed string
                 var version *string
                 var requires []string
-                if err := rows.Scan(&name, &def, &version, &requires); err != nil { return err }
+                if err := rows.Scan(&name, &def, &version, &requires, &fixed); err != nil { return err }
                 av := available[name]
                 if av == nil {
-                    av = &AvailableExtension{DefaultVersion: def, Requires: map[string][]string{}}
+                    av = &AvailableExtension{DefaultVersion: def, Requires: map[string][]string{}, Schemas: map[string]string{}}
                     available[name] = av
                 }
                 if version != nil { av.Requires[*version] = requires }
+                if version != nil && fixed != "" { av.Schemas[*version] = fixed }
             }
             live.AvailableExtensions = available
             return nil
@@ -424,13 +432,30 @@ type requalifier struct {
 // newRequalifier returns a requalifier for the extensions the plan moves to
 // another schema, or nil when there are none or their member names were not
 // loaded (see IntrospectExtensions).
-func newRequalifier(live *Live, desired *schema.Database) *requalifier {
+func newRequalifier(live *Live, desired *schema.Database) *requalifier { return requalifierFor(live, desired, true) }
+
+// withUnmovedExtensions returns desired with the references to the objects
+// of each extension declared in a schema it cannot move to (it is not
+// relocatable, see planExtensions) qualified with the schema it stays in,
+// so that the plan uses the objects the extension has instead of objects a
+// move would have made; desired itself when there are none or their member
+// names were not loaded.
+func withUnmovedExtensions(live *Live, desired *schema.Database) *schema.Database {
+    rq := requalifierFor(live, desired, false)
+    if rq == nil { return desired }
+    return rq.database(desired)
+}
+
+// requalifierFor returns a requalifier for the declared extensions whose
+// declared schema differs from the live one and whose Relocatable is
+// relocatable, or nil.
+func requalifierFor(live *Live, desired *schema.Database, relocatable bool) *requalifier {
     if live == nil || desired == nil { return nil }
     rq := &requalifier{}
     for _, ext := range desired.Extensions {
         if ext == nil || ext.Schema == "" { continue }
         le := live.ExtensionDefs[ext.Name]
-        if le == nil || !le.Relocatable || le.Members == nil { continue }
+        if le == nil || le.Relocatable != relocatable || le.Members == nil { continue }
         from := le.Schema
         if le.MovedFrom != "" && le.Schema == ext.Schema { from = le.MovedFrom }
         if from == ext.Schema { continue }
@@ -577,7 +602,13 @@ func innerArgs(args string) string {
     return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(args), "("), ")")
 }
 
-func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
+// copyValue copies src to dst, rewriting strings with text unless verbatim
+// is set. Map keys are rewritten where they hold signatures or
+// expressions: the keys of the routine maps, and those of an index's
+// per-column maps, which match its rewritten columns entries.
+func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) { rq.copyKeyed(dst, src, verbatim, false) }
+
+func (rq *requalifier) copyKeyed(dst, src reflect.Value, verbatim, keyed bool) {
     switch src.Kind() {
     case reflect.Pointer:
         if src.IsNil() { return }
@@ -585,10 +616,12 @@ func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
         rq.copyValue(dst.Elem(), src.Elem(), verbatim)
     case reflect.Struct:
         dst.Set(src)
+        index := src.Type() == reflect.TypeOf(schema.Index{})
         for i := 0; i < src.NumField(); i++ {
             f := src.Type().Field(i)
             if !f.IsExported() { continue }
-            rq.copyValue(dst.Field(i), src.Field(i), verbatim || strings.Contains(f.Name, "Body") || strings.Contains(f.Name, "Comment") || f.Name == "Data")
+            keyed := index && (f.Name == "Opclasses" || f.Name == "Collations" || f.Name == "StatisticsTargets")
+            rq.copyKeyed(dst.Field(i), src.Field(i), verbatim || strings.Contains(f.Name, "Body") || strings.Contains(f.Name, "Comment") || f.Name == "Data", keyed)
         }
     case reflect.Map:
         if src.IsNil() { return }
@@ -597,7 +630,7 @@ func (rq *requalifier) copyValue(dst, src reflect.Value, verbatim bool) {
         iter := src.MapRange()
         for iter.Next() {
             key := iter.Key()
-            if routines { key = reflect.ValueOf(rq.text(key.String())) }
+            if routines || keyed && !verbatim { key = reflect.ValueOf(rq.text(key.String())) }
             val := reflect.New(src.Type().Elem()).Elem()
             rq.copyValue(val, iter.Value(), verbatim)
             dst.SetMapIndex(key, val)

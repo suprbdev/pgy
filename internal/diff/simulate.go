@@ -11,6 +11,7 @@ import (
 func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live.scoped())
     if desired == nil { return out }
+    desired = withUnmovedExtensions(out, desired)
     desired = expandAllPrivileges(desired, out.ServerVersion)
     out, _ = applyRenames(out, desired)
     out = simulateExprProbes(out, desired)
