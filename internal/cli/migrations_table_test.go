@@ -79,7 +79,7 @@ func TestMigrationsTableWithoutCreateOnDatabase(t *testing.T) {
     ctx := context.Background()
     admin, err := pgxpool.New(ctx, dsn)
     if err != nil { t.Fatal(err) }
-    defer admin.Close()
+    t.Cleanup(admin.Close)
     const name, role = "pgytest_cli_nocreate", "pgytest_cli_nocreate_owner"
     drop := func() {
         admin.Exec(context.Background(), `drop database if exists `+name+` with (force)`) //nolint

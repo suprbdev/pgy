@@ -32,7 +32,7 @@ func TestPullOwnersSatisfiesRequireOwners(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(admin.Close)
 	const name, role = "pgytest_cli_pull_policy", "pgytest_cli_pull_policy_reader"
 	drop := func() {
 		admin.Exec(context.Background(), `drop database if exists `+name+` with (force)`) //nolint
