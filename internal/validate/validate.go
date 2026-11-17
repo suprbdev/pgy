@@ -18,7 +18,6 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/suprbdev/pgy/internal/schema"
 	"github.com/suprbdev/pgy/schemas"
-	yaml "gopkg.in/yaml.v3"
 )
 
 // Severity of an Issue. Errors make validation fail; warnings do not.
@@ -89,15 +88,15 @@ func Files(paths []string) []Issue {
 			load <- loaded{d, err}
 		}()
 		var doc any
-		if err := yaml.Unmarshal(b, &doc); err != nil {
+		if _, err := schema.DecodeYAML(b, &doc); err != nil {
 			<-load
 			issues = append(issues, Issue{Severity: Error, File: p, Message: "invalid YAML: " + err.Error()})
 			continue
 		}
-		if v, err := toJSON(doc); err == nil {
-			if verr := compiled.Validate(v); verr != nil {
-				issues = append(issues, schemaIssues(p, verr)...)
-			}
+		if v, err := toJSON(doc); err != nil {
+			issues = append(issues, Issue{Severity: Error, File: p, Message: "cannot be checked against the JSON Schema: " + err.Error()})
+		} else if verr := compiled.Validate(v); verr != nil {
+			issues = append(issues, schemaIssues(p, verr)...)
 		}
 		l := <-load
 		d, err := l.d, l.err
@@ -535,7 +534,7 @@ func Database(d *schema.Database) []Issue {
 				add(Warning, "sequence "+k, "is the sequence that serial column %s.%s creates; add dependsOn: [table %s] so a fresh build applies it after the table instead of creating a separate sequence first", table, strings.TrimSuffix(strings.TrimPrefix(k, table+"_"), "_seq"), table)
 			}
 			if owner := sq.OwnedBy; owner != "" && !strings.EqualFold(owner, "none") {
-				parts := strings.Split(owner, ".")
+				parts := strings.SplitN(owner, ".", 3)
 				if len(parts) >= 2 {
 					table := strings.Join(parts[:len(parts)-1], ".")
 					if len(parts) == 2 {
