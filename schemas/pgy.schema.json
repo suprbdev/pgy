@@ -1040,7 +1040,7 @@
       "additionalProperties": false
     },
     "view": {
-      "description": "Body of a `view <name>:` or `materialized view <name>:` declaration. Without query the declaration creates nothing: it manages the privileges, owner, comment and column comments of a view that already exists, such as one an extension owns.",
+      "description": "Body of a `view <name>:` or `materialized view <name>:` declaration. Without query the declaration creates nothing: it manages the privileges, column privileges, owner, comment and column comments of a view that already exists, such as one an extension owns.",
       "type": "object",
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
@@ -1079,6 +1079,11 @@
           "type": "object",
           "description": "Plain views: DEFAULT expressions for view columns (ALTER VIEW ... ALTER COLUMN ... SET DEFAULT), used by inserts through the view.",
           "additionalProperties": { "$ref": "#/definitions/scalar" }
+        },
+        "columnGrants": {
+          "type": "object",
+          "description": "Column privileges per view column (GRANT select (col) ON TABLE ...): `{ <column>: { <role>: [select, insert, update, references] } }`, authoritative for each column listed, like a table column's grants. Columns not listed are unmanaged.",
+          "additionalProperties": { "$ref": "#/definitions/grants" }
         },
         "rules": {
           "type": "object",

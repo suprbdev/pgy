@@ -140,9 +140,11 @@ schema public:
     securityBarrier: false
     checkOption: cascaded
     columnComments: {"?column?": the constant}
+    columnGrants: {"?column?": {app_read: [select], app_write: [update with grant option]}}
   materialized view order_stats:
     query: select 1 as id
     withData: false
+    columnGrants: {id: {app_read: [select]}}
     indexes:
       order_stats_id: {columns: [id], unique: true}
 `

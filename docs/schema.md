@@ -405,7 +405,7 @@ The functions, views, types, languages and foreign-data wrappers that `CREATE EX
 |-------------|----------|---------|
 | `function <name>(<args>):` | `body`, `returns`, `language` | `security`, `stable`/`volatile`/`immutable`, `strict`, `leakproof`, `parallel`, `cost`, `rows`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
 | `procedure <name>(<args>):` | `body`, `language` | `security`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
-| `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
+| `view <name>:`, `materialized view <name>:` | `query` | `grants`, `columnGrants`, `owner`, `comment`, `columnComments` |
 | `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
 | `languages:` entry | | `grants`. See [Languages](#languages) |
 | `foreignDataWrappers:` entry | `handler`, `validator` | `options`, `owner`, `grants`, `comment`. See [Foreign-Data Wrappers](#foreign-data-wrappers) |
@@ -1070,14 +1070,14 @@ schema public:
 
 `securityInvoker`, `securityBarrier` and `checkOption` are diffed against the live view's options: a difference emits `ALTER VIEW ... SET (...)` / `RESET (...)`, no `--unsafe` needed. Omitted keys are unmanaged. Since `CREATE OR REPLACE VIEW` replaces a view's options wholesale, the `replace: true` path carries live options the YAML does not manage over into its `WITH (...)` clause.
 
-A view or materialized view declared without `query` is never created: the declaration manages the `grants`, `owner`, `comment` and `columnComments` of one that already exists, such as an extension's `pg_stat_statements`. See [Objects an extension owns](#objects-an-extension-owns).
+A view or materialized view declared without `query` is never created: the declaration manages the `grants`, `columnGrants`, `owner`, `comment` and `columnComments` of one that already exists, such as an extension's `pg_stat_statements`. See [Objects an extension owns](#objects-an-extension-owns).
 
 ### Recreated views
 
 pgy drops a view and creates it again from the YAML when its columns change (above), when the type of a column it uses changes ([Column alterations](#column-alterations)) and around an extension update ([Updating extensions](#updating-extensions)). In all three cases the new view gets back what the old one had:
 
-- what the YAML declares for it: `comment`, `grants`, `owner`, options, `columnComments`, `columnDefaults`, `triggers`, `rules` and, for a materialized view, `indexes`;
-- what the YAML leaves unmanaged, restored from the database: the grants on the view and on its columns (column grants can't be declared, so they are always restored), the comment, column comments and column defaults, the owner, the options, and the comments of declared triggers and rules;
+- what the YAML declares for it: `comment`, `grants`, `columnGrants`, `owner`, options, `columnComments`, `columnDefaults`, `triggers`, `rules` and, for a materialized view, `indexes`;
+- what the YAML leaves unmanaged, restored from the database: the grants on the view and on the columns `columnGrants` doesn't list, the comment, column comments and column defaults, the owner, the options, and the comments of declared triggers and rules;
 - triggers and rules the YAML doesn't list, created again from their definitions in the database, with their comments. With `--prune`, which drops them anyway, they are not.
 
 A materialized view is refilled; indexes on it that the YAML doesn't declare are not created again.
@@ -1114,6 +1114,7 @@ schema public:
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
 | `columnDefaults` | map | Views only. View column → `DEFAULT` expression, used by `INSERT`s through the view (`ALTER VIEW ... ALTER COLUMN ... SET DEFAULT`). Diffed against live, [as an expression](#how-expressions-are-compared); columns not listed are unmanaged |
+| `columnGrants` | map | View column → role → column privileges (`select`, `insert`, `update`, `references`), emitted as `GRANT select (col) ON TABLE ...`. Each column listed is authoritative, like a table column's `grants`; columns not listed are unmanaged. See [Column-Level Grants](#column-level-grants) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 
@@ -1738,6 +1739,15 @@ grant select ("email"), update ("email") on table "public"."users" to "support";
 - Column grants cover `PUBLIC` like tables do: a `PUBLIC` column privilege the column's block doesn't list is revoked, with a warning.
 - To narrow a table-wide grant to specific columns, empty the table-level list and add per-column grants in the same change: `grants: {role: []}` on the table plus `grants: {role: [select]}` on each column. The table revoke is ordered ahead of the column grants, so the result is select on exactly those columns.
 - Column grants are independent of table-level grants: a table-level `select` already covers every column, so column grants are typically used *instead of* a table-level privilege to restrict access to a subset of columns.
+
+Views and materialized views have no `columns:` block, so their column grants go in `columnGrants`, keyed by column, with the same semantics. `pgy pull` writes them there.
+
+```yaml
+view active_users:
+  query: select id, email from users where active
+  columnGrants:
+    email: {reporting: [select]}
+```
 
 | Property | Type | Description |
 |----------|------|-------------|

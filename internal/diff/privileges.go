@@ -175,7 +175,29 @@ func expandAllPrivileges(desired *schema.Database, version int) *schema.Database
 		c.Grants, c.Columns = g, cols
 		return &c
 	})
-	out.Views = expandGrantsField(desired.Views, func(v *schema.View) *map[string][]string { return &v.Grants }, set("table"))
+	out.Views, _ = rewriteEach(desired.Views, func(v *schema.View) *schema.View {
+		g, grantsChanged := expandAllGrants(v.Grants, set("table"))
+		var cols map[string]map[string][]string
+		for col, cg := range v.ColumnGrants {
+			eg, ok := expandAllGrants(cg, set("column"))
+			if !ok {
+				continue
+			}
+			if cols == nil {
+				cols = cloneMap(v.ColumnGrants, nil)
+			}
+			cols[col] = eg
+		}
+		if !grantsChanged && cols == nil {
+			return nil
+		}
+		c := *v
+		c.Grants = g
+		if cols != nil {
+			c.ColumnGrants = cols
+		}
+		return &c
+	})
 	out.Sequences = expandGrantsField(desired.Sequences, func(v *schema.Sequence) *map[string][]string { return &v.Grants }, set("sequence"))
 	out.Functions = expandGrantsField(desired.Functions, func(v *schema.Function) *map[string][]string { return &v.Grants }, set("routine"))
 	out.Procedures = expandGrantsField(desired.Procedures, func(v *schema.Procedure) *map[string][]string { return &v.Grants }, set("routine"))

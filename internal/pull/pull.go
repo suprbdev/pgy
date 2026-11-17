@@ -1966,6 +1966,17 @@ func (b *builder) views() {
 		if g := b.grantsFor(b.live.TableGrants[k], k, "tables"); g != nil {
 			add(m, "grants", g)
 		}
+		if cg := b.live.ColumnGrants[k]; len(cg) > 0 {
+			gm := newMap()
+			for _, col := range sortedKeys(cg) {
+				if g := grantsNode(cg[col]); g != nil {
+					add(gm, col, g)
+				}
+			}
+			if len(gm.Content) > 0 {
+				add(m, "columnGrants", gm)
+			}
+		}
 		addStr(m, "comment", b.live.RelComments[k])
 		if cc := b.live.ViewColumnComments[k]; len(cc) > 0 {
 			cm := newMap()

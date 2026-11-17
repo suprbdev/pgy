@@ -384,6 +384,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
         if vw.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], vw.Grants) }
+        for col, g := range vw.ColumnGrants {
+            if g == nil { continue }
+            if out.ColumnGrants[k] == nil { out.ColumnGrants[k] = map[string]map[string]map[string]bool{} }
+            out.ColumnGrants[k][col] = simulateGrants(out.ColumnGrants[k][col], g)
+        }
         if vw.Comment != "" { out.RelComments[k] = vw.Comment }
         for col, cm := range vw.ColumnComments {
             if out.ViewColumnComments[k] == nil { out.ViewColumnComments[k] = map[string]string{} }

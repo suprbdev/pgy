@@ -5564,15 +5564,25 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(viewNames)
     for _, k := range viewNames {
         vw := desired.Views[k]
-        if vw == nil || vw.Grants == nil { continue }
-        liveG := live.TableGrants[k]
-        desiredG := resolveGrantRoles(vw.Grants, live.CurrentUser)
-        if !live.Views[k] && !live.MatViews[k] {
-            liveG = created(k, "tables")
-            if strings.TrimSpace(vw.Query) == "" { liveG = pendingGrants(liveG, desiredG) }
+        if vw == nil { continue }
+        var revoked map[string]map[string]bool
+        if vw.Grants != nil {
+            liveG := live.TableGrants[k]
+            desiredG := resolveGrantRoles(vw.Grants, live.CurrentUser)
+            if !live.Views[k] && !live.MatViews[k] {
+                liveG = created(k, "tables")
+                if strings.TrimSpace(vw.Query) == "" { liveG = pendingGrants(liveG, desiredG) }
+            }
+            liveG = member("rel:"+k, "", liveG, desiredG)
+            owner := objectOwner(live, "rel:"+k, vw.Owner)
+            addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
+            revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
         }
-        liveG = member("rel:"+k, "", liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, vw.Owner), covers(true, desiredG)))
+        for _, col := range sortedKeys(vw.ColumnGrants) {
+            if vw.ColumnGrants[col] == nil { continue }
+            colG := resolveGrantRoles(vw.ColumnGrants[col], live.CurrentUser)
+            addFor(colG)(columnGrantDiffStmts(k, col, colG, withoutPrivileges(live.ColumnGrants[k][col], revoked), covers(true, colG)))
+        }
     }
 
     funcNames := make([]string, 0, len(desired.Functions))
