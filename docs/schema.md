@@ -777,11 +777,17 @@ schema reporting:
     comment: orders in the warehouse
 ```
 
-Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change instead. A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables. Without the block, servers are unmanaged.
+Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
 
-User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none.
+A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables and together with their user mappings (`DROP USER MAPPING`). A server that still has foreign tables the plan keeps (in a schema the YAML doesn't manage, or declared on another server name) is not dropped, and `pgy diff` says so. Without the block, servers are unmanaged.
 
-Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped. PostgreSQL cannot move a foreign table to another server, so a changed `server` is reported. Check constraints, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`. A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or storage settings, and cannot be partitioned themselves. `pgy pull` writes servers to `database.yml` and foreign tables to their schema's file.
+User mappings are not managed, because their options hold passwords, which do not belong in schema files. Create them separately. For `postgres_fdw` servers, `pgy diff` warns while the connected role, or `PUBLIC`, has none. A materialized view that reads a foreign table is populated when it is created, which fails without a user mapping. `pgy diff` warns when a plan creates such a view while the server has none: set `withData: false` and refresh the view once the mapping exists, or create the server and its user mapping before running the migration.
+
+Foreign table columns are diffed like table columns (added, dropped under `--unsafe`, retyped, `NOT NULL`, defaults, comments, grants), and their `options` are diffed with `ALTER FOREIGN TABLE ... ALTER COLUMN ... OPTIONS`. Table `options` are diffed the same way. Option blocks are authoritative when present: options they no longer list are dropped, and `options: {}` means none. Columns can be `generated` (stored, or `virtual` on PostgreSQL 18) and take a `storage` mode. PostgreSQL cannot move a foreign table to another server, so a changed `server` is only reported, also under `--unsafe`. Nor can it turn a table into a foreign table or back: a table declared as one kind that is the other in the database is reported and left alone. Check constraints, `triggers`, `owner`, `renamedFrom` and `dependsOn` work as on tables. `--unsafe --prune` drops undeclared foreign tables with `DROP FOREIGN TABLE`.
+
+A foreign table can be a partition of a local partitioned table (`partitionOf` with `forValues` or `default`, as for [partitions](#partitioning)), which is how `postgres_fdw` shards are attached: pgy emits `CREATE FOREIGN TABLE ... PARTITION OF ... SERVER ...`. It can also be an inheritance child (`inherits`, as for [inheritance](#inheritance)): `CREATE FOREIGN TABLE ... INHERITS (...) SERVER ...`. In both cases the columns it gets from its parent are left to the parent. List one without a `type` to set what the foreign table keeps of its own for it, such as the wrapper's column `options`. Foreign partitions cannot be indexed, so `concurrently: true` indexes on their parent are built with a plain `CREATE INDEX`, which skips them, and `pgy diff` warns. Unique indexes and primary keys on such a parent are rejected by PostgreSQL. Foreign tables take no primary keys, indexes, foreign keys or table storage parameters, and cannot be partitioned themselves.
+
+`pgy pull` writes servers to `database.yml` and foreign tables to their schema's file. It writes the `options` block of every server and foreign table, as `options: {}` when there are none, so the pulled YAML also notices options added to them later. A column gets an `options` block only when it has options: an option added later to a column without one goes unnoticed unless the YAML lists `options: {}` for that column.
 
 Server properties:
 
@@ -793,6 +799,7 @@ Server properties:
 | `options` | map | Wrapper options. Authoritative when present; omitted = unmanaged |
 | `owner` | string | Owner role, diffed against live |
 | `comment` | string | `COMMENT ON SERVER` |
+| `renamedFrom` | string | Previous name: `ALTER SERVER ... RENAME TO` when only that name exists live |
 
 Foreign table properties:
 
@@ -801,8 +808,10 @@ Foreign table properties:
 | `server` | string | Required. The server the table reads through |
 | `options` | map | Wrapper table options. Authoritative when present; omitted = unmanaged |
 | `partitionOf`, `forValues`, `default` | | Attach as a partition of a local partitioned table, as for [partitions](#partitioning) |
-| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `collate`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options |
+| `inherits` | list | Parent tables (`INHERITS`), as for [inheritance](#inheritance) |
+| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `generated`, `virtual`, `collate`, `storage`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options. Columns of a partition or inheritance child take no `type` |
 | `constraints` | map | Check constraints, as on [tables](#constraints) |
+| `triggers` | map | Triggers, as on [tables](#triggers) |
 | `grants`, `owner`, `comment`, `renamedFrom`, `dependsOn` | | As on tables |
 
 ## Views

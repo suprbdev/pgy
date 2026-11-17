@@ -113,6 +113,7 @@ type Server struct {
     Owner   string            // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
     Comment string
+    RenamedFrom string // previous name; emitted as ALTER SERVER ... RENAME TO when only the old name exists live
 }
 
 // ForeignTable holds what makes a table a CREATE FOREIGN TABLE: the server
@@ -981,6 +982,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
             fillColumnOrderFromNode(node, out, schemaName)
         }
     }
+    fillFDWScalarsFromNode(node, out)
     return out, nil
 }
 
@@ -2620,10 +2622,83 @@ func parseServers(v any) map[string]*Server {
             if o, ok := b["owner"].(string); ok { s.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { s.Grants = parseGrants(g) }
             if c, ok := b["comment"].(string); ok { s.Comment = c }
+            if v, ok := b["renamedFrom"].(string); ok { s.RenamedFrom = strings.TrimSpace(v) }
         }
         out[name] = s
     }
     return out
+}
+
+// fillFDWScalarsFromNode replaces the values parsed for a server's version
+// and for server, foreign table and foreign column options with their YAML
+// source text. These settings are strings to PostgreSQL, and decoding a bare
+// scalar as a number loses what was written: 15.10 would become 15.1 and
+// 05432 an octal integer.
+func fillFDWScalarsFromNode(root *yaml.Node, db *Database) {
+    if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 { return }
+    top := root.Content[0]
+    if top.Kind != yaml.MappingNode { return }
+    for i := 0; i+1 < len(top.Content); i += 2 {
+        key, body := top.Content[i].Value, resolveAlias(top.Content[i+1])
+        if body.Kind != yaml.MappingNode { continue }
+        if key == "servers" {
+            for j := 0; j+1 < len(body.Content); j += 2 {
+                s, def := db.Servers[body.Content[j].Value], resolveAlias(body.Content[j+1])
+                if s == nil || def.Kind != yaml.MappingNode { continue }
+                if v := mappingValue(def, "version"); v != nil && v.Kind == yaml.ScalarNode && s.Version != "" { s.Version = scalarText(v) }
+                fillScalarTexts(mappingValue(def, "options"), s.Options)
+            }
+            continue
+        }
+        schemaName, ok := strings.CutPrefix(key, "schema ")
+        if !ok { continue }
+        schemaName = strings.TrimSpace(schemaName)
+        for j := 0; j+1 < len(body.Content); j += 2 {
+            tname, foreign := tableKey(body.Content[j].Value)
+            def := resolveAlias(body.Content[j+1])
+            t := db.Tables[qualify(schemaName, tname)]
+            if !foreign || t == nil || t.Foreign == nil || def.Kind != yaml.MappingNode { continue }
+            fillScalarTexts(mappingValue(def, "options"), t.Foreign.Options)
+            cols := mappingValue(def, "columns")
+            if cols == nil || cols.Kind != yaml.MappingNode { continue }
+            for x := 0; x+1 < len(cols.Content); x += 2 {
+                c, spec := t.Columns[cols.Content[x].Value], resolveAlias(cols.Content[x+1])
+                if c == nil || spec.Kind != yaml.MappingNode { continue }
+                fillScalarTexts(mappingValue(spec, "options"), c.FDWOptions)
+            }
+        }
+    }
+}
+
+// resolveAlias returns the node a YAML alias points at, or n itself.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+    if n != nil && n.Kind == yaml.AliasNode && n.Alias != nil { return n.Alias }
+    return n
+}
+
+// mappingValue returns the value node of key in mapping node m, or nil.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+    if m == nil || m.Kind != yaml.MappingNode { return nil }
+    for i := 0; i+1 < len(m.Content); i += 2 {
+        if m.Content[i].Value == key { return resolveAlias(m.Content[i+1]) }
+    }
+    return nil
+}
+
+// scalarText returns a scalar node's value as written, or "" for a null.
+func scalarText(n *yaml.Node) string {
+    if n.ShortTag() == "!!null" { return "" }
+    return n.Value
+}
+
+// fillScalarTexts overwrites the entries of out that mapping node m sets to
+// a scalar with that scalar's source text.
+func fillScalarTexts(m *yaml.Node, out map[string]string) {
+    if m == nil || m.Kind != yaml.MappingNode || out == nil { return }
+    for i := 0; i+1 < len(m.Content); i += 2 {
+        k, v := m.Content[i].Value, resolveAlias(m.Content[i+1])
+        if _, ok := out[k]; ok && v.Kind == yaml.ScalarNode { out[k] = scalarText(v) }
+    }
 }
 
 // parsePublications parses { name: {allTables, tables, schemas, publish,

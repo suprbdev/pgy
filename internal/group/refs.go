@@ -20,6 +20,7 @@ const (
     kindCollation = "collation"
     kindTSConfig  = "tsconfig"
     kindTSDict    = "tsdictionary"
+    kindServer    = "server"
 )
 
 var (
@@ -62,6 +63,7 @@ func declared(d *schema.Database) []ref {
     add(kindCollation, nonNilKeys(d.Collations))
     add(kindTSConfig, nonNilKeys(d.TSConfigs))
     add(kindTSDict, nonNilKeys(d.TSDictionaries))
+    add(kindServer, nonNilKeys(d.Servers))
     return out
 }
 
@@ -99,6 +101,8 @@ func isDeclared(d *schema.Database, r ref) bool {
         return d.TSConfigs[r.key] != nil
     case kindTSDict:
         return d.TSDictionaries[r.key] != nil
+    case kindServer:
+        return d.Servers[r.key] != nil
     }
     return false
 }
@@ -128,6 +132,8 @@ func existsLive(l *diff.Live, r ref) bool {
         return l.TSConfigs[r.key] != nil
     case kindTSDict:
         return l.TSDictionaries[r.key]
+    case kindServer:
+        return l.Servers[r.key] != nil
     }
     return false
 }

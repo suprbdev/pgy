@@ -139,7 +139,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if s == nil { continue }
         ls := &LiveServer{Wrapper: s.Wrapper, Type: s.Type, Version: s.Version, Owner: s.Owner, Comment: s.Comment}
         if prev := out.Servers[name]; prev != nil {
-            ls.UserMapping, ls.Options = prev.UserMapping, prev.Options
+            ls.UserMapping, ls.UserMappings, ls.Options = prev.UserMapping, prev.UserMappings, prev.Options
             if s.Version == "" { ls.Version = prev.Version }
             if s.Owner == "" { ls.Owner = prev.Owner }
             if s.Comment == "" { ls.Comment = prev.Comment }
@@ -425,6 +425,7 @@ func simulateConfig(set map[string]string) map[string]string {
 
 func simulateTable(out *Live, fq string, dt *schema.Table) {
     lt := out.Tables[fq]
+    if foreignKindMismatch(dt, lt) { return }
     if lt == nil {
         lt = &LiveTable{}
         out.Tables[fq] = lt
@@ -673,6 +674,7 @@ func cloneLive(l *Live) *Live {
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
+        Offline:            l.Offline,
         DefaultTablespace:  l.DefaultTablespace,
         ViewProbes:         cloneMap(l.ViewProbes, nil),
         ViewDependents:     cloneMap(l.ViewDependents, nil),

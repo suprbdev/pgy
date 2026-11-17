@@ -21,6 +21,7 @@ import (
 func applyRenames(live *Live, desired *schema.Database) (*Live, []string) {
     if live == nil || desired == nil || !hasRenames(desired) { return live, nil }
     r := &renamer{l: cloneLive(live)}
+    r.servers(desired)
     r.relations(desired)
     r.types(desired)
     r.routines(desired)
@@ -35,6 +36,9 @@ type renamer struct {
 }
 
 func hasRenames(d *schema.Database) bool {
+    for _, s := range d.Servers {
+        if s != nil && s.RenamedFrom != "" { return true }
+    }
     for _, t := range d.Tables {
         if t == nil { continue }
         if t.RenamedFrom != "" { return true }
@@ -121,6 +125,25 @@ func (r *renamer) allTables() []*LiveTable {
         }
     }
     return out
+}
+
+func (r *renamer) servers(d *schema.Database) {
+    l := r.l
+    for _, name := range sortedKeys(d.Servers) {
+        s := d.Servers[name]
+        if s == nil || s.RenamedFrom == "" || s.RenamedFrom == name { continue }
+        old := s.RenamedFrom
+        if l.Servers[old] == nil || l.Servers[name] != nil { continue }
+        r.stmts = append(r.stmts, fmt.Sprintf("alter server %s rename to %s;", quoteIdent(old), quoteIdent(name)))
+        moveKey(l.Servers, old, name)
+        for _, t := range l.Tables {
+            if t != nil && t.Foreign != nil && t.Foreign.Server == old {
+                f := *t.Foreign
+                f.Server = name
+                t.Foreign = &f
+            }
+        }
+    }
 }
 
 func (r *renamer) relations(d *schema.Database) {
