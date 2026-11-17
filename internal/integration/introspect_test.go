@@ -133,16 +133,17 @@ func TestIntegrationGeneratedColumnAlter(t *testing.T) {
 	if err := pool.QueryRow(ctx, "select current_setting('server_version_num')::int").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version >= 170000 {
-		applyPlan(t, pool, plan(desired("a * 3")))
-		if sql := diff.Render(plan(desired("a * 3"))); sql != "" {
-			t.Fatalf("expected no changes after set expression, got:\n%s", sql)
-		}
-	} else {
-		p := plan(desired("a * 3"))
-		if sql := diff.Render(p); sql != "" || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "has no ALTER COLUMN ... SET EXPRESSION") {
-			t.Fatalf("before PostgreSQL 17 an expression change must only warn, got:\n%s\nwarnings: %+v", sql, p.Warnings)
-		}
+	p := plan(desired("a * 3"))
+	want := "set expression as (a * 3)"
+	if version < 170000 {
+		want = `add column "b" int generated always as (a * 3) stored`
+	}
+	if sql := diff.Render(p); !strings.Contains(sql, want) {
+		t.Fatalf("want %q for the changed expression, got:\n%s", want, sql)
+	}
+	applyPlan(t, pool, p)
+	if sql := diff.Render(plan(desired("a * 3"))); sql != "" {
+		t.Fatalf("expected no changes after the expression changed, got:\n%s", sql)
 	}
 
 	applyPlan(t, pool, plan(desired("")))
