@@ -152,6 +152,21 @@ schema app:
 	}
 }
 
+func TestValidateExtensionDeclaredDifferently(t *testing.T) {
+	dir := t.TempDir()
+	a := write(t, dir, "a.yml", "extensions:\n  - citext\n  - {name: hstore, schema: ext}\n  - pg_trgm\n")
+	b := write(t, dir, "b.yml", "extensions:\n  - {name: citext, schema: ext, version: \"1.5\"}\n  - {name: hstore, schema: public}\n  - pg_trgm\n")
+	got := messages(Files([]string{a, b}))
+	for _, name := range []string{"citext", "hstore"} {
+		if want := "warning: extension " + name + ": declared differently in " + a + ", " + b + "; the first declaration wins"; !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "pg_trgm") {
+		t.Errorf("identical declarations must not warn:\n%s", got)
+	}
+}
+
 func TestValidateClusterOn(t *testing.T) {
 	p := write(t, t.TempDir(), "c.yml", `
 schema app:

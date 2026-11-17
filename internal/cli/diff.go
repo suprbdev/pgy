@@ -127,6 +127,9 @@ Exit codes:
                 return err
             }
             if pool != nil {
+                if err := diff.IntrospectExtensions(ctx, pool, live, compiled); err != nil {
+                    return err
+                }
                 if err := diff.IntrospectData(ctx, pool, live, compiled); err != nil {
                     return err
                 }

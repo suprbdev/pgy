@@ -55,7 +55,9 @@ $f$`
 // ProbeViews compares the query of each declared view and materialized view
 // that exists live with the live definition, by creating it as a temporary
 // view in a transaction that is always rolled back, so PostgreSQL rewrites
-// both the same way (qualification, casts, aliases, * expansion). The
+// both the same way (qualification, casts, aliases, * expansion). A query
+// that names the objects of an extension the plan moves to another schema
+// is probed in the schema they are still in. The
 // results go to live.ViewProbes, and the live views that depend on each
 // probed view to live.ViewDependents. A server that can't run the probe,
 // such as a read-only standby, leaves both empty, and views stay
@@ -63,13 +65,16 @@ $f$`
 func ProbeViews(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
     if live == nil || desired == nil || pool == nil { return nil }
     keys, queries, schemas, names := []string{}, []string{}, []string{}, []string{}
+    rq := newRequalifier(live, desired)
     for _, k := range sortedKeys(desired.Views) {
         vw := desired.Views[k]
         if vw == nil || strings.TrimSpace(vw.Query) == "" { continue }
         if vw.Materialized && !live.MatViews[k] || !vw.Materialized && !live.Views[k] { continue }
         s, n := splitQualified(k)
         keys, schemas, names = append(keys, k), append(schemas, s), append(names, n)
-        queries = append(queries, strings.TrimRight(strings.TrimSpace(vw.Query), "; \t\n"))
+        query := strings.TrimRight(strings.TrimSpace(vw.Query), "; \t\n")
+        if rq != nil { query = rq.text(query) }
+        queries = append(queries, query)
     }
     if len(keys) == 0 { return nil }
     workers := min(viewProbeWorkers, (len(keys)+viewProbeChunk-1)/viewProbeChunk)
