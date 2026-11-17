@@ -147,7 +147,7 @@ func TestLiveIndexOpclassDeclaration(t *testing.T) {
 
 func TestIndexExpressionDefaultCollation(t *testing.T) {
 	ix := &schema.Index{Name: "t_words", Columns: []string{"string_to_array(name, ' ')"}, Using: "gin"}
-	live := []LiveIndexOpclass{{Name: "array_ops", Default: true}}
+	live := []LiveIndexOpclass{{Name: "array_ops", Default: true, KeyCollation: "default"}}
 	if indexOpclassesDiffer(ix, live) {
 		t.Error("an expression key without a collation must match")
 	}
@@ -160,7 +160,10 @@ func TestIndexExpressionDefaultCollation(t *testing.T) {
 		t.Error("another collation on an expression key must differ")
 	}
 	col := &schema.Index{Name: "t_name", Columns: []string{"name"}, Collations: map[string]string{"name": "default"}}
-	if !indexOpclassesDiffer(col, []LiveIndexOpclass{{Name: "text_ops", Default: true}}) {
-		t.Error("collate default on a plain column is compared as written")
+	if !indexOpclassesDiffer(col, []LiveIndexOpclass{{Name: "text_ops", Default: true, KeyCollation: "C"}}) {
+		t.Error("collate default on a plain column whose own collation is C must differ")
+	}
+	if indexOpclassesDiffer(col, []LiveIndexOpclass{{Name: "text_ops", Default: true, KeyCollation: "default"}}) {
+		t.Error("collate default on a plain column with the default collation is what PostgreSQL stores")
 	}
 }
