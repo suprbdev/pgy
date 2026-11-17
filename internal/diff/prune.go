@@ -221,7 +221,8 @@ func pruneIndexes(fq string, declared []*schema.Index, lt *LiveTable) []string {
 }
 
 // pruneRoutines drops undeclared plain functions and procedures in managed
-// schemas. Aggregates and window functions are left alone.
+// schemas. Window functions are left alone, and so are routines written in
+// C or internal, which YAML cannot declare.
 func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bool) []string {
     want := map[string]bool{}
     for k, f := range desired.Functions {
@@ -245,11 +246,11 @@ func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bo
             if s, ok := collect(norm, lf.Signature); ok { aggs = append(aggs, aggregateDropArgs(s)) }
             continue
         }
-        if lf.Kind != "f" { continue }
+        if lf.Kind != "f" || CompiledLanguage(lf.Language) { continue }
         if s, ok := collect(norm, lf.Signature); ok { funcs = append(funcs, s) }
     }
     for norm, lp := range live.ProcedureDefs {
-        if lp == nil { continue }
+        if lp == nil || CompiledLanguage(lp.Language) { continue }
         if s, ok := collect(norm, lp.Signature); ok { procs = append(procs, s) }
     }
     sort.Strings(funcs)

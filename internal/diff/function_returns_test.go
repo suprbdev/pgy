@@ -107,7 +107,10 @@ func TestSQLStandardBodies(t *testing.T) {
 	if got := routineBodySQL("sql", "begin atomic select 1; end;\n"); got != "begin atomic select 1; end" {
 		t.Errorf("routineBodySQL = %q", got)
 	}
-	if got := routineBodySQL("sql", "select 1"); got != "as $$\nselect 1\n$$" {
+	if got := routineBodySQL("sql", "select 1"); got != "as $$select 1$$" {
+		t.Errorf("routineBodySQL = %q", got)
+	}
+	if got := routineBodySQL("sql", "select 1\n"); got != "as $$\nselect 1\n$$" {
 		t.Errorf("routineBodySQL = %q", got)
 	}
 	cases := []struct {
@@ -123,7 +126,7 @@ func TestSQLStandardBodies(t *testing.T) {
 		{"", "anything", false, true, false},
 	}
 	for _, c := range cases {
-		if got := routineBodyChanged("sql", c.body, c.replace, c.live, c.liveStd); got != c.want {
+		if got := routineBodyChanged("sql", c.body, c.body != "", c.replace, c.live, c.liveStd); got != c.want {
 			t.Errorf("routineBodyChanged(%q, replace=%v, live std=%v) = %v, want %v", c.body, c.replace, c.liveStd, got, c.want)
 		}
 	}

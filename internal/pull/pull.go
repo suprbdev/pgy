@@ -158,6 +158,8 @@ func (b *builder) unsupported() {
 	}
 	for _, o := range b.live.Details.Unsupported {
 		switch {
+		case o.Schema == "":
+			b.warn("%s %s is not supported by pgy and was left out", o.Kind, o.Name)
 		case !b.wantSchema(o.Schema):
 		case o.Kind == "cast":
 			b.warn("cast %s is not supported by pgy and was left out", o.Name)
@@ -580,9 +582,8 @@ func (b *builder) routines() {
 		if !ok {
 			continue
 		}
-		lang := strings.ToLower(r.Language)
-		if lang == "c" || lang == "internal" {
-			b.warn("%s %s.%s is written in %s and cannot be pulled", kindOf(r), r.Schema, r.Name, lang)
+		if diff.CompiledLanguage(r.Language) {
+			b.warn("%s %s.%s is written in %s and cannot be pulled", kindOf(r), r.Schema, r.Name, strings.ToLower(r.Language))
 			continue
 		}
 		m := newMap()
@@ -597,11 +598,12 @@ func (b *builder) routines() {
 				continue
 			}
 			add(m, "language", str(r.Language))
+			b.addTransform(m, r.Language, lp.Transform)
 			if lp.Security == "definer" {
 				add(m, "security", str("definer"))
 			}
 			addSet(m, lp.Config)
-			add(m, "body", literal(lp.Body))
+			add(m, "body", routineBody(lp.Body, lp.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(deps))
 			}
@@ -612,6 +614,7 @@ func (b *builder) routines() {
 			}
 			add(m, "returns", str(r.Returns))
 			add(m, "language", str(r.Language))
+			b.addTransform(m, r.Language, lf.Transform)
 			if lf.Security == "definer" {
 				add(m, "security", str("definer"))
 			}
@@ -634,7 +637,7 @@ func (b *builder) routines() {
 				add(m, "rows", floatNum(lf.Rows))
 			}
 			addSet(m, lf.Config)
-			add(m, "body", literal(lf.Body))
+			add(m, "body", routineBody(lf.Body, lf.SQLBody))
 			if deps := b.d.RoutineDeps[norm]; len(deps) > 0 {
 				add(m, "dependsOn", list(deps))
 			}
@@ -648,6 +651,25 @@ func (b *builder) routines() {
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "proc:"+norm)
 		add(blk, key, m)
+	}
+}
+
+// routineBody renders a routine's stored body. A string body is written so
+// that pgy recreates it byte for byte; a SQL-standard one is PostgreSQL's
+// deparsed form, which has no original spelling to keep.
+func routineBody(src string, sqlBody bool) *node {
+	if sqlBody {
+		return literal(src)
+	}
+	return exact(diff.DeclaredRoutineBody(src))
+}
+
+// addTransform writes a routine's transform types. A routine without any
+// gets an empty list when its language has transforms, so that one added
+// later is noticed; elsewhere the key is left out.
+func (b *builder) addTransform(m *node, language string, types []string) {
+	if len(types) > 0 || b.d.TransformLanguages[language] {
+		add(m, "transform", list(types))
 	}
 }
 
@@ -679,7 +701,9 @@ func (b *builder) aggregates() {
 		add(m, "stype", str(la.SType))
 		addStr(m, "finalfunc", la.FinalFunc)
 		addStr(m, "combinefunc", la.CombineFunc)
-		addStr(m, "initcond", la.InitCond)
+		if la.HasInitCond {
+			add(m, "initcond", str(la.InitCond))
+		}
 		if la.Parallel != "unsafe" {
 			add(m, "parallel", str(la.Parallel))
 		}
@@ -697,6 +721,10 @@ func (b *builder) aggregates() {
 			case strings.HasSuffix(o[1], "space"):
 				if v != "0" && v != "" {
 					add(m, o[0], num(v))
+				}
+			case o[1] == "minitcond":
+				if la.HasMInitCond {
+					add(m, o[0], str(v))
 				}
 			default:
 				addStr(m, o[0], v)

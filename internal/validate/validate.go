@@ -462,7 +462,7 @@ func Database(d *schema.Database) []Issue {
 	for _, k := range sortedKeys(d.Functions) {
 		if f := d.Functions[k]; f != nil {
 			checkDeps(d, "function "+k, f.DependsOn, add)
-			if strings.TrimSpace(f.Body) != "" && (f.Returns == "" || f.Language == "") {
+			if f.HasBody() && (f.Returns == "" || f.Language == "") {
 				add(Error, "function "+k, "needs returns and language")
 			}
 			if r := strings.ToLower(strings.TrimSpace(f.Returns)); f.Rows != nil && r != "" && !strings.HasPrefix(r, "setof ") && !strings.HasPrefix(r, "table") {
@@ -473,7 +473,7 @@ func Database(d *schema.Database) []Issue {
 	for _, k := range sortedKeys(d.Procedures) {
 		if p := d.Procedures[k]; p != nil {
 			checkDeps(d, "procedure "+k, p.DependsOn, add)
-			if strings.TrimSpace(p.Body) == "" || p.Language == "" {
+			if !p.HasBody() || p.Language == "" {
 				add(Error, "procedure "+k, "needs body and language")
 			}
 		}

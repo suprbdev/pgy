@@ -269,6 +269,9 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             lp.Config = prev.Config
         }
         lp.Body, lp.SQLBody = pr.Body, schema.IsSQLStandardBody(pr.Language, pr.Body)
+        lp.Language, _ = schema.SplitLanguage(pr.Language)
+        lp.Transform = schema.RoutineTransform(pr.Language, pr.Transform)
+        if lp.Transform == nil && prev != nil { lp.Transform = prev.Transform }
         if pr.Security != "" { lp.Security = strings.ToLower(pr.Security) }
         out.Procedures[norm] = true
         out.ProcedureDefs[norm] = lp
@@ -299,7 +302,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
             opts[o[1]] = v
         }
-        out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, CombineFunc: ag.CombineFunc, Parallel: parallel, Options: opts}
+        _, minitcond := ag.Options["minitcond"]
+        out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, HasInitCond: ag.HasInitCond(), HasMInitCond: minitcond, CombineFunc: ag.CombineFunc, Parallel: parallel, Options: opts}
         out.FunctionDefs[norm] = &LiveFunction{Signature: schema.RoutineName(k) + aggregateArgs(ag.ArgsSig), Kind: "a"}
         if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
     }
@@ -384,12 +388,21 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     sig := schema.RoutineName(k) + f.ArgsSig
     norm := normalizeFunctionSignature(sig)
     prev := out.FunctionDefs[norm]
-    hasBody := strings.TrimSpace(f.Body) != ""
+    hasBody := f.HasBody()
     if prev != nil || hasBody {
         lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: defaultFunctionCost(f.Language), Rows: defaultFunctionRows(f.Returns)}
-        replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body))
+        replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body) ||
+            routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform))
         if prev != nil && !replaced { *lf = *prev }
-        if hasBody { lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body) }
+        if hasBody {
+            lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body)
+            lf.Language, _ = schema.SplitLanguage(f.Language)
+            if t := schema.RoutineTransform(f.Language, f.Transform); t != nil {
+                lf.Transform = t
+            } else if prev != nil {
+                lf.Transform = prev.Transform
+            }
+        }
         if f.Volatility != "" { lf.Volatility = strings.ToLower(f.Volatility) }
         if f.Security != "" { lf.Security = strings.ToLower(f.Security) }
         if f.Strict != nil { lf.Strict = *f.Strict }

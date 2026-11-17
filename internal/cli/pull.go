@@ -31,8 +31,8 @@ directory.
 
 Objects pgy cannot express (functions written in C, operators, operator
 classes and families, conversions, base types, text search parsers and
-templates) are reported on stderr; objects that belong to an extension are
-not.`,
+templates, procedural languages, transforms and foreign-data wrappers) are
+reported on stderr; objects that belong to an extension are not.`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
