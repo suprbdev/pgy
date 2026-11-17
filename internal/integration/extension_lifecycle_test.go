@@ -216,6 +216,52 @@ schema app:
 	}
 }
 
+func TestIntegrationExtensionMoveOffSearchPathWarns(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	db := freshDatabase(t, admin, "pgytest_ext_move_off_path")
+	if _, err := db.Exec(ctx, `
+		create extension citext schema public;
+		create extension "uuid-ossp" schema public;
+		create extension pgcrypto schema public;
+		create schema app;
+		create table app.users (id uuid primary key default uuid_generate_v4(), token uuid not null default gen_random_uuid(), email citext not null);
+		create function app.norm(e citext) returns text language sql as $$select lower(e::text)$$;`); err != nil {
+		t.Fatal(err)
+	}
+	const y = `
+extensions:
+  - {name: citext, schema: ext}
+  - {name: uuid-ossp, schema: ext}
+  - {name: pgcrypto, schema: ext}
+schema app:
+  table users:
+    columns:
+      id: {type: uuid, primaryKey: true, default: uuid_generate_v4()}
+      token: {type: uuid, default: gen_random_uuid()}
+      email: {type: citext}
+  function norm(e citext):
+    returns: text
+    language: sql
+    body: select lower(e::text)
+`
+	plan := planExtensionsLive(t, db, y, diff.Options{Unsafe: true})
+	msgs := []string{}
+	for _, w := range plan.Warnings {
+		msgs = append(msgs, w.Message)
+	}
+	want := []string{
+		"extension citext moves to schema ext, which is not on the search_path, while the YAML still names its objects without a schema in column app.users.email, function app.norm(e citext); those names will not resolve once it has moved, so qualify them with the schema",
+		"extension uuid-ossp moves to schema ext, which is not on the search_path, while the YAML still names its objects without a schema in column app.users.id; those names will not resolve once it has moved, so qualify them with the schema",
+	}
+	if strings.Join(msgs, "\n") != strings.Join(want, "\n") {
+		t.Errorf("want the warnings\n%s\ngot\n%s", strings.Join(want, "\n"), strings.Join(msgs, "\n"))
+	}
+	if !strings.Contains(diff.Render(plan), `alter extension "citext" set schema "ext";`) {
+		t.Errorf("the extension still moves:\n%s", diff.Render(plan))
+	}
+}
+
 func TestIntegrationExtensionCreateOrder(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_order")

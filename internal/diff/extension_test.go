@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -377,6 +378,77 @@ func TestExtensionMoveAltersRequalifiedRoutine(t *testing.T) {
 		`alter extension "citext" set schema "ext";`,
 		`alter function "app"."by_c"(p ext.citext) stable;`,
 	})
+}
+
+func unqualifiedCitextDesired() *schema.Database {
+	d := movedCitextDesired()
+	d.Tables["app.t"].Columns["c"] = &schema.Column{Type: "citext", Default: "''::citext"}
+	d.Tables["app.t"].Columns["n"] = &schema.Column{Type: "text", Default: `regexp_replace('a', 'b', 'c')`}
+	d.Tables["app.t"].Columns["l"] = &schema.Column{Type: "text", Default: `'citext(x)'`}
+	d.Tables["app.t"].Columns["m"] = &schema.Column{Type: "text", Generated: `upper(citext(n)::text)`}
+	d.Tables["app.t"].Columns["q"] = &schema.Column{Type: "text", Generated: `"CITEXT"(n)::text`}
+	d.Domains = map[string]*schema.Domain{"app.email": {Type: "citext[]"}, "app.code": {Type: "ext.citext"}}
+	d.Functions = map[string]*schema.Function{
+		"app.norm(e citext)":          {Schema: "app", Name: "norm", ArgsSig: "(e citext)", Returns: "ext.citext", Language: "sql", Body: "select e::text::citext"},
+		"app.size(e ext.citext)":      {Schema: "app", Name: "size", ArgsSig: "(e ext.citext)", Returns: "setof citext", Language: "sql", Body: "select e"},
+		"app.ok(e ext.citext, n int)": {Schema: "app", Name: "ok", ArgsSig: "(e ext.citext, n int)", Returns: "boolean", Language: "sql", Body: "select true"},
+	}
+	return d
+}
+
+func searchPathWarnings(p *PlanDiff) []string {
+	out := []string{}
+	for _, w := range p.Warnings {
+		if strings.Contains(w.Message, "not on the search_path") {
+			out = append(out, w.Message)
+		}
+	}
+	return out
+}
+
+func TestExtensionMoveOffSearchPathWarns(t *testing.T) {
+	live := movedCitextLive()
+	live.ExtensionDefs["citext"].Builtins = map[string]bool{"regexp_replace": true}
+	p := Plan(live, unqualifiedCitextDesired(), true)
+	if !findCreate(p, `alter extension "citext" set schema "ext";`) {
+		t.Fatalf("the extension still moves:\n%s", Render(p))
+	}
+	want := "extension citext moves to schema ext, which is not on the search_path, while the YAML still names its objects without a schema in " +
+		"column app.t.c, column app.t.m, domain app.email, function app.norm(e citext), function app.size(e ext.citext); " +
+		"those names will not resolve once it has moved, so qualify them with the schema"
+	wantStatements(t, searchPathWarnings(p), []string{want})
+	if p := Plan(live, movedCitextDesired(), true); len(p.Warnings) != 0 {
+		t.Errorf("qualified names need no warning: %v", p.Warnings)
+	}
+}
+
+func TestExtensionMoveOnSearchPathQuiet(t *testing.T) {
+	live := movedCitextLive()
+	d := unqualifiedCitextDesired()
+	d.DatabaseSettings = map[string]string{"search_path": `"$user", public, "ext"`}
+	if w := searchPathWarnings(Plan(live, d, true)); len(w) != 0 {
+		t.Errorf("a database search_path with the schema resolves the names: %v", w)
+	}
+	live.SearchPath = []string{"public", "ext"}
+	if w := searchPathWarnings(Plan(live, unqualifiedCitextDesired(), true)); len(w) != 0 {
+		t.Errorf("the session's search_path has the schema: %v", w)
+	}
+	live.SearchPath = nil
+	live.ExtensionDefs["citext"].Members = nil
+	if w := searchPathWarnings(Plan(live, unqualifiedCitextDesired(), true)); len(w) != 0 {
+		t.Errorf("without member names nothing can be named: %v", w)
+	}
+}
+
+func TestExtensionMoveOffSearchPathListsTen(t *testing.T) {
+	d := movedCitextDesired()
+	for i := 0; i < 12; i++ {
+		d.Tables["app.t"].Columns[fmt.Sprintf("c%02d", i)] = &schema.Column{Type: "citext", Nullable: true}
+	}
+	w := searchPathWarnings(Plan(movedCitextLive(), d, true))
+	if len(w) != 1 || !strings.Contains(w[0], "column app.t.c09, 2 more;") || strings.Contains(w[0], "c10") {
+		t.Errorf("ten objects are named, then a count: %v", w)
+	}
 }
 
 func TestExtensionMoveWithoutMemberNamesReemits(t *testing.T) {
