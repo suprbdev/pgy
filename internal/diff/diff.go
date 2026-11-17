@@ -2796,7 +2796,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     recreateWarnings = append(recreateWarnings, argWarnings...)
     live, updatePost, updateWarnings := recreateUpdateDependents(extensions, live, desired, opts)
     recreateWarnings = append(recreateWarnings, updateWarnings...)
-    live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
+    live, typeChangeEarly, typeChangePre, typeChangePost, readdedColumns, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
@@ -3282,6 +3282,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                 }
                 sort.Strings(colNames)
+                sort.SliceStable(colNames, func(i, j int) bool { return indexOf(readdedColumns[fq], colNames[i]) < 0 && indexOf(readdedColumns[fq], colNames[j]) >= 0 })
                 for _, cn := range colNames {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
@@ -6387,7 +6388,7 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
         case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
             switch {
             case serverVersion > 0 && serverVersion < 170000:
-                warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); drop and re-add the column, along with the indexes and constraints that use it, in a hand-written migration", fq, cn, serverVersion/10000))
+                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, serverVersion/10000)) }
             case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }

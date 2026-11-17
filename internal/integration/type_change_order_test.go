@@ -198,8 +198,81 @@ schema SCH:
 	}
 }
 
-func TestIntegrationTypeChangeWarnsAboutGeneratedColumn(t *testing.T) {
+func TestIntegrationTypeChangeReaddsGeneratedColumn(t *testing.T) {
 	pool := connect(t)
+	ctx := context.Background()
+	sch := freshSchema(t, pool)
+	reader := freshRole(t, pool, "reader")
+	y := `
+schema SCH:
+  table t:
+    columns:
+      id: {type: int, primaryKey: true}
+      name: {type: %s, default: "''"}
+      name_lc: {type: text, generated: lower(name), nullable: true}
+      note: {type: text, nullable: true}
+    indexes:
+      t_name_lc: {columns: [name_lc]}
+    constraints:
+      t_name_lc_check: {type: check, expression: "name_lc <> 'x'"}
+  view lc:
+    query: select id, name_lc from SCH.t
+`
+	convergeYAML(t, pool, sch, strings.Replace(y, "%s", "text", 1))
+	if _, err := pool.Exec(ctx, strings.NewReplacer("SCH", sch, "READER", reader).Replace(`
+		insert into SCH.t (id, name) values (1, 'Ada'), (2, 'Bob');
+		comment on column SCH.t.name_lc is 'unmanaged';
+		grant select (name_lc) on SCH.t to "READER";
+		alter table SCH.t alter column name_lc set statistics 300;`)); err != nil {
+		t.Fatal(err)
+	}
+	d, err := schema.LoadAndMerge([]string{writeYAML(t, strings.ReplaceAll(strings.Replace(y, "%s", "varchar(40)", 1), "SCH", sch))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := diff.Plan(introspect(t, pool, d), d, false); diff.Render(p) != "" {
+		t.Fatalf("without --unsafe nothing changes, got:\n%s", diff.Render(p))
+	}
+	p := diff.Plan(introspect(t, pool, d), d, true)
+	sql := diff.Render(p)
+	for _, w := range p.Warnings {
+		if w.Kind == "dependents" {
+			t.Errorf("nothing is in the way: %v", w)
+		}
+	}
+	last := -1
+	for _, want := range []string{`drop view "` + sch + `"."lc"`, `drop column "name_lc"`, `alter column "name" type varchar(40)`, `add column "name_lc" text generated always as (lower(name)) stored`, `create index if not exists "t_name_lc"`, `create or replace view "` + sch + `"."lc"`} {
+		i := strings.Index(sql, want)
+		if i < 0 || i < last {
+			t.Errorf("%q is missing or out of order in:\n%s", want, sql)
+		}
+		last = max(last, i)
+	}
+	applyPlan(t, pool, p)
+	if again := diff.Plan(introspect(t, pool, d), d, true); diff.Render(again)+diff.RenderConcurrent(again) != "" {
+		t.Fatalf("plan did not converge:\n%s%s", diff.Render(again), diff.RenderConcurrent(again))
+	}
+
+	var lc, comment string
+	var granted, last2 bool
+	var stats int
+	if err := pool.QueryRow(ctx, `
+		select (select string_agg(name_lc, ',' order by id) from `+sch+`.t),
+		       coalesce(col_description($1::regclass, (select attnum from pg_attribute where attrelid = $1::regclass and attname = 'name_lc')), ''),
+		       has_column_privilege($2, $1::regclass, 'name_lc', 'select'),
+		       (select attstattarget from pg_attribute where attrelid = $1::regclass and attname = 'name_lc'),
+		       (select max(attnum) from pg_attribute where attrelid = $1::regclass and not attisdropped) = (select attnum from pg_attribute where attrelid = $1::regclass and attname = 'name_lc')`,
+		sch+".t", reader).Scan(&lc, &comment, &granted, &stats, &last2); err != nil {
+		t.Fatal(err)
+	}
+	if lc != "ada,bob" || comment != "unmanaged" || !granted || stats != 300 || !last2 {
+		t.Errorf("after the change: values %q, comment %q, grant %v, statistics %d, last column %v", lc, comment, granted, stats, last2)
+	}
+}
+
+func TestIntegrationTypeChangeKeepsGeneratedColumnItCannotReadd(t *testing.T) {
+	pool := connect(t)
+	ctx := context.Background()
 	sch := freshSchema(t, pool)
 	y := `
 schema SCH:
@@ -210,6 +283,9 @@ schema SCH:
       name_lc: {type: text, generated: lower(name), nullable: true}
 `
 	convergeYAML(t, pool, sch, strings.Replace(y, "%s", "text", 1))
+	if _, err := pool.Exec(ctx, `create index hidden on `+sch+`.t (name_lc)`); err != nil {
+		t.Fatal(err)
+	}
 	d, err := schema.LoadAndMerge([]string{writeYAML(t, strings.ReplaceAll(strings.Replace(y, "%s", "varchar(40)", 1), "SCH", sch))})
 	if err != nil {
 		t.Fatal(err)
@@ -217,9 +293,9 @@ schema SCH:
 	p := diff.Plan(introspect(t, pool, d), d, true)
 	found := false
 	for _, w := range p.Warnings {
-		found = found || (w.Kind == "dependents" && strings.Contains(w.Message, "generated column name_lc uses it"))
+		found = found || w.Kind == "dependents" && strings.Contains(w.Message, "generated column name_lc uses it") && strings.Contains(w.Message, "because index hidden on it isn't declared")
 	}
 	if sql := diff.Render(p); !found || strings.Contains(sql, "name_lc") {
-		t.Errorf("want a warning naming the generated column and no statement for it, got %v\n%s", p.Warnings, sql)
+		t.Errorf("want a warning naming the generated column and the index, and no statement for it, got %v\n%s", p.Warnings, sql)
 	}
 }

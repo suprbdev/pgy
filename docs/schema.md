@@ -560,9 +560,9 @@ For columns that already exist in the live database, `pgy diff` reconciles their
   - The column's default is dropped before the change and the declared `default` set again after it. PostgreSQL has to cast a default left in place to the new type and refuses when there is no implicit cast (`default for column ... cannot be cast automatically`), whatever `using` says. `nextval(...)` defaults stay.
   - Indexes and check, unique and exclusion constraints on the column that the same diff redefines (or drops, with `--prune`) are dropped before the change and created after it. Left in place, PostgreSQL rebuilds them from their old definition, and an operator class or expression written for the old type may not accept the new one. Indexes and constraints the YAML leaves as they are stay for PostgreSQL to carry over.
   - A foreign key whose columns change type on both sides is dropped before either change and added again after both, since PostgreSQL checks it after each one, when the two types may not be comparable. Like any foreign key added to an existing table it comes back `NOT VALID` and is validated in the no-transaction migration.
-  - PostgreSQL refuses the change while a generated column uses the column. A stored generated column that the YAML drops or now declares as a plain column gets `DROP EXPRESSION` first. One that stays generated is reported (kind `dependents`) and left alone, because dropping and re-adding it would also drop the indexes and constraints on it: write that migration by hand.
+  - PostgreSQL refuses the change while a generated column uses the column. A stored generated column that the YAML drops or now declares as a plain column gets `DROP EXPRESSION` first. One that stays generated is dropped before the change and added again after it from the YAML (see [Generated columns added again](#generated-columns-added-again)).
 - **Identity**: a changed kind emits `SET GENERATED ALWAYS | BY DEFAULT`, and changed sequence options emit `SET START WITH / SET INCREMENT BY / ...` (options left out of the YAML are unmanaged; `start` only affects a later `RESTART`). Under `--unsafe`, an identity declared on an existing column is added with `ADD GENERATED ... AS IDENTITY` (dropping its default first), and one the YAML no longer declares is removed with `DROP IDENTITY`. The new sequence starts at `start`, not after existing values, so set `start` past them, for example when converting a `serial` column.
-- **Generated** (requires `--unsafe`): a changed `generated` expression emits `ALTER COLUMN ... SET EXPRESSION AS (...)` (PostgreSQL 17+. On 15/16, `pgy diff` emits nothing for the change and prints a warning instead, because drop-and-re-add would also drop the indexes and constraints that use the column. Write that migration by hand), and removing `generated` from a live generated column emits `DROP EXPRESSION`, turning it into a plain column that keeps its current values. Expressions are compared normalized, so `price * qty` matches the live `(price * (qty)::numeric)`, and [through the server](#how-expressions-are-compared) when that is not enough (`ean13(isbn)`, stored as `(isbn)::ean13`). A plain column cannot be turned into a generated one in place. Generated columns never get `SET DEFAULT`/`DROP DEFAULT`.
+- **Generated** (requires `--unsafe`): a changed `generated` expression emits `ALTER COLUMN ... SET EXPRESSION AS (...)` on PostgreSQL 17+. PostgreSQL 15 and 16 have no `SET EXPRESSION`, so there the column is dropped and added again with the new expression (see [Generated columns added again](#generated-columns-added-again)); without `--unsafe`, `pgy diff` warns. Removing `generated` from a live generated column emits `DROP EXPRESSION`, turning it into a plain column that keeps its current values. Expressions are compared normalized, so `price * qty` matches the live `(price * (qty)::numeric)`, and [through the server](#how-expressions-are-compared) when that is not enough (`ean13(isbn)`, stored as `(isbn)::ean13`). A plain column cannot be turned into a generated one in place. Generated columns never get `SET DEFAULT`/`DROP DEFAULT`.
 - **Removed** (requires `--unsafe`): a column the YAML no longer declares is dropped with `DROP COLUMN`, after the generated columns, policies and publications the same plan drops. PostgreSQL rejects the drop while a view, materialized view, trigger, rule, policy or generated column still uses the column, so when one of them stays (it isn't declared, and `--prune` is off or doesn't drop it), `pgy diff` keeps the column and warns (kind `dependents`), naming them. `--prune` drops undeclared views, materialized views, triggers and rules first; a policy goes when the table's `policies` block leaves it out.
 
 ```yaml
@@ -573,6 +573,24 @@ schema public:
         type: numeric(10,2)          # was: text
         using: amount::numeric(10,2) # cast for ALTER ... TYPE (with --unsafe)
 ```
+
+#### Generated columns added again
+
+PostgreSQL can't change a generated column in place in two cases: the type of a column it uses changes, and, before PostgreSQL 17, its expression changes. With `--unsafe`, pgy drops the generated column and adds it again from the YAML:
+
+```sql
+drop view "app"."lc";                                   -- what uses the column, as around a type change
+alter table "app"."users" drop column "name_lc";
+alter table "app"."users" alter column "name" type citext;
+alter table "app"."users" add column "name_lc" text generated always as (lower(name)) stored;
+create index if not exists "users_name_lc" on "app"."users"("name_lc");
+create or replace view "app"."lc" as select id, name_lc from app.users;
+```
+
+- The indexes, constraints and extended statistics on the column go with it and are created again from the YAML, like new ones: a check or foreign key `NOT VALID` and validated in the no-transaction migration, an index with `concurrently: true` there too. The views, materialized views, triggers, policies and rules that use the column are dropped first and recreated after, like around a type change (see [Recreated views](#recreated-views)).
+- What the YAML leaves unmanaged on the column comes back: its comment, grants, storage, compression, statistics target and `n_distinct` settings.
+- The column moves to the end of the table, and a stored column is computed again for every row, which rewrites the table under an `ACCESS EXCLUSIVE` lock (a lock warning says so). `pgy diff` prints a warning for each column it adds again.
+- pgy only does this when everything that goes with the column can be created again. It keeps the column, and warns with the reason, when the table is partitioned, has inheritance children, or is a foreign or typed table; when the column is part of the primary key, has a collation the YAML doesn't declare, or a foreign key references it or a publication lists it; when an index, constraint or statistics object on it isn't declared and `--prune` is off; or when an object that uses it isn't declared. The migration then has to be written by hand.
 
 ### Primary Key
 
