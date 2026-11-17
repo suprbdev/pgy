@@ -257,6 +257,8 @@ It runs only when the first step leaves something to it. A schema that is in syn
 
 It needs the `TEMPORARY` privilege on the database (`PUBLIC` has it by default) and a writable session. Without them, on a read-only standby for instance, `pgy diff` prints one warning and reports what the text comparison finds: a definition PostgreSQL stores in another spelling shows up as changed on every diff, and a cast or schema qualifier that only one side has goes unnoticed. Write definitions the way PostgreSQL prints them to get an exact diff there: `pgy pull`, or `\d` in psql, shows the stored form.
 
+The copy also needs what `CREATE TABLE ... (LIKE ...)` needs: USAGE on the table's schema and SELECT on the table. A role that lacks them for some tables, such as the tables of a hosted platform's own schema, has the definitions on those tables compared as text, and the others through the server as usual. `pgy diff` prints one warning that names them, together with the views and types it couldn't compare for a missing privilege (see [Views](#views)). A missing privilege never makes `pgy diff` plan a statement: what is planned is what the text comparison finds.
+
 Some definitions are compared as text only:
 
 - **A definition that uses something the same plan creates:** a column it adds, a function or a table it creates, an extension's objects in the schema it moves the extension to. PostgreSQL can't attach it to the copy yet, so that diff reports it as changed, and the next one compares it through the server. Tables, columns, constraints, indexes, domains and functions the plan renames with [`renamedFrom`](#renames) are no problem.
@@ -1059,6 +1061,7 @@ For views and materialized views that already exist, `pgy diff` compares the dec
 - **A column dropped, renamed or retyped:** `CREATE OR REPLACE VIEW` can't do that, so with `--unsafe` the view is dropped and recreated together with the declared views that select from it, which get back what they had (see [Recreated views](#recreated-views)). Without `--unsafe`, `pgy diff` warns. A view that an undeclared view (or one declared without a `query`) depends on is left alone with a warning.
 - **A materialized view whose query changed:** dropped and recreated with its indexes under `--unsafe`, with a lock warning, since it is refilled and unreadable meanwhile.
 - **A declared query that can't be compared,** because it uses something the plan creates: a plain view is replaced, and a materialized view is left alone, each with a warning.
+- **A declared query the connecting role may not parse,** because it lacks USAGE on a schema the query names (a hosted platform's own schema, such as RDS's `rdsadmin`): the query is compared with the live definition as text. One that matches, as `pgy pull` writes it, is the same; one that doesn't is left as it is, never replaced, and `pgy diff` names it in one warning together with the other definitions it couldn't compare for a missing privilege.
 
 The comparison needs the TEMP privilege (PUBLIC has it by default) and a writable session. On a read-only standby, `pgy diff` warns and leaves existing views as they are. `replace: true` still forces `CREATE OR REPLACE VIEW` on every diff.
 

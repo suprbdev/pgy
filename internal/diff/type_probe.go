@@ -77,11 +77,13 @@ func applyTypeProbes(e *liveEdit, live *Live, desired *schema.Database) {
 }
 
 // probeType is what pg_temp.pgy_probe_types made of one declared type: the
-// way format_type prints it, or why it couldn't resolve it.
+// way format_type prints it, or why it couldn't resolve it, with the
+// error's SQLSTATE.
 type probeType struct {
 	Type  string `json:"type"`
 	Shown string `json:"shown"`
 	Err   string `json:"err"`
+	Code  string `json:"code"`
 }
 
 // typeResults returns the types of reply that PostgreSQL resolved, by the
@@ -137,7 +139,7 @@ begin
             end if;
             resolved := resolved || jsonb_build_object('type', t, 'shown', pg_temp.pgy_probe_type(typ, tmod));
         exception when others then
-            resolved := resolved || jsonb_build_object('type', t, 'err', sqlerrm);
+            resolved := resolved || jsonb_build_object('type', t, 'err', sqlerrm, 'code', sqlstate);
         end;
     end loop;
     return to_jsonb(resolved);

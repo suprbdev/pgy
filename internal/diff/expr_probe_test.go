@@ -475,7 +475,7 @@ func TestExprProbeResults(t *testing.T) {
 	for i, r := range plan.spec.Relations {
 		rels[r.Name] = i
 	}
-	reply.Relations[rels["mv"]].Err = `permission denied for materialized view mv`
+	reply.Relations[rels["mv"]].Err, reply.Relations[rels["mv"]].Code = `permission denied for materialized view mv`, insufficientPrivilege
 	failedID := -1
 	for id, r := range plan.requests {
 		switch {
@@ -490,7 +490,7 @@ func TestExprProbeResults(t *testing.T) {
 			reply.Defs = append(reply.Defs, probeDef{Kind: r.attach.kind, Name: r.attach.name, Parts: []string{"read " + r.attach.name}})
 		}
 	}
-	reply.Errors = append(reply.Errors, probeFailure{failedID, `function cube(unknown) does not exist`}, probeFailure{-1, `ignored`})
+	reply.Errors = append(reply.Errors, probeFailure{ID: failedID, Err: `function cube(unknown) does not exist`, Code: "42883"}, probeFailure{ID: -1, Err: `ignored`})
 
 	probes := plan.results(reply)
 	if len(probes) != len(plan.requests) {
@@ -508,8 +508,11 @@ func TestExprProbeResults(t *testing.T) {
 	if p := probes[ExprKey{ExprPolicy, "app.t", "t_p"}]; p.Err != selfReference || p.Parts != nil {
 		t.Errorf("a definition that reads the probe's copy is not compared, got %+v", p)
 	}
-	if p := probes[ExprKey{ExprIndex, "app.mv", "mv_part"}]; p.Err != `permission denied for materialized view mv` {
-		t.Errorf("a relation that can't be copied fails its definitions, got %+v", p)
+	if p := probes[ExprKey{ExprIndex, "app.mv", "mv_part"}]; p.Err != `permission denied for materialized view mv` || !p.Denied {
+		t.Errorf("a relation that can't be copied fails its definitions, for a missing privilege, got %+v", p)
+	}
+	if p := probes[ExprKey{ExprConstraint, "app.t", "t_box"}]; p.Denied {
+		t.Errorf("an error other than a missing privilege is not a denial, got %+v", p)
 	}
 	if p := probes[ExprKey{ExprDomainDefault, "app.props", ""}]; p.Err != "" || !slices.Equal(p.Parts, []string{"read pgy_probe_d0"}) {
 		t.Errorf("a domain default is read back under the probe's domain, got %+v", p)

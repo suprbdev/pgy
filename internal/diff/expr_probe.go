@@ -67,6 +67,9 @@ type ExprProbe struct {
 	// creates, or it names the probe's copy of its table (see
 	// selfReference). "" when it was read back.
 	Err string
+	// Denied marks an Err that is a missing privilege, such as USAGE on the
+	// schema of the table the probe copies (see DeniedError).
+	Denied bool
 }
 
 // exprSlot is a declared definition together with the live one it is
@@ -973,16 +976,19 @@ type probeDef struct {
 	Parts []string `json:"parts"`
 }
 
-// probeFailure is the error of the statement with the given ID.
+// probeFailure is the error of the statement with the given ID, and its
+// SQLSTATE.
 type probeFailure struct {
-	ID  int    `json:"id"`
-	Err string `json:"err"`
+	ID   int    `json:"id"`
+	Err  string `json:"err"`
+	Code string `json:"code"`
 }
 
 // probeRelationReply is what pg_temp.pgy_probe read back from the copy of
-// one relation, or why it couldn't copy it.
+// one relation, or why it couldn't copy it, with the error's SQLSTATE.
 type probeRelationReply struct {
 	Err  string     `json:"err"`
+	Code string     `json:"code"`
 	Defs []probeDef `json:"defs"`
 }
 
@@ -1278,9 +1284,9 @@ func collectExprProbes(live *Live, desired *schema.Database, all bool) *exprProb
 
 // results turns the server's reply into the probe of each request.
 func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
-	failed := map[int]string{}
+	failed := map[int]probeFailure{}
 	for _, e := range reply.Errors {
-		failed[e.ID] = e.Err
+		failed[e.ID] = e
 	}
 	read := func(defs []probeDef) map[[2]string][]string {
 		out := make(map[[2]string][]string, len(defs))
@@ -1304,14 +1310,14 @@ func (p *exprProbePlan) results(reply *probeReply) map[ExprKey]*ExprProbe {
 				probe.Err = "no result"
 				continue
 			}
-			if err := reply.Relations[r.relation].Err; err != "" {
-				probe.Err = err
+			if rel := reply.Relations[r.relation]; rel.Err != "" {
+				probe.Err, probe.Denied = rel.Err, rel.Code == insufficientPrivilege
 				continue
 			}
 			defs = relations[r.relation]
 		}
-		if err, ok := failed[id]; ok {
-			probe.Err = err
+		if f, ok := failed[id]; ok {
+			probe.Err, probe.Denied = f.Err, f.Code == insufficientPrivilege
 			continue
 		}
 		parts, ok := defs[[2]string{r.attach.kind, r.attach.name}]
@@ -1421,7 +1427,7 @@ begin
                 execute st->>'sql';
             end if;
         exception when others then
-            failed := failed || jsonb_build_object('id', st->'id', 'err', sqlerrm);
+            failed := failed || jsonb_build_object('id', st->'id', 'err', sqlerrm, 'code', sqlstate);
         end;
     end loop;
     return failed;
@@ -1432,6 +1438,7 @@ declare
     r jsonb;
     rel oid;
     failure text;
+    code text;
     failed jsonb[] := '{}';
     relations jsonb[] := '{}';
     types jsonb;
@@ -1443,9 +1450,10 @@ begin
             execute format('create temporary table %I (like %s)', r->>'name', r->>'like');
         exception when others then
             failure := sqlerrm;
+            code := sqlstate;
         end;
         if failure is not null then
-            relations := relations || jsonb_build_object('err', failure);
+            relations := relations || jsonb_build_object('err', failure, 'code', code);
             continue;
         end if;
         failed := failed || pg_temp.pgy_probe_run(r->'run');
@@ -1641,7 +1649,9 @@ func runExprProbe(ctx context.Context, pool *pgxpool.Pool, spec *probeSpec) (*pr
 // from both sides. A server that can't run the probe, such as a read-only
 // standby or a role without the TEMPORARY privilege, leaves both nil, and
 // everything is compared as text; the error is returned for the caller to
-// report.
+// report. A role that lacks a privilege for some of them, such as USAGE on
+// the schema of a table, has those compared as text, and gets a
+// *DeniedError that lists them; the results of the others are kept.
 func ProbeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database) error {
 	return probeExpressions(ctx, pool, live, desired, false)
 }
@@ -1680,5 +1690,5 @@ func probeExpressions(ctx context.Context, pool *pgxpool.Pool, live *Live, desir
 	if len(plan.spec.Types) > 0 {
 		live.TypeProbes = typeResults(reply)
 	}
-	return nil
+	return deniedExprProbes(live.ExprProbes, reply).err()
 }
