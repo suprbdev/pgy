@@ -45,8 +45,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
 
     for _, ext := range desired.Extensions {
         if ext == nil || ext.Name == "" { continue }
+        le := &LiveExtension{Relocatable: true, Created: !out.Extensions[ext.Name]}
         out.Extensions[ext.Name] = true
-        le := &LiveExtension{Relocatable: true}
         prev := out.ExtensionDefs[ext.Name]
         if prev != nil { *le = *prev }
         if ext.Schema != "" {
@@ -312,8 +312,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for k, vw := range desired.Views {
-        if vw == nil || vw.Query == "" { continue }
-        if vw.Materialized {
+        if vw == nil { continue }
+        if vw.Query == "" {
+            if vw.Materialized { out.MatViews[k] = true } else { out.Views[k] = true }
+        } else if vw.Materialized {
             out.MatViews[k] = true
             delete(out.ViewProbes, k)
             if vw.With != nil {
@@ -727,6 +729,9 @@ func cloneLive(l *Live) *Live {
         CompositeCollations: cloneMap(l.CompositeCollations, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         CompositeComments:   cloneMap(l.CompositeComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
+        MemberExtension:    l.MemberExtension,
+        InitPrivs:          l.InitPrivs,
+        BaseTypes:          cloneSet(l.BaseTypes),
         OwnedSequences:     cloneSet(l.OwnedSequences),
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),
         PartitionBounds:    cloneMap(l.PartitionBounds, nil),

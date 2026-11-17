@@ -30,6 +30,8 @@ type LiveDetails struct {
     // RoutineDeps: normalized routine signature -> dependsOn entries
     // ("table x", "view x", "function x(args)", ...) for routines with a
     // SQL-standard body, whose references PostgreSQL records in pg_depend.
+    // Objects an extension owns are left out, here and in ViewDeps: they
+    // exist once the extension does, and are not declared.
     RoutineDeps map[string][]string
     // TransformLanguages: procedural languages that have at least one
     // transform, so their routines can take a TRANSFORM FOR TYPE clause.
@@ -191,6 +193,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             func(scan func(...any) error) error {
                 var sig, dep string
                 if err := scan(&sig, &dep); err != nil { return err }
+                if l.ExtensionMembers[dependencyMemberKey(dep)] { return nil }
                 key := publicScope.functionSignature(sig)
                 if deps := d.RoutineDeps[key]; len(deps) == 0 || deps[len(deps)-1] != dep { d.RoutineDeps[key] = append(deps, dep) }
                 return nil
@@ -218,6 +221,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             func(scan func(...any) error) error {
                 var view, ref string
                 if err := scan(&view, &ref); err != nil { return err }
+                if l.ExtensionMembers["rel:"+ref] { return nil }
                 d.ViewDeps[view] = append(d.ViewDeps[view], ref)
                 return nil
             }},
@@ -304,6 +308,18 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         })
     }
     return batch.run(ctx, pool)
+}
+
+// dependencyMemberKey returns the Live.ExtensionMembers key of the object a
+// RoutineDeps entry ("table x", "function x(args)", ...) names.
+func dependencyMemberKey(dep string) string {
+    for _, kind := range []string{"function ", "procedure "} {
+        if sig, ok := strings.CutPrefix(dep, kind); ok { return "proc:" + publicScope.functionSignature(sig) }
+    }
+    for _, kind := range []string{"materialized view ", "view ", "sequence ", "table "} {
+        if name, ok := strings.CutPrefix(dep, kind); ok { return "rel:" + name }
+    }
+    return ""
 }
 
 // parseDictOptions splits pg_ts_dict.dictinitoption ("language = 'english',

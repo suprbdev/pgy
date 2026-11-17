@@ -1,0 +1,32 @@
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'pgy_fx_reader') then create role pgy_fx_reader; end if;
+  if not exists (select from pg_roles where rolname = 'pgy_fx_monitor') then create role pgy_fx_monitor; end if;
+end $$;
+create extension pg_buffercache;
+create extension pg_stat_statements;
+create extension citext;
+create extension hstore;
+create extension tablefunc;
+create schema crypto;
+create extension pgcrypto schema crypto;
+revoke execute on function pg_buffercache_pages() from pg_monitor;
+grant execute on function pg_buffercache_pages() to pgy_fx_monitor with grant option;
+grant execute on function pg_buffercache_pages() to public;
+revoke select on pg_buffercache from pg_monitor;
+grant insert on pg_stat_statements to public;
+revoke select on pg_stat_statements_info from public;
+grant select on pg_stat_statements_info to pgy_fx_monitor;
+revoke execute on function crypto.digest(text, text) from public;
+grant execute on function crypto.gen_salt(text) to pgy_fx_reader;
+grant execute on function each(hstore) to pgy_fx_reader;
+revoke all on function crosstab(text) from public;
+grant execute on function crosstab(text) to pgy_fx_reader;
+revoke usage on type citext from public;
+grant usage on type hstore to pgy_fx_reader with grant option;
+alter function citext_eq(citext, citext) leakproof;
+create view slow as select queryid, calls from pg_stat_statements;
+create materialized view slow_mv as select queryid, calls from pg_stat_statements with no data;
+create function sha(x text) returns bytea language sql immutable return crypto.digest(x, 'sha256');
+create function pairs(h hstore) returns bigint language sql stable begin atomic
+  select count(*) from each(h);
+end;

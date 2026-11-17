@@ -188,6 +188,8 @@ func (l *Live) scoped() *Live {
 	out.FunctionComments = rekeyed(l.FunctionComments, sc.functionSignature)
 	out.Owners = rekeyed(l.Owners, proc)
 	out.ExtensionMembers = rekeyed(l.ExtensionMembers, proc)
+	out.MemberExtension = rekeyed(l.MemberExtension, proc)
+	out.InitPrivs = rekeyed(l.InitPrivs, proc)
 	return &out
 }
 

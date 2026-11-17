@@ -529,6 +529,30 @@ func TestPlanAttributeOnlyRevokeEmittedOnce(t *testing.T) {
     if got := strings.Count(Render(steps), "revoke all on function"); got != 1 { t.Fatalf("expected one revoke, got %d:\n%s", got, Render(steps)) }
 }
 
+func TestPlanAttributeOnlyAfterTheGroupThatCreatesTheExtension(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "a.yml": "extensions:\n  - {name: hstore, schema: public}\nschema public:\n  table a:\n    columns:\n      id: {type: int, primaryKey: true}\n",
+        "b.yml": "schema public:\n  function each(hstore):\n    rows: 50\n    grants: {app: [execute]}\n  type hstore:\n    revokePublic: true\n  table b:\n    columns:\n      a_id: {type: int}\n    foreignKeys:\n      b_a: {columns: [a_id], references: {table: public.a, columns: [id]}}\n",
+        "c.yml": "tables:\n  c:\n    columns:\n      id: {type: int}\n",
+    })
+    steps := planFiles(t, nil, p("a.yml", "b.yml", "c.yml"), ModeFile, false)
+    assertEmittedOnce(t, steps)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"a", "b", "c"}) { t.Fatalf("steps = %v", got) }
+    b := stepSQL(t, steps, "b")
+    for _, want := range []string{
+        `alter function "public"."each"(hstore) rows 50;`,
+        `grant execute on function "public"."each"(hstore) to "app";`,
+        `revoke usage on type "public"."hstore" from public;`,
+    } {
+        if !strings.Contains(b, want) { t.Errorf("missing %q in step b:\n%s", want, b) }
+    }
+    for _, s := range steps {
+        for _, w := range s.Plan.Warnings {
+            if strings.Contains(w.Message, "has no") { t.Errorf("step %s: the extension of step a creates these objects: %s", s.Name, w.Message) }
+        }
+    }
+}
+
 func TestPlanReplaceViewEmittedOnce(t *testing.T) {
     _, p := writeSchemas(t, map[string]string{
         "a.yml": "schema public:\n  table a:\n    columns:\n      id: {type: int}\n  view a_ids:\n    query: select id from public.a\n    replace: true\n",
