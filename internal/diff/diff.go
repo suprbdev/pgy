@@ -87,8 +87,9 @@ type Live struct{
     // RoleMembers: member role -> parent role -> exists (pg_auth_members)
     RoleMembers map[string]map[string]bool
     // ColumnDependents: "schema.relation.column" -> the views, materialized
-    // views, triggers, policies and rules whose definitions use the column,
-    // which PostgreSQL won't let ALTER COLUMN ... TYPE change under them.
+    // views, triggers, policies, rules and generated columns whose
+    // definitions use the column, which PostgreSQL won't let ALTER COLUMN ...
+    // TYPE change under them.
     ColumnDependents map[string][]ColumnDependent
     // RoleMemberOptions: member role -> parent role -> the membership's
     // options, combined over grantors.
@@ -209,8 +210,9 @@ type LiveRole struct {
 }
 
 // ColumnDependent is an object whose definition uses a column: a view or
-// materialized view (Name is "schema.view"), or a trigger, policy or rule
-// (Name is its name, Table the relation it is on).
+// materialized view (Name is "schema.view"), a trigger, policy or rule
+// (Name is its name, Table the relation it is on), or a generated column of
+// the same table (Kind "generated", Name is the column).
 type ColumnDependent struct {
     Kind, Name, Table string
 }
@@ -1775,13 +1777,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select distinct n.nspname || '.' || c.relname || '.' || a.attname,
                case when d.classid = 'pg_trigger'::regclass then 'trigger'
                     when d.classid = 'pg_policy'::regclass then 'policy'
+                    when d.classid = 'pg_attrdef'::regclass then 'generated'
                     when ev.relkind = 'v' then 'view' when ev.relkind = 'm' then 'matview' else 'rule' end,
                case when d.classid = 'pg_trigger'::regclass then tg.tgname::text
                     when d.classid = 'pg_policy'::regclass then po.polname::text
+                    when d.classid = 'pg_attrdef'::regclass then ga.attname::text
                     when ev.relkind in ('v', 'm') then evn.nspname || '.' || ev.relname
                     else rw.rulename::text end,
                case when d.classid = 'pg_trigger'::regclass then tgn.nspname || '.' || tgc.relname
                     when d.classid = 'pg_policy'::regclass then pon.nspname || '.' || poc.relname
+                    when d.classid = 'pg_attrdef'::regclass then n.nspname || '.' || c.relname
                     else evn.nspname || '.' || ev.relname end
         from pg_depend d
         join pg_class c on c.oid = d.refobjid
@@ -1796,9 +1801,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         left join pg_policy po on d.classid = 'pg_policy'::regclass and po.oid = d.objid
         left join pg_class poc on poc.oid = po.polrelid
         left join pg_namespace pon on pon.oid = poc.relnamespace
+        left join pg_attrdef ad on d.classid = 'pg_attrdef'::regclass and ad.oid = d.objid
+        left join pg_attribute ga on ga.attrelid = ad.adrelid and ga.attnum = ad.adnum
         where d.refclassid = 'pg_class'::regclass and d.refobjsubid > 0 and d.deptype = 'n'
-        and d.classid in ('pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass)
+        and d.classid in ('pg_rewrite'::regclass, 'pg_trigger'::regclass, 'pg_policy'::regclass, 'pg_attrdef'::regclass)
         and not (d.classid = 'pg_rewrite'::regclass and ev.oid = c.oid and ev.relkind in ('v', 'm'))
+        and not (d.classid = 'pg_attrdef'::regclass and (ga.attgenerated = '' or ad.adrelid <> c.oid))
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
@@ -2505,7 +2513,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         recreated[k] = v
     }
     recreateWarnings = append(recreateWarnings, argWarnings...)
-    live, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, unsafe)
+    live, typeChangeEarly, typeChangePre, typeChangePost, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
@@ -2603,7 +2611,8 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     plan.Creates = append(plan.Creates, renames...)
-    
+    plan.Creates = append(plan.Creates, typeChangeEarly...)
+
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
@@ -5466,9 +5475,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             // Changed definition → drop + recreate. Rebuilding an index can be
             // expensive and briefly leaves queries without it, so gate behind
             // --unsafe. Without live definition data the index is adopted by name.
-            changed := false
-            if lt != nil && lt.IndexDefs[name] != nil { changed = indexDefinitionDiffers(ix, lt.IndexDefs[name]) }
-            if liveOCs, ok := liveIndexOpclasses(lt)[name]; ok && indexOpclassesDiffer(ix, liveOCs) { changed = true }
+            changed := indexChanged(ix, lt, name)
             switch {
             case !unsafe || !changed:
                 plan.Alters = append(plan.Alters, indexComment(false)...)
@@ -5900,15 +5907,22 @@ func RenderMain(p *PlanDiff) string {
 // alterColumnStmts reconciles an existing column's live attributes with its
 // desired definition. Type changes can rewrite the table or fail on cast, so
 // they are gated behind --unsafe (with an optional USING expression from the
-// column's `using` property). Identity changes go through
-// identityAlterStmts; identity/serial columns keep their generated defaults
-// and implicit NOT NULL.
+// column's `using` property). A default is dropped before the type changes
+// and the declared one set afterwards, since PostgreSQL has to cast a
+// default left in place to the new type and gives up when no implicit or
+// assignment cast exists. Identity changes go through identityAlterStmts;
+// identity/serial columns keep their generated defaults and implicit NOT
+// NULL.
 func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), pqIdent(cn))
 
     typeChanged := c.Type != "" && normalizeColumnType(c.Type) != normalizeColumnType(lc.Type)
     collateChanged := c.Collate != "" && collationName(c.Collate) != lc.Collation
+    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
+    sequenceDefault := strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval(")
+    resetDefault := unsafe && typeChanged && !generated && lc.Default != "" && !sequenceDefault
+    if resetDefault { out = append(out, target+" drop default;") }
     if unsafe && c.Type != "" && (typeChanged || collateChanged) {
         stmt := fmt.Sprintf("%s type %s", target, c.Type)
         if c.Collate != "" { stmt += " collate " + collationIdent(c.Collate) }
@@ -5947,12 +5961,11 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     }
     out = append(out, serialConversionStmts(fq, cn, c, lc)...)
 
-    generated := c.Identity != "" || lc.Identity != "" || isSerialType(c.Type) || c.Generated != "" || lc.Generated != ""
     if !generated {
         switch {
-        case c.Default != "" && !defaultsEqual(c.Default, lc.Default):
+        case c.Default != "" && (resetDefault || !defaultsEqual(c.Default, lc.Default)):
             out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
-        case c.Default == "" && lc.Default != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(lc.Default)), "nextval("):
+        case c.Default == "" && lc.Default != "" && !sequenceDefault && !resetDefault:
             out = append(out, fmt.Sprintf("%s drop default;", target))
         }
     }
@@ -6810,6 +6823,16 @@ func keyIndexStorageStmts(idxFq string, want map[string]string, li *LiveIndex) [
 func liveIndexOpclasses(lt *LiveTable) map[string][]LiveIndexOpclass {
     if lt == nil { return nil }
     return lt.IndexOpclasses
+}
+
+// indexChanged reports whether desired index ix differs from lt's live
+// index name, in its definition or its operator classes. An index whose
+// live definition is unknown counts as unchanged.
+func indexChanged(ix *schema.Index, lt *LiveTable, name string) bool {
+    if lt == nil { return false }
+    if li := lt.IndexDefs[name]; li != nil && indexDefinitionDiffers(ix, li) { return true }
+    liveOCs, ok := lt.IndexOpclasses[name]
+    return ok && indexOpclassesDiffer(ix, liveOCs)
 }
 
 // indexOpclassesDiffer reports whether the desired index's operator classes
