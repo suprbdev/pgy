@@ -339,8 +339,8 @@ type LiveExtension struct {
     // owns, and Operators those of its operators. Builtins holds the names
     // of its routines that pg_catalog has a routine of too, so that an
     // unqualified call may well mean the built-in one. All three are nil
-    // until IntrospectExtensions loads them for an extension that has to
-    // move.
+    // until IntrospectExtensions loads them for an extension declared in
+    // another schema.
     Members   map[string]bool
     Operators map[string]bool
     Builtins  map[string]bool
@@ -363,10 +363,12 @@ type LiveExtension struct {
 
 // AvailableExtension is an extension the server can install: its default
 // version and, for every version it can install or update to, the
-// extensions that version requires.
+// extensions that version requires, and for the versions whose control
+// file names the schema they have to be installed in, that schema.
 type AvailableExtension struct {
     DefaultVersion string
     Requires       map[string][]string
+    Schemas        map[string]string
 }
 
 type LiveFunction struct{
@@ -1350,6 +1352,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if err := funcRows.Scan(&schemaName, &funcName, &args, &src, &sqlBody, &vol, &secdef, &strict, &leakproof, &kind, &config, &internal, &parallel, &cost, &rows, &returns, &fullArgs, &language, &transform); err != nil {
                 return err
             }
+            src = routineSource(language, src)
             key := fmt.Sprintf("%s.%s(%s)", schemaName, funcName, args)
             if kind == "p" {
                 norm := publicScope.functionSignature(key)
@@ -2796,6 +2799,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
@@ -2951,11 +2955,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     sorted, _ := schema.TopologicalSort(desired)
     columnSeqs := desired.ColumnSequences()
     liveFuncs := normalizedLiveFunctions(live)
-    createsRelations := plansNewRelations(live, desired)
     // Attribute-only ALTER FUNCTION / PROCEDURE statements go into Creates
     // here, not Alters: an index or generated column created below may need
     // the function to be immutable already.
     routineAlterAt := len(plan.Creates)
+    routineCreates := map[string]bool{}
     routineAlters := []string{}
 
     // Generate SQL in dependency order (excluding extensions, already handled above)
@@ -3036,6 +3040,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 }
                 continue
             }
+            if found { f = keepLiveFunctionAttributes(f, live.FunctionDefs[normalizedDesired]) }
             setClauses := ""
             if len(f.Set) > 0 {
                 keys := make([]string, 0, len(f.Set))
@@ -3060,7 +3065,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace function" }
             if drop := recreated[normalizedDesired]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s returns %s language %s%s %s;", verb, pqIdent(fname)+f.ArgsSig, f.Returns, routineLanguageSQL(f.Language, f.Transform, liveTransforms[normalizedDesired]), attrsStr+setClauses, routineBodySQL(f.Language, body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(f.Language, body, stmt, createsRelations)...)
+            plan.Creates = append(plan.Creates, stmt)
+            if !schema.IsSQLStandardBody(f.Language, body) { routineCreates[stmt] = true }
         case "procedure":
             pr, ok := desired.Procedures[e.Key]
             if !ok || pr == nil { continue }
@@ -3081,6 +3087,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 lp := live.ProcedureDefs[norm]
                 if lp == nil || !procedureChanged(pr, lp) { continue }
                 // fall through: definition changed, emit CREATE OR REPLACE
+                pr = keepLiveProcedureAttributes(pr, lp)
             }
             setClauses := ""
             if len(pr.Set) > 0 {
@@ -3097,7 +3104,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if found { verb = "create or replace procedure" }
             if drop := recreated[norm]; drop != "" { plan.Creates = append(plan.Creates, drop) }
             stmt := fmt.Sprintf("%s %s language %s%s %s;", verb, pqIdent(prname)+pr.ArgsSig, routineLanguageSQL(pr.Language, pr.Transform, liveTransforms[norm]), attrsStr+setClauses, routineBodySQL(pr.Language, pr.Body))
-            plan.Creates = append(plan.Creates, routineCreateStmts(pr.Language, pr.Body, stmt, createsRelations)...)
+            plan.Creates = append(plan.Creates, stmt)
+            if !schema.IsSQLStandardBody(pr.Language, pr.Body) { routineCreates[stmt] = true }
         case "aggregate":
             ag := desired.Aggregates[e.Key]
             if ag == nil || ag.SFunc == "" || ag.SType == "" { continue }
@@ -3417,6 +3425,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         planExtensionDrops(plan, live, desired, opts)
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
+    if !keepsBodyChecks(plan, routineCreates) { plan.Creates = uncheckedRoutineCreates(plan.Creates, routineCreates) }
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, desired, plan)...)
     return plan
@@ -4493,28 +4502,55 @@ func serialConversionStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []st
     }
 }
 
-// plansNewRelations reports whether desired declares a table, view or
-// materialized view that live lacks.
-func plansNewRelations(live *Live, desired *schema.Database) bool {
-    for k, t := range desired.Tables {
-        if t != nil && live.Tables[k] == nil { return true }
+// keepsBodyChecks reports whether plan can create the routines in
+// creates, the CREATE statements of its routines with a string body, with
+// check_function_bodies on, so that the validator of their language reports
+// a mistake in the body when the migration runs. That holds when the plan
+// creates or replaces at most one routine and otherwise only changes
+// privileges, comments, owners and routine attributes, or drops objects:
+// nothing else in the plan can be what the body refers to.
+func keepsBodyChecks(plan *PlanDiff, creates map[string]bool) bool {
+    if len(creates) > 1 { return false }
+    for _, sec := range [][]string{plan.Prelude, plan.Creates, plan.Alters} {
+        for _, s := range sec {
+            if !creates[s] && !bodyNeutral(s) { return false }
+        }
     }
-    for k, v := range desired.Views {
-        if v != nil && !live.Views[k] && !live.MatViews[k] { return true }
-    }
-    return false
+    return true
 }
 
-// routineCreateStmts returns stmt, the CREATE of a function or procedure
-// written in language. PostgreSQL checks a SQL-language string body against
-// the catalog at CREATE time, so when the plan also creates relations the
-// body may read, stmt is wrapped in SET / RESET check_function_bodies, as
-// pg_dump does; the body is then checked when the routine first runs.
-// SQL-standard bodies are always parsed at CREATE, so they are not wrapped:
-// their dependencies must be created first.
-func routineCreateStmts(language, body, stmt string, createsRelations bool) []string {
-    if !createsRelations || !strings.EqualFold(strings.TrimSpace(language), "sql") || schema.IsSQLStandardBody(language, body) { return []string{stmt} }
-    return []string{"set check_function_bodies = off;", stmt, "reset check_function_bodies;"}
+// bodyNeutral reports whether stmt, a planned statement, changes nothing a
+// routine body can refer to.
+func bodyNeutral(stmt string) bool {
+    s := strings.ToLower(strings.TrimSpace(stmt))
+    for _, prefix := range []string{"comment on ", "grant ", "revoke ", "alter function ", "alter procedure ", "alter default privileges ", "drop "} {
+        if strings.HasPrefix(s, prefix) { return true }
+    }
+    return strings.HasPrefix(s, "alter ") && strings.Contains(s, " owner to ")
+}
+
+// uncheckedRoutineCreates puts the statements of creates that are in
+// routines, CREATE statements of routines with a string body, between SET
+// check_function_bodies = off and RESET, as pg_dump does: the validator of
+// their language then leaves alone what a body refers to, such as a
+// relation or routine created later in the same migration, or a class a
+// PL/Java jar provides, and the body is checked when the routine first
+// runs. Routines created one after another share one SET and RESET.
+// SQL-standard bodies are parsed at CREATE whatever the setting, so they
+// are not in routines: their dependencies must be created first.
+func uncheckedRoutineCreates(creates []string, routines map[string]bool) []string {
+    if len(routines) == 0 { return creates }
+    out := make([]string, 0, len(creates)+2)
+    unchecked := false
+    for _, s := range creates {
+        if routines[s] != unchecked {
+            if unchecked { out = append(out, "reset check_function_bodies;") } else { out = append(out, "set check_function_bodies = off;") }
+            unchecked = !unchecked
+        }
+        out = append(out, s)
+    }
+    if unchecked { out = append(out, "reset check_function_bodies;") }
+    return out
 }
 
 // recreateChangedFunctions finds desired functions whose return type differs
@@ -4733,7 +4769,7 @@ func routineIdentity(sig string, procedure bool) string {
         }
         if mode == "out" && !procedure { continue }
         if len(words) > 1 && !isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) { words = words[1:] }
-        types = append(types, normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public.")))
+        types = append(types, withoutArgTypmods(normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public."))))
     }
     return name + "(" + strings.Join(types, ", ") + ")"
 }
@@ -7585,7 +7621,8 @@ func (sc *nameScope) functionArg(arg string) string {
     return sc.functionArgNoDefault(decl)
 }
 
-// functionArgNoDefault normalizes an argument without default clause
+// functionArgNoDefault normalizes an argument without default clause. Type
+// modifiers are left out: PostgreSQL discards them from argument types.
 func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Format: "param_name type_name", "param_name schema.type_name", or an
     // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
@@ -7596,7 +7633,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     }
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
-        return sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
+        return withoutArgTypmods(sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public.")))
     }
 
     // Unnamed multi-word type: pg_get_function_identity_arguments prints
@@ -7604,7 +7641,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // zone[]" must not be parsed as param "timestamp" + type "with time
     // zone[]" — it would never match the YAML's "timestamptz[]" spelling.
     if isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) {
-        return sc.columnType(arg)
+        return withoutArgTypmods(sc.columnType(arg))
     }
 
     // Parameter name (first word) - lowercase for comparison
@@ -7624,10 +7661,19 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Canonicalize through the same alias table as column types so alias
     // spellings (timestamptz[]) and live canonical forms (timestamp with
     // time zone[]) compare equal instead of re-emitting the function forever.
-    typeName = sc.columnType(typeName)
+    typeName = withoutArgTypmods(sc.columnType(typeName))
 
     return paramName + " " + typeName
 }
+
+// withoutArgTypmods drops the type modifiers, interval fields included,
+// from a normalized argument type: PostgreSQL keeps neither in a routine's
+// argument types, so f(x varchar(10)) is f(x character varying) live.
+func withoutArgTypmods(t string) string {
+    return intervalFieldsRe.ReplaceAllString(typmodRe.ReplaceAllString(t, ""), "interval")
+}
+
+var intervalFieldsRe = regexp.MustCompile(`\binterval\s+(?:year|month|day|hour|minute|second)(?:\s+to\s+(?:month|hour|minute|second))?\b`)
 
 // isMultiWordTypeStart reports whether the first two tokens of an argument
 // begin a multi-word Postgres type name rather than "param_name type_name".
