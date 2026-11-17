@@ -19,16 +19,21 @@ foreignDataWrappers:
     comment: second wrapper
     renamedFrom: pg_two
   bare: {}
+  none:
+    handler: ""
+    validator: ""
+  half:
+    validator: postgresql_fdw_validator
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.ForeignDataWrappers) != 3 {
+	if len(d.ForeignDataWrappers) != 5 {
 		t.Fatalf("wrappers = %v", d.ForeignDataWrappers)
 	}
 	w := d.ForeignDataWrappers["pg2"]
 	want := &ForeignDataWrapper{
-		Name: "pg2", Handler: "public.postgres_fdw_handler", Validator: "postgres_fdw_validator",
+		Name: "pg2", Handler: "public.postgres_fdw_handler", Validator: "postgres_fdw_validator", HandlerSet: true, ValidatorSet: true,
 		Options: map[string]string{"debug": "true", "level": "05", "note": ""},
 		Owner:   "admin", Comment: "second wrapper", RenamedFrom: "pg_two",
 	}
@@ -36,14 +41,23 @@ foreignDataWrappers:
 		t.Errorf("pg2 = %+v, want %+v", w, want)
 	}
 	member := d.ForeignDataWrappers["postgres_fdw"]
-	if member.Handler != "" || member.Validator != "" || member.Options != nil {
+	if member.ManagesHandler() || member.ManagesValidator() || member.Options != nil {
 		t.Errorf("an entry with grants only declares nothing else: %+v", member)
 	}
 	if got := member.Grants; !reflect.DeepEqual(got, map[string][]string{"app_owner": {"usage"}, "auditor": {"usage*"}, "public": {}}) {
 		t.Errorf("grants = %v", got)
 	}
-	if bare := d.ForeignDataWrappers["bare"]; bare == nil || bare.Name != "bare" || bare.Options != nil || bare.Grants != nil {
-		t.Errorf("an empty entry is a wrapper without handler, validator or options: %+v", bare)
+	if bare := d.ForeignDataWrappers["bare"]; bare == nil || bare.Name != "bare" || bare.ManagesHandler() || bare.ManagesValidator() || bare.Options != nil || bare.Grants != nil {
+		t.Errorf("an empty entry manages nothing: %+v", bare)
+	}
+	if none := d.ForeignDataWrappers["none"]; !none.ManagesHandler() || !none.ManagesValidator() || none.Handler != "" || none.Validator != "" {
+		t.Errorf("an empty handler or validator declares that the wrapper has none: %+v", none)
+	}
+	if half := d.ForeignDataWrappers["half"]; half.ManagesHandler() || !half.ManagesValidator() || half.Validator != "postgresql_fdw_validator" {
+		t.Errorf("a key left out is unmanaged, on its own: %+v", half)
+	}
+	if w := (&ForeignDataWrapper{Handler: "h"}); !w.ManagesHandler() || w.ManagesValidator() {
+		t.Errorf("a handler given without HandlerSet is managed: %+v", w)
 	}
 }
 
@@ -152,6 +166,8 @@ foreignDataWrappers:
     owner: admin
     renamedFrom: pg_two
   legacy:
+    handler: ""
+    validator: ""
     options: {debug: true, level: 3}
   bare: {}
 languages:
@@ -166,7 +182,7 @@ languages:
 	for name, doc := range map[string]string{
 		"an unknown wrapper key":            "foreignDataWrappers:\n  w: {handlr: f}\n",
 		"a wrapper dependsOn":               "foreignDataWrappers:\n  w: {dependsOn: [function f]}\n",
-		"an empty handler":                  "foreignDataWrappers:\n  w: {handler: \"\"}\n",
+		"a handler that is not a string":    "foreignDataWrappers:\n  w: {handler: false}\n",
 		"a language without grants":         "languages:\n  plpgsql: {}\n",
 		"a language with anything but that": "languages:\n  plpgsql: {grants: {a: [usage]}, owner: a}\n",
 		"a language list":                   "languages: [plpgsql]\n",

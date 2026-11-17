@@ -35,7 +35,7 @@ func TestForeignDataWrapperCreate(t *testing.T) {
 	d := wrapperDB(map[string]*schema.ForeignDataWrapper{
 		"pg2": {Name: "pg2", Handler: "public.postgres_fdw_handler", Validator: "postgres_fdw_validator", Owner: "admin", Comment: "second wrapper",
 			Grants: map[string][]string{"app": {"usage"}}},
-		"legacy": {Name: "legacy", Options: map[string]string{"debug": "true", "level": "3"}},
+		"legacy": {Name: "legacy", HandlerSet: true, ValidatorSet: true, Options: map[string]string{"debug": "true", "level": "3"}},
 		"bare":   {Name: "bare"},
 	})
 	d.Servers = map[string]*schema.Server{"on_pg2": {Name: "on_pg2", Wrapper: "pg2"}}
@@ -94,17 +94,22 @@ func TestForeignDataWrapperAltered(t *testing.T) {
 		change func(w *schema.ForeignDataWrapper)
 		want   string
 	}{
-		"another handler":       {func(w *schema.ForeignDataWrapper) { w.Handler = "ext.h2" }, `alter foreign data wrapper "w" handler "ext"."h2";`},
-		"the handler removed":   {func(w *schema.ForeignDataWrapper) { w.Handler = "" }, `alter foreign data wrapper "w" no handler;`},
-		"another validator":     {func(w *schema.ForeignDataWrapper) { w.Validator = "v2" }, `alter foreign data wrapper "w" validator "v2";`},
-		"the validator removed": {func(w *schema.ForeignDataWrapper) { w.Validator = "" }, `alter foreign data wrapper "w" no validator;`},
+		"another handler":         {func(w *schema.ForeignDataWrapper) { w.Handler = "ext.h2" }, `alter foreign data wrapper "w" handler "ext"."h2";`},
+		"an empty handler":        {func(w *schema.ForeignDataWrapper) { w.Handler, w.HandlerSet = "", true }, `alter foreign data wrapper "w" no handler;`},
+		"the handler left out":    {func(w *schema.ForeignDataWrapper) { w.Handler = "" }, ``},
+		"another validator":       {func(w *schema.ForeignDataWrapper) { w.Validator = "v2" }, `alter foreign data wrapper "w" validator "v2";`},
+		"an empty validator":      {func(w *schema.ForeignDataWrapper) { w.Validator, w.ValidatorSet = "", true }, `alter foreign data wrapper "w" no validator;`},
+		"the validator left out":  {func(w *schema.ForeignDataWrapper) { w.Validator = "" }, ``},
+		"both functions left out": {func(w *schema.ForeignDataWrapper) { w.Handler, w.Validator = "", "" }, ``},
 		"options": {func(w *schema.ForeignDataWrapper) {
 			w.Options = map[string]string{"keep": "1", "change": "new", "more": "2"}
 		}, `alter foreign data wrapper "w" options (set "change" 'new', add "more" '2', drop "gone");`},
-		"no options":              {func(w *schema.ForeignDataWrapper) { w.Options = map[string]string{} }, `alter foreign data wrapper "w" options (drop "change", drop "gone", drop "keep");`},
-		"the owner":               {func(w *schema.ForeignDataWrapper) { w.Owner = "admin" }, `alter foreign data wrapper "w" owner to "admin";`},
-		"the comment":             {func(w *schema.ForeignDataWrapper) { w.Comment = "is" }, `comment on foreign data wrapper "w" is 'is';`},
-		"the definition together": {func(w *schema.ForeignDataWrapper) { w.Handler, w.Validator, w.Options = "", "v2", map[string]string{} }, `alter foreign data wrapper "w" no handler validator "v2" options (drop "change", drop "gone", drop "keep");`},
+		"no options":  {func(w *schema.ForeignDataWrapper) { w.Options = map[string]string{} }, `alter foreign data wrapper "w" options (drop "change", drop "gone", drop "keep");`},
+		"the owner":   {func(w *schema.ForeignDataWrapper) { w.Owner = "admin" }, `alter foreign data wrapper "w" owner to "admin";`},
+		"the comment": {func(w *schema.ForeignDataWrapper) { w.Comment = "is" }, `comment on foreign data wrapper "w" is 'is';`},
+		"the definition together": {func(w *schema.ForeignDataWrapper) {
+			w.Handler, w.HandlerSet, w.Validator, w.Options = "", true, "v2", map[string]string{}
+		}, `alter foreign data wrapper "w" no handler validator "v2" options (drop "change", drop "gone", drop "keep");`},
 	} {
 		live := wrapperLive()
 		live.Wrappers["w"] = base()
@@ -217,6 +222,64 @@ func TestForeignDataWrapperOfExtensionIgnoresHandler(t *testing.T) {
 	wantSQL(t, sql, `comment on foreign data wrapper "file_fdw" is 'files';`)
 	if len(warns) != 1 || !strings.Contains(warns[0].Message, "foreign-data wrapper file_fdw belongs to extension file_fdw") {
 		t.Errorf("want a warning about the ignored handler, got %v", warns)
+	}
+
+	d.ForeignDataWrappers["file_fdw"] = &schema.ForeignDataWrapper{Name: "file_fdw", ValidatorSet: true}
+	sql, warns = planSQL(t, live, d, Options{})
+	if sql != "" || len(warns) != 1 {
+		t.Errorf("an empty validator on an extension's wrapper is ignored too, with a warning, got:\n%s%v", sql, warns)
+	}
+}
+
+func TestForeignDataWrapperAttributesOnlyLeavesFunctionsAlone(t *testing.T) {
+	live := wrapperLive()
+	live.Wrappers["mine"] = &LiveWrapper{Handler: "public.h", Validator: "public.v", Options: map[string]string{"a": "1"}, Owner: "owner"}
+	d := wrapperDB(map[string]*schema.ForeignDataWrapper{"mine": {Name: "mine", Grants: map[string][]string{"app": {"usage"}}, Comment: "made by hand"}})
+	sql, warns := planSQL(t, live, d, pruneAll)
+	wantSQL(t, sql,
+		`grant usage on foreign data wrapper "mine" to "app";`,
+		`comment on foreign data wrapper "mine" is 'made by hand';`,
+	)
+	if len(warns) > 0 {
+		t.Errorf("unexpected warnings: %v", warns)
+	}
+	if after := Simulate(live, d).Wrappers["mine"]; after.Handler != "public.h" || after.Validator != "public.v" {
+		t.Errorf("an entry that names neither function leaves both as they are: %+v", after)
+	}
+}
+
+func TestForeignDataWrapperHandlerChangeUnderForeignTablesWarns(t *testing.T) {
+	live := wrapperLive()
+	live.Schemas["app"] = true
+	live.Wrappers["w"] = &LiveWrapper{Handler: "public.h", Validator: "public.v", Owner: "owner"}
+	live.Wrappers["other"] = &LiveWrapper{Handler: "public.h", Owner: "owner"}
+	live.Servers["s"] = &LiveServer{Wrapper: "w", Owner: "owner"}
+	live.Servers["elsewhere"] = &LiveServer{Wrapper: "other", Owner: "owner"}
+	for fq, server := range map[string]string{"app.remote": "s", "app.remote_too": "s", "app.unrelated": "elsewhere"} {
+		lt := newLiveTable()
+		lt.Foreign = &LiveForeignTable{Server: server}
+		lt.Columns["id"] = &LiveColumn{Type: "integer"}
+		live.Tables[fq] = lt
+	}
+	d := wrapperDB(map[string]*schema.ForeignDataWrapper{"w": {Name: "w", HandlerSet: true}})
+	sql, warns := planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `alter foreign data wrapper "w" no handler;`)
+	if len(warns) != 1 || warns[0].Kind != "" || !strings.Contains(warns[0].Message, "cannot be read until the wrapper has a handler again: app.remote, app.remote_too") {
+		t.Errorf("want a warning naming the foreign tables, got %v", warns)
+	}
+
+	d.ForeignDataWrappers["w"] = &schema.ForeignDataWrapper{Name: "w", Handler: "public.h2"}
+	sql, warns = planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `alter foreign data wrapper "w" handler "public"."h2";`)
+	if len(warns) != 1 || !strings.Contains(warns[0].Message, "are read through the new handler from this migration on: app.remote, app.remote_too") {
+		t.Errorf("want a warning naming the foreign tables, got %v", warns)
+	}
+
+	d.ForeignDataWrappers["w"] = &schema.ForeignDataWrapper{Name: "w", Validator: "public.v2"}
+	sql, warns = planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `alter foreign data wrapper "w" validator "public"."v2";`)
+	if len(warns) > 0 {
+		t.Errorf("a validator is not what foreign tables are read through, got %v", warns)
 	}
 }
 

@@ -111,11 +111,13 @@ func sameWrapperFunction(want, have string) bool {
 // planWrappers creates and reconciles the declared foreign-data wrappers,
 // ahead of the servers that use them. A wrapper an extension owns (see
 // wrapperExtension) is never created, and of its declaration only the
-// options, owner, privileges and comment are applied. For any other wrapper
-// the declaration is the whole definition: one without a handler or a
-// validator has none. Privileges follow the rules of planGrantsWarned for
-// objects that give PUBLIC nothing by default. Dropping undeclared wrappers
-// is part of pruning; see pruneWrappers.
+// options, owner, privileges and comment are applied. Any other wrapper is
+// created when the database lacks it. The handler and validator of a live
+// one are compared only when the declaration manages them (see
+// schema.ForeignDataWrapper.ManagesHandler), and a handler changed under
+// foreign tables is reported. Privileges follow the rules of
+// planGrantsWarned for objects that give PUBLIC nothing by default.
+// Dropping undeclared wrappers is part of pruning; see pruneWrappers.
 func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode PublicGrants) {
 	warn := func(format string, args ...any) {
 		plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})
@@ -141,7 +143,7 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 		var liveG map[string]map[string]bool
 		switch {
 		case owned:
-			if w.Handler != "" || w.Validator != "" {
+			if w.ManagesHandler() || w.ManagesValidator() {
 				warn("foreign-data wrapper %s belongs to extension %s, which defines its handler and validator; the ones declared for it are ignored", name, extension)
 			}
 			var liveOptions map[string]string
@@ -166,14 +168,25 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 		default:
 			liveOwner, liveG = lw.Owner, lw.Grants
 			clauses := []string{}
-			for _, f := range []struct{ keyword, want, have string }{{"handler", w.Handler, lw.Handler}, {"validator", w.Validator, lw.Validator}} {
+			for _, f := range []struct {
+				keyword    string
+				managed    bool
+				want, have string
+			}{{"handler", w.ManagesHandler(), w.Handler, lw.Handler}, {"validator", w.ManagesValidator(), w.Validator, lw.Validator}} {
 				switch {
-				case sameWrapperFunction(f.want, f.have):
+				case !f.managed || sameWrapperFunction(f.want, f.have):
 				case f.want == "":
 					clauses = append(clauses, "no "+f.keyword)
 				default:
 					clauses = append(clauses, f.keyword+" "+pqIdent(f.want))
 				}
+			}
+			if tables := wrapperForeignTables(live, name); len(tables) > 0 && w.ManagesHandler() && !sameWrapperFunction(w.Handler, lw.Handler) {
+				effect := "are read through the new handler from this migration on"
+				if w.Handler == "" {
+					effect = "cannot be read until the wrapper has a handler again"
+				}
+				warn("foreign-data wrapper %s: its handler changes, and the foreign tables on its servers %s: %s", name, effect, strings.Join(tables, ", "))
 			}
 			if clause := fdwOptionsAlter(w.Options, lw.Options); clause != "" {
 				clauses = append(clauses, clause)
@@ -200,6 +213,22 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 			plan.Alters = append(plan.Alters, fmt.Sprintf("comment on %s is %s;", target, quoteString(w.Comment)))
 		}
 	}
+}
+
+// wrapperForeignTables returns the live foreign tables that read through a
+// server on foreign-data wrapper name, sorted.
+func wrapperForeignTables(live *Live, name string) []string {
+	out := []string{}
+	for _, fq := range sortedKeys(live.Tables) {
+		lt := live.Tables[fq]
+		if lt == nil || lt.Foreign == nil {
+			continue
+		}
+		if ls := live.Servers[lt.Foreign.Server]; ls != nil && ls.Wrapper == name {
+			out = append(out, fq)
+		}
+	}
+	return out
 }
 
 // pruneWrappers returns the DROP statements for the live foreign-data
@@ -271,7 +300,12 @@ func simulateWrappers(out *Live, desired *schema.Database) {
 			*lw = *prev
 		}
 		if _, owned := wrapperExtension(out, desired, name); !owned {
-			lw.Handler, lw.Validator = w.Handler, w.Validator
+			if w.ManagesHandler() {
+				lw.Handler = w.Handler
+			}
+			if w.ManagesValidator() {
+				lw.Validator = w.Validator
+			}
 		} else if prev == nil {
 			out.ExtensionMembers["fdw:"+name] = true
 		}

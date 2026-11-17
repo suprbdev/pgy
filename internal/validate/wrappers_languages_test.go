@@ -17,7 +17,11 @@ languages:
     grants: {app_dev: [usage with grant option]}
 foreignDataWrappers:
   legacy:
+    handler: ""
+    validator: ""
     options: {debug: "true"}
+  attributes_only:
+    grants: {app_owner: [usage]}
   pg2:
     handler: public.postgres_fdw_handler
     validator: public.postgres_fdw_validator
@@ -40,7 +44,7 @@ func TestValidateForeignDataWrapperOfExtensionTakesNoHandler(t *testing.T) {
 extensions: [mysql_fdw, hstore]
 foreignDataWrappers:
   postgres_fdw: {handler: postgres_fdw_handler}
-  file_fdw: {validator: public.file_fdw_validator}
+  file_fdw: {validator: ""}
   dblink_fdw: {validator: dblink_fdw_validator, comment: links}
   mysql_fdw: {handler: mysql_fdw_handler, validator: mysql_fdw_validator}
   oracle_fdw: {handler: oracle_fdw_handler}

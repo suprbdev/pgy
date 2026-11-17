@@ -169,6 +169,7 @@ foreignDataWrappers:
     grants: {}
     comment: remote PostgreSQL
   pg2:
+    handler: ""
     validator: postgresql_fdw_validator
     owner: BOSS
     grants: {APP: [usage], public: [usage]}
@@ -178,6 +179,7 @@ foreignDataWrappers:
     options: {level: 4, more: yes}
   checked:
     handler: postgres_fdw_handler
+    validator: ""
 servers:
   on_pg2: {wrapper: pg2, options: {dbname: x}}
   on_legacy: {wrapper: old_one}
@@ -431,11 +433,14 @@ func TestIntegrationWrappersPulled(t *testing.T) {
 	y := string(res.Files[0].Content)
 	wantYAML := strings.NewReplacer("APP", app, "BOSS", boss).Replace(`foreignDataWrappers:
   checked:
+    handler: ""
     validator: postgresql_fdw_validator
     options: {}
   dblink_fdw:
     comment: links
   legacy:
+    handler: ""
+    validator: ""
     options: {debug: "true", level: "03"}
   pg2:
     handler: public.postgres_fdw_handler
@@ -470,6 +475,57 @@ func TestIntegrationWrappersPulled(t *testing.T) {
 		if d := dumpDifferences(a, pgDump(t, "pgytest_fdw_pull_copy")); len(d) > 0 {
 			t.Errorf("pg_dump of the rebuilt database differs from the original:\n%s\n%s", strings.Join(d, "\n"), y)
 		}
+	}
+
+	if _, err := dst.Exec(ctx, `
+		alter foreign data wrapper legacy handler postgres_fdw_handler;
+		alter foreign data wrapper checked no validator;`); err != nil {
+		t.Fatal(err)
+	}
+	repair := planExtensionsLive(t, dst, y, opts)
+	if got := strings.TrimSpace(diff.Render(repair)); got != "alter foreign data wrapper \"checked\" validator \"postgresql_fdw_validator\";\nalter foreign data wrapper \"legacy\" no handler;" {
+		t.Errorf("the pulled YAML states that a wrapper has no handler or validator, so drift is undone, got:\n%s", got)
+	}
+	applyPlan(t, dst, repair)
+	if want, got := wrapperStates(t, src), wrapperStates(t, dst); !reflect.DeepEqual(got, want) {
+		t.Errorf("wrappers after undoing the drift:\n%v\nwant:\n%v", got, want)
+	}
+}
+
+func TestIntegrationWrapperAttributesOnly(t *testing.T) {
+	admin := connect(t)
+	app := freshRole(t, admin, "app")
+	db := freshDatabase(t, admin, "pgytest_fdw_attributes")
+	if _, err := db.Exec(context.Background(), `
+		create extension postgres_fdw;
+		create foreign data wrapper mine handler postgres_fdw_handler validator postgres_fdw_validator;
+		create server s foreign data wrapper mine;
+		create foreign table remote (id integer) server s;`); err != nil {
+		t.Fatal(err)
+	}
+	entry := strings.ReplaceAll("foreignDataWrappers:\n  mine:\n    grants: {APP: [usage]}\n    comment: made by hand\n", "APP", app)
+	sql := convergeLive(t, db, entry, diff.Options{})
+	wantLines := []string{
+		fmt.Sprintf(`grant usage on foreign data wrapper "mine" to %q;`, app),
+		`comment on foreign data wrapper "mine" is 'made by hand';`,
+	}
+	if strings.TrimSpace(sql) != strings.Join(wantLines, "\n") {
+		t.Errorf("an entry without handler and validator leaves both alone, got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))
+	}
+	if got := wrapperStates(t, db)["mine"]; !strings.HasPrefix(got, "handler=postgres_fdw_handler validator=postgres_fdw_validator ") {
+		t.Errorf("the wrapper kept its functions: %s", got)
+	}
+
+	plan := planExtensionsLive(t, db, entry+"    handler: \"\"\n", diff.Options{})
+	if got := strings.TrimSpace(diff.Render(plan)); got != `alter foreign data wrapper "mine" no handler;` {
+		t.Errorf("an empty handler removes it and nothing else, got:\n%s", got)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0].Message, "cannot be read until the wrapper has a handler again: public.remote") {
+		t.Errorf("want a warning naming the foreign table that loses its handler, got %v", plan.Warnings)
+	}
+	applyPlan(t, db, plan)
+	if got := wrapperStates(t, db)["mine"]; !strings.HasPrefix(got, "handler=- validator=postgres_fdw_validator ") {
+		t.Errorf("the wrapper after NO HANDLER: %s", got)
 	}
 }
 

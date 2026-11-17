@@ -125,21 +125,33 @@ type Server struct {
     RenamedFrom string // previous name; emitted as ALTER SERVER ... RENAME TO when only the old name exists live
 }
 
-// ForeignDataWrapper is a foreignDataWrappers entry. For a wrapper that no
-// extension owns it is a CREATE FOREIGN DATA WRAPPER declaration, and
-// Handler and Validator state its whole definition. For a wrapper an
+// ForeignDataWrapper is a foreignDataWrappers entry. A wrapper that neither
+// exists nor comes with an extension is created from it. For a wrapper an
 // extension owns, such as postgres_fdw, only Options, Owner, Grants and
 // Comment are managed.
 type ForeignDataWrapper struct {
     Name      string
-    Handler   string            // HANDLER function, optionally schema-qualified; "" = NO HANDLER
-    Validator string            // VALIDATOR function, optionally schema-qualified; "" = NO VALIDATOR
+    Handler   string            // HANDLER function, optionally schema-qualified; see ManagesHandler
+    Validator string            // VALIDATOR function, optionally schema-qualified; see ManagesValidator
+    // HandlerSet and ValidatorSet report a handler or validator key in the
+    // YAML, so that an empty value (NO HANDLER, NO VALIDATOR) can be told
+    // from a key left out.
+    HandlerSet, ValidatorSet bool
     Options   map[string]string // OPTIONS; nil = unmanaged, present = authoritative
     Owner     string            // "" = unmanaged
     Grants    map[string][]string // role -> privileges (usage); nil = unmanaged
     Comment   string
     RenamedFrom string // previous name; emitted as ALTER FOREIGN DATA WRAPPER ... RENAME TO when only the old name exists live
 }
+
+// ManagesHandler reports whether w declares its handler, which may be
+// none. Without a declaration an existing wrapper keeps the handler it has,
+// and a new one is created without.
+func (w *ForeignDataWrapper) ManagesHandler() bool { return w.HandlerSet || w.Handler != "" }
+
+// ManagesValidator reports whether w declares its validator, which may be
+// none; see ManagesHandler.
+func (w *ForeignDataWrapper) ManagesValidator() bool { return w.ValidatorSet || w.Validator != "" }
 
 // Language is a languages entry: the privileges of a procedural language
 // that exists already or that an extension creates.
@@ -2766,19 +2778,21 @@ func parseServers(v any) map[string]*Server {
 
 // parseForeignDataWrappers parses { name: {handler, validator, options,
 // owner, grants, comment, renamedFrom} }. A handler or validator may be
-// written with the empty argument list of the function.
+// written with the empty argument list of the function, and as the empty
+// string for none.
 func parseForeignDataWrappers(v any) map[string]*ForeignDataWrapper {
     out := map[string]*ForeignDataWrapper{}
     m, ok := v.(map[string]any)
     if !ok { return out }
-    function := func(v any) string {
-        s, _ := v.(string)
-        return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "()"))
+    function := func(v any) (string, bool) {
+        s, ok := v.(string)
+        return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "()")), ok
     }
     for name, raw := range m {
         w := &ForeignDataWrapper{Name: name}
         if b, ok := raw.(map[string]any); ok {
-            w.Handler, w.Validator = function(b["handler"]), function(b["validator"])
+            w.Handler, w.HandlerSet = function(b["handler"])
+            w.Validator, w.ValidatorSet = function(b["validator"])
             if o, ok := b["options"].(map[string]any); ok { w.Options = stringMap(o) }
             if o, ok := b["owner"].(string); ok { w.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { w.Grants = parseGrants(g) }

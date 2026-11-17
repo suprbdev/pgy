@@ -1072,7 +1072,7 @@ func checkWrappersAndLanguages(d *schema.Database, add func(Severity, string, st
 		}
 		obj := "foreign-data wrapper " + k
 		usageOnly(obj, w.Grants)
-		if ext := d.WrapperExtension(k); ext != "" && (w.Handler != "" || w.Validator != "") {
+		if ext := d.WrapperExtension(k); ext != "" && (w.ManagesHandler() || w.ManagesValidator()) {
 			add(Error, obj, "extension %s creates this wrapper with its own handler and validator, so the entry cannot set them; it manages the wrapper's options, owner, grants and comment", ext)
 		}
 		if w.RenamedFrom == "" {

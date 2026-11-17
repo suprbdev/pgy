@@ -898,7 +898,7 @@ Foreign table properties:
 A top-level `foreignDataWrappers:` block manages foreign-data wrappers. What an entry does depends on who owns the wrapper:
 
 - **A wrapper an extension owns** (`postgres_fdw`, `file_fdw`, the `dblink_fdw` of `dblink`, `mysql_fdw` and so on) is never created or dropped by pgy. Its entry manages `grants`, `options`, `owner` and `comment`, whichever it lists. `handler` and `validator` belong to the extension, and `pgy validate` rejects them on such an entry.
-- **Any other wrapper** is created by pgy, and its entry is the whole definition. `handler` and `validator` name functions that exist already, usually those of an extension. A wrapper declared without one has `NO HANDLER` or `NO VALIDATOR`, and a wrapper with neither is a named set of options, which is how `dblink` uses `dblink_fdw`.
+- **Any other wrapper** is created by pgy when the database does not have it, and altered in place when it does. `handler` and `validator` name functions that exist already, usually those of an extension. Like every other key they are unmanaged when left out: a new wrapper is created without the clause, which gives it no handler or no validator, and an existing wrapper keeps the function it has. So `mywrapper: {grants: {app: [usage]}}` only touches the grants of a wrapper that was made by hand. The empty string says that the wrapper has none: `handler: ""` is `NO HANDLER`, `validator: ""` is `NO VALIDATOR`. A wrapper with neither is a named set of options, which is how `dblink` uses `dblink_fdw`.
 
 ```yaml
 extensions: [postgres_fdw]
@@ -911,8 +911,12 @@ foreignDataWrappers:
     validator: postgres_fdw_validator
     owner: admin
     comment: second wrapper on the postgres_fdw handler
-  legacy:                       # no handler: a catalogue of connection settings
+  legacy:                       # a catalogue of connection settings
+    handler: ""                 # NO HANDLER, also when someone gave it one
+    validator: ""
     options: {debug: "true"}
+  inherited:                    # made by hand: its handler and validator stay as they are
+    grants: {app_owner: [usage]}
 
 servers:
   warehouse: {wrapper: postgres_fdw, options: {host: wh.internal, dbname: analytics}, owner: app_owner}
@@ -921,8 +925,8 @@ servers:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `handler` | string | `HANDLER` function, optionally schema-qualified (`ext.postgres_fdw_handler`). Omitted = `NO HANDLER`. Not allowed on a wrapper an extension owns |
-| `validator` | string | `VALIDATOR` function, optionally schema-qualified. Omitted = `NO VALIDATOR`. Not allowed on a wrapper an extension owns |
+| `handler` | string | `HANDLER` function, optionally schema-qualified (`ext.postgres_fdw_handler`). `""` = `NO HANDLER`. Omitted = unmanaged: an existing wrapper keeps its handler, a new one is created without. Not allowed on a wrapper an extension owns |
+| `validator` | string | `VALIDATOR` function, optionally schema-qualified. `""` = `NO VALIDATOR`. Omitted = unmanaged, like `handler`. Not allowed on a wrapper an extension owns |
 | `options` | map | Wrapper options. Authoritative when present (`options: {}` means none); omitted = unmanaged. Values are passed on as written |
 | `owner` | string | Owner role, diffed against live. PostgreSQL requires the owner of a wrapper to be a superuser |
 | `grants` | map | Role → privileges (`usage`). See below |
@@ -930,11 +934,11 @@ servers:
 | `renamedFrom` | string | Previous name: `ALTER FOREIGN DATA WRAPPER ... RENAME TO` when only that name exists live. Its servers follow |
 
 - **Order.** Wrapper statements run after the extension statements and before servers: `CREATE FOREIGN DATA WRAPPER`, changes to the definition, `OWNER TO` and the grants. A server that the same migration creates, or hands to another role, then finds the wrapper and the privilege it needs. Handler and validator functions are C functions, which pgy cannot declare, so they have to exist already or come with a declared extension. With `diff --split`, wrappers go into the first group, together with the extensions.
-- **Changes** are made in place: `ALTER FOREIGN DATA WRAPPER ... HANDLER` or `NO HANDLER`, `VALIDATOR` or `NO VALIDATOR`, `OPTIONS (ADD / SET / DROP ...)` and `OWNER TO`. When a declared function is compared with the live one, its schema is optional for `pg_catalog`, `public` and the schemas on the connection's `search_path` (see [Name resolution](#name-resolution)).
+- **Changes** are made in place: `ALTER FOREIGN DATA WRAPPER ... HANDLER` or `NO HANDLER`, `VALIDATOR` or `NO VALIDATOR`, `OPTIONS (ADD / SET / DROP ...)` and `OWNER TO`. Only the keys the entry has are compared. Foreign tables are read through the handler of their server's wrapper, so `pgy diff` warns, naming them, when a plan changes or removes the handler of a wrapper that has foreign tables. When a declared function is compared with the live one, its schema is optional for `pg_catalog`, `public` and the schemas on the connection's `search_path` (see [Name resolution](#name-resolution)).
 - **Privileges.** `USAGE` on a wrapper lets a role that is not a superuser create servers on it, and PostgreSQL demands it of the new owner in `ALTER SERVER ... OWNER TO`. The block follows the [grants](#grants) rules for objects without a `PUBLIC` default: it is authoritative, `PUBLIC` included. On an extension's wrapper, privileges are compared with the ones the extension set (`pg_init_privs`), and what the extension granted is left alone unless the block names the grantee, as for the other [objects an extension owns](#objects-an-extension-owns).
 - **In the migration that creates the extension**, the entry of its wrapper is applied after `CREATE EXTENSION`. Before the extension is installed, pgy takes a wrapper to be an extension's when it is named like an extension the YAML declares (`postgres_fdw`, `file_fdw`, `mysql_fdw`) or is one PostgreSQL ships (`dblink_fdw` comes with `dblink`). Afterwards the database says which wrappers belong to an extension. An entry for the wrapper of one of PostgreSQL's own extensions gets no statements, and a warning, while that extension is neither installed nor declared.
 - **Pruning.** A present block is authoritative: `--unsafe --prune` drops the wrappers it does not list with `DROP FOREIGN DATA WRAPPER`, after the servers the same plan drops and before `DROP EXTENSION`. The wrappers of extensions are never dropped. A wrapper that a remaining server still uses is kept, and `pgy diff` says so. Without the block, wrappers are unmanaged. An extension is kept while the YAML has an entry for its wrapper, or while a wrapper that stays uses one of its functions (see [Removing extensions](#removing-extensions)).
-- **`pgy pull`** writes wrappers to `database.yml`. One that no extension owns is written in full, with `options: {}` when it has none. An extension's wrapper is written only when something about it is no longer as the extension left it: the grantees whose privileges changed, its options, its comment, and with `--owners` an owner other than the extension's.
+- **`pgy pull`** writes wrappers to `database.yml`. One that no extension owns is written in full, with `handler: ""`, `validator: ""` and `options: {}` for what it does not have, so the pulled YAML also notices a handler, a validator or options given to it later. An extension's wrapper is written only when something about it is no longer as the extension left it: the grantees whose privileges changed, its options, its comment, and with `--owners` an owner other than the extension's.
 
 ## Views
 

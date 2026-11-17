@@ -51,10 +51,11 @@ func withoutRole(acl map[string]map[string]bool, role string) map[string]map[str
 }
 
 // wrappers renders the foreign-data wrappers. One that no extension owns is
-// written in full. Of an extension's wrapper only what is no longer as the
-// extension left it is written, and nothing at all for an untouched one:
-// its options, the grantees whose privileges changed, its comment, and with
-// Options.Owners an owner other than the extension's.
+// written in full, with an empty handler or validator where it has none, so
+// that one set later is noticed. Of an extension's wrapper only what is no
+// longer as the extension left it is written, and nothing at all for an
+// untouched one: its options, the grantees whose privileges changed, its
+// comment, and with Options.Owners an owner other than the extension's.
 func (b *builder) wrappers() *node {
 	out := newMap()
 	for _, name := range sortedKeys(b.live.Wrappers) {
@@ -71,8 +72,8 @@ func (b *builder) wrappers() *node {
 				add(w, "options", stringsNode(lw.Options))
 			}
 		} else {
-			addStr(w, "handler", strings.TrimPrefix(lw.Handler, "pg_catalog."))
-			addStr(w, "validator", strings.TrimPrefix(lw.Validator, "pg_catalog."))
+			add(w, "handler", str(strings.TrimPrefix(lw.Handler, "pg_catalog.")))
+			add(w, "validator", str(strings.TrimPrefix(lw.Validator, "pg_catalog.")))
 			add(w, "options", stringsNode(lw.Options))
 		}
 		if b.opts.Owners && lw.Owner != owner {

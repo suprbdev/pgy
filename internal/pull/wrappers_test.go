@@ -45,6 +45,7 @@ func TestBuildForeignDataWrappers(t *testing.T) {
 	got := buildDatabase(t, live, Options{Owners: true})
 	want := `foreignDataWrappers:
   checked:
+    handler: ""
     validator: postgresql_fdw_validator
     options: {}
   dblink_fdw:
@@ -53,6 +54,8 @@ func TestBuildForeignDataWrappers(t *testing.T) {
     grants: {ext_role: [], public: [usage]}
     comment: links
   legacy:
+    handler: ""
+    validator: ""
     options: {debug: "true", level: "3"}
   pg2:
     handler: public.postgres_fdw_handler

@@ -105,7 +105,7 @@
       }
     },
     "foreignDataWrappers": {
-      "description": "Foreign-data wrappers. A wrapper an extension owns (postgres_fdw, file_fdw, dblink_fdw, ...) is never created or dropped: its entry manages options, owner, grants and comment. Any other wrapper is created by pgy (CREATE FOREIGN DATA WRAPPER) after extensions and before servers, and its entry is the whole definition. When present, --unsafe --prune drops the wrappers not listed that no extension owns and no remaining server uses.",
+      "description": "Foreign-data wrappers. A wrapper an extension owns (postgres_fdw, file_fdw, dblink_fdw, ...) is never created or dropped: its entry manages options, owner, grants and comment. Any other wrapper is created by pgy (CREATE FOREIGN DATA WRAPPER) after extensions and before servers when the database lacks it, and altered in place otherwise; keys left out are unmanaged. When present, --unsafe --prune drops the wrappers not listed that no extension owns and no remaining server uses.",
       "type": "object",
       "additionalProperties": {
         "type": "object",
@@ -113,13 +113,11 @@
         "properties": {
           "handler": {
             "type": "string",
-            "minLength": 1,
-            "description": "HANDLER function, optionally schema-qualified, e.g. public.postgres_fdw_handler. Omitted = NO HANDLER. Not allowed on a wrapper an extension owns."
+            "description": "HANDLER function, optionally schema-qualified, e.g. public.postgres_fdw_handler. The empty string means NO HANDLER. Omitted = unmanaged: an existing wrapper keeps its handler, and a new one is created without. Not allowed on a wrapper an extension owns."
           },
           "validator": {
             "type": "string",
-            "minLength": 1,
-            "description": "VALIDATOR function, optionally schema-qualified. Omitted = NO VALIDATOR. Not allowed on a wrapper an extension owns."
+            "description": "VALIDATOR function, optionally schema-qualified. The empty string means NO VALIDATOR. Omitted = unmanaged: an existing wrapper keeps its validator, and a new one is created without. Not allowed on a wrapper an extension owns."
           },
           "options": {
             "type": "object",
