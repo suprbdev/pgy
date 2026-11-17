@@ -96,11 +96,12 @@ Exit codes:
                         LockTimeout: firstNonEmpty(lockTimeout, cfg.Migrate.LockTimeout), StatementTimeout: firstNonEmpty(statementTimeout, cfg.Migrate.StatementTimeout),
                         RecordIn: schemaName + "." + tableName,
                         NoTransaction: db.HasNoTransactionDirective(string(b)),
+                        NewSession: db.HasNewSessionDirective(string(b)),
                     }
                     wait := retryWait
                     for attempt := 0; ; attempt++ {
                         err = db.ApplyMigration(ctx, pool, m)
-                        if err == nil || m.NoTransaction || attempt >= retries || !isLockFailure(err) { break }
+                        if err == nil || m.NoTransaction || m.NewSession || attempt >= retries || !isLockFailure(err) { break }
                         fmt.Fprintf(os.Stderr, "%s: %v; retrying in %s (%d/%d)\n", base, err, wait, attempt+1, retries)
                         select {
                         case <-ctx.Done():

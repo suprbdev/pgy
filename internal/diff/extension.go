@@ -94,8 +94,9 @@ func orderedExtensions(live *Live, desired *schema.Database) []*schema.Extension
 // ones, in requirement order. Both go to plan.Creates, ahead of every
 // object that may use the extension. A relocatable extension is moved to
 // its declared schema; others cannot be moved and are left alone. Unset
-// schema, version and comment are unmanaged. Dropping undeclared
-// extensions is part of pruning; see planExtensionDrops.
+// schema, version and comment are unmanaged; comment: null (NoComment)
+// removes the comment. Dropping undeclared extensions is part of pruning;
+// see planExtensionDrops.
 func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     warn := func(format string, args ...any) {
         plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf(format, args...)})
@@ -137,6 +138,9 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
             if ext.Comment != "" && ext.Comment != le.Comment {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", name, quoteString(ext.Comment)))
             }
+            if ext.NoComment && le.Comment != "" {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is null;", name))
+            }
             continue
         }
         if ext.Name == "plpgsql" && live.ServerVersion == 0 { continue }
@@ -155,6 +159,9 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
         plan.Creates = append(plan.Creates, renderExtension(&create))
         if ext.Comment != "" {
             plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", name, quoteString(ext.Comment)))
+        }
+        if ext.NoComment {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is null;", name))
         }
     }
 }
@@ -659,7 +666,7 @@ func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opt
     if rq == nil { return plan }
     before := planWith(live, rq.database(desired), opts)
     want, left := map[string]int{}, 0
-    for _, sec := range [][]string{before.Prelude, before.Creates, before.Alters, before.Drops, before.Concurrent} {
+    for _, sec := range [][]string{before.ExtensionUpdates, before.Prelude, before.Creates, before.Alters, before.Drops, before.Concurrent} {
         for _, s := range sec {
             want[s]++
             left++
@@ -671,6 +678,7 @@ func withoutMoveEchoes(plan *PlanDiff, live *Live, desired *schema.Database, opt
         dst *[]string
         got []string
     }{
+        {&out.ExtensionUpdates, plan.ExtensionUpdates},
         {&out.Prelude, plan.Prelude},
         {&out.Creates, plan.Creates},
         {&out.Alters, plan.Alters},

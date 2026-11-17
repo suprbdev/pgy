@@ -13,12 +13,14 @@ type Section struct {
     SQL  string
 }
 
-// Render renders steps as buffer sections, one per step. A step that adds
-// enum labels gets a "<name>_enum_values" section before it holding the
-// ADD VALUE statements, and a step with statements that cannot run in a
-// transaction gets a "<name>_concurrent" section after it holding them
-// behind the no-transaction directive, so commit writes each to its own
-// migration file.
+// Render renders steps as buffer sections, one per step. A step that
+// updates extensions gets a "<name>_extension_updates" section first,
+// holding the ALTER EXTENSION ... UPDATE statements behind the new-session
+// directive; a step that adds enum labels gets a "<name>_enum_values"
+// section before it holding the ADD VALUE statements, and a step with
+// statements that cannot run in a transaction gets a "<name>_concurrent"
+// section after it holding them behind the no-transaction directive, so
+// commit writes each to its own migration file.
 func Render(steps []Step) string {
     var b strings.Builder
     section := func(name, sql string) {
@@ -32,8 +34,9 @@ func Render(steps []Step) string {
     }
     for _, s := range steps {
         if !hasStatements(s.Plan) { continue }
+        if u := diff.RenderExtensionUpdates(s.Plan); u != "" { section(suffixed(s.Name, "extension_updates"), u) }
         if p := diff.RenderPrelude(s.Plan); p != "" { section(suffixed(s.Name, "enum_values"), p) }
-        if sql := diff.RenderMain(s.Plan); sql != "" || len(s.Plan.Concurrent)+len(s.Plan.Prelude) == 0 { section(s.Name, sql) }
+        if sql := diff.RenderMain(s.Plan); sql != "" || len(s.Plan.Concurrent)+len(s.Plan.Prelude)+len(s.Plan.ExtensionUpdates) == 0 { section(s.Name, sql) }
         if c := diff.RenderConcurrent(s.Plan); c != "" {
             name := "concurrent"
             if s.Name != "" { name = s.Name + "_concurrent" }

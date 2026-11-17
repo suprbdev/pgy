@@ -162,3 +162,58 @@ func TestPruneKeepsInternalRoutines(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneKeepsInheritanceChildrenOfKeptTables(t *testing.T) {
+	live := pruneLive()
+	for _, k := range []string{"app.chunk_1", "app.chunk_2", "app.grandchild", "app.old_parent", "app.old_child", "app.mixed", "app.held", "app.other_child"} {
+		live.Tables[k] = newLiveTable()
+	}
+	live.Tables["app.chunk_1"].Inherits = []string{"app.keep"}
+	live.Tables["app.chunk_2"].Inherits = []string{"app.keep"}
+	live.Tables["app.grandchild"].Inherits = []string{"app.chunk_1"}
+	live.Tables["app.old_child"].Inherits = []string{"app.old_parent"}
+	live.Tables["app.mixed"].Inherits = []string{"app.held", "app.keep"}
+	live.Tables["app.other_child"].Inherits = []string{"other.untouched"}
+	p := PlanWith(live, pruneDesired(), Options{Unsafe: true, Prune: true})
+	drops := strings.Join(p.Drops, "\n")
+	if !strings.Contains(drops, `drop table "app"."gone", "app"."old_child", "app"."old_parent";`) {
+		t.Errorf("an undeclared parent and child must still be dropped together:\n%s", drops)
+	}
+	for _, k := range []string{"chunk_1", "chunk_2", "grandchild", "mixed", "held", "other_child"} {
+		if strings.Contains(drops, `"app"."`+k+`"`) {
+			t.Errorf("%s inherits from a kept table and must not be dropped:\n%s", k, drops)
+		}
+	}
+	var msgs []string
+	for _, w := range p.Warnings {
+		msgs = append(msgs, w.Message)
+	}
+	all := strings.Join(msgs, "\n")
+	for _, want := range []string{
+		"app.keep is kept, so its undeclared inheritance children are not dropped: app.chunk_1, app.chunk_2, app.mixed;",
+		"app.chunk_1 is kept, so its undeclared inheritance children are not dropped: app.grandchild;",
+		"other.untouched is kept, so its undeclared inheritance children are not dropped: app.other_child;",
+		"table app.held is not declared but is not dropped because app.mixed inherits from it and is kept",
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing warning %q in:\n%s", want, all)
+		}
+	}
+	if q := PlanWith(live, pruneDesired(), Options{Unsafe: true}); len(q.Warnings) != len(p.Warnings)-4 {
+		t.Errorf("the warnings belong to prune only: %v", q.Warnings)
+	}
+}
+
+func TestPruneKeepsServerOfForeignInheritanceChild(t *testing.T) {
+	live := pruneLive()
+	live.Servers = map[string]*LiveServer{"remote": {Wrapper: "postgres_fdw"}}
+	live.Tables["app.remote_chunk"] = newLiveTable()
+	live.Tables["app.remote_chunk"].Foreign = &LiveForeignTable{Server: "remote"}
+	live.Tables["app.remote_chunk"].Inherits = []string{"app.keep"}
+	desired := pruneDesired()
+	desired.Servers = map[string]*schema.Server{}
+	p := PlanWith(live, desired, Options{Unsafe: true, Prune: true})
+	if drops := strings.Join(p.Drops, "\n"); strings.Contains(drops, "remote") {
+		t.Errorf("a kept foreign inheritance child and its server must not be dropped:\n%s", drops)
+	}
+}
