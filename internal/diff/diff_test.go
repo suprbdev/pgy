@@ -1878,11 +1878,11 @@ func TestExtensionSchemaVersionAltered(t *testing.T) {
 	}
 	p := Plan(l, desired, false)
 	want := []string{
-		`alter extension "pg_trgm" set schema "extensions";`,
 		`alter extension "pg_trgm" update to '1.6';`,
+		`alter extension "pg_trgm" set schema "extensions";`,
 	}
-	if len(p.Alters) != 0 || len(p.Creates) != 2 || p.Creates[0] != want[0] || p.Creates[1] != want[1] {
-		t.Errorf("want creates %v, got creates=%v alters=%v", want, p.Creates, p.Alters)
+	if len(p.Alters) != 0 || len(p.ExtensionUpdates) != 1 || p.ExtensionUpdates[0] != want[0] || len(p.Creates) != 1 || p.Creates[0] != want[1] {
+		t.Errorf("want extension updates and creates %v, got updates=%v creates=%v alters=%v", want, p.ExtensionUpdates, p.Creates, p.Alters)
 	}
 }
 

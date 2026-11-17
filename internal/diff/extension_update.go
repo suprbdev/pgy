@@ -101,6 +101,47 @@ func queryUpdateDependents(batch *queryBatch, live *Live, names []string) {
 	})
 }
 
+// separateExtensionUpdates takes out of creates, the extension statements
+// of a plan, the ALTER EXTENSION ... UPDATE statements that can run before
+// everything else (see PlanDiff.ExtensionUpdates): those of installed
+// extensions whose new version requires only installed extensions, and
+// whose dependent views and materialized views are all still in live, the
+// snapshot as the rest of the plan sees it. An update the plan drops such a
+// view for stays where it is, since the drop has to precede it and share a
+// transaction with it and with the view's recreation.
+func separateExtensionUpdates(creates []string, live *Live, desired *schema.Database) (updates, rest []string) {
+	movable := map[string]bool{}
+	for _, ext := range orderedExtensions(live, desired) {
+		le := live.ExtensionDefs[ext.Name]
+		if ext.Version == "" || !live.Extensions[ext.Name] || le == nil {
+			continue
+		}
+		ready := true
+		for _, r := range extensionRequires(live, ext) {
+			ready = ready && live.Extensions[r]
+		}
+		for _, d := range le.UpdateDependents {
+			if d.Kind == "view" || d.Kind == "matview" {
+				ready = ready && (live.Views[d.Name] || live.MatViews[d.Name])
+			}
+			if d.On != "" {
+				ready = ready && (live.Views[d.On] || live.MatViews[d.On])
+			}
+		}
+		if ready {
+			movable[fmt.Sprintf("alter extension %s update to %s;", quoteIdent(ext.Name), quoteString(ext.Version))] = true
+		}
+	}
+	for _, s := range creates {
+		if movable[s] {
+			updates = append(updates, s)
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	return updates, rest
+}
+
 // recreateUpdateDependents makes room for the ALTER EXTENSION ... UPDATE
 // statements in extensions.Creates. An update script may drop an object of
 // the extension to create it again, which PostgreSQL refuses while a view

@@ -134,13 +134,13 @@ func TestExtensionAltersPrecedeDependents(t *testing.T) {
 		Views:      map[string]*schema.View{"public.info": {Name: "info", Query: "select dealloc from pg_stat_statements_info"}},
 	}
 	p := Plan(live, d, false)
-	if len(p.Creates) < 5 {
+	if len(p.Creates) < 4 {
 		t.Fatalf("creates: %v", p.Creates)
 	}
-	wantStatements(t, p.Creates[:3], []string{
+	wantStatements(t, p.ExtensionUpdates, []string{`alter extension "pg_stat_statements" update to '1.10';`})
+	wantStatements(t, p.Creates[:2], []string{
 		`create schema if not exists "ext";`,
 		`alter extension "citext" set schema "ext";`,
-		`alter extension "pg_stat_statements" update to '1.10';`,
 	})
 	if !findCreate(p, `"public"."invites"`) || !findCreate(p, `"public"."info"`) {
 		t.Errorf("dependents missing: %v", p.Creates)
@@ -183,13 +183,13 @@ func TestExtensionVersionWithoutUpdatePath(t *testing.T) {
 	}
 	d.Extensions[0].Version = "1.11"
 	p = Plan(live, d, true)
-	wantStatements(t, p.Creates, []string{`alter extension "pg_stat_statements" update to '1.11';`})
+	wantStatements(t, p.ExtensionUpdates, []string{`alter extension "pg_stat_statements" update to '1.11';`})
 	if len(p.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", p.Warnings)
 	}
 	live.ExtensionDefs["pg_stat_statements"].UpdateTargets = nil
 	d.Extensions[0].Version = "1.4"
-	wantStatements(t, Plan(live, d, true).Creates, []string{`alter extension "pg_stat_statements" update to '1.4';`})
+	wantStatements(t, Plan(live, d, true).ExtensionUpdates, []string{`alter extension "pg_stat_statements" update to '1.4';`})
 }
 
 func TestExtensionVersionWithoutUpdatePathReason(t *testing.T) {

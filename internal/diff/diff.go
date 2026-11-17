@@ -2714,6 +2714,13 @@ func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv strin
 }
 
 type PlanDiff struct{
+    // ExtensionUpdates holds the ALTER EXTENSION ... UPDATE statements that
+    // need nothing else in the plan to run first. Some extensions
+    // (TimescaleDB) accept an update only as the first statement of a
+    // session, so they belong in a migration of their own that runs before
+    // the rest, each statement on a new connection (see
+    // db.NewSessionDirective).
+    ExtensionUpdates []string
     // Prelude holds ALTER TYPE ... ADD VALUE statements. PostgreSQL rejects
     // a new enum label until the transaction that added it commits, so they
     // belong in a migration of their own that runs before the rest.
@@ -2736,6 +2743,7 @@ func (p *PlanDiff) Summary() map[string]int {
         "drops": len(p.Drops),
         "concurrent": len(p.Concurrent),
         "prelude": len(p.Prelude),
+        "extension_updates": len(p.ExtensionUpdates),
     }
 }
 
@@ -2883,7 +2891,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
-    plan.Creates = append(plan.Creates, extensions.Creates...)
+    updates, extensionCreates := separateExtensionUpdates(extensions.Creates, live, desired)
+    plan.ExtensionUpdates = updates
+    plan.Creates = append(plan.Creates, extensionCreates...)
     plan.Alters = append(plan.Alters, extensions.Alters...)
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
@@ -6288,11 +6298,22 @@ func RenderConcurrent(p *PlanDiff) string {
     return db.NoTransactionDirective + "\n" + strings.Join(p.Concurrent, "\n") + "\n"
 }
 
-// Render renders the plan's transactional statements: the Prelude, then
-// Creates, Alters and Drops. Concurrent statements are rendered by
-// RenderConcurrent. RenderPrelude and RenderMain render the two parts on
-// their own, for migrations that commit the Prelude first.
-func Render(p *PlanDiff) string { return RenderPrelude(p) + RenderMain(p) }
+// Render renders the plan's statements except the Concurrent ones, which
+// RenderConcurrent renders: the ExtensionUpdates, the Prelude, then
+// Creates, Alters and Drops. RenderPrelude and RenderMain render the last
+// two parts on their own, for migrations that commit the Prelude first.
+func Render(p *PlanDiff) string {
+    updates := ""
+    if len(p.ExtensionUpdates) > 0 { updates = strings.Join(p.ExtensionUpdates, "\n") + "\n" }
+    return updates + RenderPrelude(p) + RenderMain(p)
+}
+
+// RenderExtensionUpdates renders the plan's ExtensionUpdates behind the
+// new-session directive, or "" when it has none.
+func RenderExtensionUpdates(p *PlanDiff) string {
+    if len(p.ExtensionUpdates) == 0 { return "" }
+    return db.NewSessionDirective + "\n" + strings.Join(p.ExtensionUpdates, "\n") + "\n"
+}
 
 // RenderPrelude renders the plan's Prelude, or "" when it has none.
 func RenderPrelude(p *PlanDiff) string {

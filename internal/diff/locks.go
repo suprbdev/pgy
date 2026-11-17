@@ -329,5 +329,5 @@ func unsafeOnly(safe, full *PlanDiff) []Warning {
 }
 
 func planStatements(p *PlanDiff) []string {
-    return append(append(append(append(append([]string{}, p.Prelude...), p.Creates...), p.Alters...), p.Drops...), p.Concurrent...)
+    return append(append(append(append(append(append([]string{}, p.ExtensionUpdates...), p.Prelude...), p.Creates...), p.Alters...), p.Drops...), p.Concurrent...)
 }
