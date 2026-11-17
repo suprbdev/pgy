@@ -6759,11 +6759,25 @@ func orderedKeys(m map[string]string, order []string) []string {
 // storageParamValue renders the value of a storage parameter for WITH (...)
 // or SET (...): a number, a lower-case word or an SQL-quoted value as it is,
 // anything else as a string literal, since PostgreSQL folds an unquoted
-// word to lower case and accepts any value as a string.
+// word to lower case and accepts any value as a string. A word that is a
+// column-name keyword is quoted too: the grammar reads an unquoted one as a
+// type name, so time would become pg_catalog.time, or rejects it.
 func storageParamValue(v string) string {
     v = strings.TrimSpace(v)
-    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) { return v }
+    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) && !colNameKeywords[v] { return v }
     return quoteString(v)
+}
+
+var colNameKeywords = map[string]bool{}
+
+func init() {
+    for _, w := range strings.Fields(`between bigint bit boolean char character coalesce dec decimal exists extract float
+        greatest grouping inout int integer interval json json_array json_arrayagg json_exists json_object json_objectagg
+        json_query json_scalar json_serialize json_table json_value least merge_action national nchar normalize nullif
+        numeric out overlay position precision real row setof smallint substring time timestamp treat trim values varchar
+        xmlattributes xmlconcat xmlelement xmlexists xmlforest xmlnamespaces xmlparse xmlpi xmlroot xmlserialize xmltable`) {
+        colNameKeywords[w] = true
+    }
 }
 
 // columnStorageStmts emits newColumnStmts for every column a newly created

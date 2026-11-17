@@ -42,10 +42,11 @@ func TestCreateTimeOnlyParamsInYAMLOrderQuoted(t *testing.T) {
 	if err := os.WriteFile(p, []byte(`
 schema app:
   table m:
-    columns: {at: {type: timestamptz}}
+    columns: {time: {type: timestamptz}, device: {type: int}}
     with:
       tsdb.hypertable: true
-      tsdb.partition_column: at
+      tsdb.partition_column: time
+      tsdb.segmentby: device
       tsdb.chunk_interval: 1 day
       fillfactor: 70
 `), 0o644); err != nil {
@@ -56,10 +57,10 @@ schema app:
 		t.Fatal(err)
 	}
 	sql := Render(Plan(emptyLive(), d, false))
-	if !strings.Contains(sql, `with (tsdb.hypertable = true, tsdb.partition_column = at, tsdb.chunk_interval = '1 day', fillfactor = 70);`) {
-		t.Errorf("CREATE TABLE passes the parameters in YAML order, quoting values that need it:\n%s", sql)
+	if !strings.Contains(sql, `with (tsdb.hypertable = true, tsdb.partition_column = 'time', tsdb.segmentby = device, tsdb.chunk_interval = '1 day', fillfactor = 70);`) {
+		t.Errorf("CREATE TABLE passes the parameters in YAML order, quoting values that need it, keywords included:\n%s", sql)
 	}
-	live := liveWithTable("app.m", map[string]*LiveColumn{"at": {Type: "timestamp with time zone"}})
+	live := liveWithTable("app.m", map[string]*LiveColumn{"time": {Type: "timestamp with time zone"}, "device": {Type: "integer"}})
 	live.Schemas["app"] = true
 	live.Tables["app.m"].Options = map[string]string{"fillfactor": "70"}
 	if sql := Render(Plan(live, d, true)); sql != "" {
