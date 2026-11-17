@@ -93,7 +93,8 @@ func orderedExtensions(live *Live, desired *schema.Database) []*schema.Extension
 // ones, in requirement order. Both go to plan.Creates, ahead of every
 // object that may use the extension. A relocatable extension is moved to
 // its declared schema; others cannot be moved and are left alone. Unset
-// schema, version and comment are unmanaged. Dropping undeclared
+// schema, version and comment are unmanaged; comment: null (NoComment)
+// removes the comment. Dropping undeclared
 // extensions is part of pruning; see planExtensionDrops.
 func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
     warn := func(format string, args ...any) {
@@ -132,6 +133,9 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
             if ext.Comment != "" && ext.Comment != le.Comment {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", name, quoteString(ext.Comment)))
             }
+            if ext.NoComment && le.Comment != "" {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is null;", name))
+            }
             continue
         }
         if ext.Name == "plpgsql" && live.ServerVersion == 0 { continue }
@@ -148,6 +152,9 @@ func planExtensions(plan *PlanDiff, live *Live, desired *schema.Database) {
         plan.Creates = append(plan.Creates, renderExtension(&create))
         if ext.Comment != "" {
             plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is %s;", name, quoteString(ext.Comment)))
+        }
+        if ext.NoComment {
+            plan.Alters = append(plan.Alters, fmt.Sprintf("comment on extension %s is null;", name))
         }
     }
 }

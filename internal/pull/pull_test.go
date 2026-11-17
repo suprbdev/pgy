@@ -2,6 +2,8 @@ package pull
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -162,6 +164,28 @@ func TestBuildExtensionsKeepTheirSchema(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestBuildExtensionComments(t *testing.T) {
+	live := &diff.Live{
+		Extensions: map[string]bool{"citext": true, "hstore": true, "pgcrypto": true, "mine": true},
+		ExtensionDefs: map[string]*diff.LiveExtension{
+			"citext":   {Schema: "public", Comment: "case-insensitive", DefaultComment: "case-insensitive"},
+			"hstore":   {Schema: "public", DefaultComment: "key/value pairs"},
+			"pgcrypto": {Schema: "public", Comment: "hashing", DefaultComment: "cryptographic functions"},
+			"mine":     {Schema: "public"},
+		},
+		Details: &diff.LiveDetails{},
+	}
+	_, d, _ := buildSingle(t, live)
+	got := map[string]string{}
+	for _, ext := range d.Extensions {
+		got[ext.Name] = fmt.Sprintf("%q %v", ext.Comment, ext.NoComment)
+	}
+	want := map[string]string{"citext": `"" false`, "hstore": `"" true`, "pgcrypto": `"hashing" false`, "mine": `"" false`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("extension comments %v, want %v", got, want)
 	}
 }
 

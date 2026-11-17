@@ -119,3 +119,14 @@ schema app:
 		}
 	}
 }
+
+func TestValidateExtensionCommentNull(t *testing.T) {
+	p := write(t, t.TempDir(), "ok.yml", `
+extensions:
+  - {name: hstore, schema: public, comment: null}
+  - {name: citext, schema: public, comment: case-insensitive text}
+`)
+	if issues := Files([]string{p}); len(issues) > 0 {
+		t.Errorf("comment: null removes an extension's comment:\n%s", messages(issues))
+	}
+}

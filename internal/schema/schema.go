@@ -611,6 +611,10 @@ type Extension struct {
     Cascade     bool     `yaml:"cascade"`
     DependsOn   []string `yaml:"dependsOn"`
     Comment     string   `yaml:"comment"` // COMMENT ON EXTENSION; "" = unmanaged
+    // NoComment reports comment: null, an extension without a comment
+    // (COMMENT ON EXTENSION ... IS NULL), which CREATE EXTENSION would
+    // otherwise give its control file's comment.
+    NoComment   bool     `yaml:"-"`
 }
 
 type TypeDef struct {
@@ -1085,6 +1089,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                     if ver, ok := v["version"]; ok { ext.Version = scalarToString(ver) }
                     if b, ok := v["cascade"].(bool); ok { ext.Cascade = b }
                     if c, ok := v["comment"].(string); ok { ext.Comment = c }
+                    if c, ok := v["comment"]; ok && c == nil { ext.NoComment = true }
                     if dep, ok := v["dependsOn"]; ok {
                         ext.DependsOn = parseStringListFromNode(dep)
                     }

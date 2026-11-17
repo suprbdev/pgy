@@ -336,7 +336,7 @@ extensions: [pg_trgm, pgcrypto]
 | `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are. Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
 | `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO` (see [Updating extensions](#updating-extensions)). Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
-| `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
+| `comment` | string or `null` | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted (or `""`) = unmanaged. `comment: null` means no comment: `COMMENT ON EXTENSION ... IS NULL` after `CREATE EXTENSION`, and whenever one is set again. `pgy pull` writes the comment when it differs from the control file's and `null` when there is none, so a rebuild matches; a comment equal to the control file's is left out and stays unmanaged, as the `public` schema's default comment does. `null` is only for extensions, the one kind of object that gets a comment it wasn't declared with |
 | `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
 
 ```yaml
@@ -1749,7 +1749,7 @@ Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named in
 Behavior:
 
 - Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
-- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
+- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually. The exception is an extension, which `CREATE EXTENSION` gives its control file's comment: there `comment: null` removes it (see [Extensions](#extensions)).
 - Single quotes are escaped automatically.
 
 ## Publications

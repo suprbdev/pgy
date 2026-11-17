@@ -348,6 +348,49 @@ schema public:
 	}
 }
 
+func TestIntegrationExtensionCommentNull(t *testing.T) {
+	admin := connect(t)
+	ctx := context.Background()
+	src := freshDatabase(t, admin, "pgytest_ext_comment_null")
+	dst := freshDatabase(t, admin, "pgytest_ext_comment_null_copy")
+	if _, err := src.Exec(ctx, `
+		create extension hstore schema public;
+		create extension citext schema public;
+		comment on extension hstore is null;
+		comment on extension citext is 'case-insensitive text';`); err != nil {
+		t.Fatal(err)
+	}
+	comments := func(db *pgxpool.Pool) map[string]string {
+		rows, err := db.Query(ctx, `select extname, coalesce(obj_description(oid, 'pg_extension'), '<null>') from pg_extension where extname in ('hstore', 'citext')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, c string
+			if err := rows.Scan(&name, &c); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = c
+		}
+		return out
+	}
+	y := pullAndRebuild(t, src, dst)
+	if !strings.Contains(y, "{name: hstore, ifNotExists: true, schema: public, comment: null}") {
+		t.Errorf("an extension without a comment is pulled with comment: null:\n%s", y)
+	}
+	if want, got := comments(src), comments(dst); !reflect.DeepEqual(want, got) || got["hstore"] != "<null>" {
+		t.Errorf("rebuilt extension comments %v, want %v", got, want)
+	}
+	if _, err := dst.Exec(ctx, `comment on extension hstore is 'added by hand'`); err != nil {
+		t.Fatal(err)
+	}
+	if sql := strings.TrimSpace(diff.Render(planExtensionsLive(t, dst, y, diff.Options{}))); sql != `comment on extension "hstore" is null;` {
+		t.Errorf("a comment added by hand is removed again, got:\n%s", sql)
+	}
+}
+
 func TestIntegrationExtensionViewRulesNotPruned(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_view_rules")

@@ -19,7 +19,7 @@
               "schema": { "type": "string", "minLength": 1, "description": "Schema to install the extension's objects into (WITH SCHEMA). Created if missing, unless it is a system schema such as pg_catalog; a relocatable extension living elsewhere is moved with ALTER EXTENSION ... SET SCHEMA. Omitted = the schema of the extension's control file, or the first schema of the search_path." },
               "version": { "type": "string", "minLength": 1, "description": "Extension version (VERSION). A live extension on another version is updated with ALTER EXTENSION ... UPDATE TO when PostgreSQL has an update path to it." },
               "cascade": { "type": "boolean", "description": "CASCADE: also install extensions this one requires." },
-              "comment": { "type": "string", "description": "COMMENT ON EXTENSION, replacing the one its control file sets. Omitted = unmanaged." },
+              "comment": { "type": ["string", "null"], "description": "COMMENT ON EXTENSION, replacing the one its control file sets; null removes the comment (COMMENT ... IS NULL). Omitted = unmanaged." },
               "dependsOn": { "$ref": "#/definitions/stringList", "description": "extension <name> entries: extensions this one is created after." }
             },
             "required": ["name"],

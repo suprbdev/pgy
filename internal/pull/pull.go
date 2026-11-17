@@ -1966,6 +1966,9 @@ func (b *builder) database() *node {
 			if le.Comment != "" && le.Comment != le.DefaultComment {
 				add(e, "comment", str(le.Comment))
 			}
+			if le.Comment == "" && le.DefaultComment != "" {
+				add(e, "comment", &node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"})
+			}
 			deps := []string{}
 			for _, r := range le.Requires {
 				if r != "plpgsql" {

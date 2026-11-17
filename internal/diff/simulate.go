@@ -59,6 +59,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if ext.Version != "" { le.Version = ext.Version }
         if ext.Comment != "" { le.Comment = ext.Comment }
+        if ext.NoComment { le.Comment = "" }
         out.ExtensionDefs[ext.Name] = le
     }
 

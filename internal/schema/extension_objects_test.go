@@ -98,6 +98,27 @@ schema public:
 	}
 }
 
+func TestExtensionCommentNullParsed(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+extensions:
+  - {name: hstore, comment: null}
+  - {name: citext, comment: ""}
+  - {name: pgcrypto}
+  - {name: pg_trgm, comment: trigrams}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]any{}
+	for _, ext := range db.Extensions {
+		got[ext.Name] = [2]any{ext.Comment, ext.NoComment}
+	}
+	want := map[string][2]any{"hstore": {"", true}, "citext": {"", false}, "pgcrypto": {"", false}, "pg_trgm": {"trigrams", false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("extension comments %v, want %v", got, want)
+	}
+}
+
 func TestTableAttributeOnlyMergedWithColumns(t *testing.T) {
 	a, err := parseFlexibleDatabase([]byte("schema public:\n  table t:\n    columns: {id: {type: int}}\n"))
 	if err != nil {
