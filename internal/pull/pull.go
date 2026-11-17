@@ -2018,29 +2018,36 @@ func (b *builder) database() *node {
 	if b.opts.Roles && len(b.live.RoleDefs) > 0 {
 		roles := newMap()
 		for _, name := range sortedKeys(b.live.RoleDefs) {
-			if name == b.live.CurrentUser || name == "postgres" {
+			lr := b.live.RoleDefs[name]
+			if lr.Bootstrap {
 				continue
 			}
-			lr := b.live.RoleDefs[name]
+			connecting := name == b.live.CurrentUser
 			r := flowMap()
 			for _, a := range []struct {
 				key string
 				on  bool
 			}{{"login", lr.Login}, {"superuser", lr.Superuser}, {"createdb", lr.CreateDB}, {"createrole", lr.CreateRole}, {"replication", lr.Replication}, {"bypassRLS", lr.BypassRLS}} {
-				if a.on {
+				if a.on && !connecting {
 					add(r, a.key, boolean(true))
 				}
 			}
-			if !lr.Inherit {
+			if !lr.Inherit && !connecting {
 				add(r, "inherit", boolean(false))
 			}
-			if lr.ConnectionLimit >= 0 {
+			if lr.ConnectionLimit >= 0 && !connecting {
 				add(r, "connectionLimit", num(strconv.Itoa(lr.ConnectionLimit)))
 			}
-			if lr.ValidUntil != "" {
+			if lr.ValidUntil != "" && !connecting {
 				add(r, "validUntil", str(lr.ValidUntil))
 			}
-			if parents := sortedKeys(b.live.RoleMembers[name]); len(parents) > 0 {
+			parents := []string{}
+			for _, p := range sortedKeys(b.live.RoleMembers[name]) {
+				if !connecting || !b.live.CreatorGrant(name, p) {
+					parents = append(parents, p)
+				}
+			}
+			if len(parents) > 0 {
 				items := &node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
 				for _, p := range parents {
 					lm := b.live.RoleMemberOptions[name][p]
@@ -2071,6 +2078,9 @@ func (b *builder) database() *node {
 				add(r, "set", set)
 			}
 			addStr(r, "comment", b.live.RoleComments[name])
+			if connecting && len(r.Content) == 0 {
+				continue
+			}
 			add(roles, name, r)
 		}
 		if len(roles.Content) > 0 {
