@@ -859,12 +859,11 @@ func ownsColumns(t *Table) bool {
 func parseFlexibleDatabase(b []byte) (*Database, error) {
     // Generic map for flexible parsing
     var root map[string]any
-    if err := yaml.Unmarshal(b, &root); err != nil {
+    // Also capture YAML node tree to preserve order information
+    node, err := DecodeYAML(b, &root)
+    if err != nil {
         return nil, err
     }
-    // Also capture YAML node tree to preserve order information
-    var node yaml.Node
-    _ = yaml.Unmarshal(b, &node)
     out := &Database{Tables: map[string]*Table{}}
     out.Types = map[string]*TypeDef{}
     out.Functions = map[string]*Function{}
@@ -980,10 +979,10 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
             schemaName := strings.TrimSpace(strings.TrimPrefix(k, "schema "))
             mergeSchemaBlock(out, schemaName, v)
             // fill column order from node if available
-            fillColumnOrderFromNode(&node, out, schemaName)
+            fillColumnOrderFromNode(node, out, schemaName)
         }
     }
-    fillFDWScalarsFromNode(&node, out)
+    fillFDWScalarsFromNode(node, out)
     return out, nil
 }
 
@@ -1088,7 +1087,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
         for _, item := range tt {
             m, ok := item.(map[string]any)
             if !ok { continue }
-            name, _ := m["name"].(string)
+            name, _ := nameScalar(m["name"])
             schemaName := defaultSchema
             if sc, ok := m["schema"].(string); ok && sc != "" {
                 schemaName = sc
@@ -1292,7 +1291,7 @@ func parseColumns(v any) map[string]*Column {
     case []any:
         for _, item := range cc {
             if m, ok := item.(map[string]any); ok {
-                name, _ := m["name"].(string)
+                name, _ := nameScalar(m["name"])
                 cols[name] = parseColumnSpec(m)
             }
         }
@@ -1499,12 +1498,15 @@ func qualify(schemaName, tableName string) string {
     return schemaName + "." + tableName
 }
 
+// parseStringListFromNode reads a list of names. An entry YAML resolved to
+// a number, a boolean or null, such as the column 2024 in
+// `primaryKey: [id, 2024]`, is taken as the name it spells.
 func parseStringListFromNode(v any) []string {
     out := []string{}
     switch x := v.(type) {
     case []any:
         for _, it := range x {
-            if s, ok := it.(string); ok { out = append(out, s) }
+            if s, ok := listName(it); ok { out = append(out, s) }
         }
     case map[string]any:
         // map name -> {columns:[...]}
@@ -1806,6 +1808,25 @@ func floatPtr(v any) *float64 {
     return nil
 }
 
+// nameScalar returns the name a YAML scalar spells: a string as it is, a
+// number or a boolean in its plain form. Anything else is not a name.
+func nameScalar(v any) (string, bool) {
+    switch x := v.(type) {
+    case string:
+        return x, true
+    case bool, int, int64, uint64, float64:
+        return scalarToString(x), true
+    }
+    return "", false
+}
+
+// listName is nameScalar for an entry of a list of names, where a null
+// entry is the name null rather than a missing value.
+func listName(v any) (string, bool) {
+    if v == nil { return "null", true }
+    return nameScalar(v)
+}
+
 func scalarToString(v any) string {
     switch x := v.(type) {
     case string:
@@ -1942,11 +1963,11 @@ func parseType(schemaName, key string, body any) *TypeDef {
     if rl, ok := m["renamedLabels"].(map[string]any); ok {
         td.RenamedLabels = map[string]string{}
         for label, old := range rl {
-            if o, ok := old.(string); ok { td.RenamedLabels[label] = o }
+            if o, ok := nameScalar(old); ok { td.RenamedLabels[label] = o }
         }
     }
     if labels, ok := m["labels"].([]any); ok {
-        for _, it := range labels { if s, ok := it.(string); ok { td.Labels = append(td.Labels, s) } }
+        for _, it := range labels { if s, ok := listName(it); ok { td.Labels = append(td.Labels, s) } }
     }
     if attrs, ok := m["attributes"].(map[string]any); ok {
         td.Attributes = map[string]string{}
@@ -2670,7 +2691,7 @@ func mappingValue(m *yaml.Node, key string) *yaml.Node {
 
 // scalarText returns a scalar node's value as written, or "" for a null.
 func scalarText(n *yaml.Node) string {
-    if n.Tag == "!!null" { return "" }
+    if n.ShortTag() == "!!null" { return "" }
     return n.Value
 }
 

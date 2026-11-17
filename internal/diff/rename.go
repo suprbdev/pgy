@@ -101,11 +101,11 @@ func relocateStmts(kind, old, new, args string) []string {
     out := []string{}
     cur := old
     if oldSchema != newSchema {
-        out = append(out, fmt.Sprintf("alter %s %s%s set schema %s;", kind, pqIdent(old), args, pqIdent(newSchema)))
+        out = append(out, fmt.Sprintf("alter %s %s%s set schema %s;", kind, pqIdent(old), args, quoteIdent(newSchema)))
         cur = newSchema + "." + oldName
     }
     if oldName != newName {
-        out = append(out, fmt.Sprintf("alter %s %s%s rename to %s;", kind, pqIdent(cur), args, pqIdent(newName)))
+        out = append(out, fmt.Sprintf("alter %s %s%s rename to %s;", kind, pqIdent(cur), args, quoteIdent(newName)))
     }
     return out
 }
@@ -394,7 +394,7 @@ func (r *renamer) tableParts(d *schema.Database) {
         for _, cn := range sortedKeys(dt.Columns) {
             c := dt.Columns[cn]
             if c == nil || c.RenamedFrom == "" || lt.Columns[c.RenamedFrom] == nil || lt.Columns[cn] != nil { continue }
-            r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename column %s to %s;", pqIdent(k), pqIdent(c.RenamedFrom), pqIdent(cn)))
+            r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename column %s to %s;", pqIdent(k), quoteIdent(c.RenamedFrom), quoteIdent(cn)))
             moveKey(lt.Columns, c.RenamedFrom, cn)
             if g := r.l.ColumnGrants[k]; g != nil { moveKey(g, c.RenamedFrom, cn) }
             r.rewriteColumnRefs(k, lt, c.RenamedFrom, cn)
@@ -420,7 +420,7 @@ func (r *renamer) renameIndexes(fq string, lt *LiveTable, indexes []*schema.Inde
         if ix == nil || ix.RenamedFrom == "" || ix.Name == "" { continue }
         old, name := truncateIdent(ix.RenamedFrom), truncateIdent(ix.Name)
         if !lt.Indexes[old] || lt.Indexes[name] { continue }
-        r.stmts = append(r.stmts, fmt.Sprintf("alter index %s rename to %s;", pqIdent(sch+"."+old), pqIdent(name)))
+        r.stmts = append(r.stmts, fmt.Sprintf("alter index %s rename to %s;", pqIdent(sch+"."+old), quoteIdent(name)))
         moveIndex(lt, old, name)
     }
 }
@@ -438,7 +438,7 @@ func (r *renamer) renameConstraint(fq string, lt *LiveTable, from, to string) {
     if from == "" || to == "" { return }
     old, name := truncateIdent(from), truncateIdent(to)
     if !lt.Constraints[old] || lt.Constraints[name] { return }
-    r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), pqIdent(old), pqIdent(name)))
+    r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(old), quoteIdent(name)))
     moveKey(lt.Constraints, old, name)
     moveKey(lt.ConstraintDefs, old, name)
     moveKey(lt.ConstraintComments, old, name)
