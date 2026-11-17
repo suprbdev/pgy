@@ -352,7 +352,7 @@ extensions: [pg_trgm, pgcrypto]
 | `schema` | string | `WITH SCHEMA`: where the extension's objects are installed. The schema is created if missing (system schemas such as `pg_catalog` never are). A live, relocatable extension in another schema is moved with `ALTER EXTENSION ... SET SCHEMA`; non-relocatable extensions (e.g. PostGIS) are left where they are, and `pgy diff` warns (see [moving an extension](#extensions)). Omitted = unmanaged: PostgreSQL then installs the extension into the schema its control file names, or else into the first schema of the connection's `search_path`, so give a `schema` to be sure where it lands |
 | `version` | string | `VERSION`. A live extension on a different version is updated with `ALTER EXTENSION ... UPDATE TO` (see [Updating extensions](#updating-extensions)). Quote it (`"1.10"`), since an unquoted YAML number loses trailing zeros. Omitted = unmanaged, and `pgy pull` writes it only when the installed version is not the server's default |
 | `cascade` | boolean | `CASCADE`: also install the extensions this one requires |
-| `comment` | string | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted = unmanaged, and `pgy pull` writes it only when it differs from the control file's |
+| `comment` | string or `null` | `COMMENT ON EXTENSION`, replacing the comment from the extension's control file. Diffed against live; omitted (or `""`) = unmanaged. `comment: null` means no comment: `COMMENT ON EXTENSION ... IS NULL` after `CREATE EXTENSION`, and whenever one is set again. `pgy pull` writes the comment when it differs from the control file's and `null` when there is none, so a rebuild matches; a comment equal to the control file's is left out and stays unmanaged, as the `public` schema's default comment does. `null` is only for extensions, the one kind of object that gets a comment it wasn't declared with |
 | `dependsOn` | list | `extension <name>` entries name extensions this one has to be created after. See [Dependencies](#dependencies) |
 
 ```yaml
@@ -385,6 +385,8 @@ Raising `version:` emits `ALTER EXTENSION ... UPDATE TO`. Many update scripts dr
 - **Views the YAML doesn't declare** can't be recreated, so they stay and are reported too. With `--unsafe --prune`, a view or materialized view that pruning drops anyway is dropped before the update instead of after it.
 - **Views that something of the above uses** stay as well, since dropping them would fail: a view a materialized view selects from, or one that a policy, a column of its row type or a SQL-standard body refers to. The warning names what holds them back.
 
+Some extensions accept `ALTER EXTENSION ... UPDATE` only as the first statement of a session: TimescaleDB loads its library on the first statement a session runs and then refuses to update (`cannot be updated after the old version has already been loaded`). So an update that needs nothing else in the plan to run first goes in a buffer section of its own, `extension_updates`, which starts with `-- pgy:new-session`. `pgy commit` writes it to a `NNNN_<name>_extension_updates.sql` migration numbered before the rest, and `pgy migrate` runs each of its statements on a new connection, as that connection's first statement, outside a transaction (`--lock-timeout` and `--statement-timeout` are passed as connection parameters). It records the migration once every statement succeeded. Rerunning an update that already took effect only prints a notice, so a migration that failed half way can be run again. Afterwards `pgy migrate` replaces its other connections, since TimescaleDB ends the sessions that loaded the old version. An update stays in the main migration, after what it needs, when the new version requires an extension the same migration creates, or when the plan drops views that use the extension (see above): the drops, the update and the views' recreation must share a transaction. An extension that wants the update first in a session rejects it there, so run that update without `--unsafe` first, which keeps the views and gives the update a migration of its own.
+
 An extension that none of these use is updated with the single statement. Other users of an extension's objects, such as a column default that calls `uuid_generate_v4()`, an index with `gin_trgm_ops` or a trigger on an extension's function, are not looked at: update scripts rarely replace what those use, and if one does, PostgreSQL's error names them.
 
 With `--split`, extensions are updated in the first migration, where only the views of the first group count as declared.
@@ -408,12 +410,17 @@ PostgreSQL does not record what a function body written as text (`plpgsql`, or `
 
 ### Objects an extension owns
 
-The functions, views, types, languages and foreign-data wrappers that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
+The functions, aggregates, tables, sequences, views, types, text search dictionaries, schemas, languages and foreign-data wrappers that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
 
 | Declaration | Left out | Managed |
 |-------------|----------|---------|
 | `function <name>(<args>):` | `body`, `returns`, `language` | `security`, `stable`/`volatile`/`immutable`, `strict`, `leakproof`, `parallel`, `cost`, `rows`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
 | `procedure <name>(<args>):` | `body`, `language` | `security`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
+| `aggregate <name>(<args>):` | `sfunc`, `stype` and the other options | `grants`, `revokePublic`, `owner`, `comment` |
+| `table <name>:`, `foreign table <name>:` | `columns` (and `of`, `partitionOf`, `inherits`, `server`) | `grants`, `owner`, `comment`, `rowLevelSecurity`, `forceRowLevelSecurity`, `policies`, `data` (with `key`) |
+| `sequence <name>:` | every option | `grants`, `owner`, `comment` |
+| `text search dictionary <name>:` | `template` | `options`, `owner`, `comment`. See [Text Search](#text-search) |
+| `schema <name>:` | | `grants`, `owner`, `comment` of a schema the extension's script creates, such as `pg_search`'s `pdb` |
 | `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
 | `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
 | `languages:` entry | | `grants`. See [Languages](#languages) |
@@ -443,13 +450,31 @@ schema public:
     grants: {app: [usage]}
 ```
 
+PostGIS's configuration table and aggregates:
+
+```yaml
+extensions:
+  - {name: postgis, schema: public}
+roles:
+  app: {}
+schema public:
+  table spatial_ref_sys:
+    grants: {app: [select, insert]}
+  aggregate st_union(geometry):
+    grants: {app: [execute]}
+```
+
 - **Matching.** A function or procedure is found by its argument types, as PostgreSQL identifies it: `function each(hstore):` is the extension's `each(hs hstore, OUT key text, OUT value text)`. Argument names and `OUT` arguments may be written or left out.
 - **Privileges** are compared with the ones the extension's script set (`pg_init_privs`), which is also what `pg_dump` keeps of an extension's objects. What the extension granted is left alone unless the `grants:` block names the grantee: `pg_buffercache_pages()` is granted to `pg_monitor` by its extension, and the block above adds `monitoring` without revoking that. A named grantee gets exactly the privileges listed, so `pg_monitor: []` revokes. Everything else follows the usual [grants](#grants) rules: privileges that were granted later to roles the block doesn't list are revoked. The same holds for a `grants:` block on any other declared object that an extension owns.
 - **In the migration that creates the extension**, the statements for its objects run after `CREATE EXTENSION`: every declared attribute is set, the listed privileges are granted, and a grantee listed with `[]` is revoked. One migration is enough unless the extension grants a listed role more than the block lists, which the next diff revokes. The same applies when the plan updates an extension (`ALTER EXTENSION ... UPDATE`).
 - **An object that doesn't exist**, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the declaration.
+- **Tables.** A table declared without `columns`, `of`, `partitionOf`, `inherits` and the keys that need columns (`primaryKey`, `indexes`, `constraints`, `triggers`, `rules`, `statistics`, storage and partitioning) is never created, altered or dropped, and prune leaves its columns, keys, indexes, triggers and rules alone. An empty `columns: {}` still declares a table without columns that pgy creates. A table that an extension owns, `CREATE EXTENSION` or `ALTER EXTENSION ... ADD` alike, is treated this way even when the YAML declares its columns, with a warning: its definition is the extension's. Column privileges cannot be declared on it. Its rows can, for a configuration table: see [Reference Data](#reference-data).
+- **Rules and triggers** of a table or view that an extension owns, or of one declared without columns or `query`, are never pruned. PostGIS's `geometry_columns` view keeps its rules when the YAML declares its grants.
+- **Sequences.** A sequence declared without options is created with PostgreSQL's defaults when it doesn't exist, as before. Sequences are created after the extensions, so once an extension has created one, the declaration only manages its privileges, owner and comment.
+- **Aggregates** are granted with `GRANT ... ON FUNCTION`; an ordered-set aggregate is declared as `aggregate percentile(float8 order by anyelement):` and granted on `(float8, anyelement)`. `grants` and `revokePublic` work on every aggregate, not only on one an extension owns.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
-- **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual.
-- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were. Tables, sequences and aggregates of an extension cannot be declared this way; pull reports the ones whose privileges changed.
+- **Schemas.** Such a declaration does not make pgy create its schema. Some extensions create their own schema in their script (`pg_cron` creates `cron`, `postgis_topology` creates `topology`) and fail when it already exists, so `schema cron:` holding only declarations like these leaves the schema to the extension. A schema that also holds an object pgy creates is created as usual. The grants of a schema an extension owns (`pg_search`'s `pdb`) are compared with `pg_init_privs`, like those of its other objects. Schemas are never dropped.
+- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. The owner's own privileges are never compared, those of the role that owned the object when the extension was created included, so a changed owner alone is not a changed privilege. Tables, sequences, aggregates and schemas are written the same way, a table also with its row level security and policies, which `pg_dump` keeps too; a schema an extension created is never written as the application's, with its owner and comment. PostgreSQL keeps no record of the options an extension's script gave its text search dictionaries, so pull writes the current options of each one that has any (`unaccent`'s `rules: unaccent` included), which a rebuild sets after `CREATE EXTENSION`; `pg_dump` loses them. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were, and neither are column privileges on an extension's table, which pull reports.
 
 ## Database Settings
 
@@ -482,6 +507,8 @@ PostgreSQL knows such a parameter only in a session that has loaded the extensio
 
 ## Tables
 
+A table declared without `columns`, `of`, `partitionOf` and `inherits` (nor the keys that only a table pgy creates can have) is never created: it manages the `grants`, `owner`, `comment`, `rowLevelSecurity`, `forceRowLevelSecurity`, `policies` and `data` of one that already exists, such as an extension's configuration table. See [Objects an extension owns](#objects-an-extension-owns). `columns: {}` declares a table without columns.
+
 ### Columns
 
 | Property | Type | Description |
@@ -502,6 +529,7 @@ PostgreSQL knows such a parameter only in a session that has loaded the extensio
 | `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
 | `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
+| `validate` | string | `immediate` or `later`: how making an existing column NOT NULL is validated on PostgreSQL 18+. `later` (the default) adds the constraint `NOT VALID` and validates it in the no-transaction migration; `immediate` uses `SET NOT NULL`, which scans the table under `ACCESS EXCLUSIVE`. See [Validating constraints in one step](#validating-constraints-in-one-step). Omitted = the table's `validate` |
 | `notNullName` | string | Name of the column's NOT NULL constraint (PostgreSQL 18+, which records one per NOT NULL column). Used when the table or the column is created and when an existing column becomes NOT NULL; a live constraint with another name is renamed in place with `ALTER TABLE ... RENAME CONSTRAINT`. Omitted = unmanaged: a new constraint gets PostgreSQL's `<table>_<column>_not_null`, and `pgy pull` writes the key only for a name that differs from that. Before PostgreSQL 18 the key is ignored and `pgy diff` warns. It applies to columns a table or foreign table declares with a type; a partition or inheritance child takes the name from its parent |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
@@ -533,6 +561,7 @@ schema public:
   table events_log:
     unlogged: true              # UNLOGGED: no WAL, emptied after a crash
     tablespace: fast_ssd        # TABLESPACE (created outside pgy)
+    accessMethod: heap          # USING: table access method
     with:                       # storage parameters
       fillfactor: 80
       autovacuum_vacuum_scale_factor: 0.05
@@ -546,11 +575,17 @@ schema public:
         collate: C
 ```
 
-`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. A value that is not a number or a lower-case word is passed as a string literal, so its case and punctuation reach PostgreSQL as written (`tokenizer: TokenBigram` becomes `tokenizer = 'TokenBigram'`); a value already in single quotes is passed as it is. This applies to every `with` (tables, materialized views, indexes and key constraints), and so does the order: the parameters are emitted in the order a `schema <name>:` block lists them (other YAML layouts sort them by name), and `pgy pull` writes them in the order PostgreSQL stores them, so a rebuilt database lists them as the original does. The comparison with the database ignores the order. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
+`unlogged` and `with` are diffed against the live table. Switching `unlogged` on a live table emits `ALTER TABLE ... SET LOGGED / SET UNLOGGED`, which rewrites the table, so it requires `--unsafe`. A present `with` block is authoritative: changed parameters emit `ALTER TABLE ... SET (...)`, and live parameters it no longer lists emit `RESET (...)`. Omitting either key leaves the live setting alone. A value that is not a number or a lower-case word is passed as a string literal, so its case and punctuation reach PostgreSQL as written (`tokenizer: TokenBigram` becomes `tokenizer = 'TokenBigram'`), and so is a word PostgreSQL would read as a type name or reject, such as `time`, `int` or `values`; a value already in single quotes is passed as it is. This applies to every `with` (tables, materialized views, indexes and key constraints), and so does the order: the parameters are emitted in the order a `schema <name>:` block lists them (other YAML layouts sort them by name), and `pgy pull` writes them in the order PostgreSQL stores them, so a rebuilt database lists them as the original does. The comparison with the database ignores the order. `toast.*` parameters apply to the table's TOAST table, which PostgreSQL only creates when a column can be toasted (such as `text` or `jsonb`). Without one it discards them, so pgy skips them until the table has one.
+
+A parameter with a namespace other than `toast` (`tsdb.hypertable`, `timescaledb.continuous`) is create-time only. PostgreSQL never keeps such a parameter, so when `CREATE TABLE` or `CREATE MATERIALIZED VIEW` accepts one, an extension took it while the relation was created: TimescaleDB turns `with: {tsdb.hypertable: true, tsdb.partition_column: time, tsdb.chunk_interval: 1 day}` into a hypertable. pgy passes it to `CREATE` and afterwards compares it only while the live relation's `reloptions` show it, so it is not emitted again. Changing it, or adding it to a table that already exists, does nothing; use the extension's own functions in a hand-written migration for that. Values are quoted like any other parameter's (`1 day` becomes `'1 day'`). A materialized view declared with such a parameter that the database has as a plain view, because the extension made it one (a TimescaleDB continuous aggregate), counts as created: its query and storage are left alone, and its `comment`, `columnComments`, `grants` and `owner` are managed on the view.
 
 #### Tablespaces
 
 `tablespace:` puts a table, partition, materialized view, index, or the index of a primary key, unique or exclusion constraint in a tablespace that already exists; pgy doesn't create tablespaces. New objects get `TABLESPACE` (or `USING INDEX TABLESPACE`). An existing one in another tablespace is moved with `ALTER ... SET TABLESPACE`, which rewrites it under an `ACCESS EXCLUSIVE` lock, so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). An index with `concurrently: true` moves with `REINDEX (TABLESPACE ...) INDEX CONCURRENTLY` in the no-transaction migration instead, without blocking writes. On a partitioned table or index, `SET TABLESPACE` only sets the default for new partitions, so it has no warning. `tablespace: pg_default` moves an object back; a relation in the database's default tablespace matches its name. Without the key, the tablespace is unmanaged. `pgy pull` writes it for every relation stored outside the database default.
+
+#### Access methods
+
+`accessMethod:` names the table access method of a table, partition, partitioned table or materialized view, such as `columnar` from Citus. It is compared with the live `pg_class.relam`. New relations get `USING`, and an existing table or materialized view with another access method is changed with `ALTER ... SET ACCESS METHOD`, which rewrites it and its indexes under an `ACCESS EXCLUSIVE` lock. So that needs `--unsafe` and gets a lock warning (and `--strict` fails on it by default). On a partitioned table it only sets the access method that partitions created later get, which needs neither. PostgreSQL keeps an access method for a partitioned table from version 17 on; before that the key is ignored there with a warning, so declare it on the partitions. Foreign tables and plain views have no storage, so `pgy validate` rejects the key on them. Without the key, the access method is unmanaged. `pgy pull` writes it for every relation whose access method is not the session's `default_table_access_method`.
 
 #### Replica identity and extended statistics
 
@@ -715,11 +750,25 @@ foreignKeys:
     deferrable: true    # optional DEFERRABLE
     initiallyDeferred: true   # optional DEFERRABLE INITIALLY DEFERRED (implies deferrable)
     notValid: true      # optional: add NOT VALID, existing rows are not checked
+    validate: immediate # optional: add it validated in one step (default later)
     enforced: false     # optional: NOT ENFORCED (PostgreSQL 18+)
     comment: "@fieldName owner"   # optional COMMENT ON CONSTRAINT (diffed against live)
 ```
 
 `no action` and `match: simple` are PostgreSQL's defaults and are omitted from the generated SQL. A foreign key or check added to a table that already exists is added `NOT VALID` in the main migration and validated with `ALTER TABLE ... VALIDATE CONSTRAINT` in the no-transaction migration that `pgy commit` writes after it. Validation checks the existing rows without blocking reads or writes, while new rows are checked from the start. If existing rows violate the constraint, that migration fails, the constraint stays `NOT VALID` and `pgy diff` emits the pending `VALIDATE` until it succeeds. `notValid: true` leaves the constraint unvalidated instead; removing it later validates it the same way. Before PostgreSQL 18, a NOT VALID foreign key can't be added to a partitioned table: it is added validated, with a lock warning, and with `notValid: true` `pgy diff` emits nothing and prints a warning unless the table is new in the same migration. This applies to check constraints too, which have no such restriction. A constraint validated outside pgy while the YAML still says `notValid: true` is not treated as a change.
+
+#### Validating constraints in one step
+
+Some tables refuse `VALIDATE CONSTRAINT` while they accept an `ADD CONSTRAINT` that checks the rows itself: a TimescaleDB hypertable with columnstore enabled rejects it (`operation not supported on hypertables that have columnstore enabled`), so the no-transaction migration fails on every attempt. `validate: immediate` on a check constraint, a foreign key or a column (for its NOT NULL on PostgreSQL 18), or on the table for all of them, adds the constraint validated in the main migration instead: `ADD CONSTRAINT` without `NOT VALID`, or `SET NOT NULL`. That checks the existing rows under the stronger lock of those statements (`ACCESS EXCLUSIVE` for a check and `SET NOT NULL`; a foreign key blocks writes to both tables), so `pgy diff` gives it a lock warning (and `--strict` fails on it by default). A constraint that exists `NOT VALID` is dropped and added again validated in the same migration, and a `NOT VALID` NOT NULL is validated by `SET NOT NULL`. `validate: later`, the default, keeps the two steps; on a constraint or column it overrides the table's `immediate`. `notValid: true` still leaves a constraint unvalidated, and `pgy validate` rejects it together with `validate: immediate` on the same constraint. If a `VALIDATE` migration has already failed, it was never recorded: delete that file before you commit the new diff, or `pgy migrate` keeps running it first.
+
+```yaml
+schema app:
+  table conditions:
+    validate: immediate       # every check, foreign key and NOT NULL added to it from now on
+    constraints:
+      hum_check: {type: check, expression: humidity >= 0}
+      temp_check: {type: check, expression: temperature > -100, validate: later}
+```
 
 ### Triggers
 
@@ -823,6 +872,7 @@ constraints:
     initiallyDeferred: true     # unique/exclude: DEFERRABLE INITIALLY DEFERRED
     noInherit: true             # check: NO INHERIT
     notValid: true              # check: add NOT VALID, existing rows are not checked
+    validate: immediate         # check: add it validated in one step (default later)
     enforced: false             # check: NOT ENFORCED (PostgreSQL 18+)
 ```
 
@@ -1120,6 +1170,8 @@ schema public:
 | `checkOption` | string | Plain views only. `local`, `cascaded`, or `none` to remove it. Omitted = unmanaged |
 | `withData` | boolean | Materialized views only. `false` creates `WITH NO DATA` |
 | `with` | map | Materialized views only. Storage parameters, authoritative when present. Omitted = unmanaged |
+| `tablespace` | string | Materialized views only. See [Tablespaces](#tablespaces). Omitted = unmanaged |
+| `accessMethod` | string | Materialized views only. Table access method (`USING`); changing it rewrites the view and needs `--unsafe`. See [Access methods](#access-methods). Omitted = unmanaged |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
@@ -1222,7 +1274,7 @@ Tables using a domain as a column type must declare `dependsOn: [domain <schema.
 
 ## Sequences
 
-Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `unlogged` emits `ALTER SEQUENCE ... SET UNLOGGED` or `SET LOGGED`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise).
+Sequences are defined inside `schema <name>:` blocks using `sequence <name>:` keys. Created with `CREATE SEQUENCE IF NOT EXISTS`. Only the options set in YAML are emitted, and PostgreSQL defaults apply to the rest. For an existing sequence, options set in YAML (`as`, `increment`, `minValue`, `maxValue`, `start`, `cache`, `cycle`) are compared against `pg_sequence` and changes emit one `ALTER SEQUENCE`. A changed `unlogged` emits `ALTER SEQUENCE ... SET UNLOGGED` or `SET LOGGED`. A changed `ownedBy` emits `ALTER SEQUENCE ... OWNED BY`, and `ownedBy: none` removes the owner. Options left out are unmanaged. The sequence's current value is never touched, so new `minValue`/`maxValue` bounds must still contain it (PostgreSQL rejects the change otherwise). A sequence declared without options can also be one an extension creates: sequences are created after the extensions, so the declaration then only manages its `grants`, `owner` and `comment`. See [Objects an extension owns](#objects-an-extension-owns).
 
 ```yaml
 schema public:
@@ -1418,6 +1470,8 @@ schema app:
     hypothetical: true
 ```
 
+`grants` (role -> `[execute]`) and `revokePublic` work as on [functions](#functions); the statements are `GRANT ... ON FUNCTION`, with the direct and aggregated arguments of an ordered-set aggregate in one list. An aggregate declared without `sfunc`, `stype` and the other options creates nothing: it manages the `grants`, `revokePublic`, `owner` and `comment` of one that already exists, such as PostGIS's `st_union(geometry)`. See [Objects an extension owns](#objects-an-extension-owns).
+
 ## Procedures
 
 Procedures (PostgreSQL 11+, invoked with `CALL`) are defined inside `schema <name>:` blocks using `procedure <name>(<args>):` keys. Argument types may be schema-qualified; unqualified types are treated as `public` (same rules as functions). Unlike functions they have no return type, volatility, or strictness. Existing procedures are compared against the live definition (body via `prosrc`, language, `transform`, security, `set` via `proconfig`); on change, `CREATE OR REPLACE PROCEDURE` is emitted, with the live `security` and `set` when the YAML leaves them out. Bodies are stored and pulled as described under [Functions](#functions), and `body: ""` is an empty body.
@@ -1540,7 +1594,20 @@ schema app:
         generated: "to_tsvector('app.english_unaccent'::regconfig, body)"
 ```
 
-`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+`mappings` lists only the token types the YAML manages: for an existing configuration they are compared against `pg_ts_config_map` and emit `ADD`, `ALTER` or `DROP MAPPING`. Other token types keep whatever they have. A dictionary's `options` are compared with live and changed with `ALTER TEXT SEARCH DICTIONARY`, which also removes options the YAML doesn't list (omit `options` to leave them unmanaged; `options: {}` means none, which is what `pgy pull` writes for a dictionary without options); its template can't be changed in place, so a changed one is reported. A template an extension provides can be named with or without its schema (`template: unaccent`, `template: public.unaccent`). `owner` is diffed with `ALTER ... OWNER TO`. Comments are diffed, and `--prune` drops undeclared configurations and dictionaries (extension-owned ones are kept).
+
+A dictionary declared without `template` is never created: it manages the `options`, `owner` and `comment` of one that already exists. That is how to configure the dictionaries that `dict_int` (`intdict`), `dict_xsyn` (`xsyn`) and `unaccent` (`unaccent`) create, as their documentation does with `ALTER TEXT SEARCH DICTIONARY`. In the migration that creates the extension, the options are set right after it; options the extension's script set and the YAML doesn't list are removed by the next diff. See [Objects an extension owns](#objects-an-extension-owns).
+
+```yaml
+extensions:
+  - {name: dict_int, schema: public}
+  - {name: unaccent, schema: public}
+schema public:
+  text search dictionary intdict:
+    options: {maxlen: 4, rejectlong: true}
+  text search dictionary unaccent:
+    options: {rules: my_rules}
+```
 
 ## Row Level Security
 
@@ -1794,7 +1861,7 @@ Index comments are emitted as `COMMENT ON INDEX <schema>.<index>` (auto-named in
 Behavior:
 
 - Emitted when the desired comment differs from the live comment; skipped when identical (idempotent).
-- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually.
+- An absent or empty `comment:` is unmanaged — existing comments are never cleared. To clear a comment, run `COMMENT ON ... IS NULL` manually. The exception is an extension, which `CREATE EXTENSION` gives its control file's comment: there `comment: null` removes it (see [Extensions](#extensions)).
 - Single quotes are escaped automatically.
 
 ## Publications
@@ -1869,6 +1936,18 @@ schema app:
 - A column whose type the same plan changes (`varchar(3)` to `varchar(5)`, with `--unsafe`) is compared in its declared type, without its modifier, so rows that only fit the new type are updated after the change. When a key column's type changes, or the new type does not exist in the database yet, the rows are written with `INSERT ... ON CONFLICT (key) DO UPDATE` instead. Without `--unsafe` the type change is left out, so rows are compared in the live type, and a row that only fits the new type is an error in `pgy diff`.
 - Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
 - `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
+- **An extension's configuration tables** (the ones its script marks with `pg_extension_config_dump`, such as PostGIS's `spatial_ref_sys` or `topology.topology`) hold rows of the extension and rows an application added, which `pg_dump` tells apart by the table's condition (`pg_extension.extcondition`). Declare such a table without columns and with `data.key`. Its rows are inserted and updated as declared, after the extension is created, but `--unsafe --prune` only deletes rows the condition selects, so the extension's own rows stay. `pgy pull --data` writes only those rows too, with the key and a `dependsOn` on the configuration tables with rows that its foreign keys reference, whose rows are then inserted first. It warns instead of writing the rows of an extension's table that is not a configuration table. See [Objects an extension owns](#objects-an-extension-owns).
+
+```yaml
+extensions:
+  - {name: postgis, schema: public}
+schema public:
+  table spatial_ref_sys:
+    data:
+      key: [srid]
+      rows:
+        - {srid: 990001, auth_name: local, auth_srid: 990001, srtext: 'LOCAL_CS["local",UNIT["metre",1]]', proj4text: +proj=longlat +datum=WGS84 +no_defs}
+```
 - `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`. A `key` that isn't the primary key or a unique constraint gets a warning.
 
 ## Renames

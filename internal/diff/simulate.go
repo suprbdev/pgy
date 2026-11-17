@@ -61,6 +61,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if ext.Version != "" { le.Version = ext.Version }
         if ext.Comment != "" { le.Comment = ext.Comment }
+        if ext.NoComment { le.Comment = "" }
         out.ExtensionDefs[ext.Name] = le
     }
 
@@ -194,11 +195,14 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for k, td := range desired.TSDictionaries {
-        if td == nil || td.Template == "" { continue }
+        if td == nil { continue }
         out.TSDictionaries[k] = true
         if td.Comment != "" { out.TSComments["dict:"+k] = td.Comment }
         ld := &schema.TSDictionary{Template: strings.TrimPrefix(td.Template, "pg_catalog.")}
-        if prev := out.TSDictionaryDefs[k]; prev != nil { ld.Options = prev.Options }
+        if prev := out.TSDictionaryDefs[k]; prev != nil {
+            ld.Options = prev.Options
+            if td.AttributeOnly() { ld.Template = prev.Template }
+        }
         if td.Options != nil {
             ld.Options = map[string]string{}
             for o, v := range td.Options { ld.Options[strings.ToLower(o)] = v }
@@ -302,8 +306,16 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     for k, ag := range desired.Aggregates {
-        if ag == nil || ag.SFunc == "" { continue }
+        if ag == nil { continue }
         norm := normalizeFunctionSignature(schema.RoutineName(k) + aggregateArgs(ag.ArgsSig))
+        if ag.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], ag.Grants) }
+        if ag.RevokePublic {
+            out.FunctionPublicExec[norm] = false
+        } else if out.AggregateDefs[norm] == nil && !ag.AttributeOnly() {
+            out.FunctionPublicExec[norm] = true
+        }
+        if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
+        if ag.SFunc == "" { continue }
         parallel := ag.Parallel
         if parallel == "" { parallel = "unsafe" }
         opts := map[string]string{}
@@ -322,7 +334,6 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         _, minitcond := ag.Options["minitcond"]
         out.AggregateDefs[norm] = &LiveAggregate{SFunc: ag.SFunc, SType: ag.SType, FinalFunc: ag.FinalFunc, InitCond: ag.InitCond, HasInitCond: ag.HasInitCond(), HasMInitCond: minitcond, CombineFunc: ag.CombineFunc, Parallel: parallel, Options: opts}
         out.FunctionDefs[norm] = &LiveFunction{Signature: schema.RoutineName(k) + aggregateArgs(ag.ArgsSig), Kind: "a"}
-        if ag.Comment != "" { out.FunctionComments[norm] = ag.Comment }
     }
 
     for k, vw := range desired.Views {
@@ -342,6 +353,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
                 lt.Tablespace = vw.Tablespace
+            }
+            if vw.AccessMethod != "" {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                lt.AccessMethod = vw.AccessMethod
             }
             if len(vw.Indexes) > 0 {
                 lt := out.MatViewTables[k]
@@ -648,6 +664,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         for k, v := range dt.With { lt.Options[strings.ToLower(k)] = v }
     }
     if dt.Tablespace != "" { lt.Tablespace = dt.Tablespace }
+    if dt.AccessMethod != "" { lt.AccessMethod = dt.AccessMethod }
     if dt.Grants != nil { out.TableGrants[fq] = simulateGrants(out.TableGrants[fq], dt.Grants) }
     if dt.Comment != "" { out.RelComments[fq] = dt.Comment }
 }
@@ -731,6 +748,7 @@ func cloneLive(l *Live) *Live {
         ServerVersion:      l.ServerVersion,
         Offline:            l.Offline,
         DefaultTablespace:  l.DefaultTablespace,
+        DefaultAccessMethod: l.DefaultAccessMethod,
         SearchPath:         l.SearchPath,
         scope:              l.scope,
         ViewProbes:         cloneMap(l.ViewProbes, nil),
@@ -775,6 +793,7 @@ func cloneLive(l *Live) *Live {
         InitPrivs:          l.InitPrivs,
         BaseTypes:          cloneSet(l.BaseTypes),
         OwnedSequences:     cloneSet(l.OwnedSequences),
+        ExtensionConfig:    l.ExtensionConfig,
         Partitions:         cloneMap(l.Partitions, func(v []string) []string { return append([]string(nil), v...) }),
         PartitionBounds:    cloneMap(l.PartitionBounds, nil),
         TableData:          cloneMap(l.TableData, func(d *LiveTableData) *LiveTableData { c := *d; return &c }),
@@ -860,6 +879,7 @@ func simulateOwnersAndDefaults(out *Live, desired *schema.Database) {
     for k, p := range desired.Procedures {
         if p != nil { set("proc:"+normalizeFunctionSignature(schema.RoutineName(k)+p.ArgsSig), p.Owner) }
     }
+    for k, td := range desired.TSDictionaries { if td != nil { set("tsdict:"+k, td.Owner) } }
     for _, dp := range desired.DefaultPrivileges {
         if dp != nil {
             for _, nsp := range dp.Schemas { out.Schemas[nsp] = true }

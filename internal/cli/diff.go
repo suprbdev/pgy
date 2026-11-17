@@ -195,7 +195,7 @@ Exit codes:
                 sql = group.Render(steps)
                 summary = splitSummary(steps)
                 for _, s := range steps {
-                    if s.Name != "" || len(s.Plan.Creates)+len(s.Plan.Alters)+len(s.Plan.Drops)+len(s.Plan.Concurrent)+len(s.Plan.Prelude) > 0 { groups++ }
+                    if s.Name != "" || len(s.Plan.Creates)+len(s.Plan.Alters)+len(s.Plan.Drops)+len(s.Plan.Concurrent)+len(s.Plan.Prelude)+len(s.Plan.ExtensionUpdates) > 0 { groups++ }
                     if noWarnings { continue }
                     for _, w := range capUnsafe(s.Plan.Warnings) {
                         if s.Name == "" { fmt.Fprintln(os.Stderr, "warning:", w.Message) } else { fmt.Fprintf(os.Stderr, "warning: [%s] %s\n", s.Name, w.Message) }
@@ -209,7 +209,7 @@ Exit codes:
                 }
             } else {
                 sql = diff.Render(plan)
-                if len(plan.Concurrent)+len(plan.Prelude) > 0 {
+                if len(plan.Concurrent)+len(plan.Prelude)+len(plan.ExtensionUpdates) > 0 {
                     sql = group.Render([]group.Step{{Plan: plan}})
                 }
                 s := map[string]any{}

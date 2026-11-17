@@ -108,6 +108,10 @@ type Live struct{
     // DefaultTablespace is the database's default tablespace, which a
     // relation with no tablespace of its own is stored in; "" when unknown.
     DefaultTablespace string
+    // DefaultAccessMethod is default_table_access_method in the session
+    // that read the snapshot, which CREATE TABLE without USING uses; ""
+    // when unknown.
+    DefaultAccessMethod string
     // SearchPath lists the schemas on the search_path of the session that
     // read the snapshot (current_schemas(false)); nil when unknown. The
     // snapshot itself is read with search_path set to public, so its
@@ -173,7 +177,8 @@ type Live struct{
     CompositeComments map[string]map[string]string
     // ExtensionMembers: objects belonging to an extension, which are never
     // pruned. Keys are "rel:schema.name", "type:schema.name",
-    // "proc:<normalized signature>", "language:name" and "fdw:name".
+    // "proc:<normalized signature>", "language:name", "fdw:name" and
+    // "schema:name".
     ExtensionMembers map[string]bool
     // MemberExtension: ExtensionMembers key -> the name of the extension
     // the object belongs to.
@@ -188,6 +193,10 @@ type Live struct{
     // creates; a type declaration without a kind manages their owner,
     // privileges and comment.
     BaseTypes map[string]bool
+    // ExtensionConfig: the configuration tables of extensions
+    // (pg_extension.extconfig), "schema.table" -> the WHERE clause that
+    // selects the rows pg_dump keeps (extcondition), "" for all of them.
+    ExtensionConfig map[string]string
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
@@ -447,6 +456,7 @@ type LiveTable struct{
     Partitioned bool            // relkind = 'p': a partitioned table
     Unlogged    bool            // relpersistence = 'u'
     Tablespace  string          // the relation's own tablespace; "" = the database default
+    AccessMethod string         // pg_am.amname of relam; "" for a foreign table, or a partitioned table without one
     Options     map[string]string // reloptions: lower-cased name -> value
     OptionOrder []string        // the names in Options in catalog order
     NoToast     bool            // reltoastrelid = 0: PostgreSQL discards toast.* storage parameters
@@ -728,6 +738,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         InitPrivs: map[string]map[string]map[string]bool{},
         BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
+        ExtensionConfig: map[string]string{},
     }
     batch := &queryBatch{}
     
@@ -761,10 +772,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
                                                         where x.indrelid = c.oid and x.indisreplident), '')
                     else 'default' end,
                coalesce((select tn.nspname || '.' || ty.typname from pg_type ty join pg_namespace tn on tn.oid = ty.typnamespace where ty.oid = c.reloftype), ''),
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''), coalesce(am.amname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_tablespace ts on ts.oid = c.reltablespace
+        left join pg_am am on am.oid = c.relam
         left join pg_foreign_table ft on ft.ftrelid = c.oid
         left join pg_foreign_server fs on fs.oid = ft.ftserver
         where c.relkind in ('r', 'p', 'f')
@@ -776,8 +788,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             var schemaName, tableName, server string
             var isPartition, partitioned, unlogged, noToast, foreign bool
             var reloptions, ftoptions []string
-            var replident, ofType, tablespace string
-            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType, &tablespace); err != nil {
+            var replident, ofType, tablespace, accessMethod string
+            if err := tableRows.Scan(&schemaName, &tableName, &isPartition, &partitioned, &unlogged, &noToast, &foreign, &server, &ftoptions, &reloptions, &replident, &ofType, &tablespace, &accessMethod); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
@@ -786,7 +798,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             if foreign { lt.Foreign = &LiveForeignTable{Server: server, Options: parseFDWOptions(ftoptions)} }
             lt.IsPartition, lt.Partitioned, lt.Unlogged, lt.Options, lt.ReplicaIdentity, lt.OfType = isPartition, partitioned, unlogged, parseProconfig(reloptions), replident, ofType
             lt.OptionOrder = proconfigNames(reloptions)
-            lt.Tablespace = tablespace
+            lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.Tables[key] = lt
         }
         return nil
@@ -797,20 +809,21 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select n.nspname, c.relname, c.reltoastrelid = 0,
                coalesce(c.reloptions, '{}'::text[]) ||
                coalesce((select array_agg('toast.' || o) from pg_class tc, unnest(tc.reloptions) o where tc.oid = c.reltoastrelid), '{}'::text[]),
-               coalesce(ts.spcname::text, '')
+               coalesce(ts.spcname::text, ''), coalesce(am.amname::text, '')
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
         left join pg_tablespace ts on ts.oid = c.reltablespace
+        left join pg_am am on am.oid = c.relam
         where c.relkind = 'm'
         and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(matViewQ, func(matViewRows pgx.Rows) error {
         for matViewRows.Next() {
-            var schemaName, viewName, tablespace string
+            var schemaName, viewName, tablespace, accessMethod string
             var noToast bool
             var reloptions []string
-            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions, &tablespace); err != nil {
+            if err := matViewRows.Scan(&schemaName, &viewName, &noToast, &reloptions, &tablespace, &accessMethod); err != nil {
                 return err
             }
             key := fmt.Sprintf("%s.%s", schemaName, viewName)
@@ -818,7 +831,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
             lt := newLiveTable()
             lt.NoToast = noToast
             lt.Options, lt.OptionOrder = parseProconfig(reloptions), proconfigNames(reloptions)
-            lt.Tablespace = tablespace
+            lt.Tablespace, lt.AccessMethod = tablespace, accessMethod
             l.MatViewTables[key] = lt
         }
         return nil
@@ -2281,6 +2294,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', pg_get_userbyid(p.proowner)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
+        union all
+        select 'tsdict:' || n.nspname || '.' || d.dictname, pg_get_userbyid(d.dictowner)
+        from pg_ts_dict d join pg_namespace n on n.oid = d.dictnamespace
+        where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(ownerQ, func(ownerRows pgx.Rows) error {
         for ownerRows.Next() {
@@ -2336,10 +2353,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(`select current_user, current_setting('server_version_num')::int,
                       coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
                                 where d.datname = current_database() and s.setrole = 0), '{}'::text[]),
-                      coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), '')`, func(rows pgx.Rows) error {
+                      coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), ''),
+                      current_setting('default_table_access_method')`, func(rows pgx.Rows) error {
         for rows.Next() {
             var config []string
-            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace); err != nil { return err }
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace, &l.DefaultAccessMethod); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
         }
         return nil
@@ -2379,6 +2397,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         select 'fdw:' || w.fdwname, d.refobjid
         from pg_depend d join pg_foreign_data_wrapper w on w.oid = d.objid
         where d.deptype = 'e' and d.classid = 'pg_foreign_data_wrapper'::regclass
+        union all
+        select 'schema:' || n.nspname, d.refobjid
+        from pg_depend d join pg_namespace n on n.oid = d.objid
+        where d.deptype = 'e' and d.classid = 'pg_namespace'::regclass
         ) m(key, extension)
         join pg_extension x on x.oid = m.extension
     `
@@ -2395,6 +2417,14 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         return nil
     })
     batch.add(initPrivsQ, l.scanInitPrivs)
+    batch.add(extensionConfigQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var table, condition string
+            if err := rows.Scan(&table, &condition); err != nil { return err }
+            l.ExtensionConfig[table] = condition
+        }
+        return nil
+    })
 
     ownedQ := `
         select n.nspname || '.' || s.relname
@@ -2794,6 +2824,13 @@ func addLiveGrant(m map[string]map[string]map[string]bool, key, role, priv strin
 }
 
 type PlanDiff struct{
+    // ExtensionUpdates holds the ALTER EXTENSION ... UPDATE statements that
+    // need nothing else in the plan to run first. Some extensions
+    // (TimescaleDB) accept an update only as the first statement of a
+    // session, so they belong in a migration of their own that runs before
+    // the rest, each statement on a new connection (see
+    // db.NewSessionDirective).
+    ExtensionUpdates []string
     // Prelude holds ALTER TYPE ... ADD VALUE statements. PostgreSQL rejects
     // a new enum label until the transaction that added it commits, so they
     // belong in a migration of their own that runs before the rest.
@@ -2819,6 +2856,7 @@ func (p *PlanDiff) Summary() map[string]int {
         "drops": len(p.Drops),
         "concurrent": len(p.Concurrent),
         "prelude": len(p.Prelude),
+        "extension_updates": len(p.ExtensionUpdates),
     }
 }
 
@@ -2842,6 +2880,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
+    desired = viewsCreatedAsViews(live, desired)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
     live, renames := applyRenames(live, desired)
     live = applyExprProbes(live, desired)
@@ -2883,16 +2922,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, ext := range desired.Extensions {
         if ext != nil && ext.Schema != "" { neededSchemas[ext.Schema] = true }
     }
-    for k, td := range desired.Types {
-        if td != nil && td.Kind == "" { continue }
+    for k := range desired.Types {
+        if attributeOnly(desired, "type", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k, f := range desired.Functions {
-        if f != nil && !f.HasBody() { continue }
+    for k := range desired.Functions {
+        if attributeOnly(desired, "function", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2900,10 +2939,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Aggregates {
+        if attributeOnly(desired, "aggregate", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
     }
-    for k, p := range desired.Procedures {
-        if p != nil && !p.HasBody() { continue }
+    for k := range desired.Procedures {
+        if attributeOnly(desired, "procedure", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2911,14 +2951,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
     for k := range desired.Tables {
+        if attributeOnly(desired, "table", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
         }
     }
-    for k, vw := range desired.Views {
-        if vw != nil && strings.TrimSpace(vw.Query) == "" { continue }
+    for k := range desired.Views {
+        if attributeOnly(desired, "view", k) { continue }
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
@@ -2945,6 +2986,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     for _, keys := range [][]string{sortedKeys(desired.Collations), sortedKeys(desired.TSConfigs), sortedKeys(desired.TSDictionaries)} {
         for _, k := range keys {
+            if attributeOnly(desired, "tsdictionary", k) { continue }
             if parts := strings.SplitN(k, ".", 2); len(parts) == 2 { neededSchemas[parts[0]] = true }
         }
     }
@@ -2974,7 +3016,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
 
     // EXTENSIONS HAVE SECOND PRIORITY - created after schemas, before everything else
-    plan.Creates = append(plan.Creates, extensions.Creates...)
+    updates, extensionCreates := separateExtensionUpdates(extensions.Creates, live, desired)
+    plan.ExtensionUpdates = updates
+    plan.Creates = append(plan.Creates, extensionCreates...)
     plan.Alters = append(plan.Alters, extensions.Alters...)
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
@@ -3160,11 +3204,19 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             plan.Creates = append(plan.Creates, renderAggregate(name, ag))
         case "tsdictionary":
             td := desired.TSDictionaries[e.Key]
-            if td == nil || td.Template == "" { continue }
+            if td == nil { continue }
             if live.TSDictionaries[e.Key] {
                 stmts, warn := tsDictionaryAlterStmts(e.Key, td, live.TSDictionaryDefs[e.Key])
                 plan.Alters = append(plan.Alters, stmts...)
                 if warn != "" { plan.Warnings = append(plan.Warnings, Warning{Message: warn}) }
+                continue
+            }
+            if td.AttributeOnly() {
+                if len(td.Options) > 0 {
+                    opts := []string{}
+                    for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
+                }
                 continue
             }
             opts := []string{"template = " + td.Template}
@@ -3209,7 +3261,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if !ok || vw == nil || vw.Query == "" { continue }
             if vw.Materialized {
                 if !live.MatViews[e.Key] {
-                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s as %s", pqIdent(e.Key), renderStorageParams(vw.With, vw.WithOrder), tablespaceClause(vw.Tablespace), vw.Query)
+                    stmt := fmt.Sprintf("create materialized view if not exists %s%s%s%s as %s", pqIdent(e.Key), accessMethodClause(e.Key, vw.AccessMethod, false, live.ServerVersion, nil), renderStorageParams(vw.With, vw.WithOrder), tablespaceClause(vw.Tablespace), vw.Query)
                     if vw.WithData != nil && !*vw.WithData { stmt += " with no data" }
                     plan.Creates = append(plan.Creates, stmt+";")
                 } else {
@@ -3220,6 +3272,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter materialized view %s set tablespace %s;", pqIdent(e.Key), quoteIdent(vw.Tablespace)))
                         plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("materialized view "+e.Key, e.Key))
                     }
+                    plan.Alters = append(plan.Alters, accessMethodStmts("materialized view", e.Key, vw.AccessMethod, lt, live.ServerVersion, unsafe, nil)...)
                 }
                 if len(vw.Indexes) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
@@ -3243,7 +3296,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         case "table":
             // Handle tables in dependency order
             dt, ok := desired.Tables[e.Key]
-            if !ok || dt == nil { continue }
+            if !ok || dt == nil || dt.AttributeOnly() { continue }
             fq := e.Key
             lt := live.Tables[fq]
             if lt == nil {
@@ -3255,7 +3308,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         sub, unlogged := "", ""
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
+                        using := accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
@@ -3320,6 +3374,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.PartitionBy != nil {
                     create += " partition by " + renderPartitionBy(dt.PartitionBy)
                 }
+                create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
                 applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
@@ -3387,7 +3442,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                             plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(lc.NotNullName), quoteIdent(name)))
                             if pending != "" { pending = name }
                         }
-                        if pending != "" && !c.Nullable && !c.NotValid {
+                        if pending != "" && !c.Nullable && !c.NotValid && schema.ValidatesImmediately(dt, c.Validate) {
+                            plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s alter column %s set not null;", pqIdent(fq), quoteIdent(cn)))
+                        } else if pending != "" && !c.Nullable && !c.NotValid {
                             plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
                         }
                     }
@@ -3405,6 +3462,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s set tablespace %s;", pqIdent(fq), quoteIdent(dt.Tablespace)))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("table "+fq, fq)) }
                 }
+                if dt.Foreign == nil { plan.Alters = append(plan.Alters, accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
@@ -3457,6 +3515,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     if opts.Unsafe && opts.Prune {
         early, late := planPrune(live, desired, opts.MigrationsTable)
         plan.Drops = append(append(early, plan.Drops...), late...)
+        _, inheritWarnings := keptInheritanceChildren(live, desired, opts.MigrationsTable)
+        plan.Warnings = append(plan.Warnings, inheritWarnings...)
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
         plan.Drops = append(plan.Drops, serverDrops...)
         plan.Warnings = append(plan.Warnings, serverWarnings...)
@@ -4428,8 +4488,8 @@ func hasForeignPartition(live *Live, fq string) bool {
 // no-transaction migration, which scans under SHARE UPDATE EXCLUSIVE. It
 // returns "" when SET NOT NULL is used: before PostgreSQL 18, on primary
 // key, identity and generated columns, on foreign tables and partitions,
-// and when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip
-// the scan.
+// when a validated CHECK (cn IS NOT NULL) already lets PostgreSQL skip the
+// scan, and when the column or its table asks for validate: immediate.
 // notValidNotNullStmt adds column cn's NOT NULL constraint NOT VALID, under
 // its declared name or PostgreSQL's default one, for a column declared
 // notValid.
@@ -4443,7 +4503,7 @@ func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *Li
         return ""
     case c.PrimaryKey, pkCols[cn], c.Identity != "", c.Generated != "", isSerialType(c.Type):
         return ""
-    case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn):
+    case dt.Foreign != nil, dt.PartitionOf != "", lt.IsPartition, hasNotNullCheck(lt, cn), schema.ValidatesImmediately(dt, c.Validate):
         return ""
     }
     return notNullConstraintName(fq, cn, c)
@@ -4967,7 +5027,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
 func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
     if ld == nil { return nil, "" }
     warn := ""
-    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !tsTemplatesEqual(t, ld.Template) {
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !td.AttributeOnly() && !tsTemplatesEqual(t, ld.Template) {
         warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
     }
     if td.Options == nil { return nil, warn }
@@ -5375,6 +5435,9 @@ func planOwners(live *Live, desired *schema.Database) []string {
             owner("procedure", pqIdent(name)+grantFuncArgs(p.ArgsSig), p.Owner, "proc:"+normalizeFunctionSignature(name+p.ArgsSig))
         }
     }
+    for _, k := range sortedKeys(desired.TSDictionaries) {
+        if td := desired.TSDictionaries[k]; td != nil { owner("text search dictionary", pqIdent(k), td.Owner, "tsdict:"+k) }
+    }
     return out
 }
 
@@ -5498,7 +5561,10 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     sort.Strings(schemaNames)
     for _, s := range schemaNames {
         desiredG := resolveGrantRoles(desired.SchemaGrants[s], live.CurrentUser)
-        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, live.SchemaGrants[s], objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
+        liveG := live.SchemaGrants[s]
+        if !live.Schemas[s] { liveG = pendingGrants(liveG, desiredG) }
+        liveG = member("schema:"+s, "", liveG, desiredG)
+        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, liveG, objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -5510,8 +5576,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         var revoked map[string]map[string]bool
         if dt.Grants != nil {
             liveG := live.TableGrants[k]
-            if live.Tables[k] == nil { liveG = created(k, "tables") }
             desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
+            if live.Tables[k] == nil {
+                liveG = created(k, "tables")
+                if dt.AttributeOnly() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
@@ -5530,8 +5599,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     for _, k := range sortedKeys(desired.Sequences) {
         if sq := desired.Sequences[k]; sq != nil && sq.Grants != nil {
             liveG := live.TableGrants[k]
-            if !live.Sequences[k] { liveG = created(k, "sequences") }
             desiredG := resolveGrantRoles(sq.Grants, live.CurrentUser)
+            if !live.Sequences[k] {
+                liveG = created(k, "sequences")
+                if !sq.DeclaresOptions() { liveG = pendingGrants(liveG, desiredG) }
+            }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("sequence "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, sq.Owner), covers(true, desiredG)))
         }
@@ -5631,7 +5703,43 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), covers(false, desiredG)))
         }
     }
+
+    for _, k := range sortedKeys(desired.Aggregates) {
+        ag := desired.Aggregates[k]
+        if ag == nil { continue }
+        name := schema.RoutineName(k)
+        norm := normalizeFunctionSignature(name + aggregateArgs(ag.ArgsSig))
+        target := "function " + pqIdent(name) + aggregateGrantArgs(ag.ArgsSig)
+        desiredG := resolveGrantRoles(ag.Grants, live.CurrentUser)
+        exists := live.AggregateDefs[norm] != nil
+        defaultExec := !exists || live.FunctionPublicExec[norm]
+        if ag.RevokePublic && (ag.Grants == nil || !covers(false, desiredG)) && defaultExec {
+            revokes = append(revokes, fmt.Sprintf("revoke all on %s from public;", target))
+        }
+        if ag.Grants != nil {
+            liveG := withPublicDefault(live.FunctionGrants[norm], "execute", defaultExec)
+            if !exists {
+                liveG = withPublicDefault(created(name, "functions"), "execute", true)
+                if ag.AttributeOnly() { liveG = pendingGrants(created(name, "functions"), desiredG) }
+            }
+            liveG = member("proc:"+norm, "execute", liveG, desiredG)
+            addFor(desiredG)(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), covers(false, desiredG)))
+        }
+    }
     return append(revokes, grants...), warns
+}
+
+// aggregateGrantArgs returns the argument types of an aggregate declared
+// with args as GRANT ... ON FUNCTION takes them: (*) as (), and the direct
+// and aggregated arguments of an ordered-set aggregate as one list.
+func aggregateGrantArgs(args string) string {
+    inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(aggregateArgs(args)), "("), ")"))
+    if loc := orderByRe.FindStringIndex(inner); loc != nil {
+        direct, aggregated := strings.TrimSpace(inner[:loc[0]]), strings.TrimSpace(inner[loc[1]:])
+        inner = aggregated
+        if direct != "" { inner = direct + ", " + aggregated }
+    }
+    return grantFuncArgs("(" + inner + ")")
 }
 
 // withPublicDefault returns liveG with PUBLIC holding priv when present
@@ -5939,7 +6047,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(fkName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(fkName), def)
         partitionedBefore18 := dt.PartitionBy != nil && live.ServerVersion > 0 && live.ServerVersion < 180000
-        split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18
+        immediate := schema.ValidatesImmediately(dt, fk.Validate)
+        split := lt != nil && !fk.NotValid && !fk.NotEnforced && !partitionedBefore18 && !immediate
         if split {
             c := *fk
             c.NotValid = true
@@ -5951,6 +6060,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
+            case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef) && immediate:
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             }
@@ -6130,7 +6241,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         ctName := truncateIdent(ct.Name)
         validate := fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(ctName))
         stmt := fmt.Sprintf("alter table %s add constraint %s %s;", pqIdent(fq), quoteIdent(ctName), def)
-        split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced
+        immediate := schema.ValidatesImmediately(dt, ct.Validate)
+        split := lt != nil && strings.EqualFold(ct.Type, "check") && !ct.NotValid && !ct.NotEnforced && !immediate
         if split {
             c := *ct
             c.NotValid = true
@@ -6142,6 +6254,8 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
+            case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef) && immediate:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
@@ -6493,11 +6607,22 @@ func RenderConcurrent(p *PlanDiff) string {
     return db.NoTransactionDirective + "\n" + strings.Join(p.Concurrent, "\n") + "\n"
 }
 
-// Render renders the plan's transactional statements: the Prelude, then
-// Creates, Alters and Drops. Concurrent statements are rendered by
-// RenderConcurrent. RenderPrelude and RenderMain render the two parts on
-// their own, for migrations that commit the Prelude first.
-func Render(p *PlanDiff) string { return RenderPrelude(p) + RenderMain(p) }
+// Render renders the plan's statements except the Concurrent ones, which
+// RenderConcurrent renders: the ExtensionUpdates, the Prelude, then
+// Creates, Alters and Drops. RenderPrelude and RenderMain render the last
+// two parts on their own, for migrations that commit the Prelude first.
+func Render(p *PlanDiff) string {
+    updates := ""
+    if len(p.ExtensionUpdates) > 0 { updates = strings.Join(p.ExtensionUpdates, "\n") + "\n" }
+    return updates + RenderPrelude(p) + RenderMain(p)
+}
+
+// RenderExtensionUpdates renders the plan's ExtensionUpdates behind the
+// new-session directive, or "" when it has none.
+func RenderExtensionUpdates(p *PlanDiff) string {
+    if len(p.ExtensionUpdates) == 0 { return "" }
+    return db.NewSessionDirective + "\n" + strings.Join(p.ExtensionUpdates, "\n") + "\n"
+}
 
 // RenderPrelude renders the plan's Prelude, or "" when it has none.
 func RenderPrelude(p *PlanDiff) string {
@@ -6721,11 +6846,25 @@ func orderedKeys(m map[string]string, order []string) []string {
 // storageParamValue renders the value of a storage parameter for WITH (...)
 // or SET (...): a number, a lower-case word or an SQL-quoted value as it is,
 // anything else as a string literal, since PostgreSQL folds an unquoted
-// word to lower case and accepts any value as a string.
+// word to lower case and accepts any value as a string. A word that is a
+// column-name keyword is quoted too: the grammar reads an unquoted one as a
+// type name, so time would become pg_catalog.time, or rejects it.
 func storageParamValue(v string) string {
     v = strings.TrimSpace(v)
-    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) { return v }
+    if isQuotedWith(v, '\'') || isQuotedWith(v, '"') || configNumberRe.MatchString(v) || configBareWord(v) && !colNameKeywords[v] { return v }
     return quoteString(v)
+}
+
+var colNameKeywords = map[string]bool{}
+
+func init() {
+    for _, w := range strings.Fields(`between bigint bit boolean char character coalesce dec decimal exists extract float
+        greatest grouping inout int integer interval json json_array json_arrayagg json_exists json_object json_objectagg
+        json_query json_scalar json_serialize json_table json_value least merge_action national nchar normalize nullif
+        numeric out overlay position precision real row setof smallint substring time timestamp treat trim values varchar
+        xmlattributes xmlconcat xmlelement xmlexists xmlforest xmlnamespaces xmlparse xmlpi xmlroot xmlserialize xmltable`) {
+        colNameKeywords[w] = true
+    }
 }
 
 // columnStorageStmts emits newColumnStmts for every column a newly created
@@ -6811,7 +6950,9 @@ func tableStorageStmts(fq string, dt *schema.Table, lt *LiveTable, unsafe bool) 
 // storageParamStmts emits ALTER <kind> ... SET (...) / RESET (...) so the
 // relation's storage parameters match with exactly: live parameters with
 // does not list are reset. toast.* parameters are skipped while the
-// relation has no TOAST table, since PostgreSQL silently discards them.
+// relation has no TOAST table, since PostgreSQL silently discards them, and
+// so are create-time-only parameters the relation doesn't show (see
+// createTimeOnlyParam).
 func storageParamStmts(kind, fq string, with map[string]string, order []string, lt *LiveTable) []string {
     out := []string{}
     set, reset := []string{}, []string{}
@@ -6821,6 +6962,7 @@ func storageParamStmts(kind, fq string, with map[string]string, order []string, 
         want[strings.ToLower(k)] = true
         if lt.NoToast && strings.HasPrefix(strings.ToLower(k), "toast.") { continue }
         lv, ok := live[strings.ToLower(k)]
+        if !ok && createTimeOnlyParam(k) { continue }
         if !ok || !strings.EqualFold(normalizeConfigValue(lv), normalizeConfigValue(with[k])) {
             set = append(set, k+" = "+storageParamValue(with[k]))
         }

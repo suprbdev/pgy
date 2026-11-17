@@ -88,8 +88,8 @@ func TestIntegrationExtensionSchemaAndVersion(t *testing.T) {
 
 	second := &schema.Extension{Name: "ltree", Schema: sch + "_b", Version: "1.2"}
 	p := plan(second)
-	if len(p.Creates) != 3 || len(p.Alters) != 0 {
-		t.Fatalf("expected create schema, set schema and update to, got creates=%v alters=%v", p.Creates, p.Alters)
+	if len(p.ExtensionUpdates) != 1 || len(p.Creates) != 2 || len(p.Alters) != 0 {
+		t.Fatalf("expected update to, then create schema and set schema, got updates=%v creates=%v alters=%v", p.ExtensionUpdates, p.Creates, p.Alters)
 	}
 	applyPlan(t, pool, p)
 	if sql := diff.Render(plan(second)); sql != "" {

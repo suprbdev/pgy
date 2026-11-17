@@ -47,9 +47,12 @@ type Options struct {
 
 // planPrune returns the DROP statements for live objects the desired schema
 // no longer declares. Only schemas that contain at least one desired object
-// are considered, and extension members, partitions, inherited constraints,
+// are considered, and extension members, partitions, inheritance children of
+// kept tables (see keptInheritanceChildren), inherited constraints,
 // triggers and indexes, constraint-backed indexes, primary keys, sequences
-// owned by a column and pgy's migrations table are never dropped.
+// owned by a column and pgy's migrations table are never dropped, nor is
+// anything on a relation an extension owns, a table declared without
+// columns or a view declared without a query.
 //
 // early holds the drops that must precede column drops (triggers,
 // constraints, indexes, views); late holds the drops of objects other
@@ -66,12 +69,12 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
+        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {
         vw := desired.Views[fq]
-        if vw == nil { continue }
+        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] { continue }
         if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
             early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
         }
@@ -100,9 +103,10 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
     early = append(early, dropList("materialized view", undeclared(live.MatViews, isView, "rel"))...)
 
     tables, foreignTables := map[string]bool{}, map[string]bool{}
+    inheritKept, _ := keptInheritanceChildren(live, desired, migrationsTable)
     for k, lt := range live.Tables {
         switch {
-        case lt == nil || lt.IsPartition || k == migrationsTable:
+        case lt == nil || lt.IsPartition || k == migrationsTable || inheritKept[k]:
         case lt.Foreign != nil:
             foreignTables[k] = true
         default:
@@ -138,6 +142,7 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
     if desired.Servers == nil { return nil, nil }
     if migrationsTable == "" { migrationsTable = "pgy.migrations" }
     managed := managedSchemas(desired)
+    inheritKept, _ := keptInheritanceChildren(live, desired, migrationsTable)
     parentOf := map[string]string{}
     for parent, children := range live.Partitions {
         for _, c := range children { parentOf[c] = parent }
@@ -146,7 +151,7 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
         i := strings.IndexByte(fq, '.')
         lt := live.Tables[fq]
-        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq]
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq]
     }
     users := map[string][]string{}
     for _, fq := range sortedKeys(live.Tables) {
