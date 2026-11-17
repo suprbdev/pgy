@@ -1238,6 +1238,8 @@ Overloads — functions sharing a name but taking different arguments — are se
 
 Argument types may be schema-qualified, e.g. `function fn(t public.my_type):` or `function fn(t app.my_type):`. `fn(t my_type)` and `fn(t public.my_type)` refer to the same function, `fn(n integer)` and `fn(n pg_catalog.int4)` too, and so do `fn(t my_type)` and `fn(t app.my_type)` while `app` is on the connection's `search_path` (see [Name resolution](#name-resolution)).
 
+Type modifiers on argument types (`varchar(10)`, `numeric(6,2)`, `timestamp(0)`, `interval day to second`, PostGIS `geometry(Point,4326)`) are accepted and kept in the `CREATE` statement, but PostgreSQL discards them, so `fn(x varchar(10))` is the live `fn(x character varying)` and pgy ignores them when it matches routines. This holds for the arguments of functions, procedures and aggregates, `OUT` and `INOUT` ones included; a function's return type keeps no modifier either. Two declarations that differ only in modifiers are the same routine.
+
 ```yaml
 schema public:
   function set_updated_at():

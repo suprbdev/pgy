@@ -4675,7 +4675,7 @@ func routineIdentity(sig string, procedure bool) string {
         }
         if mode == "out" && !procedure { continue }
         if len(words) > 1 && !isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) { words = words[1:] }
-        types = append(types, normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public.")))
+        types = append(types, withoutArgTypmods(normalizeColumnType(strings.TrimPrefix(strings.ToLower(strings.Join(words, " ")), "public."))))
     }
     return name + "(" + strings.Join(types, ", ") + ")"
 }
@@ -7508,7 +7508,8 @@ func (sc *nameScope) functionArg(arg string) string {
     return sc.functionArgNoDefault(decl)
 }
 
-// functionArgNoDefault normalizes an argument without default clause
+// functionArgNoDefault normalizes an argument without default clause. Type
+// modifiers are left out: PostgreSQL discards them from argument types.
 func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Format: "param_name type_name", "param_name schema.type_name", or an
     // unnamed bare type (possibly multi-word, e.g. "timestamp with time zone")
@@ -7519,7 +7520,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     }
     if len(words) < 2 {
         // Unnamed arg: the single token is a type name
-        return sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public."))
+        return withoutArgTypmods(sc.columnType(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(arg)), "public.")))
     }
 
     // Unnamed multi-word type: pg_get_function_identity_arguments prints
@@ -7527,7 +7528,7 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // zone[]" must not be parsed as param "timestamp" + type "with time
     // zone[]" — it would never match the YAML's "timestamptz[]" spelling.
     if isMultiWordTypeStart(strings.ToLower(words[0]), strings.ToLower(words[1])) {
-        return sc.columnType(arg)
+        return withoutArgTypmods(sc.columnType(arg))
     }
 
     // Parameter name (first word) - lowercase for comparison
@@ -7547,10 +7548,19 @@ func (sc *nameScope) functionArgNoDefault(arg string) string {
     // Canonicalize through the same alias table as column types so alias
     // spellings (timestamptz[]) and live canonical forms (timestamp with
     // time zone[]) compare equal instead of re-emitting the function forever.
-    typeName = sc.columnType(typeName)
+    typeName = withoutArgTypmods(sc.columnType(typeName))
 
     return paramName + " " + typeName
 }
+
+// withoutArgTypmods drops the type modifiers, interval fields included,
+// from a normalized argument type: PostgreSQL keeps neither in a routine's
+// argument types, so f(x varchar(10)) is f(x character varying) live.
+func withoutArgTypmods(t string) string {
+    return intervalFieldsRe.ReplaceAllString(typmodRe.ReplaceAllString(t, ""), "interval")
+}
+
+var intervalFieldsRe = regexp.MustCompile(`\binterval\s+(?:year|month|day|hour|minute|second)(?:\s+to\s+(?:month|hour|minute|second))?\b`)
 
 // isMultiWordTypeStart reports whether the first two tokens of an argument
 // begin a multi-word Postgres type name rather than "param_name type_name".
