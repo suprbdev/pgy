@@ -26,6 +26,25 @@ type FileConfig struct {
     JSON          *bool    `yaml:"json"`
     CI            *CIConfig `yaml:"ci"`
     Policy        *PolicyConfig `yaml:"policy"`
+    Prune         *PruneConfig `yaml:"prune"`
+}
+
+// PruneConfig is the prune: block: what pgy diff --unsafe --prune leaves
+// alone although the YAML does not declare it.
+type PruneConfig struct {
+    KeepExtensions []string `yaml:"keep_extensions"`
+}
+
+// resolvePrune checks a prune: block and returns the extensions it keeps.
+func resolvePrune(pc *PruneConfig) ([]string, error) {
+    if pc == nil { return nil, nil }
+    keep := []string{}
+    for _, name := range pc.KeepExtensions {
+        name = strings.TrimSpace(name)
+        if name == "" { return nil, fmt.Errorf("prune.keep_extensions: an extension name is empty") }
+        keep = append(keep, name)
+    }
+    return keep, nil
 }
 
 // PolicyConfig is the policy: block: schema rules whose findings warn, and

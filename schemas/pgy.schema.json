@@ -6,7 +6,7 @@
   "type": "object",
   "properties": {
     "extensions": {
-      "description": "PostgreSQL extensions to create, in requirement order. String shorthand implies ifNotExists: true. Extensions are never dropped.",
+      "description": "PostgreSQL extensions to create, in requirement order. String shorthand implies ifNotExists: true. A present block, even an empty one, is authoritative for diff --unsafe --prune: installed extensions it does not list are dropped when they live in a schema the YAML declares objects in and nothing that stays uses them.",
       "type": "array",
       "items": {
         "oneOf": [

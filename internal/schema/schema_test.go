@@ -1373,6 +1373,35 @@ extensions: [pg_trgm, pgcrypto]
 	}
 }
 
+func TestExtensionsBlockPresence(t *testing.T) {
+	parse := func(yaml string) *Database {
+		t.Helper()
+		db, err := parseFlexibleDatabase([]byte(yaml))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	tables := "schema app:\n  table t:\n    columns:\n      id: {type: int}\n"
+	if db := parse(tables); db.Extensions != nil {
+		t.Errorf("without an extensions block Extensions must be nil, got %v", db.Extensions)
+	}
+	for _, block := range []string{"extensions: []\n", "extensions:\n"} {
+		if db := parse(block + tables); db.Extensions == nil || len(db.Extensions) != 0 {
+			t.Errorf("%q: want a present, empty block, got %#v", block, db.Extensions)
+		}
+	}
+	if merged := Merge([]*Database{parse(tables), parse("extensions: []\n")}); merged.Extensions == nil || len(merged.Extensions) != 0 {
+		t.Errorf("an empty block in one file must survive the merge, got %#v", merged.Extensions)
+	}
+	if merged := Merge([]*Database{parse(tables), parse(tables)}); merged.Extensions != nil {
+		t.Errorf("files without the block must merge to nil, got %#v", merged.Extensions)
+	}
+	if merged := Merge([]*Database{parse("extensions: []\n"), parse("extensions: [citext]\n")}); len(merged.Extensions) != 1 {
+		t.Errorf("want the one declared extension, got %#v", merged.Extensions)
+	}
+}
+
 func TestExtensionsMixedShorthandAndMap(t *testing.T) {
 	yaml := `
 extensions:
