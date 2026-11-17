@@ -797,3 +797,30 @@ func TestPlanOrdersServerGroupBeforeItsForeignTables(t *testing.T) {
     }
     assertEmittedOnce(t, steps)
 }
+
+func TestPlanWrappersAndLanguagesComeWithTheExtensions(t *testing.T) {
+    _, paths := writeSchemas(t, map[string]string{
+        "app.yml":      "schema app:\n  table t:\n    columns:\n      id: {type: integer}\n  foreign table orders:\n    server: wh\n    columns:\n      id: {type: integer, nullable: true}\n",
+        "database.yml": "extensions: [postgres_fdw, plperl]\nlanguages:\n  plpgsql: {grants: {public: [], dev: [usage]}}\n  plperl: {grants: {dev: [usage]}}\nforeignDataWrappers:\n  postgres_fdw: {grants: {dev: [usage]}}\n  pg2: {handler: postgres_fdw_handler, comment: second}\nservers:\n  wh: {wrapper: pg2}\n",
+        "other.yml":    "schema other:\n  table u:\n    columns:\n      id: {type: integer}\n",
+    })
+    steps := planFiles(t, nil, paths("other.yml", "app.yml", "database.yml"), ModeFile, false)
+    if got := stepNames(steps); !reflect.DeepEqual(got, []string{"other", "database", "app"}) {
+        t.Fatalf("steps = %v", got)
+    }
+    assertEmittedOnce(t, steps)
+    first := stepSQL(t, steps, "other")
+    for _, want := range []string{
+        `create extension if not exists "postgres_fdw";`,
+        `revoke usage on language "plpgsql" from public;`,
+        `grant usage on language "plperl" to "dev";`,
+        `grant usage on foreign data wrapper "postgres_fdw" to "dev";`,
+        `create foreign data wrapper "pg2" handler "postgres_fdw_handler";`,
+        `comment on foreign data wrapper "pg2" is 'second';`,
+    } {
+        if !strings.Contains(first, want) { t.Errorf("the first step must have %q:\n%s", want, first) }
+    }
+    if sql := stepSQL(t, steps, "database"); strings.TrimSpace(sql) != `create server "wh" foreign data wrapper "pg2";` {
+        t.Errorf("expected only the server in the group that declares it:\n%s", sql)
+    }
+}

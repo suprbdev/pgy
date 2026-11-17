@@ -62,6 +62,11 @@ type Live struct{
     Publications  map[string]*LivePublication
     // Servers: foreign servers that no extension owns, by name
     Servers       map[string]*LiveServer
+    // Wrappers: every foreign-data wrapper, by name, those of extensions
+    // included (see ExtensionMembers)
+    Wrappers      map[string]*LiveWrapper
+    // Languages: every language of pg_language, by name
+    Languages     map[string]*LiveLanguage
     // SequenceDefs / DomainDefs: live definitions for ALTER SEQUENCE / DOMAIN
     SequenceDefs map[string]*LiveSequence
     DomainDefs   map[string]*LiveDomain
@@ -622,6 +627,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         EventTriggers: map[string]*LiveEventTrigger{},
         Publications: map[string]*LivePublication{},
         Servers: map[string]*LiveServer{},
+        Wrappers: map[string]*LiveWrapper{},
+        Languages: map[string]*LiveLanguage{},
         DomainDefs: map[string]*LiveDomain{},
         Roles: map[string]bool{},
         RoleDefs: map[string]*LiveRole{},
@@ -1390,6 +1397,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         }
         return nil
     })
+    batch.add(wrapperQ, l.scanWrappers)
+    batch.add(languageQ, l.scanLanguages)
 
     pubQ := `
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
@@ -2857,6 +2866,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
     }
+    planLanguages(plan, live, desired, opts.PublicGrants)
+    planWrappers(plan, live, desired, opts.PublicGrants)
     planServers(plan, live, desired)
     plan.Warnings = append(plan.Warnings, unmappedMatViewWarnings(live, desired)...)
 
@@ -3307,6 +3318,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         serverDrops, serverWarnings := pruneServers(live, desired, opts.MigrationsTable)
         plan.Drops = append(plan.Drops, serverDrops...)
         plan.Warnings = append(plan.Warnings, serverWarnings...)
+        wrapperDrops, wrapperWarnings := pruneWrappers(live, desired, serverDrops)
+        plan.Drops = append(plan.Drops, wrapperDrops...)
+        plan.Warnings = append(plan.Warnings, wrapperWarnings...)
         planExtensionDrops(plan, live, desired, opts)
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
@@ -5238,25 +5252,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         grants = append(grants, gr...)
     }
     addCovering := func(rv, gr []string) {
-        for _, s := range rv {
-            if strings.HasSuffix(s, " from public;") {
-                why := "grants blocks cover PUBLIC on tables, views, sequences, columns, servers and schemas since v0.43.0"
-                if mode == PublicAuthoritative { why = "policy.public_grants: authoritative makes every grants block cover PUBLIC" }
-                warns = append(warns, Warning{Kind: "public_revoke", Message: fmt.Sprintf("%s: the grants block doesn't list public, so this revokes PUBLIC's privileges (%s; list public to keep them)", strings.TrimSuffix(s, ";"), why)})
-            }
-        }
+        warns = append(warns, publicRevokeWarnings(rv, mode, "grants blocks cover PUBLIC on tables, views, sequences, columns, servers and schemas since v0.43.0")...)
         add(rv, gr)
     }
     listsPublic := func(g map[string][]string) bool { _, ok := g["public"]; return ok }
-    covers := func(byKind bool, g map[string][]string) bool {
-        switch mode {
-        case PublicAuthoritative:
-            return true
-        case PublicExplicit:
-            return listsPublic(g)
-        }
-        return byKind || listsPublic(g)
-    }
+    covers := func(byKind bool, g map[string][]string) bool { return coversPublic(mode, byKind, g) }
     addFor := func(g map[string][]string) func(rv, gr []string) {
         if listsPublic(g) { return add }
         return addCovering
@@ -5268,9 +5268,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
     created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
     member := func(key, publicDefault string, liveG map[string]map[string]bool, g map[string][]string) map[string]map[string]bool {
-        initial, ok := live.InitialGrants(key, publicDefault)
-        if !ok { return liveG }
-        return withoutInitialGrants(liveG, initial, g, mode == PublicAuthoritative)
+        return memberLiveGrants(live, mode, key, publicDefault, liveG, g)
     }
 
     for _, name := range sortedKeys(desired.Servers) {

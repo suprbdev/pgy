@@ -1,0 +1,26 @@
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'pgy_fx_reader') then create role pgy_fx_reader; end if;
+  if not exists (select from pg_roles where rolname = 'pgy_fx_monitor') then create role pgy_fx_monitor; end if;
+end $$;
+create extension postgres_fdw;
+create extension file_fdw;
+create extension dblink;
+create foreign data wrapper pg2 handler postgres_fdw_handler validator postgres_fdw_validator;
+comment on foreign data wrapper pg2 is 'second wrapper on the postgres_fdw handler';
+grant usage on foreign data wrapper pg2 to pgy_fx_reader with grant option;
+create foreign data wrapper legacy options (debug 'true', level '03');
+create foreign data wrapper checked validator postgresql_fdw_validator;
+grant usage on foreign data wrapper checked to public;
+create server on_pg2 foreign data wrapper pg2 options (dbname 'x');
+create server on_legacy foreign data wrapper legacy;
+create server plain foreign data wrapper postgres_fdw;
+grant usage on foreign data wrapper postgres_fdw to pgy_fx_reader;
+grant usage on foreign data wrapper file_fdw to pgy_fx_monitor with grant option;
+comment on foreign data wrapper dblink_fdw is 'links';
+create schema ft;
+create foreign table ft.settings (name text, value text) server on_legacy options (kind 'kv');
+revoke usage on language plpgsql from public;
+grant usage on language plpgsql to pgy_fx_reader;
+grant usage on language sql to pgy_fx_monitor with grant option;
+create function ft.one() returns integer language plpgsql as $$ begin return 1; end $$;
+create function ft.two() returns integer language sql as 'select 2';
