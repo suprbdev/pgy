@@ -74,6 +74,70 @@ func TestBuildTable(t *testing.T) {
 	}
 }
 
+func TestBuildIdentitySequenceGrants(t *testing.T) {
+	seq := &diff.LiveSequence{Name: "app.t_id_seq", Type: "bigint", Increment: "1", Start: "1", MinValue: "1", MaxValue: "9223372036854775807", Cache: "1"}
+	plain := &diff.LiveSequence{Name: "app.t_n_seq", Type: "bigint", Increment: "1", Start: "1", MinValue: "1", MaxValue: "9223372036854775807", Cache: "1"}
+	live := &diff.Live{
+		Schemas: map[string]bool{"app": true},
+		Tables: map[string]*diff.LiveTable{"app.t": {Columns: map[string]*diff.LiveColumn{
+			"id": {Type: "bigint", Identity: "always", IdentitySequence: seq},
+			"n":  {Type: "bigint", Identity: "by default", IdentitySequence: plain},
+		}}},
+		Sequences:      map[string]bool{"app.t_id_seq": true, "app.t_n_seq": true},
+		SequenceDefs:   map[string]*diff.LiveSequence{"app.t_id_seq": seq, "app.t_n_seq": plain},
+		OwnedSequences: map[string]bool{"app.t_id_seq": true, "app.t_n_seq": true},
+		TableGrants:    map[string]map[string]map[string]bool{"app.t_id_seq": {"reader": {"usage": true, "select": true}}},
+		RelComments:    map[string]string{"app.t_id_seq": "ids"},
+		Details:        &diff.LiveDetails{ColumnOrder: map[string][]string{"app.t": {"id", "n"}}},
+	}
+	res, err := Build(live, Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(res.Files[0].Content)
+	want := "  sequence t_id_seq:\n    grants: {reader: [select, usage]}\n    comment: ids\n    dependsOn: [table app.t]\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("want the identity sequence's grants:\n%s\nin:\n%s", want, got)
+	}
+	if strings.Contains(got, "t_n_seq") {
+		t.Errorf("an identity sequence without grants or comment needs no entry:\n%s", got)
+	}
+}
+
+func TestBuildOwnerKinds(t *testing.T) {
+	live := &diff.Live{
+		CurrentUser: "app",
+		Schemas:     map[string]bool{"app": true},
+		Tables: map[string]*diff.LiveTable{
+			"app.mine":   {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+			"app.theirs": {Columns: map[string]*diff.LiveColumn{"id": {Type: "integer"}}},
+		},
+		Owners:  map[string]string{"schema:app": "app", "rel:app.mine": "app", "rel:app.theirs": "other"},
+		Details: &diff.LiveDetails{ColumnOrder: map[string][]string{"app.mine": {"id"}, "app.theirs": {"id"}}},
+	}
+	build := func(opts Options) string {
+		t.Helper()
+		opts.Single = true
+		res, err := Build(live, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(res.Files[0].Content)
+	}
+	got := build(Options{Owners: true})
+	if strings.Count(got, "owner:") != 1 || !strings.Contains(got, "owner: other") {
+		t.Errorf("without OwnerKinds only owners other than the connecting role are written:\n%s", got)
+	}
+	got = build(Options{Owners: true, OwnerKinds: map[string]bool{"tables": true}})
+	mine := got[strings.Index(got, "table mine:"):strings.Index(got, "table theirs:")]
+	if !strings.Contains(mine, "owner: app") || strings.Count(got, "owner: app") != 1 {
+		t.Errorf("OwnerKinds tables writes the connecting role on tables only:\n%s", got)
+	}
+	if got := build(Options{OwnerKinds: map[string]bool{"tables": true}}); strings.Contains(got, "owner:") {
+		t.Errorf("OwnerKinds writes nothing without Owners:\n%s", got)
+	}
+}
+
 func TestBuildNotNullName(t *testing.T) {
 	lt := &diff.LiveTable{Columns: map[string]*diff.LiveColumn{
 		"id":      {Type: "integer", NotNullName: "t_id_not_null"},

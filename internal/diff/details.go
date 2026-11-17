@@ -36,6 +36,12 @@ type LiveDetails struct {
     // TransformLanguages: procedural languages that have at least one
     // transform, so their routines can take a TRANSFORM FOR TYPE clause.
     TransformLanguages map[string]bool
+    // ExtensionUsers: extension -> the schemas of the objects outside every
+    // extension that depend on one of its objects, as pg_depend records it:
+    // columns, defaults, constraints, indexes, triggers, policies, views,
+    // routines, domains and text search objects. Calls in function bodies
+    // written as text are not recorded.
+    ExtensionUsers map[string]map[string]bool
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, text search
     // parsers and templates, procedural languages and transforms),
@@ -87,7 +93,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         CompositeOrder: map[string][]string{}, Ranges: map[string]*schema.RangeDef{}, DomainTypes: map[string]LiveDomainType{},
         Collations: map[string]*schema.Collation{}, TSParsers: map[string]string{}, TSDictionaries: map[string]*schema.TSDictionary{},
         ViewDeps: map[string][]string{}, Populated: map[string]bool{}, RoutineDeps: map[string][]string{},
-        TransformLanguages: map[string]bool{},
+        TransformLanguages: map[string]bool{}, ExtensionUsers: map[string]map[string]bool{},
     }
     l.Details = d
     const unsupportedQ = `
@@ -291,6 +297,32 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 if err := scan(&key, &tmpl, &opts); err != nil { return err }
                 td := &schema.TSDictionary{Template: strings.TrimPrefix(tmpl, "pg_catalog."), Options: parseDictOptions(opts)}
                 d.TSDictionaries[key] = td
+                return nil
+            }},
+        {`select distinct e.extname::text, n.nspname::text
+          from pg_extension e
+          join pg_depend m on m.refclassid = 'pg_extension'::regclass and m.refobjid = e.oid and m.deptype = 'e'
+          join pg_depend d on d.refclassid = m.classid and d.refobjid = m.objid and d.deptype = 'n'
+          left join pg_depend x on x.classid = d.classid and x.objid = d.objid and x.deptype = 'e'
+          left join pg_class c on d.classid = 'pg_class'::regclass and c.oid = d.objid
+          left join pg_type t on d.classid = 'pg_type'::regclass and t.oid = d.objid
+          left join pg_proc p on d.classid = 'pg_proc'::regclass and p.oid = d.objid
+          left join pg_constraint co on d.classid = 'pg_constraint'::regclass and co.oid = d.objid
+          left join pg_statistic_ext st on d.classid = 'pg_statistic_ext'::regclass and st.oid = d.objid
+          left join pg_ts_dict td on d.classid = 'pg_ts_dict'::regclass and td.oid = d.objid
+          left join pg_ts_config tc on d.classid = 'pg_ts_config'::regclass and tc.oid = d.objid
+          left join pg_attrdef ad on d.classid = 'pg_attrdef'::regclass and ad.oid = d.objid
+          left join pg_trigger tg on d.classid = 'pg_trigger'::regclass and tg.oid = d.objid
+          left join pg_rewrite rw on d.classid = 'pg_rewrite'::regclass and rw.oid = d.objid
+          left join pg_policy po on d.classid = 'pg_policy'::regclass and po.oid = d.objid
+          left join pg_class r on r.oid = coalesce(ad.adrelid, tg.tgrelid, rw.ev_class, po.polrelid)
+          join pg_namespace n on n.oid = coalesce(c.relnamespace, t.typnamespace, p.pronamespace, co.connamespace, st.stxnamespace, td.dictnamespace, tc.cfgnamespace, r.relnamespace)
+          where x.objid is null and ` + nsFilter,
+            func(scan func(...any) error) error {
+                var ext, nsp string
+                if err := scan(&ext, &nsp); err != nil { return err }
+                if d.ExtensionUsers[ext] == nil { d.ExtensionUsers[ext] = map[string]bool{} }
+                d.ExtensionUsers[ext][nsp] = true
                 return nil
             }},
     }

@@ -9,6 +9,7 @@ import (
     "sort"
     "strings"
     "time"
+    "unicode/utf8"
 
     yaml "gopkg.in/yaml.v3"
 )
@@ -178,6 +179,65 @@ func (d *Database) WrapperExtension(name string) string {
 func (d *Database) DeclaresExtension(name string) bool {
     for _, ext := range d.Extensions {
         if ext != nil && ext.Name == name { return true }
+    }
+    return false
+}
+
+// SequenceColumn is a serial or identity column: the table's key
+// ("schema.table") and the column's name.
+type SequenceColumn struct {
+    Table, Column string
+}
+
+// ColumnSequences maps the sequences that declared serial and identity
+// columns create ("schema.sequence") to their column. A sequence has the
+// name PostgreSQL gives it: the identity's sequenceName (in the table's
+// schema when unqualified), or <table>_<column>_seq with both names
+// shortened to fit 63 bytes. A name PostgreSQL numbers because it is taken
+// is not predicted.
+func (d *Database) ColumnSequences() map[string]SequenceColumn {
+    out := map[string]SequenceColumn{}
+    for fq, t := range d.Tables {
+        if t == nil { continue }
+        nsp, table, ok := strings.Cut(fq, ".")
+        if !ok { nsp, table = "public", fq }
+        for cn, c := range t.Columns {
+            if c == nil || c.Identity == "" && !IsSerialType(c.Type) { continue }
+            seq := nsp + "." + ColumnSequenceName(table, cn)
+            if c.Identity != "" && c.IdentityOptions != nil && c.IdentityOptions.Name != "" {
+                seq = c.IdentityOptions.Name
+                if !strings.Contains(seq, ".") { seq = nsp + "." + seq }
+            }
+            out[seq] = SequenceColumn{Table: nsp + "." + table, Column: cn}
+        }
+    }
+    return out
+}
+
+// ColumnSequenceName returns the name PostgreSQL chooses for the sequence
+// of a serial or identity column: <table>_<column>_seq, where the longer of
+// the two names is shortened, a byte at a time and never inside a
+// multibyte character, until the whole fits in 63 bytes.
+func ColumnSequenceName(table, column string) string {
+    const avail = 63 - len("_seq") - len("_")
+    t, c := len(table), len(column)
+    for t+c > avail {
+        if t > c { t-- } else { c-- }
+    }
+    return clipBytes(table, t) + "_" + clipBytes(column, c) + "_seq"
+}
+
+func clipBytes(s string, n int) string {
+    if len(s) <= n { return s }
+    for n > 0 && !utf8.RuneStart(s[n]) { n-- }
+    return s[:n]
+}
+
+// IsSerialType reports whether t is one of the serial pseudo-types.
+func IsSerialType(t string) bool {
+    switch strings.ToLower(strings.TrimSpace(t)) {
+    case "serial", "smallserial", "bigserial", "serial2", "serial4", "serial8":
+        return true
     }
     return false
 }
