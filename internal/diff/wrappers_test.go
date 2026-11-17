@@ -67,7 +67,7 @@ func TestForeignDataWrapperCreatedAfterExtensions(t *testing.T) {
 
 func TestForeignDataWrapperSkippedIfExists(t *testing.T) {
 	live := wrapperLive()
-	live.Wrappers["pg2"] = &LiveWrapper{Handler: "public.postgres_fdw_handler", Validator: "ext.postgres_fdw_validator", Options: map[string]string{}, Owner: "admin", Comment: "second wrapper",
+	live.Wrappers["pg2"] = &LiveWrapper{Handler: "public.postgres_fdw_handler", Validator: "public.postgres_fdw_validator", Options: map[string]string{}, Owner: "admin", Comment: "second wrapper",
 		Grants: map[string]map[string]bool{"app": {"usage": true}}}
 	live.Wrappers["legacy"] = &LiveWrapper{Options: map[string]string{"debug": "true"}, Owner: "owner"}
 	live.Wrappers["bare"] = &LiveWrapper{Options: map[string]string{"left": "alone"}, Owner: "owner", Comment: "kept"}
@@ -117,16 +117,28 @@ func TestForeignDataWrapperAltered(t *testing.T) {
 	}
 }
 
-func TestForeignDataWrapperFunctionWithoutSchemaMatchesAnySchema(t *testing.T) {
+func TestForeignDataWrapperFunctionSchemaOptionalOnTheSearchPath(t *testing.T) {
 	live := wrapperLive()
-	live.Wrappers["w"] = &LiveWrapper{Handler: "ext.h", Validator: "pg_catalog.postgresql_fdw_validator", Owner: "owner"}
+	live.Wrappers["w"] = &LiveWrapper{Handler: "public.h", Validator: "pg_catalog.postgresql_fdw_validator", Owner: "owner"}
 	d := wrapperDB(map[string]*schema.ForeignDataWrapper{"w": {Name: "w", Handler: "h", Validator: "postgresql_fdw_validator"}})
 	if sql, _ := planSQL(t, live, d, Options{}); sql != "" {
-		t.Errorf("a function named without a schema is the live one, got:\n%s", sql)
+		t.Errorf("the schema of public and pg_catalog is optional, got:\n%s", sql)
 	}
-	d.ForeignDataWrappers["w"].Handler = "public.h"
+	d.ForeignDataWrappers["w"].Validator = "pg_catalog.postgresql_fdw_validator"
+	if sql, _ := planSQL(t, live, d, Options{}); sql != "" {
+		t.Errorf("a pg_catalog qualifier is the same function, got:\n%s", sql)
+	}
+
+	live.Wrappers["w"].Handler = "ext.h"
 	sql, _ := planSQL(t, live, d, Options{})
-	wantSQL(t, sql, `alter foreign data wrapper "w" handler "public"."h";`)
+	wantSQL(t, sql, `alter foreign data wrapper "w" handler "h";`)
+	live.SearchPath = []string{"ext", "public"}
+	if sql, _ := planSQL(t, live, d, Options{}); sql != "" {
+		t.Errorf("the schema of a function on the session's search_path is optional, got:\n%s", sql)
+	}
+	d.ForeignDataWrappers["w"].Handler = "other.h"
+	sql, _ = planSQL(t, live, d, Options{})
+	wantSQL(t, sql, `alter foreign data wrapper "w" handler "other"."h";`)
 }
 
 func TestForeignDataWrapperGrants(t *testing.T) {

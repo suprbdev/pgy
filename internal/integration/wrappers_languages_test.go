@@ -360,6 +360,42 @@ foreignDataWrappers:
 	}
 }
 
+func TestIntegrationWrapperFunctionOnSearchPath(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_fdw_search_path")
+	if _, err := db.Exec(context.Background(), `
+		create schema ext;
+		create extension postgres_fdw schema ext;`); err != nil {
+		t.Fatal(err)
+	}
+	d := loadSpellingYAML(t, `
+extensions:
+  - {name: postgres_fdw, schema: ext}
+foreignDataWrappers:
+  pg2: {handler: postgres_fdw_handler, validator: postgres_fdw_validator}
+`)
+	onPath := sessionPool(t, "pgytest_fdw_search_path", map[string]string{"search_path": "ext, public"})
+	_, plan := planLikeDiff(t, onPath, d)
+	if sql := strings.TrimSpace(diff.Render(plan)); sql != `create foreign data wrapper "pg2" handler "postgres_fdw_handler" validator "postgres_fdw_validator";` {
+		t.Fatalf("got:\n%s", sql)
+	}
+	applyPlan(t, onPath, plan)
+	_, plan = planLikeDiff(t, onPath, d)
+	requireNoChanges(t, "with the functions' schema on the search_path", plan)
+
+	_, plan = planLikeDiff(t, db, d)
+	if sql := strings.TrimSpace(diff.Render(plan)); sql != `alter foreign data wrapper "pg2" handler "postgres_fdw_handler" validator "postgres_fdw_validator";` {
+		t.Errorf("a function in a schema that is not on the search_path has to be qualified, got:\n%s", sql)
+	}
+	_, plan = planLikeDiff(t, db, loadSpellingYAML(t, `
+extensions:
+  - {name: postgres_fdw, schema: ext}
+foreignDataWrappers:
+  pg2: {handler: ext.postgres_fdw_handler, validator: ext.postgres_fdw_validator}
+`))
+	requireNoChanges(t, "qualified", plan)
+}
+
 func TestIntegrationWrappersPulled(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()

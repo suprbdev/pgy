@@ -98,13 +98,14 @@ func wrapperExtension(live *Live, desired *schema.Database, name string) (extens
 
 // sameWrapperFunction reports whether want, a declared handler or
 // validator, names the live function have ("schema.function", "" for none).
-// A name without a schema matches the function wherever the search_path
-// found it.
+// The schema is optional on either side for pg_catalog and for the schemas
+// of the active name scope.
 func sameWrapperFunction(want, have string) bool {
-	if want == "" || have == "" || strings.Contains(want, ".") {
-		return want == have
+	bare := func(ref string) string {
+		name, _ := activeScope().unqualifyLiteral(strings.TrimPrefix(ref, "pg_catalog."))
+		return name
 	}
-	return want == have[strings.IndexByte(have, '.')+1:]
+	return bare(want) == bare(have)
 }
 
 // planWrappers creates and reconciles the declared foreign-data wrappers,
