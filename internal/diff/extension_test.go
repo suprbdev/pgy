@@ -360,8 +360,10 @@ func TestExtensionMoveReplacesRequalifiedRoutine(t *testing.T) {
 		wantStatements(t, append(append(append([]string{}, p.Creates...), p.Alters...), p.Drops...), []string{
 			`create schema if not exists "ext";`,
 			`alter extension "citext" set schema "ext";`,
+			`set check_function_bodies = off;`,
 			`create or replace function "app"."by_c"(p ext.citext default ''::ext.citext) returns ext.citext language sql as $$select p limit 1$$;`,
 			`create or replace procedure "app"."touch"(p ext.citext) language sql as $$select 2$$;`,
+			`reset check_function_bodies;`,
 		})
 		if len(p.Warnings) != 0 {
 			t.Errorf("%+v: unexpected warnings: %v", opts, p.Warnings)

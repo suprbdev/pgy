@@ -62,7 +62,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
     managed := managedSchemas(desired)
     inScope := func(key string) bool {
         i := strings.IndexByte(key, '.')
-        return i > 0 && managed[key[:i]]
+        return i > 0 && managed[key[:i]] && !InDottedSchema(live, key)
     }
 
     for _, fq := range sortedKeys(desired.Tables) {
@@ -149,7 +149,7 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
         i := strings.IndexByte(fq, '.')
         lt := live.Tables[fq]
-        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq]
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq]
     }
     users := map[string][]string{}
     for _, fq := range sortedKeys(live.Tables) {

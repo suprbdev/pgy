@@ -115,10 +115,35 @@ func Plan(live *diff.Live, paths []string, groups []Group, opts diff.Options) ([
         (&availability{ix: ix, cur: cur, live: live}).deferUnready()
         if prev != nil {
             for k, vw := range cur.Views {
-                if vw != nil && vw.Replace && prev.Views[k] != nil {
+                if pv := prev.Views[k]; vw != nil && pv != nil {
+                    rules, replaced := withoutReplace(vw.Rules, pv.Rules)
+                    if !vw.Replace && !replaced { continue }
                     c := *vw
-                    c.Replace = false
+                    c.Replace, c.Rules = false, rules
                     cur.Views[k] = &c
+                }
+            }
+            for k, t := range cur.Tables {
+                if pt := prev.Tables[k]; t != nil && pt != nil {
+                    if rules, replaced := withoutReplace(t.Rules, pt.Rules); replaced {
+                        c := *t
+                        c.Rules = rules
+                        cur.Tables[k] = &c
+                    }
+                }
+            }
+            for k, f := range cur.Functions {
+                if f != nil && f.Replace && prev.Functions[k] != nil {
+                    c := *f
+                    c.Replace = false
+                    cur.Functions[k] = &c
+                }
+            }
+            for k, p := range cur.Procedures {
+                if p != nil && p.Replace && prev.Procedures[k] != nil {
+                    c := *p
+                    c.Replace = false
+                    cur.Procedures[k] = &c
                 }
             }
         }
@@ -316,10 +341,10 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         for _, e := range dm.Checks { exprs = append(exprs, e) }
         hard(ix.mentions(strings.Join(exprs, " "), exprKinds))
     }
-    for _, sq := range d.Sequences {
+    for k, sq := range d.Sequences {
         if sq == nil { continue }
         hard(ix.resolveDeps(sq.DependsOn))
-        if t := ownedByTable(sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
+        if t := ownedByTable(k, sq.OwnedBy); t != "" { hard([]ref{{kindTable, t}}) }
     }
     for _, co := range d.Collations {
         if co != nil { hard(ix.resolveDeps(co.DependsOn)) }
@@ -406,4 +431,25 @@ func mergeGroups(groups []Group, members []int) Group {
 // only carries warnings, and Render leaves it out.
 func hasStatements(p *diff.PlanDiff) bool {
     return len(p.ExtensionUpdates)+len(p.Prelude)+len(p.Creates)+len(p.Alters)+len(p.Drops)+len(p.Concurrent) > 0
+}
+
+// withoutReplace returns rules with replace cleared on those that before,
+// the rules of the same table or view in an earlier group, has too, in
+// copies of them, so that the groups after the one that replaced a rule
+// leave it alone. replaced is false, and rules is returned as it is, when
+// there is none.
+func withoutReplace(rules, before []*schema.Rule) (out []*schema.Rule, replaced bool) {
+    earlier := map[string]bool{}
+    for _, r := range before {
+        if r != nil { earlier[r.Name] = true }
+    }
+    for i, r := range rules {
+        if r == nil || !r.Replace || !earlier[r.Name] { continue }
+        if out == nil { out = append([]*schema.Rule(nil), rules...) }
+        c := *r
+        c.Replace = false
+        out[i] = &c
+    }
+    if out == nil { return rules, false }
+    return out, true
 }
