@@ -833,8 +833,8 @@ func TableRows(ctx context.Context, pool *pgxpool.Pool, fq string, partitioned b
         return nil
     }, pqIdent(fq))
     if err := columns.run(ctx, pool); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
-    row := "to_jsonb(pgy_row)"
-    if len(text) > 0 { row = "(to_jsonb(pgy_row) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
+    row := "to_jsonb(pgy_row.*)"
+    if len(text) > 0 { row = "(to_jsonb(pgy_row.*) || jsonb_build_object(" + strings.Join(text, ", ") + "))" }
     out := []map[string]any{}
     values := &queryBatch{}
     values.add("select "+row+"::text from "+dataTarget(fq, partitioned)+" pgy_row", func(rows pgx.Rows) error {

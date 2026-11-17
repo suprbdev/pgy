@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -47,5 +48,40 @@ func TestIntegrationDataColumnNames(t *testing.T) {
 		if !strings.Contains(applied, want) {
 			t.Errorf("want %q, got:\n%s", want, applied)
 		}
+	}
+	rows, err := diff.TableRows(context.Background(), pool, sch+".t", false)
+	if err != nil {
+		t.Fatalf("pull --data reads the rows: %v", err)
+	}
+	got := []string{}
+	for _, r := range rows {
+		got = append(got, fmt.Sprintf("%v %v %v", r["id"], r["v"], r["pgy_row"]))
+	}
+	sort.Strings(got)
+	if strings.Join(got, ", ") != "1 10 6, 2 21 <nil>" {
+		t.Errorf("rows = %v", rows)
+	}
+}
+
+// TestIntegrationDataPullColumnPgyRow pulls the rows of a table with a column
+// named pgy_row and one whose values are read back as text (hstore).
+func TestIntegrationDataPullColumnPgyRow(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_pull_pgy_row")
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `create extension hstore`); err != nil {
+		t.Skipf("hstore is not available: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		create table t (id int primary key, pgy_row int, h hstore);
+		insert into t values (1, 7, 'a=>1');`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := diff.TableRows(ctx, db, "public.t", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || fmt.Sprintf("%v %v %v", rows[0]["id"], rows[0]["pgy_row"], rows[0]["h"]) != `1 7 "a"=>"1"` {
+		t.Errorf("rows = %v", rows)
 	}
 }
