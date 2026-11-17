@@ -171,10 +171,8 @@ func TestSimulateFunctionArgumentDefaultConverges(t *testing.T) {
         switch {
         case lf == nil:
             t.Errorf("%s: the function must be simulated", c.name)
-        case c.unsafe && (lf.Volatility != "volatile" || lf.Parallel != "unsafe" || lf.Cost != 100):
-            t.Errorf("%s: DROP and CREATE reset the attributes the YAML leaves out, got %+v", c.name, lf)
-        case !c.unsafe && (lf.Volatility != "stable" || lf.Parallel != "safe" || lf.Cost != 5):
-            t.Errorf("%s: CREATE OR REPLACE keeps the attributes the YAML leaves out, got %+v", c.name, lf)
+        case lf.Volatility != "stable" || lf.Parallel != "safe" || lf.Cost != 5:
+            t.Errorf("%s: CREATE OR REPLACE, and DROP and CREATE, keep the attributes the YAML leaves out, got %+v", c.name, lf)
         }
     }
 }

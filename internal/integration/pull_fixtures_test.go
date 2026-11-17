@@ -73,8 +73,8 @@ func TestIntegrationPullFixtures(t *testing.T) {
 			if err := diff.ProbeExpressions(ctx, src, live, pulled); err != nil {
 				t.Fatal(err)
 			}
-			if n := src.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil {
-				t.Errorf("pulled YAML must need no expression probe, got %d connections and probes %v", n, exprProbeKeys(live))
+			if n := src.Stat().AcquireCount() - acquired; n != 0 || live.ExprProbes != nil || live.TypeProbes != nil {
+				t.Errorf("pulled YAML must need no expression or type probe, got %d connections, probes %v and types %v", n, exprProbeKeys(live), live.TypeProbes)
 			}
 			dst := freshDatabase(t, admin, "pgytest_pull_"+name+"_copy")
 			plan := diff.PlanWith(introspectAll(t, dst), pulled, diff.Options{})

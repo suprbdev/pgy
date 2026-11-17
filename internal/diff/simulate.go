@@ -15,6 +15,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     desired = expandAllPrivileges(desired, out.ServerVersion)
     out, _ = applyRenames(out, desired)
     out = simulateExprProbes(out, desired)
+    simulateRenamedArguments(out, desired)
     if desired.DatabaseSettings != nil { out.DatabaseConfig = simulateConfig(desired.DatabaseSettings) }
     for role, set := range desired.DatabaseRoleSettings {
         if out.DatabaseRoleConfig == nil { out.DatabaseRoleConfig = map[string]map[string]string{} }
@@ -37,6 +38,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             } else {
                 out.Schemas["public"] = true
             }
+        }
+    }
+    for _, dt := range desired.Tables {
+        if dt == nil { continue }
+        for _, st := range dt.Statistics {
+            if st != nil && st.Schema != "" { out.Schemas[st.Schema] = true }
         }
     }
     for s, g := range desired.SchemaGrants {
@@ -274,9 +281,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Signature: schema.RoutineName(k) + pr.ArgsSig, Security: "invoker"}
         prev := out.ProcedureDefs[norm]
-        if prev != nil {
-            if _, removed := argDefaultsDiff(pr.ArgsSig, prev.Args); !removed { pr = keepLiveProcedureAttributes(pr, prev) }
-        }
+        if prev != nil { pr = keepLiveProcedureAttributes(pr, prev) }
         replaced := prev == nil || pr.HasBody() && (procedureChanged(pr, prev) || routineArgsReplaced(pr.ArgsSig, prev.Args))
         if prev != nil && !replaced { lp.Security = prev.Security }
         if replaced || procedureChanged(pr, prev) {
@@ -400,6 +405,11 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
         if vw.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], vw.Grants) }
+        for col, g := range vw.ColumnGrants {
+            if g == nil { continue }
+            if out.ColumnGrants[k] == nil { out.ColumnGrants[k] = map[string]map[string]map[string]bool{} }
+            out.ColumnGrants[k][col] = simulateGrants(out.ColumnGrants[k][col], g)
+        }
         if vw.Comment != "" { out.RelComments[k] = vw.Comment }
         for col, cm := range vw.ColumnComments {
             if out.ViewColumnComments[k] == nil { out.ViewColumnComments[k] = map[string]string{} }
@@ -430,9 +440,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
             routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform) ||
             routineArgsReplaced(f.ArgsSig, prev.Args) || returnsChanged(f.Returns, prev.Returns))
         if prev != nil && !replaced { *lf = *prev }
-        if prev != nil && replaced && !returnsChanged(f.Returns, prev.Returns) {
-            if _, removed := argDefaultsDiff(f.ArgsSig, prev.Args); !removed { f = keepLiveFunctionAttributes(f, prev) }
-        }
+        if prev != nil && replaced { f = keepLiveFunctionAttributes(f, prev) }
         if hasBody {
             lf.Args = simulatedArgs(f.ArgsSig)
             lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body)
@@ -463,6 +471,37 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     if f.RevokePublic { out.FunctionPublicExec[norm] = false }
     if f.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], f.Grants) }
     if f.Comment != "" { out.FunctionComments[norm] = f.Comment }
+}
+
+// simulateRenamedArguments moves each live routine that a declaration
+// recreates under other argument names or modes (see
+// recreateRenamedArguments) to the declaration's signature, with its
+// attributes, comment, grants and owner, which the recreation restores.
+func simulateRenamedArguments(out *Live, desired *schema.Database) {
+    for _, rr := range renamedArgumentRoutines(out, desired) {
+        move := func(m map[string]string, prefix string) {
+            if v, ok := m[prefix+rr.liveKey]; ok { m[prefix+rr.key] = v; delete(m, prefix+rr.liveKey) }
+        }
+        if lf := out.FunctionDefs[rr.liveKey]; lf != nil {
+            delete(out.Functions, lf.Signature)
+            c := *lf
+            c.Signature, c.Args = rr.name+rr.args, simulatedArgs(rr.args)
+            out.Functions[c.Signature] = true
+            out.FunctionDefs[rr.key] = &c
+            delete(out.FunctionDefs, rr.liveKey)
+        }
+        if lp := out.ProcedureDefs[rr.liveKey]; lp != nil {
+            c := *lp
+            c.Signature, c.Args = rr.name+rr.args, simulatedArgs(rr.args)
+            out.ProcedureDefs[rr.key] = &c
+            delete(out.ProcedureDefs, rr.liveKey)
+        }
+        if out.Procedures[rr.liveKey] { out.Procedures[rr.key] = true; delete(out.Procedures, rr.liveKey) }
+        move(out.FunctionComments, "")
+        move(out.Owners, "proc:")
+        if g, ok := out.FunctionGrants[rr.liveKey]; ok { out.FunctionGrants[rr.key] = g; delete(out.FunctionGrants, rr.liveKey) }
+        if e, ok := out.FunctionPublicExec[rr.liveKey]; ok { out.FunctionPublicExec[rr.key] = e; delete(out.FunctionPublicExec, rr.liveKey) }
+    }
 }
 
 // routineArgsReplaced reports whether a routine declared with args is
@@ -615,7 +654,9 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if st == nil || len(st.Columns) == 0 { continue }
         target := -1
         if st.StatisticsTarget != nil { target = *st.StatisticsTarget }
-        lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment, Target: target}
+        ls := &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment, Target: target}
+        if nsp := statisticSchema(fq, st); nsp != "" { ls.Schema, ls.Name = nsp, truncateIdent(st.Name) }
+        lt.Statistics[StatisticKey(fq, st.Schema, truncateIdent(st.Name))] = ls
     }
     if dt.ReplicaIdentity != "" { lt.ReplicaIdentity = dt.ReplicaIdentity }
     switch {
@@ -754,6 +795,7 @@ func cloneLive(l *Live) *Live {
         ViewProbes:         cloneMap(l.ViewProbes, nil),
         ViewDependents:     cloneMap(l.ViewDependents, nil),
         ExprProbes:         l.ExprProbes,
+        TypeProbes:         l.TypeProbes,
         RoleMembers:        cloneMap(l.RoleMembers, cloneSet),
         RoleMemberOptions:  cloneMap(l.RoleMemberOptions, func(m map[string]*LiveMembership) map[string]*LiveMembership {
             return cloneMap(m, func(v *LiveMembership) *LiveMembership { c := *v; return &c })
