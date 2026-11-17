@@ -423,13 +423,11 @@ func (b *builder) textSearch() {
 		}
 		m := newMap()
 		add(m, "template", str(td.Template))
-		if len(td.Options) > 0 {
-			opts := flowMap()
-			for _, o := range sortedKeys(td.Options) {
-				add(opts, o, str(td.Options[o]))
-			}
-			add(m, "options", opts)
+		opts := flowMap()
+		for _, o := range sortedKeys(td.Options) {
+			add(opts, o, str(td.Options[o]))
 		}
+		add(m, "options", opts)
 		addStr(m, "comment", b.live.TSComments["dict:"+k])
 		add(blk, "text search dictionary "+name, m)
 	}

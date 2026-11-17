@@ -4539,7 +4539,7 @@ func aggregateMatchesLive(ag *schema.Aggregate, la *LiveAggregate) bool {
 func tsDictionaryAlterStmts(fq string, td *schema.TSDictionary, ld *schema.TSDictionary) ([]string, string) {
     if ld == nil { return nil, "" }
     warn := ""
-    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !strings.EqualFold(t, ld.Template) {
+    if t := strings.TrimPrefix(td.Template, "pg_catalog."); !tsTemplatesEqual(t, ld.Template) {
         warn = fmt.Sprintf("text search dictionary %s: its template changed from %s to %s, which ALTER cannot do; drop and recreate it, with the configurations that use it, in a hand-written migration", fq, ld.Template, t)
     }
     if td.Options == nil { return nil, warn }
@@ -5639,7 +5639,7 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
-                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, ct.With, lt.IndexDefs[ctName])...)
+                plan.Alters = append(plan.Alters, keyIndexStorageStmts(schemaPrefixOf(fq)+ctName, constraintStorage(ct), lt.IndexDefs[ctName])...)
                 if li := lt.IndexDefs[ctName]; li != nil && tablespaceDiffers(ct.Tablespace, li.Tablespace, live) {
                     plan.Alters = append(plan.Alters, keyIndexTablespaceStmt(fq, ctName, ct.Tablespace))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("constraint "+ctName+"'s index", fq)) }
@@ -6366,8 +6366,7 @@ func isSerialType(t string) bool {
 // parenthesis-insensitive constraint normalization is the fallback, since
 // PostgreSQL wraps compound defaults in parentheses ((now() + '1 day')).
 func defaultsEqual(desired, live string) bool {
-    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) ||
-        normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+    return normalizeDefaultExpr(desired) == normalizeDefaultExpr(live) || constraintDefsEqual(desired, live)
 }
 
 // memoized returns f(s), caching it in cache. The normalizers it wraps are
@@ -6576,7 +6575,7 @@ func renderConstraintDef(ct *schema.Constraint) string {
         if ct.NullsNotDistinct { nulls = " nulls not distinct" }
         return fmt.Sprintf("unique%s (%s)", nulls, constraintColumns(ct.Columns)) + indexParameters(ct.Include, ct.With, ct.Tablespace) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     case "exclude":
-        return fmt.Sprintf("exclude %s", excludeWithTablespace(ct.Expression, ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
+        return fmt.Sprintf("exclude %s", excludeWithTablespace(excludeExpression(ct), ct.Tablespace)) + deferralClause(ct.Deferrable, ct.InitiallyDeferred)
     }
     return ""
 }
@@ -6639,16 +6638,28 @@ func policyMatchesLive(pol *schema.Policy, live *LivePolicy, currentUser string)
         constraintDefsEqual(pol.WithCheck, live.WithCheck)
 }
 
+// constraintDefsEqual compares two definitions with normalizeConstraintDef.
+// A string literal that either side marks as an object name ('seq'::regclass)
+// matches its public.-qualified spelling on the other side, where the cast
+// may be missing.
 func constraintDefsEqual(desired, live string) bool {
-    return normalizeConstraintDef(desired) == normalizeConstraintDef(live)
+    if normalizeConstraintDef(desired) == normalizeConstraintDef(live) { return true }
+    names := objectLiteralNames(desired, live)
+    return len(names) > 0 && normalizeConstraintDefWith(desired, names) == normalizeConstraintDefWith(live, names)
 }
 
 // triggerDefsEqual compares a desired CREATE TRIGGER statement against
-// pg_get_triggerdef() output. Both sides go through normalizeConstraintDef
-// (case, quoting, parens, casts, whitespace, public. qualifiers); on top of
-// that the trailing semicolon is ignored and EXECUTE FUNCTION (emitted by
-// PostgreSQL 11+) is treated as equal to EXECUTE PROCEDURE.
+// pg_get_triggerdef() output. The part before EXECUTE goes through
+// normalizeConstraintDef (case, quoting, parens, casts, whitespace, public.
+// qualifiers); the function call is compared by name, where EXECUTE FUNCTION
+// equals EXECUTE PROCEDURE and a public or pg_catalog qualifier is ignored,
+// and by argument values, since PostgreSQL stores every argument as a string.
 func triggerDefsEqual(desired, live string) bool {
+    dh, dc, dok := splitTriggerCall(desired)
+    lh, lc, lok := splitTriggerCall(live)
+    if dok && lok {
+        if equal, ok := triggerCallsEqual(dc, lc); ok { return equal && constraintDefsEqual(dh, lh) }
+    }
     n := func(s string) string {
         s = normalizeConstraintDef(strings.TrimSuffix(strings.TrimSpace(s), ";"))
         return strings.ReplaceAll(s, "executefunction", "executeprocedure")
@@ -6712,7 +6723,9 @@ func canonicalTriggerEvents(events []string) []string {
 // against pg_get_constraintdef() output: after canonicalizeExpr (IN/BETWEEN/
 // LIKE rewrites, cast removal), outside single-quoted strings it strips
 // double quotes, parentheses, whitespace, and "public." qualifiers, and
-// lowercases. A trailing NOT VALID is ignored: validating the constraint
+// lowercases. String literals are kept as written, except that one naming a
+// database object loses its public. qualifier (see unqualifyObjectLiterals).
+// A trailing NOT VALID is ignored: validating the constraint
 // later is not a definition change. Stripping parentheses and whitespace can make
 // differently-grouped expressions compare equal; that errs toward emitting no
 // SQL, same as the old name-only matching.
@@ -6720,13 +6733,23 @@ func normalizeConstraintDef(s string) string { return memoized(&normalizeConstra
 
 var normalizeConstraintDefCache sync.Map
 
-func normalizeConstraintDefUncached(s string) string {
-    var b strings.Builder
+func normalizeConstraintDefUncached(s string) string { return normalizeConstraintDefWith(s, nil) }
+
+// normalizeConstraintDefWith is normalizeConstraintDef for a definition in
+// which the string literals spelling an object name in names lose their
+// public. qualifier too.
+func normalizeConstraintDefWith(s string, names map[string]bool) string {
+    var b, seg strings.Builder
+    flush := func() {
+        b.WriteString(strings.ReplaceAll(seg.String(), "public.", ""))
+        seg.Reset()
+    }
     inQ := false
-    rs := []rune(strings.TrimSpace(canonicalizeExpr(s)))
+    rs := []rune(strings.TrimSpace(canonicalizeExpr(unqualifyObjectLiterals(s, names))))
     for i := 0; i < len(rs); i++ {
         r := rs[i]
         if r == '\'' {
+            if !inQ { flush() }
             inQ = !inQ
             b.WriteRune(r)
             continue
@@ -6745,9 +6768,10 @@ func normalizeConstraintDefUncached(s string) string {
             continue
         }
         if r >= 'A' && r <= 'Z' { r += 'a' - 'A' }
-        b.WriteRune(r)
+        seg.WriteRune(r)
     }
-    return strings.TrimSuffix(strings.ReplaceAll(b.String(), "public.", ""), "notvalid")
+    flush()
+    return strings.TrimSuffix(b.String(), "notvalid")
 }
 
 func isCastTypeChar(r rune) bool {
@@ -6896,6 +6920,9 @@ var constraintWithRe = regexp.MustCompile(`(?i)\s+with\s*\(\s*[a-z_][a-z0-9_.]*\
 // definition from pg_get_constraintdef, leaving out index storage
 // parameters and the index's tablespace, which are changed in place.
 func constraintMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) bool {
+    if strings.EqualFold(ct.Type, "exclude") {
+        if equal, ok := excludeMatchesLive(lt, name, ct); ok { return equal }
+    }
     strip := func(s string) string { return constraintWithRe.ReplaceAllString(s, "") }
     c := *ct
     c.Tablespace = ""
