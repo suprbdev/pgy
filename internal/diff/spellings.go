@@ -309,7 +309,8 @@ func triggerCallsEqual(desired, live string) (equal, ok bool) {
 
 // excludeElement is one element of an exclusion constraint.
 type excludeElement struct {
-	key, collation, opclass, opclassParams, ordering, operator string
+	key, collation, opclass, ordering, operator string
+	opclassParams                               map[string]string
 }
 
 // excludeDef is a parsed exclusion constraint definition, without the
@@ -488,18 +489,12 @@ func parseExcludeElement(item string) (excludeElement, bool) {
 			if end < 0 {
 				return el, false
 			}
-			el.opclassParams = normalizeStorageText(rest[1:end])
+			_, el.opclassParams = splitOpclass(el.opclass + rest[:end+1])
 			rest = strings.TrimSpace(rest[end+1:])
 		}
 	}
 	el.ordering = strings.ToLower(strings.Join(strings.Fields(rest), " "))
 	return el, true
-}
-
-// normalizeStorageText makes a parameter list comparable: lower case, no
-// whitespace and no quotes around values.
-func normalizeStorageText(s string) string {
-	return strings.ToLower(strings.NewReplacer(" ", "", "\t", "", "\n", "", "'", "").Replace(s))
 }
 
 // parseStorageParams splits the inside of a WITH (name = value, ...) clause
@@ -578,7 +573,7 @@ func excludeMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) (equa
 	opclasses := lt.IndexOpclasses[name]
 	for i, w := range want.elements {
 		h := have.elements[i]
-		if !constraintDefsEqual(w.key, h.key) || collationName(w.collation) != collationName(h.collation) || w.ordering != h.ordering || w.opclassParams != h.opclassParams {
+		if !constraintDefsEqual(w.key, h.key) || collationName(w.collation) != collationName(h.collation) || w.ordering != h.ordering || !opclassParamsEqual(w.opclassParams, h.opclassParams) {
 			return false, true
 		}
 		switch {
