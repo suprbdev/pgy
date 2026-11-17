@@ -101,6 +101,8 @@ func keepRequired(drop map[string]bool, live *Live, desired *schema.Database) {
 // outside it still use is dropped only when plan.Drops removes all of them.
 // Otherwise it is kept, along with the extensions it requires, and a
 // warning names what uses it, since PostgreSQL would reject the statement.
+// An extension is also kept, with the same warning, while desired declares
+// one of its own objects (see resolveAttributeOnly).
 // An extension whose dependents were not loaded (see IntrospectExtensions)
 // is dropped unchecked.
 func planExtensionDrops(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
@@ -110,8 +112,9 @@ func planExtensionDrops(plan *PlanDiff, live *Live, desired *schema.Database, op
 	}
 	dropped := droppedObjects(plan.Drops)
 	dropPartitions(dropped, live)
+	declared := declaredMembers(live, desired)
 	for _, name := range sortedKeys(drop) {
-		users, seen := []string{}, map[string]bool{}
+		users, seen := append([]string{}, declared[name]...), map[string]bool{}
 		for _, dep := range live.ExtensionDefs[name].Dependents {
 			if dep.Extension != "" || dep.removedBy(dropped) || seen[dep.Description] {
 				continue
@@ -138,6 +141,45 @@ func planExtensionDrops(plan *PlanDiff, live *Live, desired *schema.Database, op
 		names[i] = quoteIdent(name)
 	}
 	plan.Drops = append(plan.Drops, "drop extension "+strings.Join(names, ", ")+";")
+}
+
+// declaredMembers returns, for each installed extension, the objects it
+// owns that desired declares, described for a warning.
+func declaredMembers(live *Live, desired *schema.Database) map[string][]string {
+	out := map[string][]string{}
+	add := func(key, object string) {
+		if ext := live.MemberExtension[key]; ext != "" {
+			out[ext] = append(out[ext], object+", which the YAML declares")
+		}
+	}
+	for _, k := range sortedKeys(desired.Functions) {
+		if f := desired.Functions[k]; f != nil {
+			name := schema.RoutineName(k)
+			add("proc:"+normalizeFunctionSignature(name+f.ArgsSig), "function "+name+f.ArgsSig)
+		}
+	}
+	for _, k := range sortedKeys(desired.Procedures) {
+		if p := desired.Procedures[k]; p != nil {
+			name := schema.RoutineName(k)
+			add("proc:"+normalizeFunctionSignature(name+p.ArgsSig), "procedure "+name+p.ArgsSig)
+		}
+	}
+	for _, k := range sortedKeys(desired.Tables) {
+		add("rel:"+k, "table "+k)
+	}
+	for _, k := range sortedKeys(desired.Views) {
+		add("rel:"+k, "view "+k)
+	}
+	for _, k := range sortedKeys(desired.Sequences) {
+		add("rel:"+k, "sequence "+k)
+	}
+	for _, k := range sortedKeys(desired.Types) {
+		add("type:"+k, "type "+k)
+	}
+	for _, k := range sortedKeys(desired.Domains) {
+		add("type:"+k, "domain "+k)
+	}
+	return out
 }
 
 // droppedObjects returns what the statements in drops remove, as one

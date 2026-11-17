@@ -727,6 +727,7 @@ func cloneLive(l *Live) *Live {
         CompositeCollations: cloneMap(l.CompositeCollations, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         CompositeComments:   cloneMap(l.CompositeComments, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ExtensionMembers:   cloneSet(l.ExtensionMembers),
+        MemberExtension:    l.MemberExtension,
         InitPrivs:          l.InitPrivs,
         BaseTypes:          cloneSet(l.BaseTypes),
         OwnedSequences:     cloneSet(l.OwnedSequences),

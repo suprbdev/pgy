@@ -304,6 +304,7 @@ Several rules keep this from removing something the database still needs:
 - **Scope.** Only extensions installed in a schema the YAML declares objects in (tables, views, functions, types and so on) are considered, which is the scope `--prune` uses for those objects. An extension in any other schema is left alone. That covers a dedicated `extensions` schema and the schemas a hosting platform installs its own extensions into. A `schema:` on a declared extension does not put that schema in scope.
 - **Ignore list.** Extensions named in `prune.keep_extensions` of the [config file](../README.md#unsafe-changes-and-pruning) are never dropped. Use it for extensions the application does not own, such as a `pg_stat_statements` installed in `public`.
 - **`plpgsql`** is never dropped.
+- **Declared objects.** An extension is kept while the YAML declares one of its own objects (see [Objects an extension owns](#objects-an-extension-owns)). `pgy diff` warns (kind `dependents`) and names the declaration.
 - **Requirements.** An extension that one staying installed requires is kept: declaring `earthdistance` without listing `cube` never drops `cube`.
 - **Dependents.** PostgreSQL refuses to drop an extension while objects outside it use its types, functions, operators or operator classes: a column of type `citext`, an index with `gin_trgm_ops`, a view calling `akeys()`. With a connection, pgy looks them up in `pg_depend` for each extension it is about to drop. When the same plan drops all of them (the table is pruned, the column or the index is dropped), `DROP EXTENSION` follows those drops. Otherwise the statement is left out and `pgy diff` warns (kind `dependents`), naming the extension and what still uses it, so the migration always applies. Once nothing uses the extension, the next `pgy diff --unsafe --prune` drops it. That takes two migrations when a dependent is changed instead of dropped: retyping a column from `citext` to `text` and removing `citext` from the block changes the type in the first and drops the extension in the second.
 
@@ -313,7 +314,7 @@ PostgreSQL does not record what a function body written as text (`plpgsql`, or `
 
 ### Objects an extension owns
 
-pgy never creates, replaces or drops the functions, views and types that `CREATE EXTENSION` installs, but their privileges and a few attributes can be declared. Leave out the part that defines the object, and the declaration manages one that already exists:
+The functions, views and types that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
 
 | Declaration | Left out | Managed |
 |-------------|----------|---------|

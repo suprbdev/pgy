@@ -145,6 +145,9 @@ type Live struct{
     // pruned. Keys are "rel:schema.name", "type:schema.name",
     // "proc:<normalized signature>", "language:name" and "fdw:name".
     ExtensionMembers map[string]bool
+    // MemberExtension: ExtensionMembers key -> the name of the extension
+    // the object belongs to.
+    MemberExtension map[string]string
     // InitPrivs: the privileges CREATE EXTENSION left on the extension's
     // objects (pg_init_privs), by the object's ExtensionMembers key ->
     // grantee -> privilege set, the owner's entries excluded. A member
@@ -651,6 +654,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         CompositeCollations: map[string]map[string]string{},
         CompositeComments: map[string]map[string]string{},
         ExtensionMembers: map[string]bool{},
+        MemberExtension: map[string]string{},
         InitPrivs: map[string]map[string]map[string]bool{},
         BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
@@ -2254,46 +2258,51 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     })
 
     extMemQ := `
-        select 'rel:' || n.nspname || '.' || c.relname
+        select m.key, x.extname::text
+        from (
+        select 'rel:' || n.nspname || '.' || c.relname, d.refobjid
         from pg_depend d join pg_class c on c.oid = d.objid join pg_namespace n on n.oid = c.relnamespace
         where d.deptype = 'e' and d.classid = 'pg_class'::regclass
         union all
-        select 'type:' || n.nspname || '.' || t.typname
+        select 'type:' || n.nspname || '.' || t.typname, d.refobjid
         from pg_depend d join pg_type t on t.oid = d.objid join pg_namespace n on n.oid = t.typnamespace
         where d.deptype = 'e' and d.classid = 'pg_type'::regclass
         union all
-        select 'tscfg:' || n.nspname || '.' || c.cfgname
+        select 'tscfg:' || n.nspname || '.' || c.cfgname, d.refobjid
         from pg_depend d join pg_ts_config c on c.oid = d.objid join pg_namespace n on n.oid = c.cfgnamespace
         where d.deptype = 'e' and d.classid = 'pg_ts_config'::regclass
         union all
-        select 'tsdict:' || n.nspname || '.' || c.dictname
+        select 'tsdict:' || n.nspname || '.' || c.dictname, d.refobjid
         from pg_depend d join pg_ts_dict c on c.oid = d.objid join pg_namespace n on n.oid = c.dictnamespace
         where d.deptype = 'e' and d.classid = 'pg_ts_dict'::regclass
         union all
-        select 'coll:' || n.nspname || '.' || c.collname
+        select 'coll:' || n.nspname || '.' || c.collname, d.refobjid
         from pg_depend d join pg_collation c on c.oid = d.objid join pg_namespace n on n.oid = c.collnamespace
         where d.deptype = 'e' and d.classid = 'pg_collation'::regclass
         union all
-        select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+        select 'proc:' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', d.refobjid
         from pg_depend d join pg_proc p on p.oid = d.objid join pg_namespace n on n.oid = p.pronamespace
         where d.deptype = 'e' and d.classid = 'pg_proc'::regclass
         union all
-        select 'language:' || l.lanname
+        select 'language:' || l.lanname, d.refobjid
         from pg_depend d join pg_language l on l.oid = d.objid
         where d.deptype = 'e' and d.classid = 'pg_language'::regclass
         union all
-        select 'fdw:' || w.fdwname
+        select 'fdw:' || w.fdwname, d.refobjid
         from pg_depend d join pg_foreign_data_wrapper w on w.oid = d.objid
         where d.deptype = 'e' and d.classid = 'pg_foreign_data_wrapper'::regclass
+        ) m(key, extension)
+        join pg_extension x on x.oid = m.extension
     `
     batch.add(extMemQ, func(extMemRows pgx.Rows) error {
         for extMemRows.Next() {
-            var key string
-            if err := extMemRows.Scan(&key); err != nil {
+            var key, extension string
+            if err := extMemRows.Scan(&key, &extension); err != nil {
                 return err
             }
             if sig, ok := strings.CutPrefix(key, "proc:"); ok { key = "proc:" + normalizeFunctionSignature(sig) }
             l.ExtensionMembers[key] = true
+            l.MemberExtension[key] = extension
         }
         return nil
     })

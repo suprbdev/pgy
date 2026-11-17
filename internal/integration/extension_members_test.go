@@ -218,6 +218,33 @@ func TestIntegrationExtensionMemberPrivilegesPulled(t *testing.T) {
 	}
 }
 
+func TestIntegrationExtensionWithDeclaredMemberIsNotPruned(t *testing.T) {
+	admin := connect(t)
+	db := freshDatabase(t, admin, "pgytest_ext_member_prune")
+	if _, err := db.Exec(context.Background(), `
+		create extension pg_buffercache schema public;
+		create table public.t (id integer not null);`); err != nil {
+		t.Fatal(err)
+	}
+	const table = `
+  table t:
+    columns:
+      id: {type: int}
+`
+	opts := diff.Options{Unsafe: true, Prune: true}
+	plan := planExtensionsLive(t, db, "extensions: []\nschema public:\n  view pg_buffercache:\n    grants: {pg_monitor: [select]}"+table, opts)
+	if sql := diff.Render(plan); sql != "" {
+		t.Errorf("an extension whose view the YAML declares must be kept, got:\n%s", sql)
+	}
+	if len(plan.Warnings) != 1 || plan.Warnings[0].Kind != "dependents" || !strings.Contains(plan.Warnings[0].Message, "view public.pg_buffercache, which the YAML declares") {
+		t.Errorf("want a warning naming the declaration, got %v", plan.Warnings)
+	}
+	plan = planExtensionsLive(t, db, "extensions: []\nschema public:"+table, opts)
+	if sql := strings.TrimSpace(diff.Render(plan)); sql != `drop extension "pg_buffercache";` {
+		t.Errorf("without the declaration the extension is pruned, got:\n%s", sql)
+	}
+}
+
 func TestIntegrationInitialPrivilegesIntrospected(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -238,6 +265,9 @@ func TestIntegrationInitialPrivilegesIntrospected(t *testing.T) {
 		if !live.ExtensionMembers[key] {
 			t.Errorf("ExtensionMembers lacks %s", key)
 		}
+	}
+	if got := live.MemberExtension["proc:public.pg_buffercache_pages()"]; got != "pg_buffercache" {
+		t.Errorf("MemberExtension of pg_buffercache_pages() = %q", got)
 	}
 	if !live.BaseTypes["public.hstore"] || live.Types["public.hstore"] {
 		t.Errorf("hstore is a base type: BaseTypes=%v Types=%v", live.BaseTypes["public.hstore"], live.Types["public.hstore"])

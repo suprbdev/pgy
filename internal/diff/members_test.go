@@ -393,6 +393,37 @@ func TestSimulateKeepsMembersOfCreatedExtensionPending(t *testing.T) {
 	}
 }
 
+func TestExtensionWithDeclaredMemberIsNotPruned(t *testing.T) {
+	live := memberLive()
+	live.Extensions["pg_buffercache"] = true
+	live.ExtensionDefs = map[string]*LiveExtension{"pg_buffercache": {Schema: "public", Version: "1.5", Relocatable: true}}
+	norm := addMemberFunction(live, "public.pg_buffercache_pages()")
+	live.MemberExtension = map[string]string{"proc:" + norm: "pg_buffercache"}
+	lt := newLiveTable()
+	lt.Columns["id"] = &LiveColumn{Type: "integer"}
+	live.Tables["public.t"] = lt
+	d := &schema.Database{
+		Extensions: []*schema.Extension{},
+		Tables:     map[string]*schema.Table{"public.t": {Name: "t", Columns: map[string]*schema.Column{"id": {Type: "int"}}}},
+		Functions: map[string]*schema.Function{
+			"public.pg_buffercache_pages()": {Schema: "public", Name: "pg_buffercache_pages", ArgsSig: "()", Grants: map[string][]string{"mon": {"execute"}}},
+		},
+	}
+	p := PlanWith(live, d, pruneAll)
+	if drops := extensionDrops(p); len(drops) != 0 {
+		t.Errorf("an extension whose function the YAML declares must be kept, got %v", drops)
+	}
+	if len(p.Warnings) != 1 || p.Warnings[0].Kind != "dependents" || !strings.Contains(p.Warnings[0].Message, "extension pg_buffercache is not listed under extensions but still in use (function public.pg_buffercache_pages(), which the YAML declares)") {
+		t.Errorf("want a warning naming the declaration, got %v", p.Warnings)
+	}
+
+	d.Functions = nil
+	p = PlanWith(live, d, pruneAll)
+	if drops := extensionDrops(p); !reflect.DeepEqual(drops, []string{`drop extension "pg_buffercache";`}) {
+		t.Errorf("without the declaration the extension is pruned, got %v", drops)
+	}
+}
+
 func TestAttributeOnlyPendingPublicIsGranted(t *testing.T) {
 	d := &schema.Database{
 		Extensions: []*schema.Extension{{Name: "pg_buffercache"}},
