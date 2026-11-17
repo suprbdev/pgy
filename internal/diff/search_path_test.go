@@ -304,9 +304,12 @@ func TestScopedLiveKeepsCallerSnapshot(t *testing.T) {
 	t.Cleanup(func() { currentScope.Store(publicScope) })
 	sig := publicScope.functionSignature("app.f(p ext.t)")
 	l := &Live{
-		FunctionDefs: map[string]*LiveFunction{sig: {}},
-		Owners:       map[string]string{"proc:" + sig: "owner", "rel:app.t": "owner"},
-		SearchPath:   []string{"ext", "public"},
+		FunctionDefs:     map[string]*LiveFunction{sig: {}},
+		Owners:           map[string]string{"proc:" + sig: "owner", "rel:app.t": "owner"},
+		ExtensionMembers: map[string]bool{"proc:" + sig: true},
+		MemberExtension:  map[string]string{"proc:" + sig: "e"},
+		InitPrivs:        map[string]map[string]map[string]bool{"proc:" + sig: {"app": {"execute": true}}},
+		SearchPath:       []string{"ext", "public"},
 	}
 	s := l.scoped()
 	if s == l || l.FunctionDefs[sig] == nil || l.Owners["proc:"+sig] == "" {
@@ -314,6 +317,9 @@ func TestScopedLiveKeepsCallerSnapshot(t *testing.T) {
 	}
 	if s.FunctionDefs["app.f(p t)"] == nil || s.Owners["proc:app.f(p t)"] != "owner" || s.Owners["rel:app.t"] != "owner" {
 		t.Errorf("scoped keys: %v %v", s.FunctionDefs, s.Owners)
+	}
+	if grants, ok := s.InitialGrants("proc:app.f(p t)", "execute"); !ok || !grants["app"]["execute"] || s.MemberExtension["proc:app.f(p t)"] != "e" {
+		t.Errorf("an extension member must be found by its signature in the scope: %v %v %v", s.ExtensionMembers, s.MemberExtension, s.InitPrivs)
 	}
 	if again := s.scoped(); again != s {
 		t.Error("a scoped snapshot must not be rekeyed again")
