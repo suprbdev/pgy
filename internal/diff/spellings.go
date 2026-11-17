@@ -563,7 +563,7 @@ func excludeExpression(ct *schema.Constraint) string {
 	if !ok {
 		return ct.Expression
 	}
-	return ct.Expression[:e.with] + renderStorageParams(excludeStorage(ct)) + ct.Expression[e.withEnd:]
+	return ct.Expression[:e.with] + renderStorageParams(excludeStorage(ct), ct.WithOrder) + ct.Expression[e.withEnd:]
 }
 
 // excludeMatchesLive compares an exclusion constraint with its live

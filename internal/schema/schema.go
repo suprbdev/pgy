@@ -9,6 +9,7 @@ import (
     "sort"
     "strings"
     "time"
+    "unicode/utf8"
 
     yaml "gopkg.in/yaml.v3"
 )
@@ -100,6 +101,7 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
+    WithOrder       []string          // materialized views: order of the With keys in the YAML (filled from node tree)
     Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
@@ -178,6 +180,65 @@ func (d *Database) WrapperExtension(name string) string {
 func (d *Database) DeclaresExtension(name string) bool {
     for _, ext := range d.Extensions {
         if ext != nil && ext.Name == name { return true }
+    }
+    return false
+}
+
+// SequenceColumn is a serial or identity column: the table's key
+// ("schema.table") and the column's name.
+type SequenceColumn struct {
+    Table, Column string
+}
+
+// ColumnSequences maps the sequences that declared serial and identity
+// columns create ("schema.sequence") to their column. A sequence has the
+// name PostgreSQL gives it: the identity's sequenceName (in the table's
+// schema when unqualified), or <table>_<column>_seq with both names
+// shortened to fit 63 bytes. A name PostgreSQL numbers because it is taken
+// is not predicted.
+func (d *Database) ColumnSequences() map[string]SequenceColumn {
+    out := map[string]SequenceColumn{}
+    for fq, t := range d.Tables {
+        if t == nil { continue }
+        nsp, table, ok := strings.Cut(fq, ".")
+        if !ok { nsp, table = "public", fq }
+        for cn, c := range t.Columns {
+            if c == nil || c.Identity == "" && !IsSerialType(c.Type) { continue }
+            seq := nsp + "." + ColumnSequenceName(table, cn)
+            if c.Identity != "" && c.IdentityOptions != nil && c.IdentityOptions.Name != "" {
+                seq = c.IdentityOptions.Name
+                if !strings.Contains(seq, ".") { seq = nsp + "." + seq }
+            }
+            out[seq] = SequenceColumn{Table: nsp + "." + table, Column: cn}
+        }
+    }
+    return out
+}
+
+// ColumnSequenceName returns the name PostgreSQL chooses for the sequence
+// of a serial or identity column: <table>_<column>_seq, where the longer of
+// the two names is shortened, a byte at a time and never inside a
+// multibyte character, until the whole fits in 63 bytes.
+func ColumnSequenceName(table, column string) string {
+    const avail = 63 - len("_seq") - len("_")
+    t, c := len(table), len(column)
+    for t+c > avail {
+        if t > c { t-- } else { c-- }
+    }
+    return clipBytes(table, t) + "_" + clipBytes(column, c) + "_seq"
+}
+
+func clipBytes(s string, n int) string {
+    if len(s) <= n { return s }
+    for n > 0 && !utf8.RuneStart(s[n]) { n-- }
+    return s[:n]
+}
+
+// IsSerialType reports whether t is one of the serial pseudo-types.
+func IsSerialType(t string) bool {
+    switch strings.ToLower(strings.TrimSpace(t)) {
+    case "serial", "smallserial", "bigserial", "serial2", "serial4", "serial8":
+        return true
     }
     return false
 }
@@ -370,6 +431,7 @@ type Table struct {
     PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
     PrimaryKeyInclude []string `yaml:"-"` // INCLUDE (non-key) columns of the primary key's index
     PrimaryKeyWith map[string]string `yaml:"-"` // storage parameters of the primary key's index
+    PrimaryKeyWithOrder []string  `yaml:"-"` // order of the PrimaryKeyWith keys in the YAML (filled from node tree)
     PrimaryKeyTablespace string     `yaml:"-"` // tablespace of the primary key's index; "" = unmanaged
     ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
@@ -398,6 +460,7 @@ type Table struct {
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
+    WithOrder   []string          `yaml:"-"` // order of the With keys in the YAML (filled from node tree)
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
@@ -438,6 +501,7 @@ type Constraint struct {
     Columns           []string // for unique
     Include           []string // unique: INCLUDE (non-key) columns
     With              map[string]string // unique: index storage parameters, WITH (name = value)
+    WithOrder         []string          // order of the With keys in the YAML (filled from node tree)
     Tablespace        string            // unique and exclude: USING INDEX TABLESPACE; "" = unmanaged
     NullsNotDistinct  bool     // unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     Deferrable        bool     // unique/exclude
@@ -488,6 +552,7 @@ type Index struct {
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
+    WithOrder []string          // order of the With keys in the YAML (filled from node tree)
     Tablespace string           // TABLESPACE; "" = unmanaged
     Concurrently bool           // build on existing tables with CREATE INDEX CONCURRENTLY
     Comment   string            // empty means unmanaged
@@ -808,7 +873,7 @@ func Merge(dbs []*Database) *Database {
                     existing.Unlogged = t.Unlogged
                 }
                 if t.With != nil {
-                    existing.With = t.With
+                    existing.With, existing.WithOrder = t.With, t.WithOrder
                 }
                 if t.Tablespace != "" {
                     existing.Tablespace = t.Tablespace
@@ -819,6 +884,7 @@ func Merge(dbs []*Database) *Database {
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey, existing.PrimaryKeyName, existing.PrimaryKeyComment = t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment
                     existing.PrimaryKeyInclude, existing.PrimaryKeyWith, existing.PrimaryKeyTablespace = t.PrimaryKeyInclude, t.PrimaryKeyWith, t.PrimaryKeyTablespace
+                    existing.PrimaryKeyWithOrder = t.PrimaryKeyWithOrder
                 }
                 if t.ForceRowLevelSecurity != nil {
                     existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
@@ -1116,6 +1182,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
         }
     }
     fillFDWScalarsFromNode(node, out)
+    fillWithOrderFromNode(node, out)
     return out, nil
 }
 
