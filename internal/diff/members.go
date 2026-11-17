@@ -46,7 +46,7 @@ func (l *Live) scanInitPrivs(rows pgx.Rows) error {
 			return err
 		}
 		if sig, ok := strings.CutPrefix(key, "proc:"); ok {
-			key = "proc:" + normalizeFunctionSignature(sig)
+			key = "proc:" + publicScope.functionSignature(sig)
 		}
 		if l.InitPrivs[key] == nil {
 			l.InitPrivs[key] = map[string]map[string]bool{}

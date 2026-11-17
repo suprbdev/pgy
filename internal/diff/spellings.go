@@ -30,25 +30,17 @@ func objectLiterals(masked string) map[int]bool {
 	return out
 }
 
-// cutPublic removes a leading public. qualifier from an object name.
-func cutPublic(name string) (string, bool) {
-	for _, p := range []string{"public.", `"public".`} {
-		if rest, ok := strings.CutPrefix(name, p); ok {
-			return rest, true
-		}
-	}
-	return name, false
-}
-
-// objectLiteralNames collects, without their public. qualifier, the object
-// names that defs spell as string literals (see objectLiterals).
+// objectLiteralNames collects, without their optional qualifier (see
+// nameScope), the object names that defs spell as string literals (see
+// objectLiterals).
 func objectLiteralNames(defs ...string) map[string]bool {
+	sc := activeScope()
 	names := map[string]bool{}
 	for _, def := range defs {
 		masked, lits := maskStringLiterals(def)
 		for i := range objectLiterals(masked) {
 			if i < len(lits) {
-				name, _ := cutPublic(lits[i][1 : len(lits[i])-1])
+				name, _ := sc.unqualifyLiteral(lits[i][1 : len(lits[i])-1])
 				names[name] = true
 			}
 		}
@@ -56,22 +48,24 @@ func objectLiteralNames(defs ...string) map[string]bool {
 	return names
 }
 
-// unqualifyObjectLiterals drops the public. qualifier inside the string
-// literals of s that name a database object, and inside those that spell a
-// name in names. PostgreSQL prints 'public.seq'::regclass as 'seq'::regclass
-// while public is on the search_path, and YAML often leaves the cast out
-// (to_tsvector('public.cfg', body)), so such a literal is only known to be
-// an object name from the other side of the comparison. Other literals keep
-// the qualifier: there 'public.x' and 'x' are different values.
+// unqualifyObjectLiterals drops an optional qualifier (see nameScope)
+// inside the string literals of s that name a database object, and inside
+// those that spell a name in names. PostgreSQL prints 'public.seq'::regclass
+// as 'seq'::regclass while public is on the search_path, and YAML often
+// leaves the cast out (to_tsvector('public.cfg', body)), so such a literal
+// is only known to be an object name from the other side of the comparison.
+// Other literals keep the qualifier: there 'public.x' and 'x' are different
+// values.
 func unqualifyObjectLiterals(s string, names map[string]bool) string {
-	if !strings.Contains(s, "public") {
+	sc := activeScope()
+	if !sc.mentions(s) {
 		return s
 	}
 	masked, lits := maskStringLiterals(s)
 	marked := objectLiterals(masked)
 	changed := false
 	for i, lit := range lits {
-		name, ok := cutPublic(lit[1 : len(lit)-1])
+		name, ok := sc.unqualifyLiteral(lit[1 : len(lit)-1])
 		if ok && (marked[i] || names[name]) {
 			lits[i] = "'" + name + "'"
 			changed = true
@@ -117,8 +111,9 @@ func splitTriggerCall(stmt string) (head, call string, ok bool) {
 }
 
 // parseTriggerCall splits a trigger's function call into the function name,
-// lower-cased unless quoted and without a public or pg_catalog qualifier,
-// and its arguments as the strings PostgreSQL stores in pg_trigger.tgargs.
+// lower-cased unless quoted and without an optional (see nameScope) or
+// pg_catalog qualifier, and its arguments as the strings PostgreSQL stores
+// in pg_trigger.tgargs.
 func parseTriggerCall(call string) (name string, args []string, ok bool) {
 	call = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(call), ";"))
 	open, inIdent := -1, false
@@ -163,7 +158,7 @@ func triggerFunctionName(s string) string {
 		}
 	}
 	parts = append(parts, cur.String())
-	if len(parts) == 2 && (parts[0] == "public" || parts[0] == "pg_catalog") {
+	if len(parts) == 2 && (parts[0] == "pg_catalog" || activeScope().schemas[parts[0]]) {
 		parts = parts[1:]
 	}
 	return strings.Join(parts, ".")
@@ -336,8 +331,25 @@ var (
 	excludeCollateRe    = regexp.MustCompile(`(?i)^collate\s+((?:"(?:[^"]|"")+"|[\w$]+)(?:\.(?:"(?:[^"]|"")+"|[\w$]+))?)\s*`)
 	excludeOpclassRe    = regexp.MustCompile(`^((?:"(?:[^"]|"")+"|[\w$]+)(?:\.(?:"(?:[^"]|"")+"|[\w$]+))?)\s*`)
 	excludeOrderingRe   = regexp.MustCompile(`(?i)^(?:asc|desc|nulls)\b`)
-	catalogOperatorRe   = regexp.MustCompile(`^operator\("?pg_catalog"?\.(.+)\)$`)
+	visibleOperatorRe   = regexp.MustCompile(`(?i)\boperator\s*\(\s*"?(?:pg_catalog|public)"?\s*\.\s*([^\s()]+)\s*\)`)
 )
+
+// bareVisibleOperators turns each OPERATOR(pg_catalog.op) and
+// OPERATOR(public.op) of a declared definition into the bare operator.
+// Introspection searches both schemas, so PostgreSQL prints an operator it
+// finds there without them. It prints the qualified form only when the bare
+// operator resolves to another one, which is why a live definition keeps it.
+func bareVisibleOperators(s string) string {
+	masked, lits := maskStringLiterals(s)
+	bare := visibleOperatorRe.ReplaceAllString(masked, "$1")
+	if bare == masked {
+		return s
+	}
+	return exprPlaceholderRe.ReplaceAllStringFunc(bare, func(m string) string {
+		i, _ := strconv.Atoi(exprPlaceholderRe.FindStringSubmatch(m)[1])
+		return lits[i]
+	})
+}
 
 // closingParen returns the index of the parenthesis that closes the one at
 // s[open], skipping string literals and quoted identifiers, or -1.
@@ -553,8 +565,10 @@ func excludeExpression(ct *schema.Constraint) string {
 // excludeMatchesLive compares an exclusion constraint with its live
 // definition element by element, so that spellings PostgreSQL does not
 // print compare equal: a missing USING (btree), an operator class that is
-// the default one for the column, and operator(pg_catalog.op) for an
-// operator found without the qualifier. Storage parameters and the index
+// the default one for the column, operator(pg_catalog.op) or
+// operator(public.op) for an operator found without the qualifier, and an
+// operator spelled with or without a schema on the session's search_path
+// (see nameScope). Storage parameters and the index
 // tablespace are left out, since they are changed in place. ok is false
 // when either definition cannot be parsed.
 func excludeMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) (equal, ok bool) {
@@ -571,6 +585,7 @@ func excludeMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) (equa
 		return false, true
 	}
 	opclasses := lt.IndexOpclasses[name]
+	sc := activeScope()
 	for i, w := range want.elements {
 		h := have.elements[i]
 		if !constraintDefsEqual(w.key, h.key) || collationName(w.collation) != collationName(h.collation) || w.ordering != h.ordering || !opclassParamsEqual(w.opclassParams, h.opclassParams) {
@@ -588,7 +603,8 @@ func excludeMatchesLive(lt *LiveTable, name string, ct *schema.Constraint) (equa
 		case !opclassMatches(w.opclass, opclasses[i]):
 			return false, true
 		}
-		if w.operator != h.operator && catalogOperatorRe.ReplaceAllString(w.operator, "$1") != h.operator {
+		wop, hop := sc.unqualifySQL(w.operator), sc.unqualifySQL(h.operator)
+		if wop != hop && visibleOperatorRe.ReplaceAllString(wop, "$1") != hop {
 			return false, true
 		}
 	}
