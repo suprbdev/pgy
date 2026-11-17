@@ -40,9 +40,12 @@ func typeChangingColumns(live *Live, desired *schema.Database, unsafe bool) map[
 // dependents first, before its columns change type; early holds the foreign
 // key drops that must precede every table's changes; post restores the
 // grants, comments and owners of recreated views that the YAML leaves
-// unmanaged. A dependent the YAML doesn't declare, which pgy can't recreate,
-// gets a warning and leaves the column's dependents alone, as does a
-// generated column that stays generated.
+// unmanaged. A view that an earlier statement of the plan already drops
+// (see planViewChanges and recreateUpdateDependents) gets DROP VIEW IF
+// EXISTS, which still puts the type change ahead of the view's recreation.
+// A dependent the YAML doesn't declare, which pgy can't recreate, gets a
+// warning and leaves the column's dependents alone, as does a generated
+// column that stays generated.
 func recreateColumnDependents(live *Live, desired *schema.Database, opts Options) (out *Live, early []string, pre map[string][]string, post []string, warns []Warning) {
     out = live
     if live == nil || desired == nil { return out, nil, nil, nil, nil }
@@ -106,9 +109,10 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
             for _, v := range views {
                 if dropped["view:"+v] { continue }
                 dropped["view:"+v] = true
-                kind := "view"
+                kind, guard := "view", ""
                 if live.MatViews[v] { kind = "materialized view" }
-                pre[fq] = append(pre[fq], fmt.Sprintf("drop %s %s;", kind, pqIdent(v)))
+                if !live.Views[v] && !live.MatViews[v] { guard = "if exists " }
+                pre[fq] = append(pre[fq], fmt.Sprintf("drop %s %s%s;", kind, guard, pqIdent(v)))
                 post = append(post, restoreViewAttributes(live, desired.Views[v], v, kind)...)
                 delete(out.Views, v)
                 delete(out.MatViews, v)

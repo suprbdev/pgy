@@ -160,17 +160,19 @@ func sortedVersions(m map[string][]string) []string {
 // IntrospectExtensions loads what planning the extensions needs beyond
 // Introspect, and only when it is needed: the server's available
 // extensions and their requirements when one has to be created or updated,
-// the update paths of the installed ones when a version differs, the
-// member names of extensions that have to move to another schema, and the
-// objects that use an extension opts lets pruning drop. Without it the plan
-// is still valid: statements are ordered by dependsOn and the requirements
-// of PostgreSQL's own extensions, nothing is checked against the server,
-// objects that follow a moved extension are compared in their old
-// spelling, and DROP EXTENSION is planned without looking for dependents.
+// the update paths of the installed ones and the views and routines that
+// use them when a version differs, the member names of extensions that
+// have to move to another schema, and the objects that use an extension
+// opts lets pruning drop. Without it the plan is still valid: statements
+// are ordered by dependsOn and the requirements of PostgreSQL's own
+// extensions, nothing is checked against the server, objects that follow a
+// moved extension are compared in their old spelling, and ALTER EXTENSION
+// ... UPDATE and DROP EXTENSION are planned without looking for
+// dependents.
 func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, desired *schema.Database, opts Options) error {
     if live == nil || desired == nil || pool == nil { return nil }
     create, update := false, false
-    moving := []string{}
+    moving, updating := []string{}, []string{}
     for _, ext := range desired.Extensions {
         if ext == nil || ext.Name == "" { continue }
         le := live.ExtensionDefs[ext.Name]
@@ -179,7 +181,7 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
             create = true
         case le == nil:
         default:
-            if ext.Version != "" && ext.Version != le.Version { update = true }
+            if ext.Version != "" && ext.Version != le.Version { update, updating = true, append(updating, ext.Name) }
             if ext.Schema != "" && ext.Schema != le.Schema && le.Relocatable { moving = append(moving, quoteString(ext.Name)) }
         }
     }
@@ -224,6 +226,7 @@ func IntrospectExtensions(ctx context.Context, pool *pgxpool.Pool, live *Live, d
             }
             return nil
         })
+        queryUpdateDependents(batch, live, updating)
     }
     if len(moving) > 0 {
         batch.add(`
