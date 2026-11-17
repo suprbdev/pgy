@@ -884,6 +884,15 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 			add(Error, "foreign table "+k, "uses server %s, which servers: does not declare", t.Foreign.Server)
 		}
 	}
+	servers := newRenameGroup()
+	for k := range d.Servers {
+		servers.declared[k] = true
+	}
+	for _, k := range sortedKeys(d.Servers) {
+		if s := d.Servers[k]; s != nil && s.RenamedFrom != "" {
+			servers.check("server "+k, s.RenamedFrom, add)
+		}
+	}
 	for _, k := range sortedKeys(d.Tables) {
 		t := d.Tables[k]
 		if t == nil {

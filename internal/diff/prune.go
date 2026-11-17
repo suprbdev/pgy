@@ -61,7 +61,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || attachesPartition(dt, lt) { continue }
+        if dt == nil || lt == nil || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {
@@ -122,6 +122,44 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
     late = append(late, dropList("text search dictionary", undeclared(live.TSDictionaries, func(k string) bool { return desired.TSDictionaries[k] != nil }, "tsdict"))...)
     late = append(late, dropList("collation", undeclared(live.Collations, func(k string) bool { return desired.Collations[k] != nil }, "coll"))...)
     return early, late
+}
+
+// pruneServers returns the DROP statements for the live servers a servers
+// block does not list, each after the drops of its user mappings, which
+// DROP SERVER does not remove. A server that foreign tables still use once
+// planPrune's drops have run is kept and reported instead, since dropping
+// it would fail. Without a servers block, servers are unmanaged.
+func pruneServers(live *Live, desired *schema.Database, migrationsTable string) (drops []string, warnings []Warning) {
+    if desired.Servers == nil { return nil, nil }
+    if migrationsTable == "" { migrationsTable = "pgy.migrations" }
+    managed := managedSchemas(desired)
+    parentOf := map[string]string{}
+    for parent, children := range live.Partitions {
+        for _, c := range children { parentOf[c] = parent }
+    }
+    pruned := func(fq string) bool {
+        for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
+        i := strings.IndexByte(fq, '.')
+        lt := live.Tables[fq]
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq]
+    }
+    users := map[string][]string{}
+    for _, fq := range sortedKeys(live.Tables) {
+        if lt := live.Tables[fq]; lt != nil && lt.Foreign != nil && !pruned(fq) { users[lt.Foreign.Server] = append(users[lt.Foreign.Server], fq) }
+    }
+    for _, name := range sortedKeys(live.Servers) {
+        if desired.Servers[name] != nil { continue }
+        if left := users[name]; len(left) > 0 {
+            warnings = append(warnings, Warning{Message: fmt.Sprintf("server %s is not in the servers block but still has foreign tables this plan keeps (%s), so it is not dropped; drop or move them first", name, strings.Join(left, ", "))})
+            continue
+        }
+        for _, role := range live.Servers[name].UserMappings {
+            if role != "public" { role = quoteIdent(role) }
+            drops = append(drops, fmt.Sprintf("drop user mapping for %s server %s;", role, quoteIdent(name)))
+        }
+        drops = append(drops, fmt.Sprintf("drop server %s;", quoteIdent(name)))
+    }
+    return drops, warnings
 }
 
 // managedSchemas returns the schemas holding at least one desired object.

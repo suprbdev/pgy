@@ -740,9 +740,7 @@ func (b *builder) tables() {
 		parent := b.d.PartitionOf[fq]
 		if lt.Foreign != nil {
 			add(t, "server", str(lt.Foreign.Server))
-			if len(lt.Foreign.Options) > 0 {
-				add(t, "options", stringsNode(lt.Foreign.Options))
-			}
+			add(t, "options", stringsNode(lt.Foreign.Options))
 		}
 		if parent == "" {
 			if len(lt.Inherits) > 0 {
@@ -846,10 +844,8 @@ func (b *builder) servers() *node {
 		add(s, "wrapper", str(ls.Wrapper))
 		addStr(s, "type", ls.Type)
 		addStr(s, "version", ls.Version)
-		if len(ls.Options) > 0 {
-			add(s, "options", stringsNode(ls.Options))
-		}
-		if b.opts.Owners {
+		add(s, "options", stringsNode(ls.Options))
+		if b.opts.Owners && ls.Owner != b.live.CurrentUser {
 			addStr(s, "owner", ls.Owner)
 		}
 		if g := grantsNode(ls.Grants); g != nil {
@@ -873,7 +869,14 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 			if lt.OfType != "" {
 				parent = &diff.LiveColumn{Nullable: true, Storage: lc.TypeStorage}
 			}
-			if c := inheritedColumnNode(lc, parent); c != nil {
+			c := inheritedColumnNode(lc, parent)
+			if lt.Foreign != nil {
+				if c == nil {
+					c = flowMap()
+				}
+				add(c, "options", stringsNode(lc.FDWOptions))
+			}
+			if c != nil {
 				add(cols, cn, c)
 			}
 			continue
@@ -897,7 +900,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		if lc.StatisticsTarget != nil {
 			add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
 		}
-		if len(lc.FDWOptions) > 0 {
+		if lt.Foreign != nil {
 			add(c, "options", stringsNode(lc.FDWOptions))
 		}
 		for _, o := range [][2]string{{"n_distinct", "nDistinct"}, {"n_distinct_inherited", "nDistinctInherited"}} {

@@ -95,6 +95,11 @@
           "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the server (usage), e.g. {app_user: [usage]}." },
           "comment": {
             "type": "string"
+          },
+          "renamedFrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Previous name. When only that name exists live, pgy renames the server (ALTER SERVER ... RENAME TO) instead of creating a new one; once applied it is a no-op."
           }
         }
       }
@@ -1125,6 +1130,10 @@
         "partitionOf": {"type": "string", "description": "Parent table this table is a partition of (schema-qualified or resolved against the current schema)."},
         "forValues": {"$ref": "#/definitions/partitionSpec"},
         "default": {"type": "boolean", "description": "DEFAULT partition (used with partitionOf instead of forValues)."},
+        "inherits": {
+          "$ref": "#/definitions/stringList",
+          "description": "Parent tables (CREATE FOREIGN TABLE ... INHERITS). Inherited columns are left to the parents; list one without a type to set what this table keeps of its own for it."
+        },
         "options": {
           "type": "object",
           "description": "Foreign-data wrapper table options (OPTIONS (...)), e.g. schema_name and table_name for postgres_fdw. Authoritative when present: unlisted options are dropped.",
@@ -1164,21 +1173,34 @@
           }
         },
         "triggers": {"type": "object", "additionalProperties": {"$ref": "#/definitions/trigger"}}
+      },
+      "if": { "not": { "anyOf": [ { "required": ["partitionOf"] }, { "required": ["inherits"] } ] } },
+      "then": {
+        "properties": {
+          "columns": { "type": "object", "additionalProperties": { "required": ["type"] } }
+        }
       }
     },
     "foreignColumn": {
       "type": "object",
-      "required": [
-        "type"
-      ],
       "additionalProperties": false,
-      "description": "Foreign table column: a table column without keys, identity, generation or storage settings, plus the wrapper's column options.",
+      "description": "Foreign table column: a table column without keys, identity or compression, plus the wrapper's column options. A column a foreign partition or inheritance child gets from its parent is listed without a type, to set what the child keeps of its own for it.",
       "properties": {
         "type": {
           "type": "string",
           "minLength": 1,
           "description": "PostgreSQL data type, e.g. uuid, text, timestamptz, numeric(10,2)."
         },
+        "generated": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Generated column expression: GENERATED ALWAYS AS (expr) STORED. The value is computed locally and sent to the foreign server on writes."
+        },
+        "virtual": {
+          "type": "boolean",
+          "description": "With generated: VIRTUAL (computed when read) instead of STORED. PostgreSQL 18+."
+        },
+        "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"], "description": "Column storage mode (SET STORAGE)." },
         "nullable": {
           "type": "boolean"
         },
