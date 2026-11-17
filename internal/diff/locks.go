@@ -30,7 +30,7 @@ var (
     lockIndexRe     = regexp.MustCompile(`^create( unique)? index if not exists (` + quotedName + `) on ` + lockFQ)
     lockConstraintRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add constraint (` + quotedName + `) (foreign key|check|unique|exclude)`)
     lockPrimaryKeyRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add primary key`)
-    lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) set not null;$`)
+    lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` (?:alter column (` + quotedName + `) set not null|add constraint ` + quotedName + ` not null (` + quotedName + `));$`)
     lockTypeRe      = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) type (.+);$`)
     lockLoggedRe    = regexp.MustCompile(`^alter table ` + lockFQ + ` set (logged|unlogged);$`)
     lockAddColumnRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add column (` + quotedName + `) (.+);$`)
@@ -113,7 +113,7 @@ func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
             continue
         }
         if m := lockNotNullRe.FindStringSubmatch(stmt); m != nil {
-            if fq, col := unquoteFQ(m[1]), unquoteFQ(m[2]); exists(fq) && !hasNotNullCheck(live.Tables[fq], col) {
+            if fq, col := unquoteFQ(m[1]), unquoteFQ(m[2]+m[3]); exists(fq) && !hasNotNullCheck(live.Tables[fq], col) {
                 warn(fq, stmt, "SET NOT NULL on %s.%s scans the whole table under an ACCESS EXCLUSIVE lock; a validated CHECK (%s IS NOT NULL) constraint, added in an earlier migration, lets PostgreSQL skip the scan", fq, col, col)
             }
             continue

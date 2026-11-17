@@ -35,7 +35,7 @@ schema public:
     server: warehouse
     options: {schema_name: public, table_name: orders}
     columns:
-      id: {type: bigint, notNull: true}
+      id: {type: bigint, notNull: true, notNullName: remote_orders_id_nn}
       total: {type: "numeric(12,2)", nullable: true, default: 0, options: {column_name: amount}, comment: total}
     constraints: {remote_orders_total: {type: check, expression: total >= 0}}
     grants: {app_read: [select]}
@@ -94,7 +94,7 @@ schema public:
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:
       id: {type: int, identity: {generated: by default, start: 1000, increment: 5, cycle: false}}
-      price: {type: numeric}
+      price: {type: numeric, notNullName: orders_price_required}
       qty: {type: int, statisticsTarget: 1000, renamedFrom: quantity}
       total: {type: numeric, generated: price * qty}
       doubled: {type: int, generated: qty * 2, virtual: true}

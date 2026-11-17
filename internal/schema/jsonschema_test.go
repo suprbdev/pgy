@@ -131,6 +131,7 @@ tables:
     schema: app
     columns:
       - {name: id, type: bigint, identity: always}
+      - {name: created_at, type: timestamptz, notNullName: events_created_at_required}
     partitionBy: {range: [created_at]}
 `,
     }

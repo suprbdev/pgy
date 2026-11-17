@@ -341,6 +341,34 @@ schema app:
 	}
 }
 
+func TestValidateNotNullName(t *testing.T) {
+	p := write(t, t.TempDir(), "n.yml", `
+schema app:
+  table t:
+    columns:
+      id: {type: int, notNullName: t_id_required}
+      a: {type: int, nullable: true, notNullName: a_must_exist}
+    partitionBy: {type: list, columns: [id]}
+  table t1:
+    partitionOf: app.t
+    forValues: {in: [1]}
+    columns:
+      id: {notNullName: t1_id_required}
+`)
+	got := messages(Files([]string{p}))
+	for _, want := range []string{
+		"table app.t: column a sets notNullName but is nullable",
+		"table app.t1: column id: notNullName is ignored on a column of a partition",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "column id sets notNullName") || strings.Contains(got, "app.t: column id: notNullName") {
+		t.Errorf("a NOT NULL column the table declares takes a name:\n%s", got)
+	}
+}
+
 func TestValidateData(t *testing.T) {
 	p := write(t, t.TempDir(), "d.yml", `
 schema app:

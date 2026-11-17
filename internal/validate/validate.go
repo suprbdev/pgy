@@ -328,6 +328,14 @@ func Database(d *schema.Database) []Issue {
 			if c == nil {
 				continue
 			}
+			if c.NotNullName != "" {
+				switch {
+				case t.PartitionOf != "" || t.Of != "" || strings.TrimSpace(c.Type) == "":
+					add(Warning, obj, "column %s: notNullName is ignored on a column of a partition, a typed table or an inheritance child; it names the constraint of a column the table declares with a type", cn)
+				case c.Nullable:
+					add(Warning, obj, "column %s sets notNullName but is nullable, so there is no NOT NULL constraint to name", cn)
+				}
+			}
 			if t.Of != "" {
 				switch {
 				case strings.TrimSpace(c.Type) != "":
