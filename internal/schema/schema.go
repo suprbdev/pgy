@@ -101,6 +101,7 @@ type View struct {
     CheckOption     string // views: local | cascaded | none; "" = unmanaged
     WithData        *bool  // materialized views: false = WITH NO DATA at create; nil = WITH DATA
     With            map[string]string // materialized views: storage parameters; nil = unmanaged, present = authoritative
+    WithOrder       []string          // materialized views: order of the With keys in the YAML (filled from node tree)
     Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
     Indexes         []*Index // materialized views only
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
@@ -430,6 +431,7 @@ type Table struct {
     PrimaryKeyComment string   `yaml:"-"` // COMMENT ON CONSTRAINT for the primary key; "" = unmanaged
     PrimaryKeyInclude []string `yaml:"-"` // INCLUDE (non-key) columns of the primary key's index
     PrimaryKeyWith map[string]string `yaml:"-"` // storage parameters of the primary key's index
+    PrimaryKeyWithOrder []string  `yaml:"-"` // order of the PrimaryKeyWith keys in the YAML (filled from node tree)
     PrimaryKeyTablespace string     `yaml:"-"` // tablespace of the primary key's index; "" = unmanaged
     ForceRowLevelSecurity *bool `yaml:"-"` // FORCE ROW LEVEL SECURITY; nil = unmanaged
     Indexes    []*Index        `yaml:"-"`
@@ -458,6 +460,7 @@ type Table struct {
     Partition   *PartitionSpec `yaml:"-"` // bound spec for partition children
     Unlogged    *bool          `yaml:"-"` // UNLOGGED; nil = unmanaged
     With        map[string]string `yaml:"-"` // storage parameters; nil = unmanaged, present = authoritative
+    WithOrder   []string          `yaml:"-"` // order of the With keys in the YAML (filled from node tree)
     Tablespace  string            `yaml:"-"` // TABLESPACE; "" = unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
@@ -498,6 +501,7 @@ type Constraint struct {
     Columns           []string // for unique
     Include           []string // unique: INCLUDE (non-key) columns
     With              map[string]string // unique: index storage parameters, WITH (name = value)
+    WithOrder         []string          // order of the With keys in the YAML (filled from node tree)
     Tablespace        string            // unique and exclude: USING INDEX TABLESPACE; "" = unmanaged
     NullsNotDistinct  bool     // unique: NULLS NOT DISTINCT (PostgreSQL 15+)
     Deferrable        bool     // unique/exclude
@@ -548,6 +552,7 @@ type Index struct {
     Include   []string          // INCLUDE (non-key) columns
     NullsNotDistinct bool       // NULLS NOT DISTINCT (unique indexes, PostgreSQL 15+)
     With      map[string]string // storage parameters, WITH (name = value)
+    WithOrder []string          // order of the With keys in the YAML (filled from node tree)
     Tablespace string           // TABLESPACE; "" = unmanaged
     Concurrently bool           // build on existing tables with CREATE INDEX CONCURRENTLY
     Comment   string            // empty means unmanaged
@@ -868,7 +873,7 @@ func Merge(dbs []*Database) *Database {
                     existing.Unlogged = t.Unlogged
                 }
                 if t.With != nil {
-                    existing.With = t.With
+                    existing.With, existing.WithOrder = t.With, t.WithOrder
                 }
                 if t.Tablespace != "" {
                     existing.Tablespace = t.Tablespace
@@ -879,6 +884,7 @@ func Merge(dbs []*Database) *Database {
                 if len(existing.PrimaryKey) == 0 {
                     existing.PrimaryKey, existing.PrimaryKeyName, existing.PrimaryKeyComment = t.PrimaryKey, t.PrimaryKeyName, t.PrimaryKeyComment
                     existing.PrimaryKeyInclude, existing.PrimaryKeyWith, existing.PrimaryKeyTablespace = t.PrimaryKeyInclude, t.PrimaryKeyWith, t.PrimaryKeyTablespace
+                    existing.PrimaryKeyWithOrder = t.PrimaryKeyWithOrder
                 }
                 if t.ForceRowLevelSecurity != nil {
                     existing.ForceRowLevelSecurity = t.ForceRowLevelSecurity
@@ -1176,6 +1182,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
         }
     }
     fillFDWScalarsFromNode(node, out)
+    fillWithOrderFromNode(node, out)
     return out, nil
 }
 
