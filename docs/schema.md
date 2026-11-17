@@ -29,6 +29,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Inheritance](#inheritance)
   - [Typed tables](#typed-tables)
 - [Foreign Tables](#foreign-tables)
+- [Foreign-Data Wrappers](#foreign-data-wrappers)
 - [Views](#views)
   - [Materialized Views](#materialized-views)
 - [Types](#types)
@@ -41,6 +42,7 @@ This document describes the structure and format of the YAML schema files used b
   - [Transforms](#transforms)
 - [Aggregates](#aggregates)
 - [Procedures](#procedures)
+- [Languages](#languages)
 - [Collations](#collations)
 - [Text Search](#text-search)
 - [Row Level Security](#row-level-security)
@@ -59,7 +61,7 @@ This document describes the structure and format of the YAML schema files used b
 
 ## Overview
 
-Schema files declare the database you want: schemas, tables (with columns, keys, indexes, constraints, triggers, rules, policies, partitions and inheritance), views and materialized views, types, domains, sequences, functions, procedures and aggregates, collations and text search configurations, roles, grants, ownership and default privileges, publications, event triggers, and the rows of reference tables. `pgy diff` compares them with a live PostgreSQL database (15–18) and writes the SQL that brings the database in line. Anything that could lose data needs `--unsafe`, and dropping whole objects also needs `--prune`.
+Schema files declare the database you want: schemas, tables (with columns, keys, indexes, constraints, triggers, rules, policies, partitions and inheritance), views and materialized views, types, domains, sequences, functions, procedures and aggregates, collations and text search configurations, foreign-data wrappers, servers and foreign tables, roles, grants (including those on procedural languages), ownership and default privileges, publications, event triggers, and the rows of reference tables. `pgy diff` compares them with a live PostgreSQL database (15–18) and writes the SQL that brings the database in line. Anything that could lose data needs `--unsafe`, and dropping whole objects also needs `--prune`.
 
 ## Editor Support
 
@@ -237,6 +239,25 @@ Some definitions are compared as text only:
 - **Triggers on views, rule conditions (`where`), publication row filters, extended statistics expressions and partition bounds.**
 - **Definitions that match as text are not looked at again.** A difference the normalisation hides stays hidden: a cast that was added or removed (an index on `email::text` against one on the `citext` column `email`), or a function in `public` against one of the same name in `pg_catalog`.
 
+A function body is resolved when the function runs, and PostgreSQL 17 and later run `CREATE INDEX`, `REINDEX`, `REFRESH MATERIALIZED VIEW` and the other maintenance commands with `search_path` set to `pg_catalog, pg_temp`, whatever the session has. A function those commands call then finds nothing its body leaves unqualified, objects in `public` included: the usual immutable SQL wrapper around an extension function, used in an index, fails with `function unaccent(text) does not exist` as soon as the index is built over existing rows. Qualify what the body calls, including an object it names in a string, or give the function a path of its own with `set: {search_path: ...}`:
+
+```yaml
+extensions:
+  - {name: unaccent, schema: public}
+schema app:
+  function f_unaccent(text):
+    returns: text
+    language: sql
+    immutable: true
+    body: select public.unaccent('public.unaccent', $1)
+  table city:
+    dependsOn: [function app.f_unaccent(text)]
+    columns:
+      name: {type: text}
+    indexes:
+      city_name_unaccent: {columns: [app.f_unaccent(name)]}
+```
+
 ## Merging across files
 
 `pgy diff` accepts multiple schema files and merges them before diffing. When
@@ -329,6 +350,8 @@ Extension statements come right after `CREATE SCHEMA`, before every object that 
 
 With a connection, `pgy diff` also warns about an extension the server does not offer, a `version` it cannot install, and a `version` the installed one has no update path to. The last case is left out of the plan, since PostgreSQL cannot downgrade an extension.
 
+Give every extension a `schema:`. Without one, an extension whose control file names no schema goes into the first schema of the `search_path`, and PostgreSQL's default `search_path` is `"$user", public`. That matters most for a role named like the schema of pgy's migrations table: `pgy init` creates the schema `pgy`, so for a role called `pgy` it comes first, `extensions: [citext]` installs the extension into `pgy`, and the objects a hand-written migration creates without a schema land there too. Connect as a role with another name, or keep the migrations table in another schema with `--migrations-table` (`migrations_table` in `.pgy.yml`).
+
 Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
 
 ### Removing extensions
@@ -350,7 +373,7 @@ PostgreSQL does not record what a function body written as text (`plpgsql`, or `
 
 ### Objects an extension owns
 
-The functions, views and types that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
+The functions, views, types, languages and foreign-data wrappers that `CREATE EXTENSION` installs come and go with their extension: pgy never creates, replaces or drops them on their own. Their privileges and a few attributes can be declared, though. Leave out the part that defines the object, and the declaration manages one that already exists:
 
 | Declaration | Left out | Managed |
 |-------------|----------|---------|
@@ -358,6 +381,8 @@ The functions, views and types that `CREATE EXTENSION` installs come and go with
 | `procedure <name>(<args>):` | `body`, `language` | `security`, `set`, `grants`, `revokePublic`, `owner`, `comment` |
 | `view <name>:`, `materialized view <name>:` | `query` | `grants`, `owner`, `comment`, `columnComments` |
 | `type <name>:` | `type` | `grants`, `revokePublic`, `owner`, `comment`; base types such as `hstore` and `citext` included |
+| `languages:` entry | | `grants`. See [Languages](#languages) |
+| `foreignDataWrappers:` entry | `handler`, `validator` | `options`, `owner`, `grants`, `comment`. See [Foreign-Data Wrappers](#foreign-data-wrappers) |
 
 ```yaml
 extensions:
@@ -388,7 +413,7 @@ schema public:
 - **In the migration that creates the extension**, the statements for its objects run after `CREATE EXTENSION`: every declared attribute is set, the listed privileges are granted, and a grantee listed with `[]` is revoked. One migration is enough unless the extension grants a listed role more than the block lists, which the next diff revokes. The same applies when the plan updates an extension (`ALTER EXTENSION ... UPDATE`).
 - **An object that doesn't exist**, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the declaration.
 - **Order.** `ALTER FUNCTION` and `ALTER PROCEDURE` for changed attributes run before the tables, indexes and views of the same migration, so `function unaccent(text): {immutable: true}` can be declared together with an index on `unaccent(title)`.
-- **`pgy pull`** writes such a declaration for each function, procedure, view and type of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default, `role: []` for a grantee that lost its privileges. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were. Tables, sequences and aggregates of an extension cannot be declared this way; pull reports the ones whose privileges changed.
+- **`pgy pull`** writes such a declaration for each function, procedure, view, type, language and foreign-data wrapper of an extension whose privileges are no longer the ones the extension set, with the grantees that changed: `revokePublic: true` for a revoked default (`public: []` on a language), `role: []` for a grantee that lost its privileges. Changed attributes of an extension's functions are not pulled, since PostgreSQL does not record what they were. Tables, sequences and aggregates of an extension cannot be declared this way; pull reports the ones whose privileges changed.
 
 ## Database Settings
 
@@ -431,7 +456,8 @@ Database settings are applied after the extensions are created, so a setting an 
 | `nDistinct` | number | Planner override for the column's number of distinct values → `ALTER COLUMN ... SET (n_distinct = <n>)`: a positive count, or a negative fraction of the row count (`-1` = every value distinct). `0` removes the override. Diffed against live; omitted = unmanaged. Takes effect at the next `ANALYZE` |
 | `nDistinctInherited` | number | Like `nDistinct`, for statistics across inheritance children and partitions (`n_distinct_inherited`) |
 | `virtual` | boolean | With `generated`: emit `VIRTUAL` (computed when read, not stored) instead of `STORED`. PostgreSQL 18+. A column cannot be switched between stored and virtual in place; drop and re-add it |
-| `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. A rebuilt database names it `<table>_<column>_not_null`. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
+| `notValid` | boolean | Keep a NOT NULL column's not-null constraint `NOT VALID` (PostgreSQL 18+): existing rows aren't checked, and `pgy diff` adds it with `NOT VALID` and never validates it. Without it, pgy validates a `NOT VALID` not-null constraint it finds |
+| `notNullName` | string | Name of the column's NOT NULL constraint (PostgreSQL 18+, which records one per NOT NULL column). Used when the table or the column is created and when an existing column becomes NOT NULL; a live constraint with another name is renamed in place with `ALTER TABLE ... RENAME CONSTRAINT`. Omitted = unmanaged: a new constraint gets PostgreSQL's `<table>_<column>_not_null`, and `pgy pull` writes the key only for a name that differs from that. Before PostgreSQL 18 the key is ignored and `pgy diff` warns. It applies to columns a table or foreign table declares with a type; a partition or inheritance child takes the name from its parent |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
 
@@ -512,7 +538,7 @@ schema app:
 For columns that already exist in the live database, `pgy diff` reconciles their attributes:
 
 - **Default**: a differing `default` emits `SET DEFAULT`; removing `default` from YAML emits `DROP DEFAULT`. Comparison strips the casts PostgreSQL adds to live defaults, so `'active'` matches the live `'active'::text`, and a default PostgreSQL stores in another spelling (`'1 hour'` on an `interval` column, stored as `'01:00:00'::interval`) is [compared through the server](#how-expressions-are-compared). `nextval(...)` defaults (serial columns) are never dropped.
-- **Nullability**: emits `SET NOT NULL` / `DROP NOT NULL` to match `nullable`/`notNull`. Primary-key and identity columns never emit `DROP NOT NULL`. On PostgreSQL 18, making an existing column NOT NULL instead adds `CONSTRAINT <table>_<column>_not_null NOT NULL <column> NOT VALID`, which enforces it for new rows without scanning, and validates it in the no-transaction migration `pgy commit` writes after the main one: `VALIDATE CONSTRAINT` scans under a lock that doesn't block reads or writes. If existing rows hold NULLs, that migration fails; fix the rows and migrate again, or rerun `pgy diff`, which emits the pending `VALIDATE`. Primary key, identity and generated columns, partitions, foreign tables and columns with a validated `CHECK (col IS NOT NULL)` keep `SET NOT NULL`.
+- **Nullability**: emits `SET NOT NULL` / `DROP NOT NULL` to match `nullable`/`notNull`. Primary-key and identity columns never emit `DROP NOT NULL`. On PostgreSQL 18, making an existing column NOT NULL instead adds `CONSTRAINT <table>_<column>_not_null NOT NULL <column> NOT VALID`, which enforces it for new rows without scanning, and validates it in the no-transaction migration `pgy commit` writes after the main one: `VALIDATE CONSTRAINT` scans under a lock that doesn't block reads or writes. If existing rows hold NULLs, that migration fails; fix the rows and migrate again, or rerun `pgy diff`, which emits the pending `VALIDATE`. Primary key, identity and generated columns, partitions, foreign tables and columns with a validated `CHECK (col IS NOT NULL)` keep `SET NOT NULL`. With `notNullName` the constraint takes that name instead (`ADD CONSTRAINT <name> NOT NULL <column>` where `SET NOT NULL` would be used), and a NOT NULL column whose constraint has another name gets `RENAME CONSTRAINT`.
 - **Serial**: changing an existing column's type to `serial`, `bigserial` or `smallserial` creates its `<table>_<column>_seq` sequence owned by the column, starts it after the column's largest value, and makes `nextval()` its default.
 - **Generated**: an existing column's expression changes with `ALTER COLUMN ... SET EXPRESSION` (PostgreSQL 17+, under `--unsafe`), and dropping `generated` emits `DROP EXPRESSION`. PostgreSQL cannot make a plain column generated, so declaring `generated` on one only warns.
 - **Type** (requires `--unsafe`): a differing type emits `ALTER COLUMN ... TYPE`, with `using` appended as the cast expression when set. Types are compared normalized — `varchar(255)` matches the live `character varying(255)`, `int`/`integer`/`int4` are equivalent, and `serial` matches its live `integer` + `nextval` form. Type changes can rewrite the table or fail on incompatible casts, hence the `--unsafe` gate. PostgreSQL won't change the type of a column that a view, materialized view, trigger, policy or rule uses, so pgy drops those first, along with the views built on them, and recreates them from the YAML after the change. A recreated view keeps the live grants, comments and owner that its YAML leaves unmanaged, and a materialized view is repopulated. A dependent the YAML doesn't declare can't be recreated: `pgy diff` warns about it and leaves the column's dependents alone, so the change still fails until you declare it. The statements around the change are ordered so that nothing written for the old type is in its way:
@@ -851,7 +877,7 @@ schema app:
 - `pgy validate` rejects a typed table's column that has a type or isn't one of the type's attributes, and `of` together with `partitionOf` or `inherits`. `pgy pull` writes `of` and only the options a column sets.
 ## Foreign Tables
 
-Foreign tables read through a foreign server, which a foreign-data wrapper such as `postgres_fdw` or `file_fdw` provides. Declare the wrapper's extension under `extensions:`, the servers under a top-level `servers:` block, and each table as a `foreign table <name>:` key in a `schema <name>:` block.
+Foreign tables read through a foreign server, which a foreign-data wrapper such as `postgres_fdw` or `file_fdw` provides. Declare the wrapper's extension under `extensions:`, the servers under a top-level `servers:` block, and each table as a `foreign table <name>:` key in a `schema <name>:` block. The wrapper itself needs an entry only to manage its privileges, options, owner or comment, or when no extension provides it: see [Foreign-Data Wrappers](#foreign-data-wrappers).
 
 ```yaml
 extensions: [postgres_fdw]
@@ -874,7 +900,7 @@ schema reporting:
     comment: orders in the warehouse
 ```
 
-Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
+Servers are created after extensions and [foreign-data wrappers](#foreign-data-wrappers), and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. An omitted `version` is unmanaged, and the YAML has no way to say that a server has none: to remove a server's version, run `ALTER SERVER ... VERSION NULL` in a hand-written migration. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
 
 A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables and together with their user mappings (`DROP USER MAPPING`). A server that still has foreign tables the plan keeps (in a schema the YAML doesn't manage, or declared on another server name) is not dropped, and `pgy diff` says so. Without the block, servers are unmanaged.
 
@@ -890,7 +916,7 @@ Server properties:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `wrapper` | string | Required. `FOREIGN DATA WRAPPER`, usually the name of the extension providing it |
+| `wrapper` | string | Required. `FOREIGN DATA WRAPPER`, usually the name of the extension providing it, or a wrapper declared under [`foreignDataWrappers:`](#foreign-data-wrappers) |
 | `type` | string | `TYPE`. Cannot be changed in place |
 | `version` | string | `VERSION`, diffed against live |
 | `options` | map | Wrapper options. Authoritative when present; omitted = unmanaged |
@@ -906,10 +932,57 @@ Foreign table properties:
 | `options` | map | Wrapper table options. Authoritative when present; omitted = unmanaged |
 | `partitionOf`, `forValues`, `default` | | Attach as a partition of a local partitioned table, as for [partitions](#partitioning) |
 | `inherits` | list | Parent tables (`INHERITS`), as for [inheritance](#inheritance) |
-| `columns` | map | Columns: `type`, `nullable`/`notNull`, `default`, `generated`, `virtual`, `collate`, `storage`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options. Columns of a partition or inheritance child take no `type` |
+| `columns` | map | Columns: `type`, `nullable`/`notNull`, `notNullName`, `default`, `generated`, `virtual`, `collate`, `storage`, `comment`, `grants`, `statisticsTarget`, `nDistinct`, `renamedFrom`, `using`, and `options` for the wrapper's column options. Columns of a partition or inheritance child take no `type` |
 | `constraints` | map | Check constraints, as on [tables](#constraints) |
 | `triggers` | map | Triggers, as on [tables](#triggers) |
 | `grants`, `owner`, `comment`, `renamedFrom`, `dependsOn` | | As on tables |
+
+## Foreign-Data Wrappers
+
+A top-level `foreignDataWrappers:` block manages foreign-data wrappers. What an entry does depends on who owns the wrapper:
+
+- **A wrapper an extension owns** (`postgres_fdw`, `file_fdw`, the `dblink_fdw` of `dblink`, `mysql_fdw` and so on) is never created or dropped by pgy. Its entry manages `grants`, `options`, `owner` and `comment`, whichever it lists. `handler` and `validator` belong to the extension, and `pgy validate` rejects them on such an entry.
+- **Any other wrapper** is created by pgy when the database does not have it, and altered in place when it does. `handler` and `validator` name functions that exist already, usually those of an extension. Like every other key they are unmanaged when left out: a new wrapper is created without the clause, which gives it no handler or no validator, and an existing wrapper keeps the function it has. So `mywrapper: {grants: {app: [usage]}}` only touches the grants of a wrapper that was made by hand. The empty string says that the wrapper has none: `handler: ""` is `NO HANDLER`, `validator: ""` is `NO VALIDATOR`. A wrapper with neither is a named set of options, which is how `dblink` uses `dblink_fdw`.
+
+```yaml
+extensions: [postgres_fdw]
+
+foreignDataWrappers:
+  postgres_fdw:                 # owned by the extension: only attributes are managed
+    grants: {app_owner: [usage]}
+  pg2:                          # created by pgy
+    handler: postgres_fdw_handler
+    validator: postgres_fdw_validator
+    owner: admin
+    comment: second wrapper on the postgres_fdw handler
+  legacy:                       # a catalogue of connection settings
+    handler: ""                 # NO HANDLER, also when someone gave it one
+    validator: ""
+    options: {debug: "true"}
+  inherited:                    # made by hand: its handler and validator stay as they are
+    grants: {app_owner: [usage]}
+
+servers:
+  warehouse: {wrapper: postgres_fdw, options: {host: wh.internal, dbname: analytics}, owner: app_owner}
+  mirror: {wrapper: pg2, options: {dbname: mirror}}
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `handler` | string | `HANDLER` function, optionally schema-qualified (`ext.postgres_fdw_handler`). `""` = `NO HANDLER`. Omitted = unmanaged: an existing wrapper keeps its handler, a new one is created without. Not allowed on a wrapper an extension owns |
+| `validator` | string | `VALIDATOR` function, optionally schema-qualified. `""` = `NO VALIDATOR`. Omitted = unmanaged, like `handler`. Not allowed on a wrapper an extension owns |
+| `options` | map | Wrapper options. Authoritative when present (`options: {}` means none); omitted = unmanaged. Values are passed on as written |
+| `owner` | string | Owner role, diffed against live. PostgreSQL requires the owner of a wrapper to be a superuser |
+| `grants` | map | Role → privileges (`usage`). See below |
+| `comment` | string | `COMMENT ON FOREIGN DATA WRAPPER` |
+| `renamedFrom` | string | Previous name: `ALTER FOREIGN DATA WRAPPER ... RENAME TO` when only that name exists live. Its servers follow |
+
+- **Order.** Wrapper statements run after the extension statements and before servers: `CREATE FOREIGN DATA WRAPPER`, changes to the definition, `OWNER TO` and the grants. A server that the same migration creates, or hands to another role, then finds the wrapper and the privilege it needs. Handler and validator functions are C functions, which pgy cannot declare, so they have to exist already or come with a declared extension. With `diff --split`, wrappers go into the first group, together with the extensions.
+- **Changes** are made in place: `ALTER FOREIGN DATA WRAPPER ... HANDLER` or `NO HANDLER`, `VALIDATOR` or `NO VALIDATOR`, `OPTIONS (ADD / SET / DROP ...)` and `OWNER TO`. Only the keys the entry has are compared. Foreign tables are read through the handler of their server's wrapper, so `pgy diff` warns, naming them, when a plan changes or removes the handler of a wrapper that has foreign tables. When a declared function is compared with the live one, its schema is optional for `pg_catalog`, `public` and the schemas on the connection's `search_path` (see [Name resolution](#name-resolution)).
+- **Privileges.** `USAGE` on a wrapper lets a role that is not a superuser create servers on it, and PostgreSQL demands it of the new owner in `ALTER SERVER ... OWNER TO`. The block follows the [grants](#grants) rules for objects without a `PUBLIC` default: it is authoritative, `PUBLIC` included. On an extension's wrapper, privileges are compared with the ones the extension set (`pg_init_privs`), and what the extension granted is left alone unless the block names the grantee, as for the other [objects an extension owns](#objects-an-extension-owns).
+- **In the migration that creates the extension**, the entry of its wrapper is applied after `CREATE EXTENSION`. Before the extension is installed, pgy takes a wrapper to be an extension's when it is named like an extension the YAML declares (`postgres_fdw`, `file_fdw`, `mysql_fdw`) or is one PostgreSQL ships (`dblink_fdw` comes with `dblink`). Afterwards the database says which wrappers belong to an extension. An entry for the wrapper of one of PostgreSQL's own extensions gets no statements, and a warning, while that extension is neither installed nor declared.
+- **Pruning.** A present block is authoritative: `--unsafe --prune` drops the wrappers it does not list with `DROP FOREIGN DATA WRAPPER`, after the servers the same plan drops and before `DROP EXTENSION`. The wrappers of extensions are never dropped. A wrapper that a remaining server still uses is kept, and `pgy diff` says so. Without the block, wrappers are unmanaged. An extension is kept while the YAML has an entry for its wrapper, or while a wrapper that stays uses one of its functions (see [Removing extensions](#removing-extensions)).
+- **`pgy pull`** writes wrappers to `database.yml`. One that no extension owns is written in full, with `handler: ""`, `validator: ""` and `options: {}` for what it does not have, so the pulled YAML also notices a handler, a validator or options given to it later. An extension's wrapper is written only when something about it is no longer as the extension left it: the grantees whose privileges changed, its options, its comment, and with `--owners` an owner other than the extension's.
 
 ## Views
 
@@ -1297,6 +1370,30 @@ Signature changes are not supported. Create a new procedure instead. To rename a
 
 A procedure declared without `body` and `language` is never created: the declaration manages the `security`, `set`, `grants`, `revokePublic`, `owner` and `comment` of one that already exists, with `ALTER PROCEDURE` for the first two. See [Objects an extension owns](#objects-an-extension-owns).
 
+## Languages
+
+A top-level `languages:` block manages the privileges of procedural languages: those every database has (`sql`, `plpgsql`) and those extensions create (`plperl`, `pltcl` and so on). `USAGE` on a language is what lets a role create functions in it, and `PUBLIC` has it by default.
+
+```yaml
+extensions: [plperl]
+
+languages:
+  plpgsql:
+    grants: {public: [], app_dev: [usage]}   # only app_dev may create PL/pgSQL routines
+  plperl:
+    grants: {app_dev: [usage]}
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`) |
+
+- **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates a language's extension, the grants run after `CREATE EXTENSION`. pgy takes the extension to be the one named like the language (`plperl` for the language `plperl`), which is how the extensions of procedural languages are called. Any other language that does not exist gets no statements, and `pgy diff` warns with the name of the entry.
+- **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
+- **Trusted languages only.** PostgreSQL rejects `GRANT` and `REVOKE` on untrusted languages (`c`, `internal`, `plpython3u`, `plperlu`, `pltclu`), which only superusers can use. `pgy validate` rejects entries for those, and `pgy diff` reports any other untrusted language and plans nothing for it.
+- **Order.** The statements run right after the extension statements and before any function or procedure, so a migration that grants its own role `USAGE` can create routines in that language further down. With `diff --split`, they go into the first group, together with the extensions.
+- **`pgy pull`** writes an entry for each trusted language whose privileges are not its initial ones, with the grantees that changed. The initial privileges are those `pg_init_privs` records for a language an extension owns, which `plpgsql` is, and `PUBLIC`'s `USAGE` for any other. That includes `sql`, whose privileges `pg_dump` leaves out.
+
 ## Collations
 
 Collations are defined inside `schema <name>:` blocks using `collation <name>:` keys and created with `CREATE COLLATION IF NOT EXISTS` before types, domains and tables. PostgreSQL cannot change a collation's definition in place, so existing collations are left as they are; only comments are diffed.
@@ -1456,7 +1553,7 @@ Behavior:
 
 ## Grants
 
-Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump). A privilege written as `insert with grant option` is granted `WITH GRANT OPTION`, which lets the role grant it on. Removing the suffix later emits `REVOKE GRANT OPTION FOR insert ...` and keeps the privilege itself.
+Tables, views, materialized views, sequences (`usage`, `select`, `update`), types and domains (`usage`), functions, procedures, schemas, foreign servers, [foreign-data wrappers](#foreign-data-wrappers) and [languages](#languages) (`usage`), and individual columns accept a `grants:` map of role name → privilege list. Privileges are lowercased in output SQL; roles can be declared in a top-level [`roles:`](#roles) block or must already exist. View grants are emitted as `GRANT ... ON TABLE` (views are relations; this matches pg_dump). A privilege written as `insert with grant option` is granted `WITH GRANT OPTION`, which lets the role grant it on. Removing the suffix later emits `REVOKE GRANT OPTION FOR insert ...` and keeps the privilege itself.
 
 ```yaml
 schema app:
@@ -1485,12 +1582,12 @@ Behavior:
 - Objects **without** a `grants:` block are unmanaged — no grants or revokes are emitted.
 - An **empty privilege list** (`some_role: []`) is not the same as omitting the block. It means "this role holds nothing on this object" and revokes whatever the live database still grants. Use it to take a privilege away while keeping the object managed.
 - How a `grants:` block treats `PUBLIC` depends on whether PostgreSQL gives `PUBLIC` anything by default:
-  - **Tables, views, materialized views, sequences, columns, foreign servers and schemas other than `public`** get nothing by default, so a `PUBLIC` grant on them was made on purpose. A grants block covers `PUBLIC` like any other role: `PUBLIC` privileges it doesn't list are revoked, and `pgy diff` warns about each such revoke. List `public` to keep them: `grants: {public: [select]}`.
-  - **Functions, procedures, types, domains and the `public` schema** come with `PUBLIC` privileges (`EXECUTE`, `USAGE`). Their grants block leaves `PUBLIC` alone unless it lists `public`. `public: []` revokes the default, and `public: [execute]` keeps it. `revokePublic: true` does the same as `public: []` (recommended for `security: definer` functions); it is emitted for new objects and whenever the live database still grants the default.
+  - **Tables, views, materialized views, sequences, columns, foreign servers, foreign-data wrappers and schemas other than `public`** get nothing by default, so a `PUBLIC` grant on them was made on purpose. A grants block covers `PUBLIC` like any other role: `PUBLIC` privileges it doesn't list are revoked, and `pgy diff` warns about each such revoke. List `public` to keep them: `grants: {public: [select]}`.
+  - **Functions, procedures, types, domains, languages and the `public` schema** come with `PUBLIC` privileges (`EXECUTE`, `USAGE`). Their grants block leaves `PUBLIC` alone unless it lists `public`. `public: []` revokes the default, and `public: [execute]` keeps it. On routines, types and domains, `revokePublic: true` does the same as `public: []` (recommended for `security: definer` functions); it is emitted for new objects and whenever the live database still grants the default.
   - Before v0.43.0 a grants block never revoked `PUBLIC` privileges, so an upgrade can revoke `PUBLIC` grants that were made by hand; the warnings name each one.
   - `policy.public_grants` in the config changes this: `authoritative` makes every grants block cover `PUBLIC`, routines, types, domains and the `public` schema included, and `explicit` makes only blocks that list `public` cover it. See [Strict mode](../README.md#strict-mode).
 - On **objects an extension owns**, the privileges the extension's own script granted are left alone unless the block names their grantee. See [Objects an extension owns](#objects-an-extension-owns).
-- Grant/revoke statements are emitted after all object creation and FK alters.
+- Grant/revoke statements are emitted after all object creation and FK alters. Those on languages and foreign-data wrappers are the exception: they run right after the extension statements, ahead of the routines and servers that need them.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 
 ### Ownership
@@ -1665,6 +1762,8 @@ schema app:
 - PostgreSQL does the comparison: each declared row is converted to the table's column types first. So `10` matches a `numeric(6,2)` value of `10.00`, and enum labels, arrays (`[a, b]`), maps (for `json`/`jsonb` and composite-type columns) and dates compare by value. Every value of a `json` or `jsonb` column is a JSON document (`[]` is an empty JSON array and a string is a JSON string) and is written as a `jsonb` literal. A map for a composite-type column is written through `jsonb_to_record`, the same conversion the comparison uses. Two things don't survive YAML: the original spacing of `json` values, and the difference between a JSON `null` and SQL `NULL` in `json`/`jsonb` columns, which both become YAML `null` and are written as SQL `NULL`. YAML numbers go through floating point, so quote decimals that need exact digits (`"19.99"`).
 - A type YAML has no notation for takes its value as text, the way PostgreSQL reads and prints it: an `hstore` is `attrs: '"seats"=>"1"'` (or `seats=>1`), an `ltree` is `path: top.science`, a range is `during: "[1,5)"`, and a composite value may also be written as `'(1,x)'`. This covers extension types and domains over them. A map given to a column that takes none (an `hstore` column, say) is an error in `pgy diff`, which names the row and the column, when the table or the column's type already exists in the database; otherwise PostgreSQL rejects it when the migration runs. `pgy pull --data` writes types that PostgreSQL would turn into JSON objects through a cast (`hstore`) in their text form, so its rows load back.
 - Rows are matched on the key with the key columns' own equality, so a `citext` key matches in any case. A key that matches but is written differently is updated to the spelling in the YAML. Two rows whose keys are equal that way (`free` and `FREE` in a `citext` column) are an error in `pgy diff` when the key's types exist in the database; `pgy validate`, which has no database, only catches keys written identically.
+- That equality is the one PostgreSQL itself uses for the type in unique indexes and `ORDER BY` (its default btree operator class), whatever the `search_path` is. When the type's `=` operator lives in a schema that is neither `public` nor on the `search_path` of the session pgy connected with (a `citext` installed in `ext`), the `UPDATE` and `DELETE` statements name it: `where "code" operator("ext".=) 'FREE'`. A bare `=` would compare such a key as `text` there, or find no operator at all.
+- A key column needs a type with a default btree operator class, as a primary key or unique constraint does. `json`, `xml` and the geometric types (`point`, `box`, ...) have none, so rows cannot be matched or ordered by them. `pgy validate` rejects those built-in types as key columns, and `pgy diff` rejects any type without such a class when the table or the type exists in the database. Both name the table and the column.
 - Data statements run after the table changes and before new foreign keys are added. A table's rows come after the rows of the data tables its foreign keys reference, and deletes run in the reverse order. Explicit values for `identity: always` columns are inserted with `OVERRIDING SYSTEM VALUE`.
 - `pgy pull --data schema.table` (repeatable) adds the current rows of those tables as a `data:` block.
 - `pgy validate` checks that every row has a key and no two rows share one, and that rows only set declared columns and no generated columns. A table without a primary key needs `key`. A `key` that isn't the primary key or a unique constraint gets a warning.
@@ -1699,7 +1798,7 @@ schema app:
     body: select x * 2
 ```
 
-`renamedFrom` is accepted on tables, columns, views, materialized views, sequences, types, domains, indexes, constraints, foreign keys, functions and procedures. A bare name is looked up in the object's own schema; a qualified one may name another schema. Enum labels are renamed with `renamedLabels` (new label → old label).
+`renamedFrom` is accepted on tables, columns, views, materialized views, sequences, types, domains, indexes, constraints, foreign keys, functions and procedures, and on the entries of `servers:` and `foreignDataWrappers:`. A bare name is looked up in the object's own schema; a qualified one may name another schema. Enum labels are renamed with `renamedLabels` (new label → old label).
 
 - A rename happens only when the old name exists in the database and the new name does not. Once it has been applied the key is a no-op, so it can stay in the YAML until every environment has migrated.
 - Renames are emitted right after schema creation, before anything else in the migration. The rest of the diff, including `--prune`, then treats the object as already existing under its new name. References PostgreSQL updates on its own (foreign keys, triggers, indexes and constraints naming a renamed column, columns of a renamed type) don't cause any churn.

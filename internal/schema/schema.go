@@ -40,6 +40,12 @@ type Database struct {
     // Servers is nil when the YAML has no servers block (foreign servers
     // unmanaged) and authoritative for pruning when present.
     Servers map[string]*Server `yaml:"-"`
+    // ForeignDataWrappers is nil when the YAML has no foreignDataWrappers
+    // block (wrappers unmanaged) and authoritative for pruning when present.
+    ForeignDataWrappers map[string]*ForeignDataWrapper `yaml:"-"`
+    // Languages holds the procedural languages whose privileges the YAML
+    // manages, by name. Languages are never created or dropped.
+    Languages map[string]*Language `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
@@ -117,6 +123,63 @@ type Server struct {
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
     Comment string
     RenamedFrom string // previous name; emitted as ALTER SERVER ... RENAME TO when only the old name exists live
+}
+
+// ForeignDataWrapper is a foreignDataWrappers entry. A wrapper that neither
+// exists nor comes with an extension is created from it. For a wrapper an
+// extension owns, such as postgres_fdw, only Options, Owner, Grants and
+// Comment are managed.
+type ForeignDataWrapper struct {
+    Name      string
+    Handler   string            // HANDLER function, optionally schema-qualified; see ManagesHandler
+    Validator string            // VALIDATOR function, optionally schema-qualified; see ManagesValidator
+    // HandlerSet and ValidatorSet report a handler or validator key in the
+    // YAML, so that an empty value (NO HANDLER, NO VALIDATOR) can be told
+    // from a key left out.
+    HandlerSet, ValidatorSet bool
+    Options   map[string]string // OPTIONS; nil = unmanaged, present = authoritative
+    Owner     string            // "" = unmanaged
+    Grants    map[string][]string // role -> privileges (usage); nil = unmanaged
+    Comment   string
+    RenamedFrom string // previous name; emitted as ALTER FOREIGN DATA WRAPPER ... RENAME TO when only the old name exists live
+}
+
+// ManagesHandler reports whether w declares its handler, which may be
+// none. Without a declaration an existing wrapper keeps the handler it has,
+// and a new one is created without.
+func (w *ForeignDataWrapper) ManagesHandler() bool { return w.HandlerSet || w.Handler != "" }
+
+// ManagesValidator reports whether w declares its validator, which may be
+// none; see ManagesHandler.
+func (w *ForeignDataWrapper) ManagesValidator() bool { return w.ValidatorSet || w.Validator != "" }
+
+// Language is a languages entry: the privileges of a procedural language
+// that exists already or that an extension creates.
+type Language struct {
+    Name   string
+    Grants map[string][]string // role -> privileges (usage); nil = unmanaged
+}
+
+// contribWrappers maps the foreign-data wrappers that PostgreSQL's own
+// extensions create to their extension.
+var contribWrappers = map[string]string{"postgres_fdw": "postgres_fdw", "file_fdw": "file_fdw", "dblink_fdw": "dblink"}
+
+// WrapperExtension returns the extension that creates the foreign-data
+// wrapper name, or "" when none is known to: the PostgreSQL extension that
+// ships it, or a declared extension called like the wrapper, which is how
+// extensions name the wrapper they provide.
+func (d *Database) WrapperExtension(name string) string {
+    if ext, ok := contribWrappers[name]; ok { return ext }
+    if d.DeclaresExtension(name) { return name }
+    return ""
+}
+
+// DeclaresExtension reports whether the extensions block lists name.
+func (d *Database) DeclaresExtension(name string) bool {
+    for _, ext := range d.Extensions {
+        if ext != nil && ext.Name == name { return true }
+    }
+    return false
 }
 
 // ForeignTable holds what makes a table a CREATE FOREIGN TABLE: the server
@@ -399,6 +462,7 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
     Compression string `yaml:"compression"` // pglz | lz4 | default; "" = unmanaged
     Storage     string `yaml:"storage"`     // plain | external | extended | main; "" = unmanaged
@@ -840,6 +904,14 @@ func Merge(dbs []*Database) *Database {
             if merged.Servers == nil { merged.Servers = map[string]*Server{} }
             for k, v := range d.Servers { merged.Servers[k] = v }
         }
+        if d.ForeignDataWrappers != nil {
+            if merged.ForeignDataWrappers == nil { merged.ForeignDataWrappers = map[string]*ForeignDataWrapper{} }
+            for k, v := range d.ForeignDataWrappers { merged.ForeignDataWrappers[k] = v }
+        }
+        if d.Languages != nil {
+            if merged.Languages == nil { merged.Languages = map[string]*Language{} }
+            for k, v := range d.Languages { merged.Languages[k] = v }
+        }
         if d.EventTriggers != nil {
             if merged.EventTriggers == nil { merged.EventTriggers = map[string]*EventTrigger{} }
             for k, v := range d.EventTriggers { merged.EventTriggers[k] = v }
@@ -1011,6 +1083,12 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     }
     if srvRaw, ok := root["servers"]; ok {
         out.Servers = parseServers(srvRaw)
+    }
+    if fdwRaw, ok := root["foreignDataWrappers"]; ok {
+        out.ForeignDataWrappers = parseForeignDataWrappers(fdwRaw)
+    }
+    if langRaw, ok := root["languages"]; ok {
+        out.Languages = parseLanguages(langRaw)
     }
     if pubRaw, ok := root["publications"]; ok {
         out.Publications = parsePublications(pubRaw)
@@ -1369,6 +1447,7 @@ func parseColumnSpec(spec any) *Column {
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
         if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
         if v, ok := m["compression"].(string); ok { c.Compression = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["storage"].(string); ok { c.Storage = strings.ToLower(strings.TrimSpace(v)) }
@@ -2699,11 +2778,54 @@ func parseServers(v any) map[string]*Server {
     return out
 }
 
+// parseForeignDataWrappers parses { name: {handler, validator, options,
+// owner, grants, comment, renamedFrom} }. A handler or validator may be
+// written with the empty argument list of the function, and as the empty
+// string for none.
+func parseForeignDataWrappers(v any) map[string]*ForeignDataWrapper {
+    out := map[string]*ForeignDataWrapper{}
+    m, ok := v.(map[string]any)
+    if !ok { return out }
+    function := func(v any) (string, bool) {
+        s, ok := v.(string)
+        return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "()")), ok
+    }
+    for name, raw := range m {
+        w := &ForeignDataWrapper{Name: name}
+        if b, ok := raw.(map[string]any); ok {
+            w.Handler, w.HandlerSet = function(b["handler"])
+            w.Validator, w.ValidatorSet = function(b["validator"])
+            if o, ok := b["options"].(map[string]any); ok { w.Options = stringMap(o) }
+            if o, ok := b["owner"].(string); ok { w.Owner = strings.TrimSpace(o) }
+            if g, ok := b["grants"]; ok { w.Grants = parseGrants(g) }
+            if c, ok := b["comment"].(string); ok { w.Comment = c }
+            if v, ok := b["renamedFrom"].(string); ok { w.RenamedFrom = strings.TrimSpace(v) }
+        }
+        out[name] = w
+    }
+    return out
+}
+
+// parseLanguages parses { name: {grants} }.
+func parseLanguages(v any) map[string]*Language {
+    out := map[string]*Language{}
+    m, ok := v.(map[string]any)
+    if !ok { return out }
+    for name, raw := range m {
+        l := &Language{Name: name}
+        if b, ok := raw.(map[string]any); ok {
+            if g, ok := b["grants"]; ok { l.Grants = parseGrants(g) }
+        }
+        out[name] = l
+    }
+    return out
+}
+
 // fillFDWScalarsFromNode replaces the values parsed for a server's version
-// and for server, foreign table and foreign column options with their YAML
-// source text. These settings are strings to PostgreSQL, and decoding a bare
-// scalar as a number loses what was written: 15.10 would become 15.1 and
-// 05432 an octal integer.
+// and for wrapper, server, foreign table and foreign column options with
+// their YAML source text. These settings are strings to PostgreSQL, and
+// decoding a bare scalar as a number loses what was written: 15.10 would
+// become 15.1 and 05432 an octal integer.
 func fillFDWScalarsFromNode(root *yaml.Node, db *Database) {
     if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 { return }
     top := root.Content[0]
@@ -2717,6 +2839,14 @@ func fillFDWScalarsFromNode(root *yaml.Node, db *Database) {
                 if s == nil || def.Kind != yaml.MappingNode { continue }
                 if v := mappingValue(def, "version"); v != nil && v.Kind == yaml.ScalarNode && s.Version != "" { s.Version = scalarText(v) }
                 fillScalarTexts(mappingValue(def, "options"), s.Options)
+            }
+            continue
+        }
+        if key == "foreignDataWrappers" {
+            for j := 0; j+1 < len(body.Content); j += 2 {
+                w, def := db.ForeignDataWrappers[body.Content[j].Value], resolveAlias(body.Content[j+1])
+                if w == nil || def.Kind != yaml.MappingNode { continue }
+                fillScalarTexts(mappingValue(def, "options"), w.Options)
             }
             continue
         }

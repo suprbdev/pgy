@@ -59,3 +59,60 @@ schema SCH:
 	}
 	applyPlan(t, pool, plan)
 }
+
+// TestIntegrationLockWarningVolatileDefault adds columns whose defaults call
+// extension functions and functions the YAML declares: the volatile ones
+// rewrite the table, whether the catalog or the YAML says they are.
+func TestIntegrationLockWarningVolatileDefault(t *testing.T) {
+	admin := connect(t)
+	pool := freshDatabase(t, admin, "pgytest_lock_volatile")
+	const base = `
+extensions:
+  - {name: pgcrypto, schema: public}
+  - {name: uuid-ossp, schema: ext}
+schema app:
+  function stamp():
+    returns: text
+    language: sql
+    stable: true
+    body: select 'x'
+  table t:
+    columns:
+      id: {type: int}
+COLUMNS
+    primaryKey: [id]
+`
+	convergeDatabase(t, pool, loadYAML(t, "app", strings.Replace(base, "COLUMNS", "", 1)))
+	d := loadYAML(t, "app", strings.Replace(base, "COLUMNS", `
+      token: {type: bytea, default: gen_random_bytes(8)}
+      salt: {type: text, default: "gen_salt('bf')"}
+      ref: {type: uuid, default: ext.uuid_generate_v1mc()}
+      v4: {type: uuid, default: ext.uuid_generate_v4()}
+      minted: {type: text, default: app.mint()}
+      sha: {type: bytea, default: "digest('x', 'sha256')"}
+      zero: {type: uuid, default: ext.uuid_nil()}
+      stamped: {type: text, default: app.stamp()}`, 1)+`
+  function mint():
+    returns: text
+    language: sql
+    body: select 'x'
+`)
+	plan := diff.PlanWith(introspect(t, pool, d), d, diff.Options{})
+	warned := map[string]bool{}
+	for _, w := range plan.Warnings {
+		if strings.Contains(w.Message, "with a volatile default rewrites app.t") {
+			warned[strings.Fields(strings.TrimPrefix(w.Message, "adding column "))[0]] = true
+		}
+	}
+	for _, cn := range []string{"token", "salt", "ref", "v4", "minted"} {
+		if !warned[cn] {
+			t.Errorf("column %s has a volatile default; warned: %v", cn, warned)
+		}
+	}
+	for _, cn := range []string{"sha", "zero", "stamped"} {
+		if warned[cn] {
+			t.Errorf("column %s has an immutable or stable default; warned: %v", cn, warned)
+		}
+	}
+	applyPlan(t, pool, plan)
+}

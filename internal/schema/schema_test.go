@@ -215,6 +215,37 @@ tables:
 	}
 }
 
+func TestColumnNotNullNameParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+servers:
+  files: {wrapper: file_fdw}
+schema app:
+  table t:
+    columns:
+      a: {type: int, notNullName: a_must_exist}
+      b: {type: int}
+  foreign table f:
+    server: files
+    columns:
+      a: {type: int, notNullName: " f_a_nn "}
+tables:
+  - name: app.l
+    columns:
+      - {name: a, type: int, notNullName: l_a_nn}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]string{"app.t": "a_must_exist", "app.f": "f_a_nn", "app.l": "l_a_nn"} {
+		if got := db.Tables[table].Columns["a"].NotNullName; got != want {
+			t.Errorf("%s.a: NotNullName = %q, want %q", table, got, want)
+		}
+	}
+	if got := db.Tables["app.t"].Columns["b"].NotNullName; got != "" {
+		t.Errorf("a column without notNullName leaves the name unmanaged, got %q", got)
+	}
+}
+
 func TestColumnDefault(t *testing.T) {
 	yaml := `
 tables:

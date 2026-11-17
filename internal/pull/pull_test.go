@@ -72,6 +72,37 @@ func TestBuildTable(t *testing.T) {
 	}
 }
 
+func TestBuildNotNullName(t *testing.T) {
+	lt := &diff.LiveTable{Columns: map[string]*diff.LiveColumn{
+		"id":      {Type: "integer", NotNullName: "t_id_not_null"},
+		"a":       {Type: "integer", NotNullName: "a_must_exist"},
+		"b":       {Type: "text", NotNullName: "b_pending", NotNullNotValid: "b_pending"},
+		"c":       {Type: "text", Nullable: true},
+		"unnamed": {Type: "text"},
+	}}
+	live := &diff.Live{
+		Schemas: map[string]bool{"app": true},
+		Tables:  map[string]*diff.LiveTable{"app.t": lt},
+		Details: &diff.LiveDetails{ColumnOrder: map[string][]string{"app.t": {"id", "a", "b", "c", "unnamed"}}},
+	}
+	res, err := Build(live, Options{Single: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(res.Files[0].Content)
+	for _, want := range []string{
+		"id: {type: integer}",
+		"a: {type: integer, notNullName: a_must_exist}",
+		"b: {type: text, notValid: true, notNullName: b_pending}",
+		"c: {type: text, nullable: true}",
+		"unnamed: {type: text}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildQuotedTriggers(t *testing.T) {
 	lt := &diff.LiveTable{
 		Columns: map[string]*diff.LiveColumn{"a": {Type: "integer"}},

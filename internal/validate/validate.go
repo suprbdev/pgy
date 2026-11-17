@@ -151,6 +151,7 @@ func Database(d *schema.Database) []Issue {
 		add(Error, "", "%v", err)
 	}
 	checkRenames(d, add)
+	checkWrappersAndLanguages(d, add)
 	checkOwnerGrants(d, add)
 	checkNameClashes(d, add)
 	for _, fq := range sortedKeys(d.Views) {
@@ -327,6 +328,14 @@ func Database(d *schema.Database) []Issue {
 		for cn, c := range t.Columns {
 			if c == nil {
 				continue
+			}
+			if c.NotNullName != "" {
+				switch {
+				case t.PartitionOf != "" || t.Of != "" || strings.TrimSpace(c.Type) == "":
+					add(Warning, obj, "column %s: notNullName is ignored on a column of a partition, a typed table or an inheritance child; it names the constraint of a column the table declares with a type", cn)
+				case c.Nullable:
+					add(Warning, obj, "column %s sets notNullName but is nullable, so there is no NOT NULL constraint to name", cn)
+				}
 			}
 			if t.Of != "" {
 				switch {
@@ -1042,6 +1051,58 @@ func checkRenames(d *schema.Database, add func(Severity, string, string, ...any)
 	}
 }
 
+// untrustedLanguages are the languages of PostgreSQL and its own extensions
+// that only superusers can use, on which GRANT and REVOKE fail.
+var untrustedLanguages = map[string]bool{"internal": true, "c": true, "plperlu": true, "pltclu": true, "plpythonu": true, "plpython2u": true, "plpython3u": true}
+
+// checkWrappersAndLanguages reports foreignDataWrappers entries that define
+// or rename a wrapper a declared extension creates, renames that clash,
+// languages entries for a language that takes no privileges, and grants of
+// anything but USAGE, the only privilege wrappers and languages have.
+func checkWrappersAndLanguages(d *schema.Database, add func(Severity, string, string, ...any)) {
+	usageOnly := func(obj string, grants map[string][]string) {
+		for _, role := range sortedKeys(grants) {
+			for _, priv := range grants[role] {
+				if strings.TrimSuffix(priv, "*") != "usage" {
+					add(Error, obj, "grants %s to %s; write usage, the only privilege there is here and the form pgy compares with the database", strings.TrimSuffix(priv, "*"), role)
+				}
+			}
+		}
+	}
+	wrappers := newRenameGroup()
+	for k := range d.ForeignDataWrappers {
+		wrappers.declared[k] = true
+	}
+	for _, k := range sortedKeys(d.ForeignDataWrappers) {
+		w := d.ForeignDataWrappers[k]
+		if w == nil {
+			continue
+		}
+		obj := "foreign-data wrapper " + k
+		usageOnly(obj, w.Grants)
+		if ext := d.WrapperExtension(k); ext != "" && (w.ManagesHandler() || w.ManagesValidator()) {
+			add(Error, obj, "extension %s creates this wrapper with its own handler and validator, so the entry cannot set them; it manages the wrapper's options, owner, grants and comment", ext)
+		}
+		if w.RenamedFrom == "" {
+			continue
+		}
+		wrappers.check(obj, w.RenamedFrom, add)
+		if ext := d.WrapperExtension(w.RenamedFrom); ext != "" {
+			add(Error, obj, "renamedFrom %s names the wrapper of extension %s, and pgy does not rename an extension's objects", w.RenamedFrom, ext)
+		}
+	}
+	for _, k := range sortedKeys(d.Languages) {
+		l := d.Languages[k]
+		if l == nil {
+			continue
+		}
+		if untrustedLanguages[k] {
+			add(Error, "language "+k, "is not a trusted language: only superusers can use it, and PostgreSQL rejects GRANT and REVOKE on it")
+		}
+		usageOnly("language "+k, l.Grants)
+	}
+}
+
 // tableHasColumn reports whether table fq declares column c, directly or
 // through a declared INHERITS parent.
 func tableHasColumn(d *schema.Database, fq, c string, depth int) bool {
@@ -1075,6 +1136,8 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 	for _, k := range key {
 		if !tableHasColumn(d, fq, k, 0) {
 			add(Error, obj, "data key column %s is not declared", k)
+		} else if c := t.Columns[k]; c != nil && unorderedType(c.Type) {
+			add(Error, obj, "data key column %s has type %s, which has no default btree operator class, so rows cannot be matched or ordered by it; use key columns of another type", k, strings.TrimSpace(c.Type))
 		}
 	}
 	if len(t.Data.Key) > 0 && !uniqueOn(t, key) {
@@ -1103,6 +1166,21 @@ func checkData(d *schema.Database, fq string, t *schema.Table, add func(Severity
 			}
 		}
 	}
+}
+
+// unorderedType reports whether typ is a built-in type without a default
+// btree operator class, or an array of one. Extension types are left to
+// pgy diff, which looks the class up in the database.
+func unorderedType(typ string) bool {
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	for strings.HasSuffix(typ, "[]") {
+		typ = strings.TrimSpace(strings.TrimSuffix(typ, "[]"))
+	}
+	switch strings.TrimPrefix(typ, "pg_catalog.") {
+	case "json", "jsonpath", "xml", "point", "line", "lseg", "box", "path", "polygon", "circle":
+		return true
+	}
+	return false
 }
 
 // uniqueOn reports whether cols are exactly t's primary key or the columns

@@ -1062,8 +1062,13 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		}
 		if lc.Nullable {
 			add(c, "nullable", boolean(true))
-		} else if lc.NotNullNotValid != "" {
-			add(c, "notValid", boolean(true))
+		} else {
+			if lc.NotNullNotValid != "" {
+				add(c, "notValid", boolean(true))
+			}
+			if lc.NotNullName != "" && lc.NotNullName != diff.DefaultNotNullName(fq, cn) {
+				add(c, "notNullName", str(lc.NotNullName))
+			}
 		}
 		switch {
 		case lc.Generated != "":
@@ -1843,7 +1848,8 @@ func (b *builder) views() {
 }
 
 // database builds database.yml: extensions, roles, default privileges,
-// publications and event triggers.
+// publications, language privileges, foreign-data wrappers, servers and
+// event triggers.
 func (b *builder) database() *node {
 	doc := newMap()
 	if len(b.live.Extensions) > 0 {
@@ -2016,6 +2022,12 @@ func (b *builder) database() *node {
 			add(pubs, name, p)
 		}
 		add(doc, "publications", pubs)
+	}
+	if l := b.languages(); l != nil {
+		add(doc, "languages", l)
+	}
+	if w := b.wrappers(); w != nil {
+		add(doc, "foreignDataWrappers", w)
 	}
 	if srv := b.servers(); srv != nil {
 		add(doc, "servers", srv)

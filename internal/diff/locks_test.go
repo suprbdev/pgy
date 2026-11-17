@@ -98,6 +98,96 @@ func TestLockWarnings(t *testing.T) {
 	}
 }
 
+func volatileDefaultWarnings(t *testing.T, live *Live, d *schema.Database) map[string]bool {
+	t.Helper()
+	warned := map[string]bool{}
+	for _, w := range PlanWith(live, d, Options{}).Warnings {
+		if !strings.Contains(w.Message, "with a volatile default rewrites app.t") {
+			continue
+		}
+		warned[strings.Fields(strings.TrimPrefix(w.Message, "adding column "))[0]] = true
+	}
+	return warned
+}
+
+func TestLockWarningsVolatileDefaultFromCatalog(t *testing.T) {
+	live := lockLive()
+	for sig, volatility := range map[string]string{
+		"public.gen_random_bytes(integer)": "volatile",
+		"public.gen_salt(text)":            "volatile",
+		"public.gen_salt(text, integer)":   "volatile",
+		"public.digest(text, text)":        "immutable",
+		"ext.uuid_generate_v1mc()":         "volatile",
+		"ext.uuid_nil()":                   "immutable",
+		`other.digest(text, text)`:         "volatile",
+		"app.Mixed()":                      "volatile",
+	} {
+		live.Functions[sig] = true
+		live.FunctionDefs[normalizeFunctionSignature(sig)] = &LiveFunction{Signature: sig, Kind: "f", Volatility: volatility}
+	}
+	d := lockDB()
+	for cn, def := range map[string]string{
+		"token":     "gen_random_bytes(8)",
+		"salt":      "gen_salt('bf')",
+		"v1mc":      `"ext".uuid_generate_v1mc()`,
+		"upper":     "encode(GEN_RANDOM_BYTES(4), 'hex')",
+		"mixed":     `app."Mixed"()`,
+		"sha":       "public.digest('x', 'sha256')",
+		"nil":       "ext.uuid_nil()",
+		"literal":   "'gen_random_bytes(8)'",
+		"folded":    "app.Mixed()",
+		"elsewhere": "pg_catalog.gen_salt('bf')",
+	} {
+		d.Tables["app.t"].Columns[cn] = &schema.Column{Type: "text", Default: def, Nullable: true}
+	}
+	warned := volatileDefaultWarnings(t, live, d)
+	for _, cn := range []string{"token", "salt", "v1mc", "upper", "mixed", "uid"} {
+		if !warned[cn] {
+			t.Errorf("column %s calls a function the catalog marks volatile; warned: %v", cn, warned)
+		}
+	}
+	for _, cn := range []string{"sha", "nil", "literal", "folded", "elsewhere", "at"} {
+		if warned[cn] {
+			t.Errorf("column %s does not call a volatile function; warned: %v", cn, warned)
+		}
+	}
+}
+
+func TestLockWarningsVolatileDefaultFromYAML(t *testing.T) {
+	live := lockLive()
+	for sig, volatility := range map[string]string{
+		"app.fixed()": "volatile",
+		"app.kept()":  "stable",
+		"app.loose()": "volatile",
+	} {
+		live.Functions[sig] = true
+		live.FunctionDefs[normalizeFunctionSignature(sig)] = &LiveFunction{Signature: sig, Kind: "f", Body: "select 1", Returns: "integer", Volatility: volatility, Security: "invoker"}
+	}
+	d := lockDB()
+	d.Functions = map[string]*schema.Function{
+		"app.fresh()":  {Schema: "app", Name: "fresh", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true},
+		"app.pure()":   {Schema: "app", Name: "pure", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true, Volatility: "immutable"},
+		"app.fixed()":  {Schema: "app", Name: "fixed", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true, Volatility: "immutable"},
+		"app.kept()":   {Schema: "app", Name: "kept", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true},
+		"app.loose()":  {Schema: "app", Name: "loose", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true},
+		"app.marked()": {Schema: "app", Name: "marked", ArgsSig: "()", Returns: "int", Language: "sql", Body: "select 1", BodySet: true, Volatility: "VOLATILE"},
+	}
+	for _, name := range []string{"fresh", "pure", "fixed", "kept", "loose", "marked"} {
+		d.Tables["app.t"].Columns["c_"+name] = &schema.Column{Type: "int", Default: "app." + name + "()", Nullable: true}
+	}
+	warned := volatileDefaultWarnings(t, live, d)
+	for _, cn := range []string{"c_fresh", "c_loose", "c_marked"} {
+		if !warned[cn] {
+			t.Errorf("column %s calls a function that is volatile once the plan is applied; warned: %v", cn, warned)
+		}
+	}
+	for _, cn := range []string{"c_pure", "c_fixed", "c_kept"} {
+		if warned[cn] {
+			t.Errorf("column %s calls a function the YAML or the catalog marks stable or immutable; warned: %v", cn, warned)
+		}
+	}
+}
+
 func TestPartitionedForeignKeyBeforePG18AddedValidated(t *testing.T) {
 	live := lockLive()
 	live.ServerVersion = 170000

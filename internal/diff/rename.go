@@ -21,6 +21,7 @@ import (
 func applyRenames(live *Live, desired *schema.Database) (*Live, []string) {
     if live == nil || desired == nil || !hasRenames(desired) { return live, nil }
     r := &renamer{l: cloneLive(live)}
+    r.wrappers(desired)
     r.servers(desired)
     r.relations(desired)
     r.types(desired)
@@ -36,6 +37,9 @@ type renamer struct {
 }
 
 func hasRenames(d *schema.Database) bool {
+    for _, w := range d.ForeignDataWrappers {
+        if w != nil && w.RenamedFrom != "" { return true }
+    }
     for _, s := range d.Servers {
         if s != nil && s.RenamedFrom != "" { return true }
     }

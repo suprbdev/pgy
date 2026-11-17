@@ -5,6 +5,7 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "slices"
     "sort"
     "strconv"
     "strings"
@@ -24,6 +25,11 @@ type LiveTableData struct {
     Missing []int
     Changed map[int][]string
     Extra   []map[string]string
+    // KeyEquals holds, as SQL, the equality operator of each key column
+    // whose type keeps it in a schema that is neither public nor on the
+    // session's search_path (operator("ext".=)), where a bare = would
+    // resolve to another operator or to none.
+    KeyEquals map[string]string
 }
 
 // dataValue converts a decoded YAML value to the form it is sent to
@@ -65,6 +71,13 @@ type dataColumn struct {
     typ  string
     cmp  string
     json bool
+    // eq is the equality operator of cmp's default btree operator class,
+    // which PostgreSQL itself compares the type with (ORDER BY, PARTITION
+    // BY, unique indexes), as SQL: = for one in pg_catalog,
+    // operator("schema".=) otherwise, so that it does not depend on the
+    // search_path, and "" for a type without such a class. eqSchema is the
+    // operator's schema.
+    eq, eqSchema string
 }
 
 // dataTypeChainQ resolves columns (name, type text, type oid, type
@@ -74,6 +87,13 @@ type dataColumn struct {
 // column, which fails for a domain whose base type has no binary input
 // function (seg, the isn types) and rejects a null in a NOT NULL domain;
 // the base type converts and compares the same values without it.
+//
+// It also finds the default btree operator class of the comparison type's
+// element type the way PostgreSQL's GetDefaultOpClass does (the class of
+// the type itself, the polymorphic one for its kind, or that of a type it
+// is binary coercible to, the preferred one first), and returns whether the
+// comparison type is an array and the schema and name of that class's
+// equality operator ('' without one).
 const dataTypeChainQ = `
     with recursive chain(name, orig, typ, mod, arr, depth) as (
         %s
@@ -84,12 +104,32 @@ const dataTypeChainQ = `
                c.arr or t.typtype <> 'd', c.depth + 1
         from chain c join pg_type t on t.oid = c.typ
         where t.typtype = 'd' or (not c.arr and t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1)
+    ), col as (
+        select distinct on (c.name) c.name, c.orig, c.arr, t.oid as typ, t.typtype, t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1 as nested,
+               case when not c.arr then format_type(c.typ, c.mod) when t.typarray <> 0 then format_type(t.typarray, c.mod) else c.orig end as cmp
+        from chain c join pg_type t on t.oid = c.typ
+        order by c.name, c.depth desc
     )
-    select distinct on (c.name) c.name, c.orig,
-           case when not c.arr then format_type(c.typ, c.mod) when t.typarray <> 0 then format_type(t.typarray, c.mod) else c.orig end,
-           t.typtype = 'c' or t.oid in ('json'::regtype, 'jsonb'::regtype)
-    from chain c join pg_type t on t.oid = c.typ
-    order by c.name, c.depth desc`
+    select c.name, c.orig, c.cmp, c.typtype = 'c' or c.typ in ('json'::regtype, 'jsonb'::regtype),
+           c.arr, coalesce(n.nspname, ''), coalesce(op.oprname, '')
+    from col c
+    left join lateral (
+        select o.opcfamily, o.opcintype
+        from pg_opclass o join pg_type ot on ot.oid = o.opcintype
+        where o.opcdefault and o.opcmethod = 403
+          and (o.opcintype = c.typ
+               or o.opcintype = case c.typtype when 'e' then 'anyenum'::regtype when 'r' then 'anyrange'::regtype
+                                               when 'm' then 'anymultirange'::regtype when 'c' then 'record'::regtype end
+               or (c.nested and o.opcintype = 'anyarray'::regtype)
+               or exists (select 1 from pg_cast k where k.castsource = c.typ and k.casttarget = o.opcintype
+                          and k.castmethod = 'b' and k.castcontext = 'i'))
+        order by o.opcintype <> c.typ, not ot.typispreferred
+        limit 1
+    ) oc on true
+    left join pg_amop ao on ao.amopfamily = oc.opcfamily and ao.amoplefttype = oc.opcintype and ao.amoprighttype = oc.opcintype
+         and ao.amopstrategy = 3
+    left join pg_operator op on op.oid = ao.amopopr
+    left join pg_namespace n on n.oid = op.oprnamespace`
 
 // dataLiveColumnsQ takes a table ($1) and resolves its columns.
 var dataLiveColumnsQ = fmt.Sprintf(dataTypeChainQ, `
@@ -126,12 +166,33 @@ func liveDataColumnTypes(ctx context.Context, pool *pgxpool.Pool, fq string) (ma
 
 func scanDataColumns(rows pgx.Rows, out map[string]dataColumn) error {
     for rows.Next() {
-        var name string
+        var name, opSchema, op string
+        var array bool
         var c dataColumn
-        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json); err != nil { return err }
+        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json, &array, &opSchema, &op); err != nil { return err }
+        switch {
+        case op == "":
+        case array || opSchema == "pg_catalog":
+            c.eq, c.eqSchema = "=", "pg_catalog"
+        default:
+            c.eq, c.eqSchema = "operator("+quoteIdent(opSchema)+"."+op+")", opSchema
+        }
         out[name] = c
     }
     return rows.Err()
+}
+
+// dataKeyTypeError returns an error for the first key column of fq whose
+// type has no default btree operator class (json, xml, the geometric
+// types), so that PostgreSQL can neither match nor order rows by it; nil
+// when every key column in types has one.
+func dataKeyTypeError(fq string, key []string, types map[string]dataColumn) error {
+    for _, k := range key {
+        if c, ok := types[k]; ok && c.eq == "" {
+            return fmt.Errorf("data for %s: key column %s has type %s, which has no default btree operator class, so rows cannot be matched or ordered by it; use key columns of another type", fq, k, c.typ)
+        }
+    }
+    return nil
 }
 
 // dataColumnDefs renders cols as a column definition list for
@@ -175,9 +236,10 @@ func dataUsedColumns(key []string, rows []map[string]any) map[string]bool {
 }
 
 // checkNewTableData checks the rows declared for a table the plan creates,
-// as far as the database already has the declared column types: two rows
-// whose keys are equal in the key types, and a map given to a column whose
-// type cannot take one, are errors here instead of when the migration runs.
+// as far as the database already has the declared column types: a key
+// column of a type without a default btree operator class, two rows whose
+// keys are equal in the key types, and a map given to a column whose type
+// cannot take one, are errors here instead of when the migration runs.
 // Anything else is left to the migration.
 func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *schema.Table, key []string) error {
     names, typs := []string{}, []string{}
@@ -186,6 +248,7 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
     }
     types, err := declaredDataColumnTypes(ctx, pool, names, typs)
     if err != nil || len(types) == 0 { return nil }
+    if err := dataKeyTypeError(fq, key, types); err != nil { return err }
     rows, err := dataRowsJSON(dt.Data.Rows)
     if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
     first := "d.i"
@@ -216,13 +279,15 @@ func checkNewTableData(ctx context.Context, pool *pgxpool.Pool, fq string, dt *s
 // into a record of the columns it uses with jsonb_to_record, so values are
 // compared as the column types see them (10 matches a numeric 10.00, enum
 // labels, arrays and jsonb compare by value). Only the columns a row lists
-// are compared. Rows are matched on the key with the key types' equality;
-// a key that matches but is written differently (a citext key in another
-// case) is reported as changed, and two declared rows with equal keys are
-// an error. Tables whose key columns do not exist yet (they are renamed or
-// added by the plan) are skipped and get upserts, as are tables whose rows
-// use enum labels the plan has yet to add. The rows of tables that do not
-// exist yet are only checked (see checkNewTableData).
+// are compared. Rows are matched on the key with the key types' equality,
+// whatever operator the search_path gives a bare =; a key that matches but
+// is written differently (a citext key in another case) is reported as
+// changed, and two declared rows with equal keys are an error, as is a key
+// column whose type has no default btree operator class (see
+// dataKeyTypeError). Tables whose key columns do not exist yet (they are
+// renamed or added by the plan) are skipped and get upserts, as are tables
+// whose rows use enum labels the plan has yet to add. The rows of tables
+// that do not exist yet are only checked (see checkNewTableData).
 func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
@@ -243,18 +308,21 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         types, err := liveDataColumnTypes(ctx, pool, fq)
         if err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
         if !hasDataColumns(types, key) { continue }
+        if err := dataKeyTypeError(fq, key, types); err != nil { return err }
         used := dataUsedColumns(key, dt.Data.Rows)
         for col := range used {
             if _, ok := types[col]; !ok { delete(used, col) }
         }
         from := dataTarget(fq, lt.Partitioned || dt.PartitionBy != nil)
         join := make([]string, len(key))
+        sameKey := make([]string, len(key))
         liveKey := make([]string, len(key))
         declKey := make([]string, len(key))
         textKey := make([]string, len(key))
         for i, k := range key {
             q := quoteIdent(k)
-            join[i] = fmt.Sprintf("pgy_row.%s = (r.v).%s", q, q)
+            join[i] = fmt.Sprintf("pgy_row.%s %s (r.v).%s", q, types[k].eq, q)
+            sameKey[i] = fmt.Sprintf("pgy_row.%s %s v.%s", q, types[k].eq, q)
             liveKey[i] = "pgy_row." + q
             declKey[i] = "v." + q
             textKey[i] = fmt.Sprintf("%s, pgy_row.%s::text", quoteString(k), q)
@@ -314,7 +382,7 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
             from ` + from + ` pgy_row
             where not exists (select 1 from jsonb_array_elements($1::jsonb) e(j)
                               cross join lateral jsonb_to_record(e.j) as v(` + dataColumnDefs(key, types) + `)
-                              where (` + strings.Join(liveKey, ", ") + `) = (` + strings.Join(declKey, ", ") + `))
+                              where ` + strings.Join(sameKey, " and ") + `)
             order by ` + strings.Join(liveKey, ", ")
         er, err := pool.Query(ctx, extraQ, string(rows))
         if err != nil { return dataError(fq, err, dt.Data.Rows, types) }
@@ -329,6 +397,12 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
         er.Close()
         if err := er.Err(); err != nil { return fmt.Errorf("data for %s: %w", fq, err) }
         sort.Ints(ld.Missing)
+        for _, k := range key {
+            if s := types[k].eqSchema; s != "pg_catalog" && s != "public" && !slices.Contains(l.SearchPath, s) {
+                if ld.KeyEquals == nil { ld.KeyEquals = map[string]string{} }
+                ld.KeyEquals[k] = types[k].eq
+            }
+        }
         l.TableData[fq] = ld
     }
     return nil
@@ -500,9 +574,16 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
     return fmt.Sprintf("insert into %s (%s)%s values (%s);", pqIdent(fq), strings.Join(names, ", "), overriding, strings.Join(vals, ", "))
 }
 
-func dataKeyWhere(key []string, value func(string) string) string {
+// dataKeyWhere renders the condition that selects the row whose key columns
+// equal value(column), comparing with = or with the column's operator in
+// equals (see LiveTableData.KeyEquals).
+func dataKeyWhere(key []string, equals map[string]string, value func(string) string) string {
     conds := make([]string, len(key))
-    for i, k := range key { conds[i] = fmt.Sprintf("%s = %s", quoteIdent(k), value(k)) }
+    for i, k := range key {
+        op := "="
+        if o := equals[k]; o != "" { op = o }
+        conds[i] = fmt.Sprintf("%s %s %s", quoteIdent(k), op, value(k))
+    }
     return strings.Join(conds, " and ")
 }
 
@@ -568,7 +649,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 set := []string{}
                 for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
             }
         }
     }
@@ -579,7 +660,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             if ld == nil { continue }
             key := desired.Tables[fq].DataKey()
             for _, ex := range ld.Extra {
-                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, func(k string) string { return quoteString(ex[k]) })))
+                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return quoteString(ex[k]) })))
             }
         }
     }

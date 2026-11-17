@@ -135,6 +135,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
 
     simulateOwnersAndDefaults(out, desired)
+    simulateLanguages(out, desired)
+    simulateWrappers(out, desired)
 
     for name, s := range desired.Servers {
         if s == nil { continue }
@@ -461,6 +463,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             lc.Nullable = c.Nullable
             if !c.Nullable { lc.NotNullNotValid = "" }
             if !c.Nullable && c.NotValid { lc.NotNullNotValid = "simulated" }
+            if c.Nullable { lc.NotNullName = "" } else if !override && c.NotNullName != "" { lc.NotNullName = truncateIdent(c.NotNullName) }
         }
         if !override || c.Default != "" { lc.Default = c.Default }
         if c.Identity != "" {
@@ -675,6 +678,8 @@ func cloneLive(l *Live) *Live {
         TSDictionaryDefs:   cloneMap(l.TSDictionaryDefs, func(d *schema.TSDictionary) *schema.TSDictionary { c := *d; c.Options = cloneMap(d.Options, nil); return &c }),
         TSComments:         cloneMap(l.TSComments, nil),
         Servers:            cloneMap(l.Servers, func(s *LiveServer) *LiveServer { c := *s; c.Options = cloneMap(s.Options, nil); return &c }),
+        Wrappers:           cloneMap(l.Wrappers, func(w *LiveWrapper) *LiveWrapper { c := *w; c.Options = cloneMap(w.Options, nil); return &c }),
+        Languages:          cloneMap(l.Languages, func(g *LiveLanguage) *LiveLanguage { c := *g; return &c }),
         Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
         EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),
