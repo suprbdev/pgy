@@ -121,6 +121,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		if l.Grants == nil {
 			continue
 		}
+		liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
 		revokes, grants := ownedGrantDiff("language "+quoteIdent(name), desiredG, liveG, owner, coversPublic(mode, false, desiredG))
 		if _, listed := desiredG["public"]; !listed {
 			plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, "")...)

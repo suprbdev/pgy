@@ -64,7 +64,7 @@ Exit codes:
                 return fmt.Errorf("--strict refuses --unsafe and --prune (set ci.forbid_unsafe: false in the config to allow them)")
             }
             strict := &strictFindings{}
-            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants, KeepExtensions: cfg.KeepExtensions}
+            opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants, KeepExtensions: cfg.KeepExtensions, External: cfg.External}
             schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil {
                 return err
@@ -73,7 +73,7 @@ Exit codes:
             if noWarnings && !cfg.failsOn("validate") {
                 issues <- nil
             } else {
-                go func() { issues <- validate.Files(schemaPaths) }()
+                go func() { issues <- validate.FilesWith(schemaPaths, cfg.External) }()
             }
             type loaded struct {
                 db  *schema.Database
@@ -122,6 +122,7 @@ Exit codes:
                 return l.err
             }
             compiled := l.db
+            compiled.External = cfg.External
             if !cfg.Policy.Empty() {
                 for _, is := range validate.CheckPolicy(compiled, cfg.Policy) {
                     if !noWarnings { fmt.Fprintln(os.Stderr, "warning:", is.String()) }

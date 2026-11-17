@@ -11,6 +11,7 @@ import (
     yaml "gopkg.in/yaml.v3"
 
     "github.com/suprbdev/pgy/internal/diff"
+    "github.com/suprbdev/pgy/internal/schema"
     "github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -27,12 +28,33 @@ type FileConfig struct {
     CI            *CIConfig `yaml:"ci"`
     Policy        *PolicyConfig `yaml:"policy"`
     Prune         *PruneConfig `yaml:"prune"`
+    External      *ExternalConfig `yaml:"external"`
 }
 
 // PruneConfig is the prune: block: what pgy diff --unsafe --prune leaves
 // alone although the YAML does not declare it.
 type PruneConfig struct {
     KeepExtensions []string `yaml:"keep_extensions"`
+}
+
+// ExternalConfig is the external: block: glob patterns for the schemas,
+// roles, settings and relations that the database has but the application
+// doesn't own (see schema.External).
+type ExternalConfig struct {
+    Schemas   []string `yaml:"schemas"`
+    Roles     []string `yaml:"roles"`
+    Settings  []string `yaml:"settings"`
+    Relations []string `yaml:"relations"`
+}
+
+// resolveExternal checks an external: block and returns its patterns, or
+// nil when it lists none.
+func resolveExternal(ec *ExternalConfig) (*schema.External, error) {
+    if ec == nil { return nil, nil }
+    e := &schema.External{Schemas: ec.Schemas, Roles: ec.Roles, Settings: ec.Settings, Relations: ec.Relations}
+    if err := e.Check(); err != nil { return nil, err }
+    if e.Empty() { return nil, nil }
+    return e, nil
 }
 
 // resolvePrune checks a prune: block and returns the extensions it keeps.

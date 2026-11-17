@@ -29,13 +29,15 @@ const maxListedDependents = 3
 // prunableExtensions returns the installed extensions that --unsafe --prune
 // may drop, before their dependents are looked at: the ones a present
 // extensions block does not list, living in a schema the YAML declares
-// objects in. plpgsql, the extensions in opts.KeepExtensions and the ones
-// an extension that stays installed requires are never among them.
+// objects in. plpgsql, the extensions in opts.KeepExtensions, those an
+// external role owns and the ones an extension that stays installed
+// requires are never among them.
 func prunableExtensions(live *Live, desired *schema.Database, opts Options) map[string]bool {
 	drop := map[string]bool{}
 	if live == nil || desired == nil || desired.Extensions == nil || !opts.Unsafe || !opts.Prune {
 		return drop
 	}
+	desired = withExternal(desired, opts)
 	keep := map[string]bool{"plpgsql": true}
 	for _, name := range opts.KeepExtensions {
 		keep[name] = true
@@ -48,7 +50,7 @@ func prunableExtensions(live *Live, desired *schema.Database, opts Options) map[
 	managed := managedSchemas(desired)
 	for name, installed := range live.Extensions {
 		le := live.ExtensionDefs[name]
-		if installed && !keep[name] && le != nil && managed[le.Schema] {
+		if installed && !keep[name] && le != nil && managed[le.Schema] && !desired.External.HasRole(le.Owner) {
 			drop[name] = true
 		}
 	}

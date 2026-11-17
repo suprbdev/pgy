@@ -43,11 +43,16 @@ type Options struct {
     // MigrationsTable is pgy's own bookkeeping table ("schema.table"), never
     // pruned. Empty means pgy.migrations.
     MigrationsTable string
+    // External lists what the database has that the application doesn't
+    // own (the config's external: block), which the plan leaves alone; see
+    // schema.Database.External.
+    External *schema.External
 }
 
 // planPrune returns the DROP statements for live objects the desired schema
 // no longer declares. Only schemas that contain at least one desired object
-// are considered, and extension members, partitions, inheritance children of
+// and are not external are considered, and extension members, external
+// relations (see schema.External.HasRelation), partitions, inheritance children of
 // kept tables (see keptInheritanceChildren), inherited constraints,
 // triggers and indexes, constraint-backed indexes, primary keys, sequences
 // owned by a column and pgy's migrations table are never dropped, nor is
@@ -69,12 +74,12 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
+        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || desired.External.HasRelation(fq) || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         early = append(early, pruneTableObjects(fq, dt, lt)...)
     }
     for _, fq := range sortedKeys(desired.Views) {
         vw := desired.Views[fq]
-        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] { continue }
+        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] || desired.External.HasRelation(fq) { continue }
         if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
             early = append(early, pruneIndexes(fq, vw.Indexes, lt)...)
         }
@@ -86,7 +91,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string) (ea
     undeclared := func(liveSet map[string]bool, declared func(string) bool, extKind string) []string {
         out := []string{}
         for k, ok := range liveSet {
-            if !ok || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] { continue }
+            if !ok || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] || extKind == "rel" && desired.External.HasRelation(k) { continue }
             out = append(out, k)
         }
         sort.Strings(out)
@@ -151,14 +156,14 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
         i := strings.IndexByte(fq, '.')
         lt := live.Tables[fq]
-        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq]
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq] && !desired.External.HasRelation(fq)
     }
     users := map[string][]string{}
     for _, fq := range sortedKeys(live.Tables) {
         if lt := live.Tables[fq]; lt != nil && lt.Foreign != nil && !pruned(fq) { users[lt.Foreign.Server] = append(users[lt.Foreign.Server], fq) }
     }
     for _, name := range sortedKeys(live.Servers) {
-        if desired.Servers[name] != nil { continue }
+        if desired.Servers[name] != nil || desired.External.HasRole(live.Servers[name].Owner) { continue }
         if left := users[name]; len(left) > 0 {
             warnings = append(warnings, Warning{Message: fmt.Sprintf("server %s is not in the servers block but still has foreign tables this plan keeps (%s), so it is not dropped; drop or move them first", name, strings.Join(left, ", "))})
             continue
@@ -172,12 +177,13 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
     return drops, warnings
 }
 
-// managedSchemas returns the schemas holding at least one desired object.
+// managedSchemas returns the schemas holding at least one desired object,
+// external schemas left out.
 func managedSchemas(d *schema.Database) map[string]bool {
     out := map[string]bool{}
     add := func(keys []string) {
         for _, k := range keys {
-            if i := strings.IndexByte(k, '.'); i > 0 { out[k[:i]] = true }
+            if i := strings.IndexByte(k, '.'); i > 0 && !d.External.HasSchema(k[:i]) { out[k[:i]] = true }
         }
     }
     add(sortedKeys(d.Tables))

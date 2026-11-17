@@ -11,6 +11,7 @@ import (
 
     "github.com/spf13/cobra"
 
+    "github.com/suprbdev/pgy/internal/schema"
     "github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -39,6 +40,9 @@ type GlobalConfig struct {
     // KeepExtensions lists the extensions of the config's
     // prune.keep_extensions, which pgy diff --prune never drops.
     KeepExtensions []string
+    // External holds the patterns of the config's external: block; nil
+    // without one.
+    External *schema.External
 }
 
 // failsOn reports whether a --strict run fails on a finding of kind.
@@ -126,6 +130,9 @@ func AttachGlobalFlags(root *cobra.Command) {
             return err
         }
         if cfg.KeepExtensions, err = resolvePrune(fc.Prune); err != nil {
+            return err
+        }
+        if cfg.External, err = resolveExternal(fc.External); err != nil {
             return err
         }
 

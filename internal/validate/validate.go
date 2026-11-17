@@ -61,6 +61,12 @@ func HasErrors(issues []Issue) bool {
 // Files validates the given schema files and returns every finding, errors
 // first, in a stable order.
 func Files(paths []string) []Issue {
+	return FilesWith(paths, nil)
+}
+
+// FilesWith is Files for a project whose config has an external: block:
+// references to what ext lists are not reported (see Database).
+func FilesWith(paths []string, ext *schema.External) []Issue {
 	issues := []Issue{}
 	compiled, err := compileSchema()
 	if err != nil {
@@ -137,12 +143,17 @@ func Files(paths []string) []Issue {
 			}
 		}
 	}
-	issues = append(issues, Database(schema.Merge(dbs))...)
+	merged := schema.Merge(dbs)
+	merged.External = ext
+	issues = append(issues, Database(merged)...)
 	sort.SliceStable(issues, func(i, j int) bool { return issues[i].Severity == Error && issues[j].Severity != Error })
 	return issues
 }
 
 // Database checks a merged schema for broken references and likely mistakes.
+// References to external objects (d.External) are not reported: tables,
+// views and sequences in external schemas or matching external relations,
+// and routines and types in external schemas.
 func Database(d *schema.Database) []Issue {
 	issues := []Issue{}
 	add := func(sev Severity, obj, format string, args ...any) {
@@ -172,7 +183,7 @@ func Database(d *schema.Database) []Issue {
 		}
 		obj := "table " + fq
 		checkDeps(d, obj, t.DependsOn, add)
-		if keys := t.DefinitionKeys(); len(keys) > 0 && !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil && (t.Foreign == nil || t.Foreign.Server == "") {
+		if keys := t.DefinitionKeys(); len(keys) > 0 && !t.ColumnsSet && len(t.Columns) == 0 && t.Of == "" && t.PartitionOf == "" && t.Inherits == nil && (t.Foreign == nil || t.Foreign.Server == "") && !(d.External.InSchema(fq) && slices.Equal(keys, []string{"triggers"})) {
 			add(Warning, obj, "has %s but no columns, so it is created as a table without columns; without those keys a declaration without columns, of, partitionOf or inherits manages only a table that already exists, such as one an extension owns", strings.Join(keys, ", "))
 		}
 		hasCols := t.PartitionOf == "" && (len(t.Columns) > 0 || d.Types[t.Of] != nil)
@@ -289,7 +300,9 @@ func Database(d *schema.Database) []Issue {
 			}
 			ref := d.Tables[qualifyPublic(fk.RefTable)]
 			if ref == nil {
-				add(Warning, obj, "foreign key %s references %s, which no schema file declares", fk.Name, fk.RefTable)
+				if !externalRelation(d, fk.RefTable) {
+					add(Warning, obj, "foreign key %s references %s, which no schema file declares", fk.Name, fk.RefTable)
+				}
 				continue
 			}
 			if ref.PartitionOf == "" && len(ref.Columns) > 0 {
@@ -416,7 +429,7 @@ func Database(d *schema.Database) []Issue {
 			}
 		}
 		for _, p := range t.Inherits {
-			if d.Tables[p] == nil {
+			if d.Tables[p] == nil && !externalRelation(d, p) {
 				add(Warning, obj, "inherits %s, which no schema file declares", p)
 			}
 		}
@@ -433,7 +446,7 @@ func Database(d *schema.Database) []Issue {
 		if len(t.Inherits) > 0 && (t.PartitionOf != "" || t.PartitionBy != nil) {
 			add(Error, obj, "inherits cannot be combined with partitionOf or partitionBy")
 		}
-		if t.PartitionOf != "" && d.Tables[t.PartitionOf] == nil {
+		if t.PartitionOf != "" && d.Tables[t.PartitionOf] == nil && !externalRelation(d, t.PartitionOf) {
 			add(Warning, obj, "partition of %s, which no schema file declares", t.PartitionOf)
 		}
 		if t.PartitionOf != "" && (t.Partition == nil || (!t.Partition.Default && len(t.Partition.From) == 0 && len(t.Partition.In) == 0 && t.Partition.Modulus < 0)) {
@@ -572,7 +585,9 @@ func Database(d *schema.Database) []Issue {
 			fn := strings.TrimSuffix(strings.TrimSpace(et.Function), "()")
 			keys := schema.ResolveDependencyKeys("function "+fn, d)
 			if len(keys) == 0 {
-				add(Warning, "event trigger "+name, "function %s is not declared in any schema file", et.Function)
+				if !externalDependency(d, "function "+fn) {
+					add(Warning, "event trigger "+name, "function %s is not declared in any schema file", et.Function)
+				}
 			} else if r := noArgReturns(d, keys); r != "" && r != "event_trigger" {
 				add(Error, "event trigger "+name, "function %s returns %s; event trigger functions must return event_trigger", et.Function, r)
 			}
@@ -661,7 +676,7 @@ func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(S
 	}
 	keys := schema.ResolveDependencyKeys("function "+proc, d)
 	if len(keys) == 0 {
-		if !undeclarableFunction(d, proc) {
+		if !undeclarableFunction(d, proc) && !externalDependency(d, "function "+proc) {
 			add(Warning, obj, "trigger %s calls %s, which no schema file declares", tr.Name, proc)
 		}
 	} else if r := noArgReturns(d, keys); r != "" && r != "trigger" {
@@ -715,13 +730,59 @@ func checkTrigger(d *schema.Database, obj string, tr *schema.Trigger, add func(S
 func checkDeps(d *schema.Database, obj string, deps []string, add func(Severity, string, string, ...any)) {
 	for _, dep := range deps {
 		dep = strings.TrimSpace(dep)
-		if dep == "" || strings.HasPrefix(dep, "schema ") || strings.HasPrefix(dep, "extension ") {
+		if dep == "" || strings.HasPrefix(dep, "schema ") || strings.HasPrefix(dep, "extension ") || externalDependency(d, dep) {
 			continue
 		}
 		if len(schema.ResolveDependencyKeys(dep, d)) == 0 {
 			add(Error, obj, "dependsOn %q matches nothing declared", dep)
 		}
 	}
+}
+
+// externalRelation reports whether the relation a reference names (schema
+// qualified or in public, quoted or not) is external.
+func externalRelation(d *schema.Database, ref string) bool {
+	if d.External == nil {
+		return false
+	}
+	parts := referenceParts(ref)
+	if len(parts) == 1 {
+		parts = []string{"public", parts[0]}
+	}
+	return len(parts) == 2 && d.External.HasRelation(parts[0]+"."+parts[1])
+}
+
+// referenceParts splits a reference to an object, schema.name or a name
+// alone, either part quoted or not, into its names.
+func referenceParts(ref string) []string {
+	if parts, ok := schema.SplitName(ref); ok {
+		return parts
+	}
+	return strings.SplitN(strings.TrimSpace(ref), ".", 2)
+}
+
+// externalDependency reports whether a dependsOn entry ("table x", "function
+// x(args)", ...) names an external object: a relation externalRelation
+// accepts, or another object in an external schema.
+func externalDependency(d *schema.Database, dep string) bool {
+	if d.External == nil {
+		return false
+	}
+	for _, kind := range []string{"table ", "view ", "materialized view ", "sequence ", "foreign table "} {
+		if name, ok := strings.CutPrefix(dep, kind); ok {
+			return externalRelation(d, strings.TrimSpace(name))
+		}
+	}
+	_, name, ok := strings.Cut(dep, " ")
+	if !ok {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if i := strings.IndexByte(name, '('); i >= 0 {
+		name = name[:i]
+	}
+	parts := referenceParts(name)
+	return len(parts) == 2 && d.External.HasSchema(parts[0])
 }
 
 // inheritsColumn reports whether table t gets column cn from a parent, so
