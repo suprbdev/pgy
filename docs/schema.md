@@ -218,6 +218,25 @@ Two spellings of an operator are compared with more care, because PostgreSQL pri
 
 Names are compared as text, so pgy cannot tell a function in `public` from one of the same name in `pg_catalog` (`public.gen_random_uuid()` from an old `pgcrypto` and the built-in `gen_random_uuid()`), or two objects of the same name in two schemas that are both on the `search_path`.
 
+A function body is resolved when the function runs, and PostgreSQL 17 and later run `CREATE INDEX`, `REINDEX`, `REFRESH MATERIALIZED VIEW` and the other maintenance commands with `search_path` set to `pg_catalog, pg_temp`, whatever the session has. A function those commands call then finds nothing its body leaves unqualified, objects in `public` included: the usual immutable SQL wrapper around an extension function, used in an index, fails with `function unaccent(text) does not exist` as soon as the index is built over existing rows. Qualify what the body calls, including an object it names in a string, or give the function a path of its own with `set: {search_path: ...}`:
+
+```yaml
+extensions:
+  - {name: unaccent, schema: public}
+schema app:
+  function f_unaccent(text):
+    returns: text
+    language: sql
+    immutable: true
+    body: select public.unaccent('public.unaccent', $1)
+  table city:
+    dependsOn: [function app.f_unaccent(text)]
+    columns:
+      name: {type: text}
+    indexes:
+      city_name_unaccent: {columns: [app.f_unaccent(name)]}
+```
+
 ### How expressions are compared
 
 `pgy diff` compares a declared expression with the one in the database in two steps.
@@ -238,25 +257,6 @@ Some definitions are compared as text only:
 - **A definition on a table that has the same name as a type it names without a schema.** Qualify the type.
 - **Triggers on views, rule conditions (`where`), publication row filters, extended statistics expressions and partition bounds.**
 - **Definitions that match as text are not looked at again.** A difference the normalisation hides stays hidden: a cast that was added or removed (an index on `email::text` against one on the `citext` column `email`), or a function in `public` against one of the same name in `pg_catalog`.
-
-A function body is resolved when the function runs, and PostgreSQL 17 and later run `CREATE INDEX`, `REINDEX`, `REFRESH MATERIALIZED VIEW` and the other maintenance commands with `search_path` set to `pg_catalog, pg_temp`, whatever the session has. A function those commands call then finds nothing its body leaves unqualified, objects in `public` included: the usual immutable SQL wrapper around an extension function, used in an index, fails with `function unaccent(text) does not exist` as soon as the index is built over existing rows. Qualify what the body calls, including an object it names in a string, or give the function a path of its own with `set: {search_path: ...}`:
-
-```yaml
-extensions:
-  - {name: unaccent, schema: public}
-schema app:
-  function f_unaccent(text):
-    returns: text
-    language: sql
-    immutable: true
-    body: select public.unaccent('public.unaccent', $1)
-  table city:
-    dependsOn: [function app.f_unaccent(text)]
-    columns:
-      name: {type: text}
-    indexes:
-      city_name_unaccent: {columns: [app.f_unaccent(name)]}
-```
 
 ## Merging across files
 

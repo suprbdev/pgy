@@ -56,8 +56,10 @@ type ExprProbe struct {
 	// (its key columns, then its predicate) and a policy (USING, then WITH
 	// CHECK).
 	Parts []string
-	// Err is why PostgreSQL rejected the definition, such as a column or a
-	// function this plan creates; "" when it didn't.
+	// Err is why the definition couldn't be read back: PostgreSQL rejected
+	// it, as it does one that uses a column or a function this plan
+	// creates, or it names the probe's copy of its table (see
+	// selfReference). "" when it was read back.
 	Err string
 }
 
