@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -532,6 +533,33 @@ func TestExprProbeSimulatedStepIsNotPlannedAgain(t *testing.T) {
 	again := Plan(Simulate(live, desired), desired, true)
 	if sql := Render(again) + RenderConcurrent(again); sql != "" {
 		t.Errorf("a later step of a split plan sees the definitions as applied, got:\n%s", sql)
+	}
+}
+
+func TestExprProbeNeedsAConnection(t *testing.T) {
+	live, desired := exprProbeLive(), exprProbeDesired(t)
+	if err := ProbeExpressions(context.Background(), nil, live, desired); err != nil || live.ExprProbes != nil {
+		t.Errorf("without a connection nothing is probed, got %v, %v", err, live.ExprProbes)
+	}
+	live.Offline = true
+	if plan := collectExprProbes(live, desired); len(plan.requests) == 0 {
+		t.Fatal("the fixture has definitions to probe")
+	}
+	if err := ProbeExpressions(context.Background(), nil, live, desired); err != nil || live.ExprProbes != nil {
+		t.Errorf("--from-empty has no database to probe, got %v, %v", err, live.ExprProbes)
+	}
+}
+
+func TestExprProbeSkipsViewTriggers(t *testing.T) {
+	live, desired := exprProbeLive(), exprProbeDesired(t)
+	desired.Views["app.v"].Triggers = []*schema.Trigger{{Name: "v_t", Timing: "instead of", Events: []string{"insert"}, Level: "row", Procedure: "app.trg('1e1')"}}
+	vt := newLiveTable()
+	vt.Triggers["v_t"] = `CREATE TRIGGER v_t INSTEAD OF INSERT ON app.v FOR EACH ROW EXECUTE FUNCTION app.trg('10')`
+	live.ViewTables = map[string]*LiveTable{"app.v": vt}
+	for _, r := range collectExprProbes(live, desired).requests {
+		if r.key.Kind == ExprTrigger && r.key.Object == "app.v" {
+			t.Errorf("a view's trigger can't be attached to a table, so it is not probed: %+v", r.key)
+		}
 	}
 }
 
