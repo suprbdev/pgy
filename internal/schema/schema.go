@@ -597,6 +597,7 @@ type Trigger struct {
 // expressions.
 type Statistic struct {
     Name    string
+    Schema  string // the schema the object is in; "" = its table's
     Kinds   []string
     Columns []string
     Comment string
@@ -1967,6 +1968,7 @@ func parseStatistics(v any) []*Statistic {
                 for _, kind := range parseStringListFromNode(k) { st.Kinds = append(st.Kinds, strings.ToLower(strings.TrimSpace(kind))) }
             }
             if c, ok := dm["columns"]; ok { st.Columns = parseStringListFromNode(c) }
+            if s, ok := dm["schema"].(string); ok { st.Schema = strings.TrimSpace(s) }
             if s, ok := dm["comment"].(string); ok { st.Comment = s }
             if n, ok := dm["statisticsTarget"].(int); ok { st.StatisticsTarget = &n }
         }

@@ -227,10 +227,10 @@ func pruneTableObjects(fq string, dt *schema.Table, lt *LiveTable) []string {
     }
     wantStats := map[string]bool{}
     for _, st := range dt.Statistics {
-        if st != nil { wantStats[truncateIdent(st.Name)] = true }
+        if st != nil { wantStats[StatisticKey(fq, st.Schema, truncateIdent(st.Name))] = true }
     }
-    for _, name := range sortedKeys(lt.Statistics) {
-        if !wantStats[name] { out = append(out, fmt.Sprintf("drop statistics %s;", pqIdent(schemaPrefixOf(fq)+name))) }
+    for _, key := range sortedKeys(lt.Statistics) {
+        if !wantStats[key] { out = append(out, fmt.Sprintf("drop statistics %s;", liveStatisticTarget(fq, key, lt.Statistics[key]))) }
     }
     wantRules := map[string]bool{}
     for _, r := range dt.Rules {

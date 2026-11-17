@@ -499,11 +499,38 @@ type LivePartitionBound struct {
 
 // LiveStatistic is an extended statistics object: its kinds (empty = all)
 // and items (columns and expressions) from pg_get_statisticsobjdef.
+// Schema and Name are set for an object in another schema than its table's,
+// which LiveTable.Statistics keys by its qualified name (see StatisticKey).
 type LiveStatistic struct {
     Kinds   []string
     Items   []string
     Comment string
     Target  int // stxstattarget; -1 = default
+    Schema  string
+    Name    string
+}
+
+// StatisticKey returns the LiveTable.Statistics key of the statistics object
+// name in schema nsp on table fq: the name for an object in the table's
+// schema (nsp "" included), and the quoted schema and name for one in
+// another schema.
+func StatisticKey(fq, nsp, name string) string {
+    if nsp == "" || nsp+"." == schemaPrefixOf(fq) { return name }
+    return quoteIdent(nsp) + "." + quoteIdent(name)
+}
+
+// statisticTarget returns the qualified, quoted name of the statistics
+// object name in schema nsp ("" = the table's) on table fq.
+func statisticTarget(fq, nsp, name string) string {
+    if nsp == "" { return pqIdent(schemaPrefixOf(fq) + name) }
+    return quoteIdent(nsp) + "." + quoteIdent(name)
+}
+
+// liveStatisticTarget returns the qualified, quoted name of the live
+// statistics object ls with LiveTable.Statistics key key on table fq.
+func liveStatisticTarget(fq, key string, ls *LiveStatistic) string {
+    if ls != nil && ls.Schema != "" { return statisticTarget(fq, ls.Schema, ls.Name) }
+    return statisticTarget(fq, "", key)
 }
 
 var statisticsDefRe = regexp.MustCompile(`(?s)^CREATE STATISTICS ` + catalogName + `(?: \(([^)]*)\))? ON (.+) FROM ` + catalogName + `$`)
@@ -1190,29 +1217,32 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
 
     statQ := `
         select n.nspname, c.relname, s.stxname, pg_get_statisticsobjdef(s.oid), coalesce(d.description, ''),
-               coalesce(s.stxstattarget::int, -1)
+               coalesce(s.stxstattarget::int, -1), sn.nspname
         from pg_statistic_ext s
         join pg_class c on c.oid = s.stxrelid
         join pg_namespace n on n.oid = c.relnamespace
+        join pg_namespace sn on sn.oid = s.stxnamespace
         left join pg_description d on d.objoid = s.oid and d.classoid = 'pg_statistic_ext'::regclass
         where n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
         and n.nspname !~ '^pg_(toast_)?temp_'
     `
     batch.add(statQ, func(statRows pgx.Rows) error {
         for statRows.Next() {
-            var schemaName, tableName, name, def, comment string
+            var schemaName, tableName, name, def, comment, statSchema string
             var target int
-            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment, &target); err != nil { return err }
-            t := l.Tables[fmt.Sprintf("%s.%s", schemaName, tableName)]
+            if err := statRows.Scan(&schemaName, &tableName, &name, &def, &comment, &target, &statSchema); err != nil { return err }
+            fq := fmt.Sprintf("%s.%s", schemaName, tableName)
+            t := l.Tables[fq]
             if t == nil { continue }
             ls := &LiveStatistic{Comment: comment, Target: target}
+            if statSchema != schemaName { ls.Schema, ls.Name = statSchema, name }
             if m := statisticsDefRe.FindStringSubmatch(def); m != nil {
                 for _, k := range strings.Split(m[1], ",") {
                     if k = strings.TrimSpace(k); k != "" { ls.Kinds = append(ls.Kinds, k) }
                 }
                 ls.Items = splitTopLevel(m[2])
             }
-            t.Statistics[name] = ls
+            t.Statistics[StatisticKey(fq, statSchema, name)] = ls
         }
         return nil
     })
@@ -2904,11 +2934,15 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             neededSchemas["public"] = true
         }
     }
-    for k := range desired.Tables {
+    for k, dt := range desired.Tables {
         if parts := strings.SplitN(k, ".", 2); len(parts) == 2 {
             neededSchemas[parts[0]] = true
         } else {
             neededSchemas["public"] = true
+        }
+        if dt == nil { continue }
+        for _, st := range dt.Statistics {
+            if st != nil && st.Schema != "" { neededSchemas[st.Schema] = true }
         }
     }
     for k, vw := range desired.Views {
@@ -5221,9 +5255,9 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             name := truncateIdent(st.Name)
             have := ""
             if lt != nil {
-                if ls := lt.Statistics[name]; ls != nil && statisticMatchesLive(st, ls) { have = ls.Comment }
+                if ls := lt.Statistics[StatisticKey(k, st.Schema, name)]; ls != nil && statisticMatchesLive(st, ls) { have = ls.Comment }
             }
-            comment("statistics "+pqIdent(schemaPrefixOf(k)+name), st.Comment, have)
+            comment("statistics "+statisticTarget(k, statisticSchema(k, st), name), st.Comment, have)
         }
         for _, pol := range dt.Policies {
             if pol == nil || pol.Comment == "" || pol.Name == "" { continue }
@@ -6200,10 +6234,10 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     for _, st := range dt.Statistics {
         if st == nil || len(st.Columns) == 0 { continue }
         name := truncateIdent(st.Name)
-        target := pqIdent(schemaPrefixOf(fq) + name)
+        target := statisticTarget(fq, statisticSchema(fq, st), name)
         liveTarget := -1
         if lt != nil {
-            if ls := lt.Statistics[name]; ls != nil {
+            if ls := lt.Statistics[StatisticKey(fq, st.Schema, name)]; ls != nil {
                 if statisticMatchesLive(st, ls) {
                     if st.StatisticsTarget != nil && *st.StatisticsTarget != ls.Target {
                         plan.Alters = append(plan.Alters, fmt.Sprintf("alter statistics %s set statistics %d;", target, *st.StatisticsTarget))
@@ -6229,9 +6263,16 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
     }
 }
 
-// renderStatistic renders CREATE STATISTICS in the table's schema. Plain
-// or declared columns are quoted; anything else is an expression in
-// parentheses.
+// statisticSchema returns the schema statistics object st on table fq is
+// declared in, or "" for the table's.
+func statisticSchema(fq string, st *schema.Statistic) string {
+    if st.Schema+"." == schemaPrefixOf(fq) { return "" }
+    return st.Schema
+}
+
+// renderStatistic renders CREATE STATISTICS in the schema st names, or in
+// the table's. Plain or declared columns are quoted; anything else is an
+// expression in parentheses.
 func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Column) string {
     kinds := ""
     if k := statisticKinds(st.Kinds); len(k) > 0 && len(k) < 3 { kinds = " (" + strings.Join(k, ", ") + ")" }
@@ -6240,7 +6281,7 @@ func renderStatistic(fq string, st *schema.Statistic, cols map[string]*schema.Co
         c = strings.TrimSpace(c)
         if isIndexExpression(c) && cols[c] == nil { items[i] = "(" + c + ")" } else { items[i] = quoteIdent(c) }
     }
-    return fmt.Sprintf("create statistics %s%s on %s from %s;", pqIdent(schemaPrefixOf(fq)+truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
+    return fmt.Sprintf("create statistics %s%s on %s from %s;", statisticTarget(fq, statisticSchema(fq, st), truncateIdent(st.Name)), kinds, strings.Join(items, ", "), pqIdent(fq))
 }
 
 // statisticKinds returns the requested kinds in PostgreSQL's order.

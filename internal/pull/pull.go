@@ -1083,7 +1083,7 @@ func (b *builder) tables() {
 		b.constraints(t, fq, lt)
 		b.triggers(t, fq, lt)
 		b.rules(t, lt)
-		b.statistics(t, lt)
+		b.statistics(t, fq, lt)
 		if ri := lt.ReplicaIdentity; ri != "" && ri != "default" && lt.Foreign == nil {
 			add(t, "replicaIdentity", str(ri))
 		}
@@ -1748,14 +1748,30 @@ func jsonNode(v any) *node {
 	return str(fmt.Sprint(v))
 }
 
-func (b *builder) statistics(t *node, lt *diff.LiveTable) {
+// statistics writes the extended statistics of table fq, with the schema of
+// those in another schema than the table's.
+func (b *builder) statistics(t *node, fq string, lt *diff.LiveTable) {
 	if len(lt.Statistics) == 0 {
 		return
 	}
 	sts := newMap()
-	for _, name := range sortedKeys(lt.Statistics) {
-		ls := lt.Statistics[name]
+	written := map[string]bool{}
+	keys := sortedKeys(lt.Statistics)
+	sort.SliceStable(keys, func(i, j int) bool { return lt.Statistics[keys[i]].Schema == "" && lt.Statistics[keys[j]].Schema != "" })
+	for _, key := range keys {
+		ls, name := lt.Statistics[key], key
+		if ls.Schema != "" {
+			name = ls.Name
+		}
+		if written[name] {
+			b.warn("table %s: statistics %s.%s was left out: the table has another statistics object named %s, and the YAML names a table's statistics objects by name alone", fq, ls.Schema, name, name)
+			continue
+		}
+		written[name] = true
 		m := newMap()
+		if ls.Schema != "" {
+			add(m, "schema", str(ls.Schema))
+		}
 		if len(ls.Kinds) > 0 && len(ls.Kinds) < 3 {
 			add(m, "kinds", list(ls.Kinds))
 		}

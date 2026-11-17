@@ -555,6 +555,9 @@ schema app:
         columns: [tenant_id, kind]         # columns and/or expressions such as lower(name)
         statisticsTarget: 500              # ALTER STATISTICS ... SET STATISTICS; -1 = default
         comment: correlated columns
+      events_tenant_day:
+        schema: stats                      # the statistics object's own schema; default: the table's
+        columns: [tenant_id, date_trunc('day', created_at)]
 ```
 
 #### Clustering
@@ -567,7 +570,7 @@ schema app:
 
 `clusterOn` marks the index a bare `CLUSTER` uses (`ALTER TABLE ... CLUSTER ON`, or `SET WITHOUT CLUSTER` for `none`), diffed against live. pgy only sets the mark; run `CLUSTER` yourself, since it rewrites the table under an exclusive lock. Partitioned tables can't be marked (mark each partition), and `pgy validate` rejects partial indexes.
 
-`replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects in the table's schema. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). `statisticsTarget` is diffed against live and changed in place with `ALTER STATISTICS ... SET STATISTICS` (`-1` restores the default); left out, it is unmanaged. Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
+`replicaIdentity` controls what logical replication sends for updated and deleted rows. Tables without a primary key need it, if they're published, to replicate UPDATE/DELETE. It is diffed against live and emits `ALTER TABLE ... REPLICA IDENTITY`. `statistics` declares `CREATE STATISTICS` objects, in the table's schema unless `schema:` names another one, which pgy creates if needed. A statistics object is identified by its schema and name: one in another schema than the table's is matched, commented, altered and dropped under that name, and `pgy pull` writes its `schema:`. They are compared as sets of kinds and columns, since PostgreSQL stores columns in table order, and a changed one is dropped and recreated (metadata only). `statisticsTarget` is diffed against live and changed in place with `ALTER STATISTICS ... SET STATISTICS` (`-1` restores the default); left out, it is unmanaged. Comments are diffed, and `--prune` drops undeclared statistics on declared tables.
 
 #### Column alterations
 

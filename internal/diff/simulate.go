@@ -39,6 +39,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
     }
+    for _, dt := range desired.Tables {
+        if dt == nil { continue }
+        for _, st := range dt.Statistics {
+            if st != nil && st.Schema != "" { out.Schemas[st.Schema] = true }
+        }
+    }
     for s, g := range desired.SchemaGrants {
         out.SchemaGrants[s] = simulateGrants(out.SchemaGrants[s], g)
     }
@@ -604,7 +610,9 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
         if st == nil || len(st.Columns) == 0 { continue }
         target := -1
         if st.StatisticsTarget != nil { target = *st.StatisticsTarget }
-        lt.Statistics[truncateIdent(st.Name)] = &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment, Target: target}
+        ls := &LiveStatistic{Kinds: statisticKinds(st.Kinds), Items: append([]string(nil), st.Columns...), Comment: st.Comment, Target: target}
+        if nsp := statisticSchema(fq, st); nsp != "" { ls.Schema, ls.Name = nsp, truncateIdent(st.Name) }
+        lt.Statistics[StatisticKey(fq, st.Schema, truncateIdent(st.Name))] = ls
     }
     if dt.ReplicaIdentity != "" { lt.ReplicaIdentity = dt.ReplicaIdentity }
     switch {

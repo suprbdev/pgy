@@ -279,7 +279,7 @@ func declarationsOf(fq string, dt *schema.Table, lt *LiveTable) tableDeclaration
         if c != nil && c.Unique { d.columnKeys[LiveUniqueKeyName(fq, cn, lt.Constraints)] = true }
     }
     for _, st := range dt.Statistics {
-        if st != nil { d.statistics[truncateIdent(st.Name)] = true }
+        if st != nil { d.statistics[StatisticKey(fq, st.Schema, truncateIdent(st.Name))] = true }
     }
     return d
 }

@@ -90,6 +90,7 @@ schema public:
     clusterOn: orders_cover
     statistics:
       orders_qty_price: {kinds: [dependencies], columns: [qty, price], comment: correlated}
+      orders_qty_id: {schema: stats, columns: [qty, id]}
     unlogged: false
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:
