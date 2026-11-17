@@ -36,7 +36,7 @@ schema app:
     language: sql
 `)
 	got := messages(Files([]string{p}))
-	for _, want := range []string{"function app.noop(): needs returns and language", "procedure app.no_body(): needs body and language"} {
+	for _, want := range []string{"function app.noop(): needs returns and language", "procedure app.no_body(): needs body"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}

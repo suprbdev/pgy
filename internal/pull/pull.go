@@ -71,6 +71,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.aggregates()
 	b.tables()
 	b.views()
+	b.undeclaredMemberGrants()
 
 	single := newMap()
 	emit := func(name string, doc *node) error {
@@ -186,6 +187,109 @@ func (b *builder) member(kind, key string) bool {
 	return b.live.ExtensionMembers[kind+":"+key]
 }
 
+// memberGrants returns the body of a declaration that manages the
+// privileges of the extension member key (a diff.Live.ExtensionMembers key):
+// the grantees whose privileges in current are not the ones CREATE EXTENSION
+// left, which is what pg_dump keeps of an extension's objects. It is nil
+// when the privileges are unchanged. publicDefault is the privilege PUBLIC
+// has by default on objects of that kind ("" for none); losing it is
+// written as revokePublic.
+func (b *builder) memberGrants(key, publicDefault string, current map[string]map[string]bool) *node {
+	initial, ok := b.live.InitialGrants(key, publicDefault)
+	if !ok {
+		return nil
+	}
+	changes := diff.GrantChanges(current, initial)
+	if len(changes) == 0 {
+		return nil
+	}
+	m := newMap()
+	if privs, ok := changes["public"]; ok && len(privs) == 0 && publicDefault != "" {
+		add(m, "revokePublic", boolean(true))
+		delete(changes, "public")
+	}
+	if g := grantsNode(changes); g != nil {
+		add(m, "grants", g)
+	}
+	return m
+}
+
+// undeclaredMemberGrants warns about the tables, sequences and aggregates of
+// extensions whose privileges changed: pgy has no declaration that manages
+// an object of those kinds without creating it.
+func (b *builder) undeclaredMemberGrants() {
+	report := func(kind, key, name, publicDefault string, current map[string]map[string]bool) {
+		if b.wantSchema(schemaOf(name)) && b.memberGrants(key, publicDefault, current) != nil {
+			b.warn("%s %s belongs to an extension and its privileges are no longer the ones the extension set; pgy cannot declare them and they were left out", kind, name)
+		}
+	}
+	for _, k := range sortedKeys(b.live.Tables) {
+		kind := "table"
+		if lt := b.live.Tables[k]; lt != nil && lt.Foreign != nil {
+			kind = "foreign table"
+		}
+		report(kind, "rel:"+k, k, "", b.live.TableGrants[k])
+	}
+	for _, k := range sortedKeys(b.live.Sequences) {
+		report("sequence", "rel:"+k, k, "", b.live.TableGrants[k])
+	}
+	for _, norm := range sortedKeys(b.live.AggregateDefs) {
+		if lf := b.live.FunctionDefs[norm]; lf != nil {
+			report("aggregate", "proc:"+norm, lf.Signature, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm]))
+		}
+	}
+}
+
+// memberRoutine declares a function or procedure of an extension without a
+// body when its privileges changed.
+func (b *builder) memberRoutine(norm string, r *diff.LiveRoutine) {
+	blk, _, ok := b.block(r.Schema + "." + r.Name)
+	if !ok {
+		return
+	}
+	m := b.memberGrants("proc:"+norm, "execute", diff.WithPublicDefault(b.live.FunctionGrants[norm], "execute", b.live.FunctionPublicExec[norm]))
+	if m == nil {
+		return
+	}
+	sig := ""
+	if lf := b.live.FunctionDefs[norm]; lf != nil {
+		sig = lf.Signature
+	} else if lp := b.live.ProcedureDefs[norm]; lp != nil {
+		sig = lp.Signature
+	}
+	if i := strings.IndexByte(sig, '('); i >= 0 {
+		add(blk, kindOf(r)+" "+r.Name+sig[i:], m)
+	}
+}
+
+// memberView declares a view or materialized view of an extension without a
+// query when its privileges changed.
+func (b *builder) memberView(k string, materialized bool) {
+	blk, name, ok := b.block(k)
+	if !ok {
+		return
+	}
+	if m := b.memberGrants("rel:"+k, "", b.live.TableGrants[k]); m != nil {
+		kind := "view "
+		if materialized {
+			kind = "materialized view "
+		}
+		add(blk, kind+name, m)
+	}
+}
+
+// memberType declares a type or domain of an extension without a kind when
+// its privileges changed.
+func (b *builder) memberType(k string) {
+	blk, name, ok := b.block(k)
+	if !ok {
+		return
+	}
+	if m := b.memberGrants("type:"+k, "usage", diff.WithPublicDefault(b.live.TypeGrants[k], "usage", !b.live.TypePublicRevoked[k])); m != nil {
+		add(blk, "type "+name, m)
+	}
+}
+
 func (b *builder) owner(m *node, key string) {
 	if !b.opts.Owners {
 		return
@@ -291,6 +395,7 @@ func (b *builder) collectSerials() {
 func (b *builder) types() {
 	for _, k := range sortedKeys(b.live.Types) {
 		if b.member("type", k) {
+			b.memberType(k)
 			continue
 		}
 		blk, name, ok := b.block(k)
@@ -335,11 +440,17 @@ func (b *builder) types() {
 		b.owner(t, "type:"+k)
 		add(blk, "type "+name, t)
 	}
+	for _, k := range sortedKeys(b.live.BaseTypes) {
+		if b.member("type", k) {
+			b.memberType(k)
+		}
+	}
 }
 
 func (b *builder) domains() {
 	for _, k := range sortedKeys(b.live.Domains) {
 		if b.member("type", k) {
+			b.memberType(k)
 			continue
 		}
 		blk, name, ok := b.block(k)
@@ -577,6 +688,7 @@ func (b *builder) routines() {
 	for _, norm := range sortedKeys(b.d.Routines) {
 		r := b.d.Routines[norm]
 		if b.member("proc", norm) {
+			b.memberRoutine(norm, r)
 			continue
 		}
 		blk, _, ok := b.block(r.Schema + "." + r.Name)
@@ -1652,7 +1764,11 @@ func partitionBy(key string) *node {
 func (b *builder) views() {
 	for _, k := range sortedKeys(b.d.ViewQueries) {
 		mat := b.live.MatViews[k]
-		if b.member("rel", k) || (!mat && !b.live.Views[k]) {
+		if !mat && !b.live.Views[k] {
+			continue
+		}
+		if b.member("rel", k) {
+			b.memberView(k, mat)
 			continue
 		}
 		blk, name, ok := b.block(k)

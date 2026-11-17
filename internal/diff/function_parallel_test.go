@@ -46,8 +46,8 @@ func TestFunctionParallelCostRowsAlterAndSkip(t *testing.T) {
 		`alter function "app"."f"() parallel restricted cost 50;`,
 		`alter function "app"."g"() rows 100;`,
 	} {
-		if !findAlter(p, want) {
-			t.Errorf("missing %q in %v", want, p.Alters)
+		if !findCreate(p, want) {
+			t.Errorf("missing %q in %v", want, p.Creates)
 		}
 	}
 	d.Functions["app.f()"].Parallel, d.Functions["app.f()"].Cost, d.Functions["app.g()"].Rows, d.Functions["app.g()"].Cost = "", nil, nil, nil

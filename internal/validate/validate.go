@@ -428,9 +428,6 @@ func Database(d *schema.Database) []Issue {
 				kind = "materialized view "
 			}
 			checkDeps(d, kind+k, vw.DependsOn, add)
-			if strings.TrimSpace(vw.Query) == "" {
-				add(Error, kind+k, "has no query")
-			}
 			if !vw.Materialized && vw.With != nil {
 				add(Error, kind+k, "with is for materialized views; use securityInvoker, securityBarrier and checkOption on views")
 			}
@@ -475,6 +472,9 @@ func Database(d *schema.Database) []Issue {
 			if f.HasBody() && (f.Returns == "" || f.Language == "") {
 				add(Error, "function "+k, "needs returns and language")
 			}
+			if !f.HasBody() && (f.Returns != "" || f.Language != "") {
+				add(Error, "function "+k, "needs body; without body, returns and language it manages a function that already exists")
+			}
 			if r := strings.ToLower(strings.TrimSpace(f.Returns)); f.Rows != nil && r != "" && !strings.HasPrefix(r, "setof ") && !strings.HasPrefix(r, "table") {
 				add(Error, "function "+k, "rows applies only to set-returning functions (returns setof or table)")
 			}
@@ -483,8 +483,11 @@ func Database(d *schema.Database) []Issue {
 	for _, k := range sortedKeys(d.Procedures) {
 		if p := d.Procedures[k]; p != nil {
 			checkDeps(d, "procedure "+k, p.DependsOn, add)
-			if !p.HasBody() || p.Language == "" {
-				add(Error, "procedure "+k, "needs body and language")
+			if p.HasBody() && p.Language == "" {
+				add(Error, "procedure "+k, "needs language")
+			}
+			if !p.HasBody() && p.Language != "" {
+				add(Error, "procedure "+k, "needs body; without body and language it manages a procedure that already exists")
 			}
 		}
 	}
@@ -503,6 +506,10 @@ func Database(d *schema.Database) []Issue {
 			case "range":
 				if td.Range == nil || td.Range.Subtype == "" {
 					add(Error, "type "+k, "range type needs subtype")
+				}
+			case "":
+				if len(td.Labels) > 0 || len(td.Attributes) > 0 {
+					add(Error, "type "+k, "needs type: enum, composite or range")
 				}
 			default:
 				add(Error, "type "+k, "unknown type kind %q", td.Kind)
