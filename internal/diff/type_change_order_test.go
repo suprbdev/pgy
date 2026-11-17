@@ -196,20 +196,156 @@ func retypedGeneratedSource(generated *schema.Column, virtual bool) (*Live, *sch
 	return live, &schema.Database{Tables: map[string]*schema.Table{"app.users": {Name: "users", PrimaryKey: []string{"id"}, Columns: cols}}}
 }
 
-func TestTypeChangeWarnsAboutGeneratedColumn(t *testing.T) {
+func TestTypeChangeReaddsGeneratedColumn(t *testing.T) {
 	for _, virtual := range []bool{false, true} {
 		live, d := retypedGeneratedSource(&schema.Column{Type: "text", Generated: "lower(name)", Virtual: virtual, Nullable: true}, virtual)
 		p := Plan(live, d, true)
-		found := false
-		for _, w := range p.Warnings {
-			found = found || (w.Kind == "dependents" && w.Table == "app.users" && strings.Contains(w.Message, "generated column name_lc uses it"))
+		kind := "stored"
+		if virtual {
+			kind = "virtual"
 		}
-		if sql := Render(p); !found || !strings.Contains(sql, `alter column "name" type citext;`) || strings.Contains(sql, "name_lc") {
-			t.Errorf("virtual %v: want a warning naming name_lc and the column left alone, got %v\n%s", virtual, p.Warnings, sql)
+		statementOrder(t, Render(p),
+			`alter table "app"."users" drop column "name_lc";`,
+			`alter table "app"."users" alter column "name" type citext;`,
+			`alter table "app"."users" add column "name_lc" text generated always as (lower(name)) `+kind+`;`)
+		notes, rewrite := 0, false
+		for _, w := range p.Warnings {
+			if w.Message == "generated column app.users.name_lc is dropped and added again at the end of the table, because it uses app.users.name, whose type changes; the indexes, constraints and statistics on it, and the views, triggers, policies and rules that use it, are created again" {
+				notes++
+			}
+			rewrite = rewrite || w.Kind == "lock" && strings.Contains(w.Message, "adding column name_lc with a stored generated expression rewrites app.users")
+			if w.Kind == "dependents" {
+				t.Errorf("virtual %v: nothing is in the way: %v", virtual, w)
+			}
+		}
+		if notes != 1 || rewrite == virtual {
+			t.Errorf("virtual %v: want one note, and a rewrite warning for a stored column, got %v", virtual, p.Warnings)
 		}
 		if ws := Plan(live, d, false).Warnings; len(ws) != 0 {
 			t.Errorf("virtual %v: without --unsafe the type doesn't change, so nothing is reported, got %v", virtual, ws)
 		}
+	}
+}
+
+func generatedWithDependents() (*Live, *schema.Database) {
+	live, d := retypedGeneratedSource(nil, false)
+	live.Tables["app.users"].Columns = map[string]*LiveColumn{
+		"id":   {Type: "integer"},
+		"name": {Type: "text"},
+		"a_lc": {Type: "text", Generated: "lower(name)", Nullable: true, Comment: "unmanaged", StatisticsTarget: new(int), Storage: "main", TypeStorage: "extended", Options: map[string]string{"n_distinct": "-0.5"}},
+	}
+	*live.Tables["app.users"].Columns["a_lc"].StatisticsTarget = 500
+	live.ColumnDependents = map[string][]ColumnDependent{
+		"app.users.name": {{Kind: "generated", Name: "a_lc", Table: "app.users"}},
+		"app.users.a_lc": {{Kind: "view", Name: "app.lc", Table: "app.lc"}},
+	}
+	live.Views = map[string]bool{"app.lc": true}
+	lt := live.Tables["app.users"]
+	lt.Indexes = map[string]bool{"users_a_lc_idx": true, "users_a_lc_key": true}
+	lt.IndexDefs = map[string]*LiveIndex{"users_a_lc_idx": {Method: "btree", Keys: []string{"a_lc"}}, "users_a_lc_key": {Unique: true, Method: "btree", Keys: []string{"a_lc"}, Constraint: true}}
+	lt.Constraints = map[string]bool{"users_a_lc_key": true, "users_a_lc_check": true}
+	lt.ConstraintDefs = map[string]string{"users_a_lc_key": "UNIQUE (a_lc)", "users_a_lc_check": "CHECK ((a_lc <> ''::text))"}
+	lt.Statistics = map[string]*LiveStatistic{"users_stats": {Items: []string{"id", "a_lc"}, Target: -1}}
+	live.ColumnGrants = map[string]map[string]map[string]map[string]bool{"app.users": {"a_lc": {"reader": {"select": true}}}}
+	dt := d.Tables["app.users"]
+	dt.Columns["a_lc"] = &schema.Column{Type: "text", Generated: "lower(name)", Nullable: true}
+	dt.Indexes = []*schema.Index{{Name: "users_a_lc_idx", Columns: []string{"a_lc"}}}
+	dt.Constraints = []*schema.Constraint{{Name: "users_a_lc_key", Type: "unique", Columns: []string{"a_lc"}}, {Name: "users_a_lc_check", Type: "check", Expression: "a_lc <> ''"}}
+	dt.Statistics = []*schema.Statistic{{Name: "users_stats", Columns: []string{"id", "a_lc"}}}
+	d.Views = map[string]*schema.View{"app.lc": {Name: "lc", Query: "select a_lc from app.users", DependsOn: []string{"table app.users"}}}
+	return live, d
+}
+
+func TestTypeChangeReaddsGeneratedColumnWithWhatIsOnIt(t *testing.T) {
+	live, d := generatedWithDependents()
+	p := Plan(live, d, true)
+	sql := Render(p)
+	statementOrder(t, sql,
+		`drop view "app"."lc";`,
+		`alter table "app"."users" drop column "a_lc";`,
+		`alter table "app"."users" alter column "name" type citext;`,
+		`alter table "app"."users" add column "a_lc" text generated always as (lower(name)) stored;`,
+		`create or replace view "app"."lc" as select a_lc from app.users;`)
+	for _, want := range []string{
+		`create index if not exists "users_a_lc_idx" on "app"."users"`,
+		`alter table "app"."users" add constraint "users_a_lc_key" unique ("a_lc");`,
+		`alter table "app"."users" add constraint "users_a_lc_check" check (a_lc <> '') not valid;`,
+		`create statistics "app"."users_stats" on "id", "a_lc" from "app"."users";`,
+		`alter table "app"."users" alter column "a_lc" set storage main;`,
+		`alter table "app"."users" alter column "a_lc" set statistics 500;`,
+		`alter table "app"."users" alter column "a_lc" set (n_distinct = -0.5);`,
+		`comment on column "app"."users"."a_lc" is 'unmanaged';`,
+		`grant select ("a_lc") on table "app"."users" to "reader";`,
+	} {
+		if strings.Count(sql, want) != 1 {
+			t.Errorf("want %q once in:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "drop index") || strings.Contains(sql, "drop constraint") || strings.Contains(sql, "drop statistics") {
+		t.Errorf("what is on the column goes with it, got:\n%s", sql)
+	}
+	if !live.Tables["app.users"].Indexes["users_a_lc_idx"] || live.Tables["app.users"].Columns["a_lc"] == nil {
+		t.Error("the live snapshot passed in must not be changed")
+	}
+
+	c := d.Tables["app.users"].Columns["a_lc"]
+	c.Comment, c.Storage, c.StatisticsTarget, c.Grants = "declared", "extended", new(int), map[string][]string{}
+	*c.StatisticsTarget = -1
+	sql = Render(Plan(live, d, true))
+	for _, unwanted := range []string{"unmanaged", "set storage main", "set statistics 500", `to "reader"`} {
+		if strings.Contains(sql, unwanted) {
+			t.Errorf("%q is managed by the YAML and must not be restored, got:\n%s", unwanted, sql)
+		}
+	}
+	if !strings.Contains(sql, `comment on column "app"."users"."a_lc" is 'declared';`) {
+		t.Errorf("the declared comment is set, got:\n%s", sql)
+	}
+}
+
+func TestTypeChangeKeepsGeneratedColumnItCannotReadd(t *testing.T) {
+	for name, tc := range map[string]struct {
+		change func(*Live, *schema.Database)
+		reason string
+	}{
+		"undeclared index": {func(_ *Live, d *schema.Database) { d.Tables["app.users"].Indexes = nil }, "index users_a_lc_idx on it isn't declared"},
+		"undeclared constraint": {func(_ *Live, d *schema.Database) {
+			d.Tables["app.users"].Constraints = d.Tables["app.users"].Constraints[:1]
+		}, "constraint users_a_lc_check on it isn't declared"},
+		"undeclared statistics": {func(_ *Live, d *schema.Database) { d.Tables["app.users"].Statistics = nil }, "statistics users_stats on it isn't declared"},
+		"undeclared view":       {func(_ *Live, d *schema.Database) { delete(d.Views, "app.lc") }, "view app.lc uses it and isn't declared"},
+		"primary key": {func(l *Live, d *schema.Database) {
+			d.Tables["app.users"].PrimaryKey = []string{"id", "a_lc"}
+		}, "it is part of the primary key"},
+		"referenced": {func(l *Live, _ *schema.Database) {
+			l.Tables["app.other"] = &LiveTable{Columns: map[string]*LiveColumn{"lc": {Type: "text"}}, ConstraintDefs: map[string]string{"other_lc_fkey": "FOREIGN KEY (lc) REFERENCES app.users(a_lc)"}}
+		}, "foreign key other_lc_fkey on app.other references it"},
+		"published": {func(l *Live, _ *schema.Database) {
+			l.Publications = map[string]*LivePublication{"pub": {Tables: map[string]LivePublicationTable{"app.users": {Columns: []string{"id", "a_lc"}}}}}
+		}, "publication pub lists it"},
+		"partitioned": {func(l *Live, _ *schema.Database) { l.Tables["app.users"].Partitioned = true }, "app.users is partitioned"},
+		"inherited": {func(l *Live, _ *schema.Database) {
+			l.Tables["app.child"] = &LiveTable{Columns: map[string]*LiveColumn{}, Inherits: []string{"app.users"}}
+		}, "app.users has inheritance children"},
+		"collation": {func(l *Live, _ *schema.Database) { l.Tables["app.users"].Columns["a_lc"].Collation = "C" }, "its collation C isn't declared"},
+	} {
+		live, d := generatedWithDependents()
+		tc.change(live, d)
+		p := Plan(live, d, true)
+		want := "changing the type of app.users.name: generated column a_lc uses it, and PostgreSQL rejects the change while it does; pgy can't drop a_lc and add it again, because " + tc.reason + ", so do that in a hand-written migration"
+		found := false
+		for _, w := range p.Warnings {
+			found = found || w.Kind == "dependents" && w.Message == want
+		}
+		if sql := Render(p); !found || strings.Contains(sql, `drop column "a_lc"`) || strings.Contains(sql, `add column "a_lc"`) {
+			t.Errorf("%s: want %q and the column left alone, got %v\n%s", name, want, p.Warnings, sql)
+		}
+	}
+
+	live, d := generatedWithDependents()
+	d.Tables["app.users"].Indexes = nil
+	p := PlanWith(live, d, Options{Unsafe: true, Prune: true})
+	if sql := Render(p); !strings.Contains(sql, `add column "a_lc"`) || strings.Contains(sql, "users_a_lc_idx") {
+		t.Errorf("with --prune an undeclared index goes with the column and isn't created again, got:\n%s", sql)
 	}
 }
 

@@ -390,16 +390,6 @@ func nameStart(s string, end int) int {
 	return i
 }
 
-// identName returns an identifier as the catalogs spell it: unquoted, or
-// lower-cased when it isn't quoted.
-func identName(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
-	}
-	return strings.ToLower(s)
-}
-
 // leadingName returns the identifier or operator at the start of s, as
 // identName spells it.
 func leadingName(s string) string {
@@ -496,9 +486,9 @@ func triggerFunctionSchema(call string) (schema, name string) {
 		}
 	}
 	if dot < 0 || dot >= len(call) {
-		return "", identName(call)
+		return "", identName(strings.TrimSpace(call))
 	}
-	return identName(call[:dot]), identName(call[dot+1:])
+	return identName(strings.TrimSpace(call[:dot])), identName(strings.TrimSpace(call[dot+1:]))
 }
 
 // constraintDropped is, for a constraint that constraintMatchesLive finds

@@ -11,6 +11,7 @@ import (
 func Simulate(live *Live, desired *schema.Database) *Live {
     out := cloneLive(live.scoped())
     if desired == nil { return out }
+    desired = expandAllPrivileges(desired, out.ServerVersion)
     out, _ = applyRenames(out, desired)
     out = simulateExprProbes(out, desired)
     if desired.DatabaseSettings != nil { out.DatabaseConfig = simulateConfig(desired.DatabaseSettings) }
@@ -268,11 +269,17 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         existed := out.Procedures[norm]
         lp := &LiveProcedure{Signature: schema.RoutineName(k) + pr.ArgsSig, Security: "invoker"}
         prev := out.ProcedureDefs[norm]
-        if prev != nil { lp.Security = prev.Security }
-        if prev == nil || procedureChanged(pr, prev) {
+        replaced := prev == nil || pr.HasBody() && (procedureChanged(pr, prev) || routineArgsReplaced(pr.ArgsSig, prev.Args))
+        if prev != nil && !replaced { lp.Security = prev.Security }
+        if replaced || procedureChanged(pr, prev) {
             lp.Config = simulateConfig(pr.Set)
         } else {
             lp.Config = prev.Config
+        }
+        if pr.HasBody() {
+            lp.Args = simulatedArgs(pr.ArgsSig)
+        } else if prev != nil {
+            lp.Args = prev.Args
         }
         lp.Body, lp.SQLBody = pr.Body, schema.IsSQLStandardBody(pr.Language, pr.Body)
         lp.Language, _ = schema.SplitLanguage(pr.Language)
@@ -400,9 +407,11 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     if prev != nil || hasBody {
         lf := &LiveFunction{Signature: sig, Kind: "f", Volatility: "volatile", Security: "invoker", Parallel: "unsafe", Cost: defaultFunctionCost(f.Language), Rows: defaultFunctionRows(f.Returns)}
         replaced := hasBody && (prev == nil || strings.TrimSpace(f.Body) != strings.TrimSpace(prev.Body) ||
-            routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform))
+            routineLanguageChanged(f.Language, prev.Language) || transformChanged(schema.RoutineTransform(f.Language, f.Transform), prev.Transform) ||
+            routineArgsReplaced(f.ArgsSig, prev.Args) || returnsChanged(f.Returns, prev.Returns))
         if prev != nil && !replaced { *lf = *prev }
         if hasBody {
+            lf.Args = simulatedArgs(f.ArgsSig)
             lf.Body, lf.Returns, lf.SQLBody = f.Body, f.Returns, schema.IsSQLStandardBody(f.Language, f.Body)
             lf.Language, _ = schema.SplitLanguage(f.Language)
             if t := schema.RoutineTransform(f.Language, f.Transform); t != nil {
@@ -431,6 +440,24 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     if f.RevokePublic { out.FunctionPublicExec[norm] = false }
     if f.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], f.Grants) }
     if f.Comment != "" { out.FunctionComments[norm] = f.Comment }
+}
+
+// routineArgsReplaced reports whether a routine declared with args is
+// recreated or replaced over the live one with liveArgs (as
+// pg_get_function_arguments reports them) for an argument default that was
+// added, changed or removed.
+func routineArgsReplaced(args, liveArgs string) bool {
+    changed, removed := argDefaultsDiff(args, liveArgs)
+    return changed || removed
+}
+
+// simulatedArgs is what pg_get_function_arguments reports, as far as
+// argDefaultsDiff compares it, for a routine created with args, a YAML
+// signature.
+func simulatedArgs(args string) string {
+    args = strings.TrimSpace(args)
+    if strings.HasPrefix(args, "(") && strings.HasSuffix(args, ")") { args = args[1 : len(args)-1] }
+    return strings.TrimSpace(args)
 }
 
 // simulateConfig is the proconfig a CREATE OR REPLACE or ALTER ... SET with

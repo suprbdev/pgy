@@ -12,14 +12,17 @@ import (
 // be compared, goes in replace. A plain view whose columns changed, or a
 // materialized view whose query changed, needs DROP and CREATE, together
 // with the views that select from it: under --unsafe the returned live is a
-// copy without them, so they are planned as new (with their comments,
-// grants, owner, options, triggers, rules and indexes), and drops holds the
-// DROP statements to run first; without --unsafe each gets a warning. A
-// view with a dependent the YAML doesn't declare is left alone with a
-// warning, since dropping it would drop the dependent too.
-func planViewChanges(live *Live, desired *schema.Database, unsafe bool) (out *Live, replace map[string]bool, drops []string, warns []Warning) {
+// copy without them, so they are planned as new from the YAML (with their
+// declared comments, grants, owner, options, triggers, rules and indexes),
+// drops holds the DROP statements to run first, and post restores what the
+// YAML leaves unmanaged (see recreateView); without --unsafe each gets a
+// warning. A view with a dependent the YAML doesn't declare, or declares
+// without a query, is left alone with a warning, since dropping it would
+// drop the dependent too.
+func planViewChanges(live *Live, desired *schema.Database, opts Options) (out *Live, replace map[string]bool, drops, post []string, warns []Warning) {
+    unsafe := opts.Unsafe
     out, replace = live, map[string]bool{}
-    if live == nil || live.ViewProbes == nil || desired == nil { return out, replace, nil, nil }
+    if live == nil || live.ViewProbes == nil || desired == nil { return out, replace, nil, nil, nil }
     recreate := []string{}
     for _, k := range sortedKeys(desired.Views) {
         vw, p := desired.Views[k], live.ViewProbes[k]
@@ -40,7 +43,7 @@ func planViewChanges(live *Live, desired *schema.Database, unsafe bool) (out *Li
             recreate = append(recreate, k)
         }
     }
-    if len(recreate) == 0 { return out, replace, nil, warns }
+    if len(recreate) == 0 { return out, replace, nil, nil, warns }
 
     closure, order := map[string]bool{}, []string{}
     var visit func(k string)
@@ -62,7 +65,7 @@ func planViewChanges(live *Live, desired *schema.Database, unsafe bool) (out *Li
         collect(k)
         undeclared := []string{}
         for _, v := range groupOrder {
-            if desired.Views[v] == nil { undeclared = append(undeclared, v) }
+            if vw := desired.Views[v]; vw == nil || strings.TrimSpace(vw.Query) == "" { undeclared = append(undeclared, v) }
         }
         if len(undeclared) > 0 {
             warns = append(warns, Warning{Message: fmt.Sprintf("view %s: its definition changed, but %s, which the YAML doesn't declare, depends on it, and dropping it would drop that too; recreate them in a hand-written migration", k, strings.Join(undeclared, ", "))})
@@ -70,7 +73,7 @@ func planViewChanges(live *Live, desired *schema.Database, unsafe bool) (out *Li
         }
         visit(k)
     }
-    if len(order) == 0 { return out, replace, nil, warns }
+    if len(order) == 0 { return out, replace, nil, nil, warns }
 
     out = cloneLive(live)
     for _, k := range order {
@@ -80,18 +83,8 @@ func planViewChanges(live *Live, desired *schema.Database, unsafe bool) (out *Li
             warns = append(warns, Warning{Table: k, Kind: "lock", Message: fmt.Sprintf("recreating materialized view %s refills it under an ACCESS EXCLUSIVE lock, and queries that read it fail between the drop and the create", k)})
         }
         drops = append(drops, fmt.Sprintf("drop %s if exists %s;", kind, pqIdent(k)))
-        delete(out.Views, k)
-        delete(out.MatViews, k)
-        delete(out.MatViewTables, k)
-        delete(out.ViewTables, k)
-        delete(out.ViewOptions, k)
-        delete(out.ViewColumnComments, k)
-        delete(out.ViewColumnDefaults, k)
-        delete(out.RelComments, k)
-        delete(out.TableGrants, k)
-        delete(out.Owners, "rel:"+k)
-        delete(out.ViewProbes, k)
+        post = append(post, recreateView(live, out, desired, k, opts.Prune)...)
         delete(replace, k)
     }
-    return out, replace, drops, warns
+    return out, replace, drops, post, warns
 }
