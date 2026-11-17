@@ -29,6 +29,51 @@ schema SCH:
         - {id: 2, boxes: BOXES2, grid: [], codes: [x], short: [xyz]}
 `
 
+const dataKeysWithTypmods = `
+schema SCH:
+  domain money2:
+    type: "numeric(6,2)"
+  table price:
+    dependsOn: [domain SCH.money2]
+    columns:
+      amount: {type: "numeric(6,2)"}
+      at: {type: "timestamp(0)"}
+      span: {type: "interval day"}
+      cost: {type: SCH.money2}
+      label: {type: text}
+    primaryKey: [amount, at, span, cost]
+    data:
+      rows:
+        - {amount: "1.005", at: "2026-01-01 10:00:00.6", span: "1 day 3 hours", cost: 2.345, label: LABEL}
+`
+
+// TestIntegrationDataKeysWithTypmods declares keys whose value the column's
+// type modifier changes (numeric(6,2) stores 1.005 as 1.01, timestamp(0)
+// rounds the seconds, interval day drops the hours, and so does a domain over
+// numeric(6,2)): a changed row is updated once and the next diff is clean,
+// and an undeclared row is deleted.
+func TestIntegrationDataKeysWithTypmods(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	opts := diff.Options{Unsafe: true, Prune: true}
+	convergeYAMLWith(t, pool, sch, strings.ReplaceAll(dataKeysWithTypmods, "LABEL", "one"), opts)
+	if _, err := pool.Exec(context.Background(), fmt.Sprintf(`insert into %q.price values (9.99, '2026-01-02', '2 days', 1, 'old')`, sch)); err != nil {
+		t.Fatal(err)
+	}
+	applied := convergeYAMLWith(t, pool, sch, strings.ReplaceAll(dataKeysWithTypmods, "LABEL", "uno"), opts)
+	for _, want := range []string{
+		`set "label" = 'uno' where "amount" = '1.005'::numeric(6,2) and "at" = '2026-01-01 10:00:00.6'::timestamp(0) without time zone and "span" = '1 day 3 hours'::interval day and "cost" = 2.345::numeric(6,2);`,
+		`delete from only "` + sch + `"."price" where "amount" = '9.99'::numeric(6,2)`,
+	} {
+		if !strings.Contains(applied, want) {
+			t.Errorf("want %q, got:\n%s", want, applied)
+		}
+	}
+	if got := rowTexts(t, pool, fmt.Sprintf(`select concat_ws(' ', amount, at, span, cost, label) from %q.price`, sch)); len(got) != 1 || got[0] != "1.01 2026-01-01 10:00:01 1 day 2.35 uno" {
+		t.Errorf("rows = %q", got)
+	}
+}
+
 const dataListsForOtherTypes = `
 schema SCH:
   domain ints:

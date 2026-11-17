@@ -31,6 +31,12 @@ type LiveTableData struct {
     // session's search_path (operator("ext".=)), where a bare = would
     // resolve to another operator or to none.
     KeyEquals map[string]string
+    // KeyTypes holds the type, with its type modifier, of each key column
+    // whose type has one (numeric(6,2), timestamp(0)): the comparison
+    // converts declared keys to it, and so do the UPDATE and DELETE
+    // statements, so that a key the modifier changes (1.005 is stored as
+    // 1.01) matches the stored row.
+    KeyTypes map[string]string
 }
 
 // dataValue converts a decoded YAML value to the form it is sent to
@@ -65,13 +71,14 @@ func dataRowsJSON(rows []map[string]any) ([]byte, error) {
 }
 
 // dataColumn describes a column for comparing data rows: typ is its type,
-// cmp the type declared values are converted to, and json whether the type
-// takes a YAML map (json, jsonb, a composite type, or an array or domain of
-// one).
+// cmp the type declared values are converted to, typmod whether cmp has a
+// type modifier, and json whether the type takes a YAML map (json, jsonb, a
+// composite type, or an array or domain of one).
 type dataColumn struct {
-    typ  string
-    cmp  string
-    json bool
+    typ    string
+    cmp    string
+    typmod bool
+    json   bool
     // eq is the equality operator of cmp's default btree operator class,
     // which PostgreSQL itself compares the type with (ORDER BY, PARTITION
     // BY, unique indexes), as SQL: = for one in pg_catalog,
@@ -93,8 +100,9 @@ type dataColumn struct {
 // element type the way PostgreSQL's GetDefaultOpClass does (the class of
 // the type itself, the polymorphic one for its kind, or that of a type it
 // is binary coercible to, the preferred one first), and returns whether the
-// comparison type is an array and the schema and name of that class's
-// equality operator ('' without one).
+// comparison type is an array, the schema and name of that class's
+// equality operator ('' without one), and whether the comparison type has a
+// type modifier.
 const dataTypeChainQ = `
     with recursive chain(name, orig, typ, mod, arr, depth) as (
         %s
@@ -106,13 +114,13 @@ const dataTypeChainQ = `
         from chain c join pg_type t on t.oid = c.typ
         where t.typtype = 'd' or (not c.arr and t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1)
     ), col as (
-        select distinct on (c.name) c.name, c.orig, c.arr, t.oid as typ, t.typtype, t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1 as nested,
+        select distinct on (c.name) c.name, c.orig, c.arr, c.mod, t.oid as typ, t.typtype, t.typcategory = 'A' and t.typelem <> 0 and t.typlen = -1 as nested,
                case when not c.arr then format_type(c.typ, c.mod) when t.typarray <> 0 then format_type(t.typarray, c.mod) else c.orig end as cmp
         from chain c join pg_type t on t.oid = c.typ
         order by c.name, c.depth desc
     )
     select c.name, c.orig, c.cmp, c.typtype = 'c' or c.typ in ('json'::regtype, 'jsonb'::regtype),
-           c.arr, coalesce(n.nspname, ''), coalesce(op.oprname, '')
+           c.arr, coalesce(n.nspname, ''), coalesce(op.oprname, ''), c.mod <> -1
     from col c
     left join lateral (
         select o.opcfamily, o.opcintype
@@ -170,7 +178,7 @@ func scanDataColumns(rows pgx.Rows, out map[string]dataColumn) error {
         var name, opSchema, op string
         var array bool
         var c dataColumn
-        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json, &array, &opSchema, &op); err != nil { return err }
+        if err := rows.Scan(&name, &c.typ, &c.cmp, &c.json, &array, &opSchema, &op, &c.typmod); err != nil { return err }
         switch {
         case op == "":
         case array || opSchema == "pg_catalog":
@@ -405,6 +413,10 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
                 if ld.KeyEquals == nil { ld.KeyEquals = map[string]string{} }
                 ld.KeyEquals[k] = types[k].eq
             }
+            if types[k].typmod {
+                if ld.KeyTypes == nil { ld.KeyTypes = map[string]string{} }
+                ld.KeyTypes[k] = types[k].cmp
+            }
         }
         l.TableData[fq] = ld
     }
@@ -632,13 +644,19 @@ func dataInsert(fq string, dt *schema.Table, row map[string]any) string {
 
 // dataKeyWhere renders the condition that selects the row whose key columns
 // equal value(column), comparing with = or with the column's operator in
-// equals (see LiveTableData.KeyEquals).
-func dataKeyWhere(key []string, equals map[string]string, value func(string) string) string {
+// equals (see LiveTableData.KeyEquals), the value cast to the column's type
+// in types where it has one (see LiveTableData.KeyTypes).
+func dataKeyWhere(key []string, equals, types map[string]string, value func(string) string) string {
     conds := make([]string, len(key))
     for i, k := range key {
         op := "="
         if o := equals[k]; o != "" { op = o }
-        conds[i] = fmt.Sprintf("%s %s %s", quoteIdent(k), op, value(k))
+        v := value(k)
+        if t := types[k]; t != "" {
+            if strings.HasPrefix(v, "-") { v = "(" + v + ")" }
+            v += "::" + t
+        }
+        conds[i] = fmt.Sprintf("%s %s %s", quoteIdent(k), op, v)
     }
     return strings.Join(conds, " and ")
 }
@@ -705,7 +723,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 set := []string{}
                 for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
+                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
             }
         }
     }
@@ -716,7 +734,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             if ld == nil { continue }
             key := desired.Tables[fq].DataKey()
             for _, ex := range ld.Extra {
-                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, func(k string) string { return quoteString(ex[k]) })))
+                deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return quoteString(ex[k]) })))
             }
         }
     }

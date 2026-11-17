@@ -54,6 +54,36 @@ func TestIsArrayTypeName(t *testing.T) {
 	}
 }
 
+func TestDataKeyCastToColumnType(t *testing.T) {
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"app.price": {Name: "price", ColumnOrder: []string{"amount", "at", "label"},
+			Columns:    map[string]*schema.Column{"amount": {Type: "numeric(6,2)"}, "at": {Type: "timestamp(0)"}, "label": {Type: "text"}},
+			PrimaryKey: []string{"amount", "at", "label"},
+			Data: &schema.TableData{Rows: []map[string]any{
+				{"amount": "1.005", "at": "2026-01-01 10:00:00.6", "label": "one"},
+				{"amount": -2.5, "at": "2026-01-02", "label": "two"},
+			}}},
+	}}
+	live := Simulate(emptyLive(), d)
+	live.TableData["app.price"] = &LiveTableData{
+		Changed:  map[int][]string{0: {"label"}, 1: {"label"}},
+		Extra:    []map[string]string{{"amount": "3.00", "at": "2026-01-03 00:00:00", "label": "x"}},
+		KeyTypes: map[string]string{"amount": "numeric(6,2)", "at": "timestamp(0) without time zone"},
+	}
+	p := PlanWith(live, d, Options{Unsafe: true, Prune: true})
+	for _, want := range []string{
+		`update only "app"."price" set "label" = 'one' where "amount" = '1.005'::numeric(6,2) and "at" = '2026-01-01 10:00:00.6'::timestamp(0) without time zone and "label" = 'one';`,
+		`update only "app"."price" set "label" = 'two' where "amount" = (-2.5)::numeric(6,2) and "at" = '2026-01-02'::timestamp(0) without time zone and "label" = 'two';`,
+	} {
+		if !findAlter(p, want) {
+			t.Errorf("missing %q in\n%s", want, Render(p))
+		}
+	}
+	if want := `delete from only "app"."price" where "amount" = '3.00'::numeric(6,2) and "at" = '2026-01-03 00:00:00'::timestamp(0) without time zone and "label" = 'x';`; len(p.Drops) == 0 || p.Drops[0] != want {
+		t.Errorf("want %q, got %v", want, p.Drops)
+	}
+}
+
 func TestDataListForNonArrayColumn(t *testing.T) {
 	dt := &schema.Table{Columns: map[string]*schema.Column{"r": {Type: "int4range"}, "emb": {Type: "vector(3)"}, "tags": {Type: "app.tag_list"}, "inherited": {}}}
 	for _, c := range []struct {
