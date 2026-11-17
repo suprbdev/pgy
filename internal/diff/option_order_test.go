@@ -63,6 +63,19 @@ func TestDictionaryOptionsInYAMLOrder(t *testing.T) {
 	}
 }
 
+func TestExtensionDictionaryOptionsInYAMLOrder(t *testing.T) {
+	live := emptyLive()
+	live.Schemas["public"] = true
+	d := &schema.Database{
+		Extensions: []*schema.Extension{{Name: "dict_int", Schema: "public"}},
+		TSDictionaries: map[string]*schema.TSDictionary{"public.intdict": {Schema: "public", Name: "intdict",
+			Options: map[string]string{"rejectlong": "true", "maxlen": "4"}, OptionOrder: []string{"rejectlong", "maxlen"}}},
+	}
+	if p := Plan(live, d, false); !findAlter(p, `alter text search dictionary "public"."intdict" (rejectlong = true, maxlen = 4);`) {
+		t.Errorf("the options of an extension's dictionary are set in YAML order:\n%s", Render(p))
+	}
+}
+
 func TestParseDictOptionsOrder(t *testing.T) {
 	opts, order := parseDictOptions(`stopwords = 'english', accept = 'false', "Odd" = 'a, b'`)
 	if !reflect.DeepEqual(order, []string{"stopwords", "accept", `"Odd"`}) || opts["accept"] != "'false'" || opts[`"Odd"`] != "'a, b'" {

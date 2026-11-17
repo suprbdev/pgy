@@ -3250,7 +3250,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if td.AttributeOnly() {
                 if len(td.Options) > 0 {
                     opts := []string{}
-                    for _, k := range sortedKeys(td.Options) { opts = append(opts, k+" = "+td.Options[k]) }
+                    for _, k := range orderedKeys(td.Options, td.OptionOrder) { opts = append(opts, k+" = "+td.Options[k]) }
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter text search dictionary %s (%s);", pqIdent(e.Key), strings.Join(opts, ", ")))
                 }
                 continue
