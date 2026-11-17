@@ -109,6 +109,7 @@ type View struct {
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
     ColumnDefaults  map[string]string // plain views: column -> DEFAULT expression, used by inserts through the view
+    ColumnGrants    map[string]map[string][]string // view column -> role -> column privileges; a column not listed is unmanaged
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -301,6 +302,10 @@ type TSDictionary struct {
     Name      string
     Template  string
     Options   map[string]string
+    // OptionOrder is the order of the Options keys: as the YAML lists them
+    // (filled from node tree), or as PostgreSQL stores them for a live
+    // dictionary.
+    OptionOrder []string `yaml:"-"`
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
     Owner     string // "" = unmanaged
@@ -676,6 +681,7 @@ type Trigger struct {
 // expressions.
 type Statistic struct {
     Name    string
+    Schema  string // the schema the object is in; "" = its table's
     Kinds   []string
     Columns []string
     Comment string
@@ -754,6 +760,7 @@ type Function struct {
     Cost *float64   // nil = unmanaged
     Rows *float64   // set-returning functions only; nil = unmanaged
     Set map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body string
     // BodySet reports a body key in the YAML, so that an empty body can be
     // told from a declaration without one (which manages only attributes).
@@ -829,6 +836,7 @@ type Procedure struct {
     Language string
     Security string // definer/invoker
     Set      map[string]string
+    SetOrder []string `yaml:"-"` // order of the Set keys in the YAML (filled from node tree)
     Body     string
     BodySet  bool `yaml:"-"` // a body key is present; see Function.BodySet
     Transform []string // TRANSFORM FOR TYPE types; see Function.Transform
@@ -2071,6 +2079,7 @@ func parseStatistics(v any) []*Statistic {
                 for _, kind := range parseStringListFromNode(k) { st.Kinds = append(st.Kinds, strings.ToLower(strings.TrimSpace(kind))) }
             }
             if c, ok := dm["columns"]; ok { st.Columns = parseStringListFromNode(c) }
+            if s, ok := dm["schema"].(string); ok { st.Schema = strings.TrimSpace(s) }
             if s, ok := dm["comment"].(string); ok { st.Comment = s }
             if n, ok := dm["statisticsTarget"].(int); ok { st.StatisticsTarget = &n }
         }
@@ -3000,6 +3009,12 @@ func parseView(schemaName, key string, body any) *View {
         vw.ColumnDefaults = map[string]string{}
         for col, v := range cd {
             if s := defaultToString(v); s != "" { vw.ColumnDefaults[col] = s }
+        }
+    }
+    if cg, ok := m["columnGrants"].(map[string]any); ok {
+        vw.ColumnGrants = map[string]map[string][]string{}
+        for col, v := range cg {
+            if g := parseGrants(v); g != nil { vw.ColumnGrants[col] = g }
         }
     }
     return vw
