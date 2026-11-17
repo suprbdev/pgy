@@ -215,6 +215,25 @@ Two spellings of an operator are compared with more care, because PostgreSQL pri
 
 The comparison is textual, so it cannot tell a function in `public` from one of the same name in `pg_catalog` (`public.gen_random_uuid()` from an old `pgcrypto` and the built-in `gen_random_uuid()`), or two objects of the same name in two schemas that are both on the `search_path`.
 
+A function body is resolved when the function runs, and PostgreSQL 17 and later run `CREATE INDEX`, `REINDEX`, `REFRESH MATERIALIZED VIEW` and the other maintenance commands with `search_path` set to `pg_catalog, pg_temp`, whatever the session has. A function those commands call then finds nothing its body leaves unqualified, objects in `public` included: the usual immutable SQL wrapper around an extension function, used in an index, fails with `function unaccent(text) does not exist` as soon as the index is built over existing rows. Qualify what the body calls, including an object it names in a string, or give the function a path of its own with `set: {search_path: ...}`:
+
+```yaml
+extensions:
+  - {name: unaccent, schema: public}
+schema app:
+  function f_unaccent(text):
+    returns: text
+    language: sql
+    immutable: true
+    body: select public.unaccent('public.unaccent', $1)
+  table city:
+    dependsOn: [function app.f_unaccent(text)]
+    columns:
+      name: {type: text}
+    indexes:
+      city_name_unaccent: {columns: [app.f_unaccent(name)]}
+```
+
 ## Merging across files
 
 `pgy diff` accepts multiple schema files and merges them before diffing. When
@@ -306,6 +325,8 @@ extensions:
 Extension statements come right after `CREATE SCHEMA`, before every object that could use the extension, and in requirement order: an extension is created after the declared extensions it requires. With a connection pgy reads the requirements from the server (`pg_available_extension_versions`); `diff --from-empty` knows those between PostgreSQL's own extensions (`earthdistance` needs `cube`, each transform such as `hstore_plperl` needs its language and its type) and otherwise follows `dependsOn: [extension <name>]`, which `pgy pull` writes for every extension that requires another.
 
 With a connection, `pgy diff` also warns about an extension the server does not offer, a `version` it cannot install, and a `version` the installed one has no update path to. The last case is left out of the plan, since PostgreSQL cannot downgrade an extension.
+
+Give every extension a `schema:`. Without one, an extension whose control file names no schema goes into the first schema of the `search_path`, and PostgreSQL's default `search_path` is `"$user", public`. That matters most for a role named like the schema of pgy's migrations table: `pgy init` creates the schema `pgy`, so for a role called `pgy` it comes first, `extensions: [citext]` installs the extension into `pgy`, and the objects a hand-written migration creates without a schema land there too. Connect as a role with another name, or keep the migrations table in another schema with `--migrations-table` (`migrations_table` in `.pgy.yml`).
 
 Moving an extension (`schema:` changed on a relocatable one) takes one migration: change `schema:` and the references to its types, functions, operators and operator classes (`ext.citext`, `ext.gin_trgm_ops`, `operator(ext.<>)`) together. PostgreSQL carries columns, defaults, indexes, constraints, triggers and views along with the extension, so pgy emits only `ALTER EXTENSION ... SET SCHEMA` for them. Function bodies written as text are not carried along: update them in the same change.
 
@@ -853,7 +874,7 @@ schema reporting:
     comment: orders in the warehouse
 ```
 
-Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
+Servers are created after extensions and before everything else. A server's `grants` (`usage`, e.g. `grants: {app_user: [usage]}`) work like other grants blocks. Their `version`, `options`, `owner` and `comment` are diffed against the live server (`ALTER SERVER ... VERSION`, `OPTIONS (ADD / SET / DROP ...)`, `OWNER TO`). `version` and option values are passed on as written, so `version: 15.10` stays `15.10`. An omitted `version` is unmanaged, and the YAML has no way to say that a server has none: to remove a server's version, run `ALTER SERVER ... VERSION NULL` in a hand-written migration. `renamedFrom` renames a server with `ALTER SERVER ... RENAME TO`, and its foreign tables follow. PostgreSQL cannot change a server's wrapper or type in place, so `pgy diff` reports such a change and emits nothing else for that server until it has been recreated by hand. With `diff --split`, the group that declares a server comes before the groups with foreign tables on it.
 
 A present `servers:` block is authoritative: `--unsafe --prune` drops servers it does not list, after their foreign tables and together with their user mappings (`DROP USER MAPPING`). A server that still has foreign tables the plan keeps (in a schema the YAML doesn't manage, or declared on another server name) is not dropped, and `pgy diff` says so. Without the block, servers are unmanaged.
 
