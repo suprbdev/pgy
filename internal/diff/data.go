@@ -707,7 +707,7 @@ func dataTableOrder(desired *schema.Database) []string {
         for _, fk := range dt.ForeignKeys {
             if fk != nil { visit(qualifyName(fk.RefTable)) }
         }
-        if dt.AttributeOnly() {
+        if attributeOnlyTable(desired.External, fq, dt) {
             for _, dep := range dt.DependsOn {
                 if ref, ok := strings.CutPrefix(strings.TrimSpace(dep), "table "); ok { visit(qualifyName(strings.TrimSpace(ref))) }
             }
@@ -723,9 +723,10 @@ func dataTableOrder(desired *schema.Database) []string {
 // desired into the live tables: INSERT for missing rows and UPDATE of the
 // differing columns for changed ones, in foreign key order, and, when
 // prune is set, DELETE (in reverse order) for live rows the YAML does not
-// declare. A changed key column is one whose live value equals the declared
-// one in the column's type but is written differently, and is rewritten
-// like any other column. A table created by this plan gets all of its rows
+// declare, except in external tables. A changed key column is one whose
+// live value equals the declared one in the column's type but is written
+// differently, and is rewritten like any other column. A table created by
+// this plan gets all of its rows
 // inserted. An existing table without introspected data (IntrospectData was
 // not run) gets an upsert of every row.
 func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes []string) {
@@ -769,7 +770,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
         for i := len(order) - 1; i >= 0; i-- {
             fq := order[i]
             ld := live.TableData[fq]
-            if ld == nil { continue }
+            if ld == nil || desired.External.HasRelation(fq) { continue }
             key := desired.Tables[fq].DataKey()
             for _, ex := range ld.Extra {
                 deletes = append(deletes, fmt.Sprintf("delete from %s where %s;", dataTarget(fq, partitioned(live, desired.Tables[fq], fq)), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return quoteString(ex[k]) })))
@@ -871,6 +872,47 @@ func TableRowsWhere(ctx context.Context, pool *pgxpool.Pool, fq string, partitio
         return nil
     })
     if err := values.run(ctx, pool); err != nil { return nil, fmt.Errorf("data for %s: %w", fq, err) }
+    return out, nil
+}
+
+// ConfigRowCounts counts, for each extension configuration table of l in
+// tables ("schema.table"), the rows its condition selects
+// (Live.ExtensionConfig), which are the rows pg_dump keeps of it. A table
+// the connecting role may not read counts -1.
+func ConfigRowCounts(ctx context.Context, pool *pgxpool.Pool, l *Live, tables []string) (map[string]int64, error) {
+    out := map[string]int64{}
+    if len(tables) == 0 { return out, nil }
+    names := make([]string, len(tables))
+    for i, t := range tables { names[i] = pqIdent(t) }
+    readable := map[string]bool{}
+    check := &queryBatch{}
+    check.add(`select u.i::int, has_table_privilege(u.t::regclass, 'select') from unnest($1::text[]) with ordinality u(t, i)`, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var i int
+            var ok bool
+            if err := rows.Scan(&i, &ok); err != nil { return err }
+            if i >= 1 && i <= len(tables) { readable[tables[i-1]] = ok }
+        }
+        return nil
+    }, names)
+    if err := check.run(ctx, pool); err != nil { return nil, fmt.Errorf("extension configuration tables: %w", err) }
+    counts := &queryBatch{}
+    for _, fq := range tables {
+        if !readable[fq] {
+            out[fq] = -1
+            continue
+        }
+        partitioned := l.Tables[fq] != nil && l.Tables[fq].Partitioned
+        counts.add("select count(*) from "+dataTarget(fq, partitioned)+" "+strings.TrimSpace(l.ExtensionConfig[fq]), func(rows pgx.Rows) error {
+            for rows.Next() {
+                var n int64
+                if err := rows.Scan(&n); err != nil { return err }
+                out[fq] = n
+            }
+            return nil
+        })
+    }
+    if err := counts.run(ctx, pool); err != nil { return nil, fmt.Errorf("extension configuration tables: %w", err) }
     return out, nil
 }
 

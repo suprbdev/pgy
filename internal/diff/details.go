@@ -53,8 +53,10 @@ type LiveDetails struct {
 // UnsupportedObject is a database object pgy has no YAML for. Schema is
 // empty for kinds that live outside schemas (languages, transforms). Detail
 // holds extra information for some kinds; it is empty for the others.
+// Owner is the role that owns the object, "" for kinds without an owner
+// (text search parsers and templates, casts, transforms).
 type UnsupportedObject struct {
-    Kind, Schema, Name, Detail string
+    Kind, Schema, Name, Detail, Owner string
 }
 
 // LiveRoutine is a function or procedure's declaration as pg_get_function_*
@@ -97,22 +99,22 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
     }
     l.Details = d
     const unsupportedQ = `
-        with objs(kind, nsp, name, classid, objid, detail) as (
-            select 'operator', o.oprnamespace, o.oprname || '(' || coalesce(format_type(o.oprleft, null), 'none') || ', ' || coalesce(format_type(o.oprright, null), 'none') || ')', 'pg_operator'::regclass, o.oid, '' from pg_operator o
-            union all select 'operator class', c.opcnamespace, c.opcname::text, 'pg_opclass'::regclass, c.oid, '' from pg_opclass c
-            union all select 'operator family', f.opfnamespace, f.opfname::text, 'pg_opfamily'::regclass, f.oid, '' from pg_opfamily f
-            union all select 'conversion', c.connamespace, c.conname::text, 'pg_conversion'::regclass, c.oid, '' from pg_conversion c
-            union all select 'base type', t.typnamespace, t.typname::text, 'pg_type'::regclass, t.oid, '' from pg_type t where t.typtype = 'b' and t.typcategory <> 'A'
-            union all select 'text search parser', p.prsnamespace, p.prsname::text, 'pg_ts_parser'::regclass, p.oid, '' from pg_ts_parser p
-            union all select 'text search template', t.tmplnamespace, t.tmplname::text, 'pg_ts_template'::regclass, t.oid, '' from pg_ts_template t
+        with objs(kind, nsp, name, classid, objid, detail, owner) as (
+            select 'operator', o.oprnamespace, o.oprname || '(' || coalesce(format_type(o.oprleft, null), 'none') || ', ' || coalesce(format_type(o.oprright, null), 'none') || ')', 'pg_operator'::regclass, o.oid, '', o.oprowner from pg_operator o
+            union all select 'operator class', c.opcnamespace, c.opcname::text, 'pg_opclass'::regclass, c.oid, '', c.opcowner from pg_opclass c
+            union all select 'operator family', f.opfnamespace, f.opfname::text, 'pg_opfamily'::regclass, f.oid, '', f.opfowner from pg_opfamily f
+            union all select 'conversion', c.connamespace, c.conname::text, 'pg_conversion'::regclass, c.oid, '', c.conowner from pg_conversion c
+            union all select 'base type', t.typnamespace, t.typname::text, 'pg_type'::regclass, t.oid, '', t.typowner from pg_type t where t.typtype = 'b' and t.typcategory <> 'A'
+            union all select 'text search parser', p.prsnamespace, p.prsname::text, 'pg_ts_parser'::regclass, p.oid, '', 0::oid from pg_ts_parser p
+            union all select 'text search template', t.tmplnamespace, t.tmplname::text, 'pg_ts_template'::regclass, t.oid, '', 0::oid from pg_ts_template t
             union all select 'cast', case when st.typnamespace = 'pg_catalog'::regnamespace then tt.typnamespace else st.typnamespace end,
-                   '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, ''
+                   '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, '', 0::oid
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
-            union all select 'language', 0::oid, l.lanname::text, 'pg_language'::regclass, l.oid, '' from pg_language l where l.lanispl
-            union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, ''
+            union all select 'language', 0::oid, l.lanname::text, 'pg_language'::regclass, l.oid, '', l.lanowner from pg_language l where l.lanispl
+            union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, '', 0::oid
               from pg_transform t join pg_language l on l.oid = t.trflang
         )
-        select distinct o.kind, coalesce(n.nspname, ''), o.name, o.detail
+        select distinct o.kind, coalesce(n.nspname, ''), o.name, o.detail, case when o.owner = 0 then '' else coalesce(pg_get_userbyid(o.owner), '') end
         from objs o left join pg_namespace n on n.oid = o.nsp
         where (o.nsp = 0 or n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') and n.nspname !~ '^pg_(toast_)?temp_')
         and not exists (select 1 from pg_depend d where d.classid = o.classid and d.objid = o.objid and d.deptype in ('e', 'i'))
@@ -121,7 +123,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
     unsupported.add(unsupportedQ, func(rows pgx.Rows) error {
         for rows.Next() {
             var o UnsupportedObject
-            if rows.Scan(&o.Kind, &o.Schema, &o.Name, &o.Detail) == nil { d.Unsupported = append(d.Unsupported, o) }
+            if rows.Scan(&o.Kind, &o.Schema, &o.Name, &o.Detail, &o.Owner) == nil { d.Unsupported = append(d.Unsupported, o) }
         }
         return nil
     })

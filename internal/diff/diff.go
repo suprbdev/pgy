@@ -2931,6 +2931,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    desired = withExternal(desired, opts)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     desired = expandAllPrivileges(desired, live.ServerVersion)
@@ -3055,7 +3056,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
     for s := range neededSchemas {
-        if s == "public" || systemSchema(s) { continue }
+        if s == "public" || systemSchema(s) || desired.External.HasSchema(s) { continue }
         schemaNames = append(schemaNames, s)
     }
     sort.Strings(schemaNames)
@@ -3069,8 +3070,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 
     plan.Creates = append(plan.Creates, planDefaultPrivileges(live, desired)...)
     for _, role := range sortedKeys(desired.DatabaseRoleSettings) {
+        name := resolveRole(role, live.CurrentUser)
+        if desired.External.HasRole(name) && live.Roles[name] {
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("database.roles: role %s is external (the config's external.roles), so its settings in this database are left as they are", name)})
+            continue
+        }
         prefix := "alter role " + strings.ReplaceAll(grantRole(role), "%", "%%") + " in database %I "
-        for _, c := range configClauses(desired.DatabaseRoleSettings[role], live.DatabaseRoleConfig[resolveRole(role, live.CurrentUser)]) {
+        for _, c := range configClauses(desired.DatabaseRoleSettings[role], withoutExternalSettings(desired.External, live.DatabaseRoleConfig[name], desired.DatabaseRoleSettings[role])) {
             plan.Alters = append(plan.Alters, inCurrentDatabase(prefix, c))
         }
     }
@@ -3081,7 +3087,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, extensionCreates...)
     plan.Alters = append(plan.Alters, extensions.Alters...)
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
-    for _, c := range configClauses(desired.DatabaseSettings, live.DatabaseConfig) {
+    for _, c := range configClauses(desired.DatabaseSettings, withoutExternalSettings(desired.External, live.DatabaseConfig, desired.DatabaseSettings)) {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
         if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
@@ -3361,7 +3367,13 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         case "table":
             // Handle tables in dependency order
             dt, ok := desired.Tables[e.Key]
-            if !ok || dt == nil || dt.AttributeOnly() { continue }
+            if !ok || dt == nil { continue }
+            if attributeOnly(desired, "table", e.Key) {
+                if lt := live.Tables[e.Key]; lt != nil && len(dt.Triggers) > 0 {
+                    applyTableConstraints(plan, live, e.Key, &schema.Table{Triggers: dt.Triggers}, lt, &deferredFKs, &deferredTriggers, unsafe)
+                }
+                continue
+            }
             fq := e.Key
             lt := live.Tables[fq]
             if lt == nil {
@@ -3602,7 +3614,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // planRoles emits CREATE ROLE for roles missing from live, ALTER ROLE for
 // changed attributes and settings, and GRANT <parent> TO <role> for missing
 // memberships. Roles are never dropped. With prune, a role whose inRoles is
-// declared also loses the memberships it doesn't list.
+// declared also loses the memberships it doesn't list, other than those in
+// external roles. An external role that exists is left as it is, with a
+// warning; settings that are external are never reset.
 func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool) {
     names := make([]string, 0, len(desired.Roles))
     for k := range desired.Roles { names = append(names, k) }
@@ -3610,13 +3624,17 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
     for _, name := range names {
         r := desired.Roles[name]
         if r == nil { continue }
+        if desired.External.HasRole(name) && live.Roles[name] {
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s is external (the config's external.roles), so its attributes, settings and memberships are left as they are; its declaration only creates it where it is missing", name)})
+            continue
+        }
         if !live.Roles[name] {
             plan.Creates = append(plan.Creates, renderRole(r))
         } else if opts := roleAlterOptions(r, live.RoleDefs[name]); len(opts) > 0 {
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s with %s;", grantRole(name), strings.Join(opts, " ")))
         }
         var liveConfig map[string]string
-        if lr := live.RoleDefs[name]; lr != nil && live.Roles[name] { liveConfig = lr.Config }
+        if lr := live.RoleDefs[name]; lr != nil && live.Roles[name] { liveConfig = withoutExternalSettings(desired.External, lr.Config, r.Set) }
         for _, c := range configClauses(r.Set, liveConfig) {
             plan.Alters = append(plan.Alters, fmt.Sprintf("alter role %s %s;", grantRole(name), c))
         }
@@ -3625,7 +3643,11 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
             plan.Alters = append(plan.Alters, membershipStmts(plan, live, name, parent, r.MemberOptions[parent])...)
         }
         if prune && r.InRoles != nil && live.Roles[name] {
-            plan.Drops = append(plan.Drops, revokeMembershipStmts(live, name, r.InRoles)...)
+            declared := append([]string{}, r.InRoles...)
+            for _, parent := range sortedKeys(live.RoleMembers[name]) {
+                if desired.External.HasRole(parent) { declared = append(declared, parent) }
+            }
+            plan.Drops = append(plan.Drops, revokeMembershipStmts(live, name, declared)...)
         }
     }
 }
@@ -4210,8 +4232,9 @@ func isNumericLiteral(s string) bool {
 // desired publication has no members); option changes SET (...). Switching
 // to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
 // every table, so it requires --unsafe, as does --prune dropping
-// publications missing from a present publications block, but for those the
-// connecting role may not drop (see Live.OwnerRoles), which are reported.
+// publications missing from a present publications block, but for external
+// ones (see externalPublication) and those the connecting role may not drop
+// (see Live.OwnerRoles), which are reported.
 func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.Publications == nil { return }
     for _, name := range sortedKeys(desired.Publications) {
@@ -4273,7 +4296,7 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
     }
     if !opts.Unsafe || !opts.Prune { return }
     for _, name := range sortedKeys(live.Publications) {
-        if desired.Publications[name] != nil { continue }
+        if lp := live.Publications[name]; desired.Publications[name] != nil || externalPublication(desired.External, lp) { continue }
         if owner := live.Publications[name].Owner; !live.mayDrop(owner) {
             plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "publication "+name, owner, ""))
             continue
@@ -4345,9 +4368,9 @@ func publicationWith(p *schema.Publication, lp *LivePublication) string {
 // ones whose event, tags or function changed (metadata only, so not gated
 // behind --unsafe), after every function create. Enabled state and comments
 // are reconciled with ALTER / COMMENT. With a present eventTriggers block,
-// --unsafe --prune drops undeclared ones that no extension owns and whose
-// function is in a schema the YAML declares objects in, like the other
-// objects it prunes; one the connecting role may not drop (see
+// --unsafe --prune drops undeclared ones that no extension or external role
+// owns and whose function is in a schema the YAML declares objects in, like
+// the other objects it prunes; one the connecting role may not drop (see
 // Live.OwnerRoles) is reported instead.
 func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opts Options) {
     if desired.EventTriggers == nil { return }
@@ -4383,7 +4406,7 @@ func planEventTriggers(plan *PlanDiff, live *Live, desired *schema.Database, opt
     if !opts.Unsafe || !opts.Prune { return }
     inScope := pruneScope(live, desired)
     for _, name := range sortedKeys(live.EventTriggers) {
-        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil || !inScope(le.Function) { continue }
+        if le := live.EventTriggers[name]; le.Extension || desired.EventTriggers[name] != nil || desired.External.HasRole(le.Owner) || !inScope(le.Function) { continue }
         if owner := live.EventTriggers[name].Owner; !live.mayDrop(owner) {
             plan.Warnings = append(plan.Warnings, notOwnerWarning(live, "event trigger "+name, owner, ""))
             continue
@@ -5617,7 +5640,9 @@ func planGrants(live *Live, desired *schema.Database) []string {
 // Live.InitialGrants) are left alone unless the block names their grantee;
 // PublicAuthoritative still covers PUBLIC there, and so does PublicByKind
 // on a routine or type whose extension took PUBLIC's default privilege away
-// (see publicRevokedByExtension).
+// (see publicRevokedByExtension). The privileges of external roles are left
+// alone too, and on an object in an external schema those of every grantee
+// the block doesn't name (see withoutExternalGrantees).
 //
 // Every REVOKE is emitted ahead of every GRANT. PostgreSQL's REVOKE ... ON
 // TABLE also drops that role's column-level privileges, so narrowing a
@@ -5649,7 +5674,9 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
     applyDefaultPrivileges(acls, rows, live.CurrentUser, desired.DefaultPrivileges)
     created := func(k, kind string) map[string]map[string]bool { return CreatedGrants(acls, live.CurrentUser, k, kind) }
     member := func(key, publicDefault string, liveG map[string]map[string]bool, g map[string][]string) map[string]map[string]bool {
-        return memberLiveGrants(live, mode, key, publicDefault, liveG, g)
+        kind, name, _ := strings.Cut(key, ":")
+        inExternal := kind == "schema" && desired.External.HasSchema(name) || kind != "schema" && desired.External.InSchema(name)
+        return withoutExternalGrantees(desired.External, inExternal, memberLiveGrants(live, mode, key, publicDefault, liveG, g), g)
     }
     coversMember := func(key, publicDefault string, g map[string][]string) (bool, func(rv, gr []string)) {
         if why, ok := publicRevokedByExtension(live, mode, key, publicDefault, g); ok {
@@ -5669,6 +5696,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         if ls := live.Servers[name]; ls != nil { liveG, owner = ls.Grants, ls.Owner }
         if s.Owner != "" { owner = resolveRole(s.Owner, live.CurrentUser) }
         desiredG := resolveGrantRoles(s.Grants, live.CurrentUser)
+        liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
         addFor(desiredG)(ownedGrantDiff("foreign server "+quoteIdent(name), desiredG, liveG, owner, covers(true, desiredG)))
     }
 
@@ -5695,7 +5723,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             desiredG, owner := resolveGrantRoles(dt.Grants, live.CurrentUser), objectOwner(live, "rel:"+k, dt.Owner)
             if live.Tables[k] == nil {
                 liveG = created(k, "tables")
-                if dt.AttributeOnly() { liveG = pendingGrants(liveG, desiredG) }
+                if attributeOnly(desired, "table", k) { liveG = pendingGrants(liveG, desiredG) }
             }
             liveG = member("rel:"+k, "", liveG, desiredG)
             addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
@@ -5708,7 +5736,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             c := dt.Columns[cn]
             if c == nil || c.Grants == nil { continue }
             colG := resolveGrantRoles(c.Grants, live.CurrentUser)
-            addFor(colG)(columnGrantDiffStmts(k, cn, colG, withoutPrivileges(live.ColumnGrants[k][cn], revoked), covers(true, colG)))
+            colLive := withoutExternalGrantees(desired.External, desired.External.InSchema(k), live.ColumnGrants[k][cn], colG)
+            addFor(colG)(columnGrantDiffStmts(k, cn, colG, withoutPrivileges(colLive, revoked), covers(true, colG)))
         }
     }
 
@@ -6693,10 +6722,11 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
         }
 
         // Policies — a present policies block is authoritative: missing
-        // policies are created, live policies not listed are dropped, and a
-        // live policy whose definition no longer matches is dropped and
-        // recreated. Like triggers (and unlike constraints) the replace is not
-        // gated behind --unsafe: DROP POLICY is metadata-only, has no
+        // policies are created, live policies not listed are dropped (except
+        // on an external table, which keeps them), and a live policy whose
+        // definition no longer matches is dropped and recreated. Like
+        // triggers (and unlike constraints) the replace is not gated
+        // behind --unsafe: DROP POLICY is metadata-only, has no
         // dependents, and the recreate runs in the same migration transaction.
         livePolicies := map[string]*LivePolicy{}
         if lt != nil { livePolicies = lt.Policies }
@@ -6724,7 +6754,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             if pol.WithCheck != "" { stmt += fmt.Sprintf(" with check (%s)", pol.WithCheck) }
             plan.Alters = append(plan.Alters, stmt+";")
         }
-        if dt.Policies != nil {
+        if dt.Policies != nil && !desired.External.HasRelation(fq) {
             removed := []string{}
             for name := range livePolicies {
                 if !desiredPolicies[name] { removed = append(removed, name) }

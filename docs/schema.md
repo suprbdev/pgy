@@ -18,6 +18,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Extensions](#extensions)
   - [Updating extensions](#updating-extensions)
   - [Objects an extension owns](#objects-an-extension-owns)
+  - [Tables in external schemas](#tables-in-external-schemas)
 - [Database Settings](#database-settings)
   - [Parameters an extension defines](#parameters-an-extension-defines)
 - [Tables](#tables)
@@ -400,6 +401,7 @@ Several rules keep this from removing something the database still needs:
 
 - **Scope.** Only extensions installed in a schema the YAML declares objects in (tables, views, functions, types and so on) are considered, which is the scope `--prune` uses for those objects. An extension in any other schema is left alone. That covers a dedicated `extensions` schema and the schemas a hosting platform installs its own extensions into. A `schema:` on a declared extension does not put that schema in scope.
 - **Ignore list.** Extensions named in `prune.keep_extensions` of the [config file](../README.md#unsafe-changes-and-pruning) are never dropped. Use it for extensions the application does not own, such as a `pg_stat_statements` installed in `public`.
+- **External.** Extensions installed in a schema the config's [`external:` block](hosted-platforms.md#the-external-block) lists, or owned by a role it lists, are never dropped, and `pgy pull` leaves them out.
 - **`plpgsql`** is never dropped.
 - **Declared objects.** An extension is kept while the YAML declares one of its own objects (see [Objects an extension owns](#objects-an-extension-owns)). `pgy diff` warns (kind `dependents`) and names the declaration.
 - **Requirements.** An extension that one staying installed requires is kept: declaring `earthdistance` without listing `cube` never drops `cube`.
@@ -493,6 +495,23 @@ schema pg_catalog:
     grants: {app: [usage]}
 ```
 
+### Tables in external schemas
+
+A table in a schema the config's [`external:` block](hosted-platforms.md#the-external-block) lists, such as a hosting platform's `auth.users` or `storage.objects`, is declared without columns to manage what the application puts on it: `policies`, `triggers`, `grants`, `rowLevelSecurity`, `forceRowLevelSecurity`, `comment`, `owner` and `data` (with `key`). pgy never creates, alters or drops the table or its schema, and a declaration with columns or keys is cut down to those parts, with a warning. Listed policies, triggers, grantees and rows are kept as declared; unlisted ones are the platform's and are left alone, `--unsafe --prune` included:
+
+```yaml
+schema auth:
+  table users:
+    triggers:
+      on_auth_user_created: {timing: after, events: [insert], level: row, procedure: public.handle_new_user()}
+schema storage:
+  table objects:
+    policies:
+      avatars_read: {for: select, using: "bucket_id = 'avatars'"}
+```
+
+See [Declaring objects on platform tables](hosted-platforms.md#declaring-objects-on-platform-tables).
+
 ## Database Settings
 
 A top-level `database:` block manages settings of the database pgy is connected to, for all roles (`ALTER DATABASE ... SET`):
@@ -507,7 +526,7 @@ database:
     app_user: {statement_timeout: 5s}
 ```
 
-`roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
+`roles` holds per-role settings that apply only in this database, and is authoritative for each role it lists. Settings for every database belong on the role itself (see [Roles](#roles)). When present, `set` is authoritative: changed settings are set, and settings it doesn't list are reset, except those the config's `external.settings` lists (see [Hosted platforms](hosted-platforms.md#the-external-block)), which are never reset. Without it, database settings are unmanaged. The statements name the database with `current_database()`, so a migration works whatever the database is called in each environment. Values are written as in `postgresql.conf` and quoted when needed, as for [role settings](#roles).
 
 A changed `search_path` under `set` is also set for the session that runs the migration, so the statements after it resolve unqualified names the way later sessions will (see [Name resolution](#name-resolution)). Other settings, and the per-role ones under `roles`, take effect in sessions that start afterwards.
 
@@ -1704,11 +1723,12 @@ Behavior:
 
 - Role creates are emitted **first** in the plan, before schemas and all other objects, so grants, policies (`to:`), and memberships can reference them.
 - `inRoles` memberships are added when missing from live (`pg_auth_members`): `GRANT <parent> TO <role>`. With `--unsafe --prune`, a role that declares `inRoles` (even `inRoles: []`) also loses the memberships it doesn't list: `REVOKE <parent> FROM <role>`, once per grantor (`GRANTED BY`) on PostgreSQL 16+, which records a grant per grantor. A role without `inRoles` keeps its memberships. On PostgreSQL 16+, `CREATE ROLE` run by a role that is not a superuser makes that role a member of the new role `WITH ADMIN OPTION` (granted by the bootstrap superuser, without `INHERIT` and `SET`), which is how it manages the roles it created; `--prune` never revokes such a membership of the role pgy connects as. An entry can be a map that also sets the membership's options: `admin` (`WITH ADMIN OPTION`), and on PostgreSQL 16+ `inherit` and `set`. Options it sets are diffed against live (`REVOKE ADMIN OPTION FOR`, or `GRANT ... WITH INHERIT/SET`), and options left out are unmanaged. On PostgreSQL 15, `inherit` and `set` are skipped with a warning.
+- A role that the config's `external.roles` lists belongs to the platform: a declaration only creates it where it is missing, an existing one keeps its attributes, settings and memberships (`pgy diff` warns), `--prune` never revokes another role's membership in it, and `pgy pull --roles` leaves it out (see [Hosted platforms](hosted-platforms.md)).
 - `validUntil` is compared with `rolvaliduntil`. Give it a zone (`2030-01-01T00:00:00Z`), since a value without one is read in the server's time zone when it's set but compared as UTC. `infinity` removes the expiry.
 - Passwords are intentionally unsupported — secrets do not belong in schema YAML. Set passwords out of band (`ALTER ROLE ... PASSWORD`).
 - `pgy pull --roles` writes every role except the `pg_` roles and the bootstrap superuser that `initdb` created (whatever its name; a role called `postgres` that is not that superuser, as on Supabase, is written). The role pgy connects as is written with its memberships, settings and comment only, leaving its attributes unmanaged, since it exists wherever pgy can connect but its memberships need not; the memberships `CREATE ROLE` gave it (see `inRoles` above) are left out, because they come back when it creates those roles again.
 - `comment` is diffed against `pg_shdescription` like other object comments.
-- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you, and so are words SQL reserves, such as `all` (the same applies to function and procedure `set:`, and to `database:`). A parameter an extension defines may need a grant first; see [Parameters an extension defines](#parameters-an-extension-defines).
+- `set` manages the role's settings for all databases (`ALTER ROLE ... SET`, stored in `pg_db_role_setting`). When present it is authoritative: changed settings are set, and settings it doesn't list are reset, except those `external.settings` lists. Values are written as in `postgresql.conf`. Anything that isn't a number or a plain word, such as `30s`, `64MB` or `America/New_York`, is quoted for you, and so are words SQL reserves, such as `all` (the same applies to function and procedure `set:`, and to `database:`). A parameter an extension defines may need a grant first; see [Parameters an extension defines](#parameters-an-extension-defines).
   - A value is one value, commas included: `application_name: "a,b"` sets `a,b`. Only PostgreSQL's quoted-list parameters are split on commas into elements: `search_path`, `temp_tablespaces`, `session_preload_libraries`, `shared_preload_libraries`, `local_preload_libraries` and `unix_socket_directories`.
   - An empty string sets an empty value (`search_path: ""` is `SET search_path = ''`).
   - YAML numbers and booleans are fine (`statement_timeout: 0`, `jit: false`).
@@ -1778,6 +1798,7 @@ Behavior:
   - Before v0.43.0 a grants block never revoked `PUBLIC` privileges, so an upgrade can revoke `PUBLIC` grants that were made by hand; the warnings name each one.
   - `policy.public_grants` in the config changes this: `authoritative` makes every grants block cover `PUBLIC`, routines, types, domains and the `public` schema included, and `explicit` makes only blocks that list `public` cover it. See [Strict mode](../README.md#strict-mode).
 - On **objects an extension owns**, the privileges the extension's own script granted are left alone unless the block names their grantee. See [Objects an extension owns](#objects-an-extension-owns).
+- **External roles** (`external.roles` in the config) are left alone the same way on every object: a block that doesn't name one neither revokes nor requires its privileges, and one that names it makes them exact. On an object in an external schema, every grantee the block doesn't name is left alone. See [Hosted platforms](hosted-platforms.md#what-pgy-does-with-external-objects).
 - Grant/revoke statements are emitted after all object creation and FK alters. Those on languages and foreign-data wrappers are the exception: they run right after the extension statements, ahead of the routines and servers that need them.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
 

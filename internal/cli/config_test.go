@@ -125,6 +125,36 @@ func TestConfigPruneKeepExtensions(t *testing.T) {
     }
 }
 
+func TestConfigExternal(t *testing.T) {
+    dir := t.TempDir()
+    writeFile(t, filepath.Join(dir, "pgy.yaml"), `external:
+  schemas: [auth, storage]
+  roles: [anon, "*_admin"]
+  settings: ["pgrst.*"]
+  relations: ["*._hyper_*_chunk", "pgmq.q_*"]
+`)
+    fc, _, err := loadFileConfig(dir, "")
+    if err != nil {
+        t.Fatal(err)
+    }
+    ext, err := resolveExternal(fc.External)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if !ext.HasSchema("auth") || !ext.HasRole("supabase_admin") || !ext.HasSetting("pgrst.db_schemas") || !ext.HasRelation("public._hyper_1_1_chunk") || !ext.HasRelation("pgmq.q_jobs") || ext.HasRelation("public.todos") {
+        t.Errorf("external block not read: %+v", ext)
+    }
+    if ext, err := resolveExternal(nil); err != nil || ext != nil {
+        t.Errorf("no external block: %v, %v", ext, err)
+    }
+    if ext, err := resolveExternal(&ExternalConfig{}); err != nil || ext != nil {
+        t.Errorf("an empty external block matches nothing: %v, %v", ext, err)
+    }
+    if _, err := resolveExternal(&ExternalConfig{Relations: []string{"q_*"}}); err == nil || !strings.Contains(err.Error(), "external.relations") {
+        t.Errorf("a relation pattern without a schema must be rejected, got %v", err)
+    }
+}
+
 func TestConfigPolicyStrictExpressions(t *testing.T) {
     dir := t.TempDir()
     writeFile(t, filepath.Join(dir, "pgy.yaml"), "policy:\n  strict_expressions: true\n")

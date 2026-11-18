@@ -203,6 +203,7 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 			}
 		}
 		if w.Grants != nil {
+			liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
 			revokes, grants := ownedGrantDiff(target, desiredG, liveG, owner, coversPublic(mode, true, desiredG))
 			if _, listed := desiredG["public"]; !listed {
 				plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, "a grants block on a foreign-data wrapper covers PUBLIC")...)
@@ -255,7 +256,7 @@ func pruneWrappers(live *Live, desired *schema.Database, serverDrops []string) (
 		}
 	}
 	for _, name := range sortedKeys(live.Wrappers) {
-		if desired.ForeignDataWrappers[name] != nil || live.ExtensionMembers["fdw:"+name] {
+		if desired.ForeignDataWrappers[name] != nil || live.ExtensionMembers["fdw:"+name] || desired.External.HasRole(live.Wrappers[name].Owner) {
 			continue
 		}
 		if left := users[name]; len(left) > 0 {

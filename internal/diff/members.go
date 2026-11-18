@@ -305,7 +305,8 @@ func membersPending(live *Live, stmts []string) bool {
 // doesn't exist is emptied, with a warning, unless pending says an
 // extension of this plan may still create it. A table declared with columns
 // that an extension owns is cut down to what an attribute-only declaration
-// manages, with a warning. desired itself is not modified.
+// manages, with a warning, and so is one in an external schema, which keeps
+// its triggers (see externalTable). desired itself is not modified.
 func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*schema.Database, []Warning) {
 	if live == nil || desired == nil {
 		return desired, nil
@@ -446,12 +447,18 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 	tables := cloneMap(desired.Tables, nil)
 	for _, k := range sortedKeys(desired.Tables) {
 		dt := desired.Tables[k]
+		if dt != nil && desired.External.InSchema(k) && !externalDeclaration(dt) {
+			s, _, _ := strings.Cut(k, ".")
+			warn("table %s is in schema %s, which the config's external: block lists, so pgy never creates, alters or drops it and manages only its privileges, owner, comment, row level security, policies, triggers and rows; declare it without columns", k, s)
+			dt = externalTable(dt)
+			tables[k] = dt
+		}
 		switch {
 		case dt == nil:
-		case !dt.AttributeOnly() && live.Tables[k] != nil && live.ExtensionMembers["rel:"+k]:
+		case !dt.AttributeOnly() && !desired.External.InSchema(k) && live.Tables[k] != nil && live.ExtensionMembers["rel:"+k]:
 			warn("table %s belongs to extension %s, which defines its columns, keys and indexes, so pgy manages only its privileges, owner, comment, row level security, policies and rows; declare it without columns", k, live.MemberExtension["rel:"+k])
 			tables[k] = memberTable(dt)
-		case !dt.AttributeOnly() || live.Tables[k] != nil || pending:
+		case !attributeOnlyTable(desired.External, k, dt) || live.Tables[k] != nil || pending:
 		default:
 			missing("table", k, "columns")
 			tables[k] = &schema.Table{Name: dt.Name}
@@ -529,7 +536,7 @@ func attributeOnly(desired *schema.Database, kind, k string) bool {
 		return ag != nil && ag.AttributeOnly()
 	case "table":
 		dt := desired.Tables[k]
-		return dt != nil && dt.AttributeOnly()
+		return dt != nil && attributeOnlyTable(desired.External, k, dt)
 	case "view":
 		vw := desired.Views[k]
 		return vw != nil && strings.TrimSpace(vw.Query) == ""

@@ -1,10 +1,12 @@
 package cli
 
 import (
+    "encoding/json"
     "strings"
     "fmt"
     "os"
     "path/filepath"
+    "sort"
 
     "github.com/spf13/cobra"
 
@@ -38,13 +40,23 @@ triggers whose function is in them. Database settings are left out unless
 Objects pgy cannot express (functions written in C, operators, operator
 classes and families, conversions, base types, text search parsers and
 templates, procedural languages and transforms) are reported on stderr;
-objects that belong to an extension are not.`,
+objects that belong to an extension are not. So are the configuration
+tables of the extensions written whose rows pg_dump would keep, unless
+--data pulls them. With --out, --json prints the files written and these
+warnings as JSON.
+
+The config's external: block leaves out what the application doesn't own:
+external schemas with their objects and the extensions installed there,
+external relations, objects external roles own, their role entries and
+default privileges, and external settings.`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
             cfg := FromContext(ctx)
             if cfg.DSN == "" { return fmt.Errorf("--dsn or PGY_DSN is required") }
             if cmd.Flags().Changed("schemas") { return fmt.Errorf("pull reads no schema files; use --schema to choose which database schemas to pull") }
+            if out == "" && cmd.Flags().Changed("json") && cfg.JSON { return fmt.Errorf("--json prints a summary of the files written to stdout, so it needs --out") }
+            asJSON := cfg.JSON && out != ""
             pool, err := db.Connect(ctx, cfg.DSN)
             if err != nil { return err }
             defer pool.Close()
@@ -62,7 +74,14 @@ objects that belong to an extension are not.`,
                 if err != nil { return err }
                 data[fq] = rows
             }
-            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, OwnerKinds: cfg.Policy.RequireOwners, Roles: roles, Single: out == "", Data: data})
+            configTables := []string{}
+            for fq := range live.ExtensionConfig {
+                if _, pulled := data[fq]; !pulled && !cfg.External.HasRelation(fq) { configTables = append(configTables, fq) }
+            }
+            sort.Strings(configTables)
+            configRows, err := diff.ConfigRowCounts(ctx, pool, live, configTables)
+            if err != nil { fmt.Fprintln(os.Stderr, "warning: the rows of extension configuration tables were not counted:", err) }
+            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, OwnerKinds: cfg.Policy.RequireOwners, Roles: roles, Single: out == "", Data: data, External: cfg.External, ConfigRows: configRows})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
             strict := &strictFindings{}
@@ -76,13 +95,26 @@ objects that belong to an extension are not.`,
                 return strict.err(nil)
             }
             if err := os.MkdirAll(out, 0o755); err != nil { return err }
+            written := []string{}
             for _, f := range res.Files {
                 p := filepath.Join(out, f.Name)
                 if _, err := os.Stat(p); err == nil && !force {
                     return fmt.Errorf("%s exists; use --force to overwrite", p)
                 }
                 if err := os.WriteFile(p, f.Content, 0o644); err != nil { return err }
-                if !cfg.Quiet { fmt.Printf("wrote %s\n", p) }
+                written = append(written, p)
+                if !cfg.Quiet && !asJSON { fmt.Printf("wrote %s\n", p) }
+            }
+            if asJSON {
+                type warning struct {
+                    Kind    string `json:"kind"`
+                    Message string `json:"message"`
+                }
+                warnings := make([]warning, len(res.Warnings))
+                for i, w := range res.Warnings { warnings[i] = warning{"unsupported", w} }
+                enc := json.NewEncoder(os.Stdout)
+                enc.SetIndent("", "  ")
+                if err := enc.Encode(map[string]any{"files": written, "warnings": warnings}); err != nil { return err }
             }
             return strict.err(nil)
         },

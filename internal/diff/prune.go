@@ -43,19 +43,25 @@ type Options struct {
     // MigrationsTable is pgy's own bookkeeping table ("schema.table"), never
     // pruned. Empty means pgy.migrations.
     MigrationsTable string
+    // External lists what the database has that the application doesn't
+    // own (the config's external: block), which the plan leaves alone; see
+    // schema.Database.External.
+    External *schema.External
 }
 
 // planPrune returns the DROP statements for live objects the desired schema
 // no longer declares. Only schemas that contain at least one desired object
-// are considered, and extension members, partitions, inheritance children of
+// and are not external are considered, and extension members, external
+// relations (see schema.External.HasRelation), partitions, inheritance children of
 // kept tables (see keptInheritanceChildren), inherited constraints,
 // triggers and indexes, constraint-backed indexes, primary keys, sequences
 // owned by a column and pgy's migrations table are never dropped, nor is
 // anything on a relation an extension owns, a table declared without
 // columns or a view declared without a query.
 //
-// A live object owned by a role whose privileges the connecting role lacks
-// (see Live.OwnerRoles) is left alone with a warning, and so are the
+// A live object owned by an external role is left alone, one owned by a
+// role whose privileges the connecting role lacks (see Live.OwnerRoles)
+// with a warning, and so are the
 // undeclared triggers, constraints and indexes of a declared table it does
 // not own. A routine that objects the plan keeps still use (see
 // LiveFunction.Dependents) is kept too, with a warning.
@@ -70,7 +76,9 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string, pla
     if migrationsTable == "" { migrationsTable = "pgy.migrations" }
     inScope := pruneScope(live, desired)
     owned := func(kind, key, fq, parts string) bool {
-        if owner := live.Owners[key]; !live.mayDrop(owner) {
+        owner := live.Owners[key]
+        if desired.External.HasRole(owner) { return false }
+        if !live.mayDrop(owner) {
             warnings = append(warnings, notOwnerWarning(live, kind+" "+fq, owner, parts))
             return false
         }
@@ -80,12 +88,12 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string, pla
 
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
-        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
+        if dt == nil || lt == nil || dt.AttributeOnly() || live.ExtensionMembers["rel:"+fq] || desired.External.HasRelation(fq) || attachesPartition(dt, lt) || foreignKindMismatch(dt, lt) { continue }
         if drops := pruneTableObjects(fq, dt, lt); len(drops) > 0 && owned("table", "rel:"+fq, fq, tableObjects) { early = append(early, drops...) }
     }
     for _, fq := range sortedKeys(desired.Views) {
         vw := desired.Views[fq]
-        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] { continue }
+        if vw == nil || strings.TrimSpace(vw.Query) == "" || live.ExtensionMembers["rel:"+fq] || desired.External.HasRelation(fq) { continue }
         var drops []string
         if lt := live.MatViewTables[fq]; vw.Materialized && lt != nil {
             drops = pruneIndexes(fq, vw.Indexes, lt)
@@ -99,7 +107,7 @@ func planPrune(live *Live, desired *schema.Database, migrationsTable string, pla
     undeclared := func(kind string, liveSet map[string]bool, declared func(string) bool, extKind string) []string {
         out := []string{}
         for _, k := range sortedKeys(liveSet) {
-            if !liveSet[k] || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] || !owned(kind, extKind+":"+k, k, "") { continue }
+            if !liveSet[k] || !inScope(k) || declared(k) || live.ExtensionMembers[extKind+":"+k] || extKind == "rel" && desired.External.HasRelation(k) || !owned(kind, extKind+":"+k, k, "") { continue }
             out = append(out, k)
         }
         return out
@@ -166,14 +174,14 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
         for depth := 0; depth < 32 && parentOf[fq] != ""; depth++ { fq = parentOf[fq] }
         i := strings.IndexByte(fq, '.')
         lt := live.Tables[fq]
-        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq] && live.mayDrop(live.Owners["rel:"+fq])
+        return lt != nil && !lt.IsPartition && i > 0 && managed[fq[:i]] && !InDottedSchema(live, fq) && desired.Tables[fq] == nil && fq != migrationsTable && !live.ExtensionMembers["rel:"+fq] && !inheritKept[fq] && !desired.External.HasRelation(fq) && live.mayDrop(live.Owners["rel:"+fq])
     }
     users := map[string][]string{}
     for _, fq := range sortedKeys(live.Tables) {
         if lt := live.Tables[fq]; lt != nil && lt.Foreign != nil && !pruned(fq) { users[lt.Foreign.Server] = append(users[lt.Foreign.Server], fq) }
     }
     for _, name := range sortedKeys(live.Servers) {
-        if desired.Servers[name] != nil { continue }
+        if desired.Servers[name] != nil || desired.External.HasRole(live.Servers[name].Owner) { continue }
         if left := users[name]; len(left) > 0 {
             warnings = append(warnings, Warning{Message: fmt.Sprintf("server %s is not in the servers block but still has foreign tables this plan keeps (%s), so it is not dropped; drop or move them first", name, strings.Join(left, ", "))})
             continue
@@ -191,12 +199,13 @@ func pruneServers(live *Live, desired *schema.Database, migrationsTable string) 
     return drops, warnings
 }
 
-// managedSchemas returns the schemas holding at least one desired object.
+// managedSchemas returns the schemas holding at least one desired object,
+// external schemas left out.
 func managedSchemas(d *schema.Database) map[string]bool {
     out := map[string]bool{}
     add := func(keys []string) {
         for _, k := range keys {
-            if i := strings.IndexByte(k, '.'); i > 0 { out[k[:i]] = true }
+            if i := strings.IndexByte(k, '.'); i > 0 && !d.External.HasSchema(k[:i]) { out[k[:i]] = true }
         }
     }
     add(sortedKeys(d.Tables))
@@ -288,14 +297,17 @@ func pruneIndexes(fq string, declared []*schema.Index, lt *LiveTable) []string {
 }
 
 // pruneRoutines drops the routines routinePruneCandidates returns, but for
-// those owned by a role whose privileges the connecting role lacks and those
-// that objects outside them still use once planned, the plan's other drops,
-// and the routine drops themselves have run. Both are reported.
+// those an external role owns, those owned by a role whose privileges the
+// connecting role lacks and those that objects outside them still use once
+// planned, the plan's other drops, and the routine drops themselves have
+// run. The last two are reported.
 func pruneRoutines(live *Live, desired *schema.Database, inScope func(string) bool, planned []string) ([]string, []Warning) {
     var warnings []Warning
     candidates := []*routineCandidate{}
     for _, c := range routinePruneCandidates(live, desired, inScope) {
-        if owner := live.Owners["proc:"+c.norm]; !live.mayDrop(owner) {
+        owner := live.Owners["proc:"+c.norm]
+        if desired.External.HasRole(owner) { continue }
+        if !live.mayDrop(owner) {
             warnings = append(warnings, notOwnerWarning(live, c.kind+" "+c.signature, owner, ""))
             continue
         }

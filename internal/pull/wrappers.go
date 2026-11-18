@@ -10,12 +10,13 @@ import (
 // the initial ones: what its extension left for a language an extension
 // owns, as plpgsql is, and PUBLIC's USAGE for any other. Only the grantees
 // that changed are written, one that lost its privileges with an empty
-// list.
+// list. Languages that an external role or an external extension owns are
+// left out.
 func (b *builder) languages() *node {
 	out := newMap()
 	for _, name := range sortedKeys(b.live.Languages) {
 		ll := b.live.Languages[name]
-		if ll == nil || !ll.Trusted {
+		if ll == nil || !ll.Trusted || b.opts.External.HasRole(ll.Owner) || b.externalExtension(b.live.MemberExtension["language:"+name]) {
 			continue
 		}
 		initial, owned := b.live.InitialGrants("language:"+name, "usage")
@@ -40,11 +41,13 @@ func (b *builder) languages() *node {
 // longer as the extension left it is written, and nothing at all for an
 // untouched one: its options, the grantees whose privileges changed, its
 // comment, and with Options.Owners an owner other than the extension's.
+// Wrappers that an external role or an external extension owns are left
+// out.
 func (b *builder) wrappers() *node {
 	out := newMap()
 	for _, name := range sortedKeys(b.live.Wrappers) {
 		lw := b.live.Wrappers[name]
-		if lw == nil {
+		if lw == nil || b.opts.External.HasRole(lw.Owner) || b.externalExtension(b.live.MemberExtension["fdw:"+name]) {
 			continue
 		}
 		w := newMap()

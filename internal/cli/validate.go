@@ -29,10 +29,11 @@ Exit codes:
             paths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
             if err != nil { return err }
             if len(paths) == 0 { return fmt.Errorf("no schema files found under %s", cfg.SchemaRoot) }
-            issues := validate.Files(paths)
+            issues := validate.FilesWith(paths, cfg.External)
             var policyIssues []validate.Issue
             if !cfg.Policy.Empty() && !validate.HasErrors(issues) {
                 if d, err := schema.LoadAndMerge(paths); err == nil {
+                    d.External = cfg.External
                     policyIssues = validate.CheckPolicy(d, cfg.Policy)
                 }
             }

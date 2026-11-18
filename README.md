@@ -128,7 +128,21 @@ migrations_table: pgy.migrations
 buffer: ./.pgy.buffer.sql
 ```
 
-It also takes the `ci:` and `policy:` blocks described under [Strict mode](#strict-mode), and the `prune:` block described under [Unsafe changes and pruning](#unsafe-changes-and-pruning).
+It also takes the `ci:` and `policy:` blocks described under [Strict mode](#strict-mode), the `prune:` block described under [Unsafe changes and pruning](#unsafe-changes-and-pruning), and the `external:` block below.
+
+### External objects
+
+Hosted platforms (Supabase, RDS, Neon, Cloud SQL, Azure) put schemas, roles, extensions, event triggers, publications and settings into every database that the application doesn't own. The `external:` block lists them as glob patterns (`*` and `?`), and pgy leaves them alone:
+
+```yaml
+external:
+  schemas: [auth, storage, extensions]            # pull leaves them out, prune never touches them
+  roles: [anon, authenticated, "supabase_*"]       # their objects aren't pulled, their grants neither revoked nor required
+  settings: ["pgrst.*", "app.settings.*"]         # never pulled, never reset
+  relations: ["*._hyper_*_chunk", "pgmq.q_*"]     # tables extensions create at run time: never pulled or pruned
+```
+
+A table in an external schema can be declared without columns to manage the application's policies, triggers, grants and rows on it. Without the block nothing changes. See [Hosted platforms](docs/hosted-platforms.md) for what each key does, lists to copy for each platform, and adopting such a database.
 
 ### Strict mode
 
@@ -149,7 +163,7 @@ ci:
 | `unsafe` | `pgy diff`: a statement left out because it needs `--unsafe` (see [Unsafe changes and pruning](#unsafe-changes-and-pruning)) |
 | `policy` | `pgy diff` and `pgy validate`: a schema breaks a rule of the `policy:` block (below) |
 | `validate` | `pgy validate` warnings and errors; in `pgy diff`, validation findings for the schema files |
-| `unsupported` | `pgy pull`: objects it can't express |
+| `unsupported` | `pgy pull`: objects it can't express, and rows in configuration tables of the extensions it writes that the YAML doesn't carry |
 | `all` | every warning |
 
 Without a `ci:` block, `--strict` uses the defaults shown above; a key in `ci:` replaces just that default.
@@ -185,7 +199,7 @@ policy:
 
 | Command | What it does |
 |---------|--------------|
-| `pgy pull [--out DIR] [--schema S] [--exclude-schema S] [--database-settings] [--data T] [--owners] [--roles]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--schema` pulls only the schemas named and `--exclude-schema` leaves schemas out; `database.yml` then holds only what the pulled schemas need (see [Pulling some schemas](#pulling-some-schemas)). `--data schema.table` also pulls a table's rows. `--roles` writes the cluster's roles except the bootstrap superuser, and the connecting role with its memberships and settings only (see [Roles](docs/schema.md#roles)). Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, procedural languages and transforms that no extension owns, and column privileges on an extension's tables. Functions, aggregates, tables, sequences, views, types, schemas, languages and foreign-data wrappers of an extension are written when their privileges changed, and its text search dictionaries with their options (see [Objects an extension owns](docs/schema.md#objects-an-extension-owns)). |
+| `pgy pull [--out DIR] [--schema S] [--exclude-schema S] [--database-settings] [--data T] [--owners] [--roles] [--json]` | Writes YAML for an existing database: one file per schema plus `database.yml`. `--schema` pulls only the schemas named and `--exclude-schema` leaves schemas out; `database.yml` then holds only what the pulled schemas need (see [Pulling some schemas](#pulling-some-schemas)). `--data schema.table` also pulls a table's rows. `--roles` writes the cluster's roles except the bootstrap superuser, and the connecting role with its memberships and settings only (see [Roles](docs/schema.md#roles)). Objects pgy cannot express are reported on stderr: functions written in C, operators, operator classes and families, conversions, base types, casts, text search parsers and templates, procedural languages and transforms that no extension owns, and column privileges on an extension's tables. So are the configuration tables of the extensions it writes that hold rows `pg_dump` would keep, with their number, unless `--data` pulls them (see [Extensions that create objects at run time](docs/hosted-platforms.md#extensions-that-create-objects-at-run-time)). With `--out`, `--json` prints the files written and the warnings as JSON. The config's [`external:` block](#external-objects) leaves out what the application doesn't own. Functions, aggregates, tables, sequences, views, types, schemas, languages and foreign-data wrappers of an extension are written when their privileges changed, and its text search dictionaries with their options (see [Objects an extension owns](docs/schema.md#objects-an-extension-owns)). |
 | `pgy validate [--json]` | Checks schema files without a database: JSON Schema, unknown columns, unresolvable `dependsOn`, cycles, invalid combinations, and warnings such as policies on a table without row-level security. Exits 1 on errors. |
 | `pgy diff [--unsafe] [--prune] [--split[=dir]] [--from-empty] [--strict-expressions]` | Writes the SQL that brings the database to the YAML. Exits 2 when there are changes. `--from-empty` plans against an empty database without connecting. `--strict-expressions` compares every declared expression through the server, not only those the text comparison can't settle, which takes longer (see [How expressions are compared](docs/schema.md#how-expressions-are-compared)). Warnings about locks and schema problems go to stderr (`--no-warnings` silences them). |
 | `pgy buffer [--stat] [--clear]` | Prints, summarises or deletes the buffer. |
@@ -224,16 +238,16 @@ Without `--unsafe`, `pgy diff` still plans those changes to report them: each st
 - role memberships that a role's `inRoles` no longer lists, for roles that declare `inRoles`
 - rows of tables with a `data:` block that the block no longer lists
 
-Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), undeclared inheritance children of a table the plan keeps (their rows are part of the parent's, as with TimescaleDB chunks; `pgy diff` names them in a warning), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, and the migrations table.
+Some things are never dropped: objects in other schemas, extension members, partitions (dropping the parent drops them), undeclared inheritance children of a table the plan keeps (their rows are part of the parent's, as with TimescaleDB chunks; `pgy diff` names them in a warning), primary keys, indexes that back a constraint, objects a partition inherits from its parent, sequences owned by a column, window functions, functions and procedures written in C or `internal` (YAML cannot declare them), functions PostgreSQL created for another object (such as range type constructors), roles, schemas, `plpgsql`, extensions that an extension staying installed requires, the migrations table, and what the config's [`external:` block](#external-objects) lists: anything in external schemas, external relations, and the event triggers, extensions, publications, servers and foreign-data wrappers external roles own.
 
-A `prune:` block in the config file names extensions that `--prune` must leave alone, for example ones the hosting platform installed:
+A `prune:` block in the config file names extensions that `--prune` must leave alone, for example ones the hosting platform installed in a schema the application owns:
 
 ```yaml
 prune:
   keep_extensions: [pg_stat_statements, postgis]
 ```
 
-An undeclared extension or routine that is still in use is not dropped either: `pgy diff` warns (kind `dependents`) and names what uses it, such as an event trigger the YAML doesn't manage, instead of writing a `DROP EXTENSION` or `DROP FUNCTION` that PostgreSQL would reject. Nor is an object whose owner is a role whose privileges the connecting role doesn't have (it is not that role, a member that inherits its privileges or a superuser), since only its owner may drop it: `pgy diff` warns (kind `not_owner`), for example about the event triggers, extensions and publications a hosting platform's own role created. The same goes for the triggers, constraints and indexes of a declared table such a role owns.
+Unlike an `external:` entry, `keep_extensions` doesn't stop `pgy pull` from writing the extension; see [`prune.keep_extensions`](docs/hosted-platforms.md#prunekeep_extensions) for when to use which. An undeclared extension or routine that is still in use is not dropped either: `pgy diff` warns (kind `dependents`) and names what uses it, such as an event trigger the YAML doesn't manage, instead of writing a `DROP EXTENSION` or `DROP FUNCTION` that PostgreSQL would reject. Nor is an object whose owner is a role whose privileges the connecting role doesn't have (it is not that role, a member that inherits its privileges or a superuser), since only its owner may drop it: `pgy diff` warns (kind `not_owner`), for example about the event triggers, extensions and publications a hosting platform's own role created, unless `external.roles` lists that role, which leaves them out without a warning. The same goes for the triggers, constraints and indexes of a declared table such a role owns.
 
 > **Warning:** run `--prune` with **all** of your schema files. With an explicit `--schemas` subset, it drops every object the subset doesn't mention in the schemas it touches, including whole tables and their data. Always read the buffer before committing it.
 
@@ -296,6 +310,7 @@ References inside SQL text are found by name. A name that only looks like a refe
 
 - [Schema reference](docs/schema.md): every YAML key, with examples and diff behaviour.
 - [Feature matrix](docs/feature_support.md): what pgy supports, and how it is tested.
+- [Hosted platforms](docs/hosted-platforms.md): adopting a Supabase, RDS, Neon, Cloud SQL or Azure database, with `external:` lists for each.
 - [`examples/`](examples): composable starter modules (users, orgs, e-commerce, billing, CRM, messaging and more) and link files that wire them together.
 
 ## Notes

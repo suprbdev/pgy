@@ -116,6 +116,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		if l.Grants == nil {
 			continue
 		}
+		liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
 		covers, why := coversPublic(mode, false, desiredG), ""
 		if reason, ok := publicRevokedByExtension(live, mode, "language:"+name, "usage", desiredG); ok {
 			covers, why = true, reason

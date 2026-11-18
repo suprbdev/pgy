@@ -44,6 +44,19 @@ type Options struct {
 	// Single puts everything in one document (schema.yml) instead of a file
 	// per schema plus database.yml.
 	Single bool
+	// External lists what the application doesn't own (the config's
+	// external: block), which is left out: the objects of external schemas
+	// and the extensions installed there, event triggers whose function is
+	// there and publications of their tables only, external relations,
+	// whatever external roles own, their default privileges and role
+	// entries, and external settings.
+	External *schema.External
+	// ConfigRows holds, by "schema.table", the number of rows of an
+	// extension's configuration table that its condition selects (the rows
+	// pg_dump keeps, see diff.ConfigRowCounts), -1 for a table that could
+	// not be read. Build reports the tables with rows that the YAML does
+	// not carry.
+	ConfigRows map[string]int64
 }
 
 // File is one generated YAML document.
@@ -101,6 +114,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	b.configRows()
 	for _, name := range sortedKeys(b.blocks) {
 		blk := b.blocks[name]
 		if len(blk.Content) == 0 && !b.declaredSchema[name] {
@@ -137,6 +151,8 @@ type builder struct {
 	// identitySeqs: sequence -> "schema.table.column" of the identity column
 	// it belongs to
 	identitySeqs map[string]string
+	// extensions: the extensions database.yml creates
+	extensions map[string]bool
 }
 
 func (b *builder) warn(format string, args ...any) {
@@ -153,13 +169,75 @@ func (b *builder) accessMethod(m *node, lt *diff.LiveTable) {
 }
 
 func (b *builder) wantSchema(s string) bool {
-	if slices.Contains(b.opts.ExcludeSchemas, s) {
+	if slices.Contains(b.opts.ExcludeSchemas, s) || b.opts.External.HasSchema(s) {
 		return false
 	}
 	if len(b.opts.Schemas) == 0 {
 		return s != "pgy" || b.schemaHasObjectsBesidesMigrations(s)
 	}
 	return slices.Contains(b.opts.Schemas, s)
+}
+
+// externalOwned reports whether an external role owns the object with
+// diff.Live.Owners key key.
+func (b *builder) externalOwned(key string) bool {
+	return b.opts.External.HasRole(b.live.Owners[key])
+}
+
+// externalRelation reports whether the table, view, materialized view or
+// sequence fq is left out as external: it is an external relation or an
+// external role owns it.
+func (b *builder) externalRelation(fq string) bool {
+	return b.opts.External.HasRelation(fq) || b.externalOwned("rel:"+fq)
+}
+
+// externalExtension reports whether the extension name is left out as
+// external: it is installed in an external schema or an external role
+// owns it.
+func (b *builder) externalExtension(name string) bool {
+	le := b.live.ExtensionDefs[name]
+	return le != nil && (b.opts.External.HasSchema(le.Schema) || b.opts.External.HasRole(le.Owner))
+}
+
+// externalPublication reports whether the publication lp is left out as
+// external: an external role owns it, or it publishes tables or schemas
+// and all of them are external.
+func (b *builder) externalPublication(lp *diff.LivePublication) bool {
+	ext := b.opts.External
+	if ext == nil {
+		return false
+	}
+	if ext.HasRole(lp.Owner) {
+		return true
+	}
+	if lp.AllTables || len(lp.Tables)+len(lp.Schemas) == 0 {
+		return false
+	}
+	for t := range lp.Tables {
+		if !ext.HasRelation(t) {
+			return false
+		}
+	}
+	for _, s := range lp.Schemas {
+		if !ext.HasSchema(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// externalSettings returns config without its external settings.
+func (b *builder) externalSettings(config map[string]string) map[string]string {
+	if b.opts.External == nil {
+		return config
+	}
+	out := map[string]string{}
+	for k, v := range config {
+		if !b.opts.External.HasSetting(k) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // limited reports whether Options.Schemas or Options.ExcludeSchemas leaves
@@ -282,6 +360,7 @@ func (b *builder) unsupported() {
 	}
 	for _, o := range b.live.Details.Unsupported {
 		switch {
+		case b.opts.External.HasRole(o.Owner):
 		case o.Schema == "":
 			b.warn("%s %s is not supported by pgy and was left out", o.Kind, o.Name)
 		case !b.wantSchema(o.Schema):
@@ -450,7 +529,7 @@ func (b *builder) addOwner(m *node, kind, o string) {
 func (b *builder) schemas() {
 	b.declaredSchema = map[string]bool{}
 	for _, s := range sortedKeys(b.live.Schemas) {
-		if s == "pg_toast" || !b.wantSchema(s) {
+		if s == "pg_toast" || !b.wantSchema(s) || b.externalOwned("schema:"+s) {
 			continue
 		}
 		if strings.Contains(s, ".") {
@@ -555,6 +634,9 @@ func (b *builder) collectSerials() {
 
 func (b *builder) types() {
 	for _, k := range sortedKeys(b.live.Types) {
+		if b.externalOwned("type:" + k) {
+			continue
+		}
 		if b.member("type", k) {
 			b.memberType(k)
 			continue
@@ -602,7 +684,7 @@ func (b *builder) types() {
 		add(blk, "type "+schema.QuoteName(name), t)
 	}
 	for _, k := range sortedKeys(b.live.BaseTypes) {
-		if b.member("type", k) {
+		if b.member("type", k) && !b.externalOwned("type:"+k) {
 			b.memberType(k)
 		}
 	}
@@ -610,6 +692,9 @@ func (b *builder) types() {
 
 func (b *builder) domains() {
 	for _, k := range sortedKeys(b.live.Domains) {
+		if b.externalOwned("type:" + k) {
+			continue
+		}
 		if b.member("type", k) {
 			b.memberType(k)
 			continue
@@ -696,7 +781,7 @@ func (b *builder) collations() {
 func (b *builder) textSearch() {
 	for _, k := range sortedKeys(b.live.TSDictionaries) {
 		td := b.d.TSDictionaries[k]
-		if td == nil {
+		if td == nil || b.externalOwned("tsdict:"+k) {
 			continue
 		}
 		blk, name, ok := b.block(k)
@@ -782,7 +867,7 @@ func identityOptionsNode(fq, cn string, lc *diff.LiveColumn) *node {
 func (b *builder) sequences() {
 	for _, k := range sortedKeys(b.live.Sequences) {
 		ls := b.live.SequenceDefs[k]
-		if ls == nil {
+		if ls == nil || b.externalRelation(k) || ls.Owner != "" && b.externalRelation(diff.ColumnRelation(ls.Owner)) {
 			continue
 		}
 		if b.member("rel", k) {
@@ -871,6 +956,9 @@ func (b *builder) columnSequence(k, column string) {
 func (b *builder) routines() {
 	for _, norm := range sortedKeys(b.d.Routines) {
 		r := b.d.Routines[norm]
+		if b.externalOwned("proc:" + norm) {
+			continue
+		}
 		if b.member("proc", norm) {
 			b.memberRoutine(norm, r)
 			continue
@@ -978,7 +1066,7 @@ func (b *builder) aggregates() {
 	for _, norm := range sortedKeys(b.live.AggregateDefs) {
 		la := b.live.AggregateDefs[norm]
 		lf := b.live.FunctionDefs[norm]
-		if lf == nil {
+		if lf == nil || b.externalOwned("proc:"+norm) {
 			continue
 		}
 		name := aggregateArgKeywordRe.ReplaceAllStringFunc(lf.Signature, strings.ToLower)
@@ -1095,7 +1183,7 @@ func setting(name, value string) *node {
 func (b *builder) tables() {
 	for _, fq := range sortedKeys(b.live.Tables) {
 		lt := b.live.Tables[fq]
-		if lt == nil || fq == b.opts.MigrationsTable {
+		if lt == nil || fq == b.opts.MigrationsTable || b.externalRelation(fq) {
 			continue
 		}
 		if b.member("rel", fq) {
@@ -1207,6 +1295,9 @@ func (b *builder) servers() *node {
 	out := newMap()
 	for _, name := range sortedKeys(b.live.Servers) {
 		ls := b.live.Servers[name]
+		if b.opts.External.HasRole(ls.Owner) {
+			continue
+		}
 		s := newMap()
 		add(s, "wrapper", str(ls.Wrapper))
 		addStr(s, "type", ls.Type)
@@ -1218,6 +1309,9 @@ func (b *builder) servers() *node {
 		}
 		addStr(s, "comment", ls.Comment)
 		add(out, name, s)
+	}
+	if len(out.Content) == 0 {
+		return nil
 	}
 	return out
 }
@@ -2050,7 +2144,7 @@ func partitionBy(key string) *node {
 func (b *builder) views() {
 	for _, k := range sortedKeys(b.d.ViewQueries) {
 		mat := b.live.MatViews[k]
-		if !mat && !b.live.Views[k] {
+		if !mat && !b.live.Views[k] || b.externalRelation(k) {
 			continue
 		}
 		if b.member("rel", k) {
@@ -2141,14 +2235,16 @@ func (b *builder) views() {
 // event triggers.
 func (b *builder) database() *node {
 	doc := newMap()
+	b.extensions = map[string]bool{}
 	languages, wrappers := b.languages(), b.wrappers()
 	kept := b.keptExtensions(languages, wrappers)
 	if len(b.live.Extensions) > 0 {
 		exts := &node{Kind: yaml.SequenceNode}
 		for _, name := range sortedKeys(b.live.Extensions) {
-			if name == "plpgsql" || kept != nil && !kept[name] {
+			if name == "plpgsql" || kept != nil && !kept[name] || b.externalExtension(name) {
 				continue
 			}
+			b.extensions[name] = true
 			le := b.live.ExtensionDefs[name]
 			if le == nil {
 				exts.Content = append(exts.Content, str(name))
@@ -2169,7 +2265,7 @@ func (b *builder) database() *node {
 			}
 			deps := []string{}
 			for _, r := range le.Requires {
-				if r != "plpgsql" {
+				if r != "plpgsql" && !b.externalExtension(r) {
 					deps = append(deps, "extension "+r)
 				}
 			}
@@ -2186,7 +2282,7 @@ func (b *builder) database() *node {
 		roles := newMap()
 		for _, name := range sortedKeys(b.live.RoleDefs) {
 			lr := b.live.RoleDefs[name]
-			if lr.Bootstrap {
+			if lr.Bootstrap || b.opts.External.HasRole(name) {
 				continue
 			}
 			connecting := name == b.live.CurrentUser
@@ -2237,10 +2333,10 @@ func (b *builder) database() *node {
 				}
 				add(r, "inRoles", items)
 			}
-			if len(lr.Config) > 0 {
+			if config := b.externalSettings(lr.Config); len(config) > 0 {
 				set := flowMap()
-				for _, k := range sortedKeys(lr.Config) {
-					add(set, k, setting(k, lr.Config[k]))
+				for _, k := range sortedKeys(config) {
+					add(set, k, setting(k, config[k]))
 				}
 				add(r, "set", set)
 			}
@@ -2254,7 +2350,7 @@ func (b *builder) database() *node {
 			add(doc, "roles", roles)
 		}
 	}
-	if (len(b.live.DatabaseConfig) > 0 || len(b.live.DatabaseRoleConfig) > 0) && (!b.limited() || b.opts.DatabaseSettings) {
+	if !b.limited() || b.opts.DatabaseSettings {
 		db := newMap()
 		settings := func(m map[string]string) *node {
 			set := flowMap()
@@ -2263,25 +2359,33 @@ func (b *builder) database() *node {
 			}
 			return set
 		}
-		if len(b.live.DatabaseConfig) > 0 {
-			add(db, "set", settings(b.live.DatabaseConfig))
+		if config := b.externalSettings(b.live.DatabaseConfig); len(config) > 0 {
+			add(db, "set", settings(config))
 		}
-		if len(b.live.DatabaseRoleConfig) > 0 {
-			roles := newMap()
-			for _, r := range sortedKeys(b.live.DatabaseRoleConfig) {
-				add(roles, r, settings(b.live.DatabaseRoleConfig[r]))
+		roles := newMap()
+		for _, r := range sortedKeys(b.live.DatabaseRoleConfig) {
+			if config := b.externalSettings(b.live.DatabaseRoleConfig[r]); len(config) > 0 && !b.opts.External.HasRole(r) {
+				add(roles, r, settings(config))
 			}
+		}
+		if len(roles.Content) > 0 {
 			add(db, "roles", roles)
 		}
-		add(doc, "database", db)
+		if len(db.Content) > 0 {
+			add(doc, "database", db)
+		}
 	}
 	if dp := b.defaultPrivileges(); dp != nil {
 		add(doc, "defaultPrivileges", dp)
 	}
 	if len(b.live.Publications) > 0 {
-		pubs, left := newMap(), []string{}
+		pubs, left, external := newMap(), []string{}, 0
 		for _, name := range sortedKeys(b.live.Publications) {
 			lp := b.live.Publications[name]
+			if b.externalPublication(lp) {
+				external++
+				continue
+			}
 			if !b.keptPublication(name, lp) {
 				left = append(left, name)
 				continue
@@ -2329,7 +2433,7 @@ func (b *builder) database() *node {
 			addStr(p, "comment", lp.Comment)
 			add(pubs, name, p)
 		}
-		if len(pubs.Content) > 0 || !b.limited() {
+		if len(pubs.Content) > 0 || !b.limited() && external < len(b.live.Publications) {
 			add(doc, "publications", pubs)
 			b.warnPartialBlock("publications:", "publications", left)
 		}
@@ -2346,7 +2450,7 @@ func (b *builder) database() *node {
 	ets, left := newMap(), []string{}
 	for _, name := range sortedKeys(b.live.EventTriggers) {
 		le := b.live.EventTriggers[name]
-		if le.Extension {
+		if le.Extension || b.opts.External.HasRole(le.Owner) || b.opts.External.InSchema(le.Function) {
 			continue
 		}
 		if b.limited() && !b.wantSchema(schemaOf(le.Function)) {
@@ -2372,12 +2476,34 @@ func (b *builder) database() *node {
 	return doc
 }
 
+// configRows reports the configuration tables of the extensions
+// database.yml creates that hold rows the YAML doesn't carry: rows their
+// condition selects (Options.ConfigRows), which pg_dump keeps, of a table
+// --data didn't ask for. External relations are left out.
+func (b *builder) configRows() {
+	for _, fq := range sortedKeys(b.opts.ConfigRows) {
+		n, ext := b.opts.ConfigRows[fq], b.live.MemberExtension["rel:"+fq]
+		if _, pulled := b.opts.Data[fq]; pulled || n == 0 || !b.extensions[ext] || b.opts.External.HasRelation(fq) {
+			continue
+		}
+		if n < 0 {
+			b.warn("extension %s: configuration table %s could not be read, so its rows, which pg_dump keeps and a database rebuilt from this YAML would lack, were not counted; pull them with --data %s, or list the table under external.relations", ext, fq, fq)
+			continue
+		}
+		rows := "rows"
+		if n == 1 {
+			rows = "row"
+		}
+		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry, so a database rebuilt from it would lack them; pull them with --data %s, or list the table under external.relations", ext, fq, n, rows, fq)
+	}
+}
+
 func (b *builder) defaultPrivileges() *node {
 	type scope struct{ role, schema string }
 	scopes := map[scope]map[string]map[string]map[string]bool{}
 	for key := range b.live.DefaultACLRows {
 		parts := strings.SplitN(key, "|", 3)
-		if len(parts) != 3 || (parts[1] != "" && !b.wantSchema(parts[1])) {
+		if len(parts) != 3 || (parts[1] != "" && !b.wantSchema(parts[1])) || b.opts.External.HasRole(parts[0]) {
 			continue
 		}
 		sc := scope{parts[0], parts[1]}

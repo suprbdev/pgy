@@ -53,6 +53,10 @@ type Database struct {
     DefaultPrivileges []*DefaultPrivilege `yaml:"-"`
     DatabaseSettings  map[string]string   `yaml:"-"` // ALTER DATABASE ... SET for the target database; nil = unmanaged
     DatabaseRoleSettings map[string]map[string]string `yaml:"-"` // role -> ALTER ROLE ... IN DATABASE ... SET settings
+    // External is the config's external: block, which no YAML file sets:
+    // what the database has that the application doesn't own. nil means
+    // none.
+    External *External `yaml:"-"`
 }
 
 // Role is a cluster-level role (CREATE ROLE). Passwords are intentionally

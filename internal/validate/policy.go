@@ -35,7 +35,8 @@ func (p Policy) Empty() bool {
 // of objects pgy never creates (a function or procedure without a body, a
 // view without a query, a type without a kind), which is how the objects
 // an extension owns are declared, and require_owners the sequences of
-// serial and identity columns, which have the owner of their table.
+// serial and identity columns, which have the owner of their table. Neither
+// checks objects in external schemas (d.External) or those schemas.
 func CheckPolicy(d *schema.Database, p Policy) []Issue {
 	issues := []Issue{}
 	warn := func(obj, format string, args ...any) {
@@ -49,6 +50,9 @@ func CheckPolicy(d *schema.Database, p Policy) []Issue {
 	objects := []object{}
 	schemas := map[string]bool{}
 	note := func(kind, key string, grants bool, owner string) {
+		if d.External.InSchema(key) {
+			return
+		}
 		objects = append(objects, object{kind, key, grants, owner})
 		if i := strings.IndexByte(key, '.'); i > 0 {
 			schemas[key[:i]] = true
