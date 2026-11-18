@@ -216,6 +216,13 @@ type Live struct{
     // TableData: "schema.table" -> comparison of its declared data rows
     // with the live rows; filled by IntrospectData
     TableData map[string]*LiveTableData
+    // ExtensionObjects holds what CREATE EXTENSION of the extensions a
+    // plan creates adds to the snapshot (see ProbeExtensionObjects); nil
+    // when that wasn't read.
+    ExtensionObjects *ExtensionObjects
+    // created names the extensions whose objects withExtensionObjects
+    // added to this snapshot.
+    created map[string]bool
 }
 
 // LiveServer is a foreign server from pg_foreign_server.
@@ -689,10 +696,18 @@ type LiveColumn struct{
 // an object mid-introspection (PostgreSQL then reports it as an internal
 // error such as "could not open relation with OID"), the read is retried.
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
+    return introspectAfter(ctx, pool, nil)
+}
+
+// introspectAfter is Introspect of the database as setup leaves it, in a
+// transaction that is rolled back (see queryBatch.setup). A failing setup
+// statement is returned as a *setupError and not retried.
+func introspectAfter(ctx context.Context, pool *pgxpool.Pool, setup []string) (*Live, error) {
     var err error
     for attempt := 0; attempt < 3; attempt++ {
         var l *Live
-        if l, err = introspectOnce(ctx, pool); err == nil || !isCatalogRace(err) {
+        var failed *setupError
+        if l, err = introspectOnce(ctx, pool, setup); err == nil || errors.As(err, &failed) || !isCatalogRace(err) {
             return l, err
         }
     }
@@ -717,7 +732,7 @@ func isCatalogRace(err error) bool {
     return pgErr.Code == "42P01" || pgErr.Code == "42704"
 }
 
-func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
+func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*Live, error) {
     l := &Live{
         Schemas: map[string]bool{},
         Tables: map[string]*LiveTable{},
@@ -785,7 +800,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         OwnedSequences: map[string]bool{},
         ExtensionConfig: map[string]string{},
     }
-    batch := &queryBatch{}
+    batch := &queryBatch{setup: setup}
     
     // Query existing schemas
     schemaQ := `
@@ -2935,6 +2950,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    live = withExtensionObjects(live, desired)
     desired = withExternal(desired, opts)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
@@ -2944,6 +2960,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     planExtensions(extensions, live, desired)
     desired = viewsCreatedAsViews(live, desired)
     pendingMembers := membersPending(live, extensions.Creates)
+    extensions.Warnings = append(extensions.Warnings, offlineExtensionTablesWarning(live, desired, extensions.Creates)...)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pendingMembers)
     live, renames := applyRenames(live, desired)
     renamed := live
@@ -3388,6 +3405,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if attributeOnly(desired, "table", e.Key) {
                 if lt := live.Tables[e.Key]; lt != nil && len(dt.Triggers) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Triggers: dt.Triggers}, lt, &deferredFKs, &deferredTriggers, unsafe)
+                } else if lt == nil && pendingMembers {
+                    deferredTriggers = append(deferredTriggers, pendingTriggerStmts(e.Key, dt)...)
                 }
                 continue
             }
@@ -3594,7 +3613,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
     plan.Alters = append(plan.Alters, dataWrites...)
     plan.Alters = append(plan.Alters, deferredFKs...)
-    planPolicies(plan, live, desired, unsafe)
+    planPolicies(plan, live, desired, unsafe, pendingMembers)
     planPublications(plan, live, desired, opts)
     plan.Drops = append(plan.Drops, columnDrops...)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
@@ -6707,8 +6726,13 @@ func renderTrigger(fq string, tr *schema.Trigger) string {
 // planPolicies emits ENABLE/DISABLE ROW LEVEL SECURITY and policy create/drop
 // for all tables. Runs after every object create/alter (policies may reference
 // functions created later in the same plan than their table — dependsOn cannot
-// order this when the table itself is skipped as already live).
-func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe bool) {
+// order this when the table itself is skipped as already live). pending is
+// whether an extension of the plan may create tables (see membersPending):
+// the table of an attribute-only declaration that live lacks may then come
+// with row level security and policies of its own, so each declared policy
+// is dropped if it exists before it is created, and --unsafe disables what
+// the declaration turns off.
+func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe, pending bool) {
     tableNames := make([]string, 0, len(desired.Tables))
     for k := range desired.Tables { tableNames = append(tableNames, k) }
     sort.Strings(tableNames)
@@ -6717,6 +6741,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
         if dt == nil { continue }
         lt := live.Tables[fq]
         if foreignKindMismatch(dt, lt) { continue }
+        unknown := lt == nil && pending && attributeOnly(desired, "table", fq)
 
         // Row level security. nil means unmanaged: the live state is left
         // alone. Disabling widens access — every policy on the table stops
@@ -6726,7 +6751,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
                 if lt == nil || !lt.RLSEnabled {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
                 }
-            } else if unsafe && lt != nil && lt.RLSEnabled {
+            } else if unsafe && (lt != nil && lt.RLSEnabled || unknown) {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s disable row level security;", pqIdent(fq)))
             }
         }
@@ -6734,7 +6759,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             switch {
             case *f && (lt == nil || !lt.RLSForced):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s force row level security;", pqIdent(fq)))
-            case !*f && unsafe && lt != nil && lt.RLSForced:
+            case !*f && unsafe && (lt != nil && lt.RLSForced || unknown):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s no force row level security;", pqIdent(fq)))
             }
         }
@@ -6756,6 +6781,8 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             if lp := livePolicies[polName]; lp != nil {
                 if policyMatchesLive(pol, lp, live.CurrentUser) { continue }
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", quoteIdent(polName), pqIdent(fq)))
+            } else if unknown {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy if exists %s on %s;", quoteIdent(polName), pqIdent(fq)))
             }
             stmt := fmt.Sprintf("create policy %s on %s", quoteIdent(polName), pqIdent(fq))
             if pol.As == "restrictive" { stmt += " as restrictive" }

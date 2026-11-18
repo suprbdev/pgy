@@ -444,3 +444,25 @@ func TestExtensionUpdateNeedingANewExtensionStaysInTheMigration(t *testing.T) {
 	}
 	wantStatements(t, p.Creates, []string{`create extension "helper";`, updateToOneTen})
 }
+
+func TestExtensionUpdateRequiringOneThatStaysStaysToo(t *testing.T) {
+	live := extensionUpdateLive(UpdateDependent{Kind: "view", Name: "app.slow"})
+	live.Extensions["stats_report"], live.Extensions["unrelated"] = true, true
+	live.ExtensionDefs["stats_report"] = &LiveExtension{Schema: "public", Version: "1.0"}
+	live.ExtensionDefs["unrelated"] = &LiveExtension{Schema: "public", Version: "1.0"}
+	live.AvailableExtensions = map[string]*AvailableExtension{
+		"pg_stat_statements": {DefaultVersion: "1.10", Requires: map[string][]string{"1.6": nil, "1.10": nil}},
+		"stats_report":       {DefaultVersion: "2.0", Requires: map[string][]string{"1.0": {"pg_stat_statements"}, "2.0": {"pg_stat_statements"}}},
+		"unrelated":          {DefaultVersion: "2.0", Requires: map[string][]string{"1.0": nil, "2.0": nil}},
+	}
+	d := extensionUpdateDesired(map[string]string{"app.slow": "select query, calls from pg_stat_statements"})
+	d.Extensions = append(d.Extensions, &schema.Extension{Name: "stats_report", Version: "2.0"}, &schema.Extension{Name: "unrelated", Version: "2.0"})
+	updateReport, updateUnrelated := `alter extension "stats_report" update to '2.0';`, `alter extension "unrelated" update to '2.0';`
+
+	p := Plan(live, d, true)
+	wantStatements(t, p.ExtensionUpdates, []string{updateUnrelated})
+	wantStatements(t, p.Creates[:3], []string{`drop view "app"."slow";`, updateToOneTen, updateReport})
+
+	p = Plan(live, d, false)
+	wantStatements(t, p.ExtensionUpdates, []string{updateToOneTen, updateReport, updateUnrelated})
+}

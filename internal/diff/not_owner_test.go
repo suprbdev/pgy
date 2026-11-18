@@ -395,6 +395,8 @@ func TestStatementObjects(t *testing.T) {
 		{`drop index concurrently if exists "public"."q_idx";`, []string{"idx:public.q_idx"}, needOwner, nil},
 		{`drop function "public"."f"(), "app"."g"(a integer, b text);`, []string{f, g}, needOwner, nil},
 		{`drop trigger "t" on "public"."q";`, []string{"rel:public.q"}, needOwner, nil},
+		{`drop trigger if exists "t" on "public"."q";`, []string{"rel:public.q"}, needOwner, nil},
+		{`drop policy if exists "p" on "public"."q";`, []string{"rel:public.q"}, needOwner, nil},
 		{`drop user mapping for "app" server "s1";`, []string{"srv:s1"}, needOwner, nil},
 		{`grant select, update ("ttl") on table "public"."q" to "reader";`, []string{"rel:public.q"}, needGrant, nil},
 		{`revoke grant option for execute on function "public"."f"() from "reader";`, []string{f}, needGrant, nil},
