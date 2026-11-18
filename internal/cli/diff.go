@@ -142,6 +142,9 @@ Exit codes:
                 if err := diff.IntrospectExtensions(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }
+                if err := diff.ProbeExtensionObjects(ctx, pool, live, compiled, opts); err != nil && !noWarnings {
+                    fmt.Fprintf(os.Stderr, "warning: the extensions this plan creates could not be created in a transaction that is rolled back, so what they create is unknown to the plan, which drops and creates again the policies and triggers the YAML declares on their tables, and creates a table the YAML declares with columns: %v\n", err)
+                }
                 if err := diff.IntrospectDataWith(ctx, pool, live, compiled, opts); err != nil {
                     return err
                 }

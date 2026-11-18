@@ -298,15 +298,16 @@ func pendingTriggerStmts(fq string, dt *schema.Table) []string {
 
 // membersPending reports whether live lacks objects that exist once the
 // plan's extension statements have run: stmts creates or updates an
-// extension, or an earlier step of the same plan created one.
+// extension, or an earlier step of the same plan created one, unless live
+// holds that extension's objects already (see withExtensionObjects).
 func membersPending(live *Live, stmts []string) bool {
 	for _, s := range stmts {
-		if strings.HasPrefix(s, "create extension ") || strings.HasPrefix(s, "alter extension ") && strings.Contains(s, " update to ") {
+		if strings.HasPrefix(s, "create extension ") && !createdBy(live, s) || strings.HasPrefix(s, "alter extension ") && strings.Contains(s, " update to ") {
 			return true
 		}
 	}
-	for _, le := range live.ExtensionDefs {
-		if le != nil && le.Created {
+	for name, le := range live.ExtensionDefs {
+		if le != nil && le.Created && !live.created[name] {
 			return true
 		}
 	}

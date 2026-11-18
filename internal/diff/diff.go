@@ -213,6 +213,13 @@ type Live struct{
     // TableData: "schema.table" -> comparison of its declared data rows
     // with the live rows; filled by IntrospectData
     TableData map[string]*LiveTableData
+    // ExtensionObjects holds what CREATE EXTENSION of the extensions a
+    // plan creates adds to the snapshot (see ProbeExtensionObjects); nil
+    // when that wasn't read.
+    ExtensionObjects *ExtensionObjects
+    // created names the extensions whose objects withExtensionObjects
+    // added to this snapshot.
+    created map[string]bool
 }
 
 // LiveServer is a foreign server from pg_foreign_server.
@@ -686,10 +693,18 @@ type LiveColumn struct{
 // an object mid-introspection (PostgreSQL then reports it as an internal
 // error such as "could not open relation with OID"), the read is retried.
 func Introspect(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
+    return introspectAfter(ctx, pool, nil)
+}
+
+// introspectAfter is Introspect of the database as setup leaves it, in a
+// transaction that is rolled back (see queryBatch.setup). A failing setup
+// statement is returned as a *setupError and not retried.
+func introspectAfter(ctx context.Context, pool *pgxpool.Pool, setup []string) (*Live, error) {
     var err error
     for attempt := 0; attempt < 3; attempt++ {
         var l *Live
-        if l, err = introspectOnce(ctx, pool); err == nil || !isCatalogRace(err) {
+        var failed *setupError
+        if l, err = introspectOnce(ctx, pool, setup); err == nil || errors.As(err, &failed) || !isCatalogRace(err) {
             return l, err
         }
     }
@@ -714,7 +729,7 @@ func isCatalogRace(err error) bool {
     return pgErr.Code == "42P01" || pgErr.Code == "42704"
 }
 
-func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
+func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*Live, error) {
     l := &Live{
         Schemas: map[string]bool{},
         Tables: map[string]*LiveTable{},
@@ -782,7 +797,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         OwnedSequences: map[string]bool{},
         ExtensionConfig: map[string]string{},
     }
-    batch := &queryBatch{}
+    batch := &queryBatch{setup: setup}
     
     // Query existing schemas
     schemaQ := `
@@ -2931,6 +2946,7 @@ func PlanWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // only echo an extension's move to another schema.
 func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
+    live = withExtensionObjects(live, desired)
     desired = withExternal(desired, opts)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
@@ -2939,6 +2955,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     planExtensions(extensions, live, desired)
     desired = viewsCreatedAsViews(live, desired)
     pending := membersPending(live, extensions.Creates)
+    extensions.Warnings = append(extensions.Warnings, offlineExtensionTablesWarning(live, desired, extensions.Creates)...)
     desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pending)
     live, renames := applyRenames(live, desired)
     live = applyExprProbes(live, desired)
