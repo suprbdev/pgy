@@ -611,6 +611,9 @@ func dataInteger(v any) (int64, bool) {
     return 0, false
 }
 
+// dataSequencePrefix starts every statement of dataSequenceStmt.
+const dataSequencePrefix = "select setval(q.seqrelid, c.top) from (values "
+
 // dataSequenceStmt returns the statement that advances the sequences of
 // seqs, the columns of table fq a sequence numbers, past the largest value
 // the table holds in them (the largest the declared rows give a column of
@@ -626,7 +629,7 @@ func dataSequenceStmt(fq string, seqs []dataSequence) string {
         if s.typed { top = fmt.Sprintf("(select max(%s) from %s)", quoteIdent(s.col), pqIdent(fq)) }
         vals[i] = "(" + seq + ", " + top + ")"
     }
-    return "select setval(q.seqrelid, c.top) from (values " + strings.Join(vals, ", ") + ") c(seq, top) join pg_sequence q on q.seqrelid = c.seq::regclass where " + fmt.Sprintf(sequenceGuard, "c.top") + ";"
+    return dataSequencePrefix + strings.Join(vals, ", ") + ") c(seq, top) join pg_sequence q on q.seqrelid = c.seq::regclass where " + fmt.Sprintf(sequenceGuard, "c.top") + ";"
 }
 
 // dataTarget names table fq for reading or changing its own rows: ONLY for
@@ -906,14 +909,27 @@ func dataTableOrder(desired *schema.Database) []string {
 // writes, or whose sequences are behind them (LiveTableData.SequenceBehind),
 // is followed by the statement that advances the sequences of its columns
 // past them (see dataSequenceStmt).
-func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes []string) {
+//
+// The rows of a table an extension owns, or of a table declared without
+// columns that doesn't exist yet and so is one an extension of the plan
+// creates, are returned in early instead: they go right after the
+// extensions, before the DDL that can make an extension fill its own
+// configuration tables (an index whose expression names a type modifier
+// the extension keeps a table of), as pg_dump restores them, so that what
+// the extension adds then finds the declared rows and the sequence past
+// them. Their inserts skip a row whose key the extension added after all.
+func planData(live *Live, desired *schema.Database, prune bool) (early, writes, deletes []string) {
     order := dataTableOrder(desired)
     for _, fq := range order {
         dt := desired.Tables[fq]
         key := dt.DataKey()
         if len(key) == 0 { continue }
         ld := live.TableData[fq]
-        insert := func(row map[string]any) string { return dataInsert(fq, dt, row) }
+        member := live.MemberExtension["rel:"+fq] != "" || live.Tables[fq] == nil && dt.AttributeOnly()
+        insert := func(row map[string]any) string {
+            if member { return strings.TrimSuffix(dataInsert(fq, dt, row), ";") + " on conflict (" + joinIdentList(key) + ") do nothing;" }
+            return dataInsert(fq, dt, row)
+        }
         seqs := dataSequences(live, desired, fq, dt)
         sets := func(row map[string]any, cols []string) bool {
             for _, s := range seqs {
@@ -961,7 +977,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             }
         }
         if advance && len(seqs) > 0 { stmts = append(stmts, dataSequenceStmt(fq, seqs)) }
-        writes = append(writes, stmts...)
+        if member { early = append(early, stmts...) } else { writes = append(writes, stmts...) }
     }
     if prune {
         for i := len(order) - 1; i >= 0; i-- {
@@ -974,7 +990,7 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
             }
         }
     }
-    return writes, deletes
+    return early, writes, deletes
 }
 
 func partitioned(live *Live, dt *schema.Table, fq string) bool {

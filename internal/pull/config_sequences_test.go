@@ -43,7 +43,7 @@ func TestPullReportsConfigurationSequences(t *testing.T) {
 	}
 	warnings := strings.Join(res.Warnings, "\n")
 	for _, want := range []string{
-		"extension pgcrypto: configuration table public.cfg has 2 rows that pg_dump keeps and this YAML does not carry, and the position of its sequence public.cfg_id_seq (at 5),",
+		"extension pgcrypto: configuration table public.cfg has 2 rows that pg_dump keeps and this YAML does not carry, and the position of its sequence public.cfg_id_seq (at 5); a database rebuilt from it lacks them",
 		"extension pgcrypto: configuration sequence public.counter has reached 9, which pg_dump keeps; a database rebuilt from this YAML starts it from its start value; advance it with setval in a migration, or list it under external.relations",
 		"extension pgcrypto: configuration sequence public.unread could not be read",
 	} {

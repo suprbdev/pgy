@@ -3114,6 +3114,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         plan.Creates = append(plan.Creates, inCurrentDatabase("alter database %I ", c))
         if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
+    memberData, dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
+    plan.Creates = append(plan.Creates, memberData...)
     planLanguages(plan, live, desired, opts.PublicGrants)
     planWrappers(plan, live, desired, opts.PublicGrants)
     planServers(plan, live, desired)
@@ -3597,7 +3599,6 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.parts = nil
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
-    dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
     plan.Alters = append(plan.Alters, dataWrites...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe)

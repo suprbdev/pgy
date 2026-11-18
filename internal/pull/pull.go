@@ -2520,13 +2520,29 @@ func (b *builder) configRows() {
 			b.warn("extension %s: configuration sequence %s has reached %s, which pg_dump keeps; a database rebuilt from this YAML starts it from its start value; advance it with setval in a migration, or list it under external.relations", ext, seq, pos)
 		}
 	}
+	for _, fq := range sortedKeys(b.opts.Data) {
+		lt, ext := b.live.Tables[fq], b.live.MemberExtension["rel:"+fq]
+		if _, config := b.live.ExtensionConfig[fq]; !config || lt == nil || !b.extensions[ext] {
+			continue
+		}
+		for _, name := range sortedKeys(lt.ConstraintDefs) {
+			m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+			if m == nil {
+				continue
+			}
+			if ref := relationKey(m[2]); ref != fq && b.opts.ConfigRows[ref] != 0 && !b.opts.External.HasRelation(ref) {
+				b.warn("extension %s: the rows --data pulls of configuration table %s reference rows of %s, which it does not pull, so a database rebuilt from this YAML rejects them (foreign key %s); pull them together with --data %s,%s", ext, fq, ref, name, fq, ref)
+			}
+		}
+	}
 	for _, fq := range sortedKeys(b.opts.ConfigRows) {
 		n, ext := b.opts.ConfigRows[fq], b.live.MemberExtension["rel:"+fq]
 		if _, pulled := b.opts.Data[fq]; pulled || n == 0 || !b.extensions[ext] || b.opts.External.HasRelation(fq) {
 			continue
 		}
+		advice := b.configAdvice(fq)
 		if n < 0 {
-			b.warn("extension %s: configuration table %s could not be read, so its rows, which pg_dump keeps and a database rebuilt from this YAML would lack, were not counted; pull them with --data %s, or list the table under external.relations", ext, fq, fq)
+			b.warn("extension %s: configuration table %s could not be read, so its rows, which pg_dump keeps and a database rebuilt from this YAML would lack, were not counted. %s", ext, fq, advice)
 			continue
 		}
 		rows := "rows"
@@ -2537,8 +2553,88 @@ func (b *builder) configRows() {
 		if s := tableSeqs[fq]; len(s) > 0 {
 			seqs = ", and the position of its sequence " + strings.Join(s, ", ")
 		}
-		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry%s, so a database rebuilt from it would lack them; pull them with --data %s, or list the table under external.relations", ext, fq, n, rows, seqs, fq)
+		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry%s; a database rebuilt from it lacks them, unless the extension makes them again itself. %s", ext, fq, n, rows, seqs, advice)
 	}
+}
+
+// runtimeAdvice ends the report of configuration rows: what to do with rows
+// that are not settings to copy.
+const runtimeAdvice = "rows that describe objects the extension's functions create at run time (hypertables, partitions, queues) come back when a migration calls those functions instead, and listing the table under external.relations leaves it out of this report"
+
+// configAdvice says what to do about the rows of configuration table fq: to
+// pull them with --data, together with the configuration tables with rows
+// that its foreign keys reference, when pull can, and otherwise why it
+// cannot: the table, or one it references, has no primary key to identify
+// rows by, has a column of an object identifier type (regclass, oid, ...),
+// whose rows name objects of the database, or is external.
+func (b *builder) configAdvice(fq string) string {
+	tables, reason := []string{}, ""
+	seen := map[string]bool{}
+	var visit func(t string)
+	visit = func(t string) {
+		if seen[t] || reason != "" {
+			return
+		}
+		seen[t] = true
+		tables = append(tables, t)
+		lt := b.live.Tables[t]
+		if lt == nil {
+			return
+		}
+		which := "the table"
+		if t != fq {
+			which = "it references rows of " + t + ", which"
+		}
+		if len(pkColumns(lt)) == 0 {
+			reason = which + " has no primary key to identify rows by"
+			return
+		}
+		for _, cn := range sortedKeys(lt.Columns) {
+			if objectIdentifierType(lt.Columns[cn].Type) {
+				reason = fmt.Sprintf("%s has column %s of type %s, so its rows name objects of the database", which, cn, lt.Columns[cn].Type)
+				return
+			}
+		}
+		for _, name := range sortedKeys(lt.ConstraintDefs) {
+			m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+			if m == nil {
+				continue
+			}
+			ref := relationKey(m[2])
+			if _, config := b.live.ExtensionConfig[ref]; !config || ref == t {
+				continue
+			}
+			if _, pulled := b.opts.Data[ref]; pulled {
+				continue
+			}
+			if b.opts.External.HasRelation(ref) {
+				reason = which + " references rows of " + ref + ", an external relation"
+				return
+			}
+			if b.opts.ConfigRows[ref] != 0 {
+				visit(ref)
+			}
+		}
+	}
+	visit(fq)
+	if reason != "" {
+		return "--data cannot pull them, since " + reason + "; " + runtimeAdvice
+	}
+	with := ""
+	if len(tables) > 1 {
+		with = " (with the rows they reference)"
+	}
+	return "Pull them with --data " + strings.Join(tables, ",") + with + " if they are settings to copy; " + runtimeAdvice
+}
+
+// objectIdentifierType reports whether typ, as format_type prints it, is
+// oid or one of the reg* types, or an array of one.
+func objectIdentifierType(typ string) bool {
+	switch strings.TrimSuffix(strings.TrimSpace(typ), "[]") {
+	case "oid", "regclass", "regcollation", "regconfig", "regdictionary", "regnamespace", "regoper", "regoperator", "regproc", "regprocedure", "regrole", "regtype":
+		return true
+	}
+	return false
 }
 
 // sequenceColumn returns the configuration table and column that sequence

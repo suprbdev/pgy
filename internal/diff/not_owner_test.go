@@ -334,6 +334,31 @@ func TestNotOwnerMergedWithPruneWarning(t *testing.T) {
 	}
 }
 
+func TestNotOwnerSequenceAdvanceGoesWithTheRows(t *testing.T) {
+	live := notOwnerLive()
+	for _, fq := range []string{"public.q", "public.mine"} {
+		live.Tables[fq].Columns["id"].Default = "nextval('public.ids'::regclass)"
+	}
+	live.TableData = map[string]*LiveTableData{"public.q": {Missing: []int{0}}, "public.mine": {Missing: []int{0}}}
+	d := &schema.Database{Tables: map[string]*schema.Table{}}
+	for _, fq := range []string{"public.q", "public.mine"} {
+		dt := notOwnerTable(fq, "'01:00:00'::interval")
+		dt.Columns["id"].Default = "nextval('public.ids'::regclass)"
+		dt.Comment = "seeded"
+		dt.Data = &schema.TableData{Key: []string{"id"}, Rows: []map[string]any{{"id": 5}}}
+		d.Tables[fq] = dt
+	}
+	sql := Render(PlanWith(live, d, Options{}))
+	if strings.Contains(sql, `"public"."q"`) {
+		t.Errorf("the rows and the sequence advance of a table left out go with it:\n%s", sql)
+	}
+	for _, want := range []string{`insert into "public"."mine" ("id") values (5);`, `select setval(q.seqrelid, c.top) from (values ('public.ids', (select max("id") from "public"."mine")))`} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing %s in:\n%s", want, sql)
+		}
+	}
+}
+
 func TestStatementObjects(t *testing.T) {
 	live := notOwnerLive()
 	live.Tables["public.q"].Indexes["q_idx"] = true
@@ -404,6 +429,10 @@ func TestStatementObjects(t *testing.T) {
 		{`refresh materialized view concurrently "public"."mv";`, []string{"rel:public.mv"}, needOwner, nil},
 		{`insert into "public"."q" ("id") values (1);`, []string{"rel:public.q"}, needNothing, nil},
 		{`update only "public"."q" set "ttl" = null where "id" = 1;`, []string{"rel:public.q"}, needNothing, nil},
+		{`insert into "public"."q" ("id") values (1) on conflict ("id") do nothing;`, []string{"rel:public.q"}, needNothing, nil},
+		{dataSequenceStmt("public.q", []dataSequence{{col: "id", owner: "public.q", typed: true}}), []string{"rel:public.q"}, needNothing, nil},
+		{dataSequenceStmt("public.q_1", []dataSequence{{col: "id", owner: "public.q", top: 4}}), []string{"rel:public.q"}, needNothing, nil},
+		{dataSequenceStmt("public.q", []dataSequence{{col: "id", seq: "public.ids", top: 4}}), nil, needNothing, nil},
 		{`do $pgy$begin execute format('alter database %I set "work_mem" = ''8MB''', current_database()); end$pgy$;`, []string{"db:"}, needOwner, nil},
 		{`select setval('"public"."s"', 1);`, nil, needOwner, nil},
 	} {

@@ -390,12 +390,30 @@ func statementObjects(stmt string, ix *ownerIndex) stmtInfo {
 	case strings.HasPrefix(s, "insert into ") || strings.HasPrefix(s, "update ") || strings.HasPrefix(s, "delete from "):
 		key, _, _ := readObject("rel:", false, false, trimWords(s, "insert into ", "update ", "delete from ", "only "))
 		act(key, needNothing)
+	case strings.HasPrefix(s, dataSequencePrefix):
+		act(dataSequenceTable(s[len(dataSequencePrefix):]), needNothing)
 	case strings.HasPrefix(s, "do ") && strings.Contains(s, "'alter database %I "):
 		act("db:", needOwner)
 	case strings.HasPrefix(s, "set search_path"):
 		act("db:", needNothing)
 	}
 	return info
+}
+
+// dataSequenceTable returns the key of the table whose sequences a
+// statement of dataSequenceStmt advances, s being what follows
+// dataSequencePrefix: the table it takes the maximum of a column from, or
+// the one it hands pg_get_serial_sequence; "" when it names neither. The
+// statement reads and sets the sequences only where the connecting role
+// may, so it needs nothing, and goes with the rows it follows.
+func dataSequenceTable(s string) string {
+	for _, marker := range []string{` from "`, `pg_get_serial_sequence('"`} {
+		if at := strings.Index(s, marker); at >= 0 {
+			key, _, _ := readObject("rel:", false, false, s[at+len(marker)-1:])
+			return key
+		}
+	}
+	return ""
 }
 
 // schemaPrefix returns "schema." for the key of an object in a schema, ""

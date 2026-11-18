@@ -96,7 +96,7 @@ func TestPullReportsExtensionConfigurationRows(t *testing.T) {
 	}
 	warnings := strings.Join(res.Warnings, "\n")
 	for _, want := range []string{
-		"extension pg_cron: configuration table cron.job has 3 rows that pg_dump keeps and this YAML does not carry, so a database rebuilt from it would lack them; pull them with --data cron.job, or list the table under external.relations",
+		"extension pg_cron: configuration table cron.job has 3 rows that pg_dump keeps and this YAML does not carry; a database rebuilt from it lacks them, unless the extension makes them again itself. Pull them with --data cron.job if they are settings to copy; rows that describe objects the extension's functions create at run time (hypertables, partitions, queues) come back when a migration calls those functions instead, and listing the table under external.relations leaves it out of this report",
 		"extension pg_cron: configuration table cron.job_run_details has 1 row that pg_dump keeps",
 		"extension pg_cron: configuration table cron.locked could not be read",
 	} {
