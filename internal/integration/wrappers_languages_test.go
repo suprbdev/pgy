@@ -636,13 +636,10 @@ func TestIntegrationLanguageGrantsPulled(t *testing.T) {
 
 func TestIntegrationLanguageOfNewExtension(t *testing.T) {
 	admin := connect(t)
-	ctx := context.Background()
 	dev := freshRole(t, admin, "dev")
 	db := freshDatabase(t, admin, "pgytest_language_plperl")
 	copy := freshDatabase(t, admin, "pgytest_language_plperl_copy")
-	if _, err := copy.Exec(ctx, `create extension plperl; drop extension plperl`); err != nil {
-		t.Skipf("this server cannot load PL/Perl: %v", err)
-	}
+	requireLanguage(t, copy, "plperl")
 	y := strings.ReplaceAll(`
 extensions: [plperl]
 languages:
@@ -741,12 +738,9 @@ func planUnprobed(t *testing.T, db *pgxpool.Pool, y string, offline bool) *diff.
 // out, and a migration planned without knowing skips instead of failing.
 func TestIntegrationLanguagesOfPendingExtensions(t *testing.T) {
 	admin := connect(t)
-	ctx := context.Background()
 	dev := freshRole(t, admin, "dev")
 	db := freshDatabase(t, admin, "pgytest_language_pending")
-	if _, err := db.Exec(ctx, `create extension plperl; drop extension plperl`); err != nil {
-		t.Skipf("this server cannot load PL/Perl: %v", err)
-	}
+	requireLanguage(t, db, "plperl")
 	y := strings.ReplaceAll(`
 extensions:
   - {name: bool_plperl, schema: public, cascade: true}

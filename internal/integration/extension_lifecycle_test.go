@@ -270,9 +270,7 @@ schema app:
 func TestIntegrationExtensionCreateOrder(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_order")
-	if _, err := db.Exec(context.Background(), `create extension plperl; drop extension plperl`); err != nil {
-		t.Skipf("this server cannot load PL/Perl: %v", err)
-	}
+	requireLanguage(t, db, "plperl")
 	const y = `
 extensions:
   - {name: bool_plperl, schema: public}
