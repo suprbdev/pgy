@@ -321,26 +321,7 @@ func (a *availability) blocked(text, table string, kinds []string) bool {
     return false
 }
 
-func schemaOf(key string) string {
-    if i := strings.IndexByte(key, '.'); i >= 0 { return key[:i] }
-    return "public"
-}
-
 func (a *availability) deferUnready() {
-    later := map[string]bool{}
-    for _, r := range declared(a.ix.full) { later[schemaOf(r.key)] = true }
-    for _, r := range declared(a.cur) { delete(later, schemaOf(r.key)) }
-    delete(later, "public")
-    if a.live != nil {
-        for s, ok := range a.live.Schemas {
-            if ok { delete(later, s) }
-        }
-    }
-    for s := range later {
-        delete(a.cur.SchemaGrants, s)
-        delete(a.cur.SchemaComments, s)
-    }
-
     for fq, t := range a.cur.Tables {
         if t == nil { continue }
         for cn, c := range t.Columns {

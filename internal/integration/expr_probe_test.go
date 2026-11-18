@@ -505,8 +505,11 @@ schema app:
 		t.Errorf("the unreadable table's default can't be probed, for a missing privilege, got %+v", p)
 	}
 	want := []string{`alter table "app"."closed" alter column "ttl" set default '2 hours';`}
-	if got := diff.Plan(live, d, true).Alters; !reflect.DeepEqual(got, want) {
+	if got := diff.Plan(asOwner(live), d, true).Alters; !reflect.DeepEqual(got, want) {
 		t.Errorf("want only the unreadable table's default planned, got %v", got)
+	}
+	if p := diff.Plan(live, d, true); len(p.Alters) > 0 || !strings.Contains(strings.Join(notOwnerMessages(p), "\n"), "table app.closed is owned by ") {
+		t.Errorf("the role doesn't own app.closed, so its default is left out with a not_owner warning, got %v %v", p.Alters, p.Warnings)
 	}
 }
 
@@ -707,7 +710,7 @@ func TestIntegrationProbeExpressionsFallsBack(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), c.want) || live.ExprProbes != nil {
 				t.Fatalf("want an error mentioning %q and no probes, got %v, %v", c.want, err, exprProbeKeys(live))
 			}
-			p := diff.Plan(live, d, true)
+			p := diff.Plan(asOwner(live), d, true)
 			if got := diff.Render(p) + diff.RenderConcurrent(p); got != want {
 				t.Errorf("want the plan the text comparison makes:\n%s\ngot:\n%s", want, got)
 			}
