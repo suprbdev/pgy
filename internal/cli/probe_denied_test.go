@@ -57,7 +57,8 @@ func TestDiffReportsDeniedComparisonsOnce(t *testing.T) {
 		revoke all on schema hidden from public;
 		create table hidden.beat (ts timestamptz);
 		create view hidden.last_beat as select max(ts) as ts from hidden.beat;
-		create table hidden.p (id int primary key, ttl interval default '1 hour');`); err != nil {
+		create table hidden.p (id int primary key, ttl interval default '1 hour');
+		alter table hidden.p owner to `+role+`;`); err != nil {
 		t.Fatal(err)
 	}
 
