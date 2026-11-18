@@ -2523,7 +2523,10 @@ func (b *builder) database() *node {
 // it, since --data brings it along; one that numbers none, or a column of
 // a table without rows, is reported on its own, and so is one ahead of
 // the rows --data pulled, which a rebuilt database advances only past
-// them (see diff.dataSequenceStmt). External relations are left out.
+// them (see diff.dataSequenceStmt). What a report advises comes from
+// configAdvice, and the rows --data pulls of a configuration table that
+// reference rows of one it doesn't pull are reported as well. External
+// relations are left out.
 func (b *builder) configRows() {
 	tableSeqs := map[string][]string{}
 	for _, seq := range sortedKeys(b.opts.ConfigSequences) {
