@@ -4,6 +4,7 @@
 package pull
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -57,6 +58,13 @@ type Options struct {
 	// not be read. Build reports the tables with rows that the YAML does
 	// not carry.
 	ConfigRows map[string]int64
+	// ConfigSequences holds, by "schema.sequence", the last value handed
+	// out by each sequence an extension marks as configuration, whose
+	// position pg_dump keeps (see diff.ConfigSequenceValues), "" for one
+	// that could not be read; a sequence that never handed out a value is
+	// absent. Build reports those whose position a database rebuilt from
+	// the YAML would not reach.
+	ConfigSequences map[string]string
 }
 
 // File is one generated YAML document.
@@ -2155,6 +2163,7 @@ func (b *builder) views() {
 		if !ok {
 			continue
 		}
+		b.externalReads(k, mat)
 		m := newMap()
 		if deps := b.d.ViewDeps[k]; len(deps) > 0 {
 			ds := []string{}
@@ -2228,6 +2237,35 @@ func (b *builder) views() {
 		b.owner(m, "views", "rel:"+k)
 		add(blk, key, m)
 	}
+}
+
+// externalReads warns about view k (a materialized view when mat) when its
+// query reads external relations (external.relations) that the YAML
+// leaves out and nothing else creates: a database rebuilt from the YAML
+// lacks them, so the view cannot be created there, as for the view
+// TimescaleDB makes of a continuous aggregate, which reads the aggregate's
+// materialized hypertable. The view is still written, so the YAML keeps
+// describing the database it was pulled from. Relations in an external
+// schema, of an external role or of an extension are left out of the
+// check: the platform or the extension creates them.
+func (b *builder) externalReads(k string, mat bool) {
+	reads := []string{}
+	for _, ref := range b.d.ViewRelations[k] {
+		if b.opts.External.HasRelation(ref) && !b.opts.External.HasSchema(schemaOf(ref)) && !b.externalOwned("rel:"+ref) && !b.live.ExtensionMembers["rel:"+ref] {
+			reads = append(reads, ref)
+		}
+	}
+	if len(reads) == 0 {
+		return
+	}
+	kind, them := "view", "an external relation"
+	if mat {
+		kind = "materialized view"
+	}
+	if len(reads) > 1 {
+		them = "external relations"
+	}
+	b.warn("%s %s reads %s, %s that this YAML leaves out, so a database rebuilt from it cannot create the %s; list the %s under external.relations too, or declare it the way the extension that makes it does (see Extensions that create objects at run time in docs/hosted-platforms.md)", kind, k, strings.Join(reads, ", "), them, kind, kind)
 }
 
 // database builds database.yml: extensions, roles, default privileges,
@@ -2479,23 +2517,217 @@ func (b *builder) database() *node {
 // configRows reports the configuration tables of the extensions
 // database.yml creates that hold rows the YAML doesn't carry: rows their
 // condition selects (Options.ConfigRows), which pg_dump keeps, of a table
-// --data didn't ask for. External relations are left out.
+// --data didn't ask for. It also reports their configuration sequences
+// (Options.ConfigSequences) whose position a rebuilt database would not
+// reach: one that numbers a column of a table reported here is named with
+// it, since --data brings it along; one that numbers none, or a column of
+// a table without rows, is reported on its own, and so is one ahead of
+// the rows --data pulled, which a rebuilt database advances only past
+// them (see diff.dataSequenceStmt). What a report advises comes from
+// configAdvice, and the rows --data pulls of a configuration table that
+// reference rows of one it doesn't pull are reported as well. External
+// relations are left out.
 func (b *builder) configRows() {
+	tableSeqs := map[string][]string{}
+	for _, seq := range sortedKeys(b.opts.ConfigSequences) {
+		pos, ext := b.opts.ConfigSequences[seq], b.live.MemberExtension["rel:"+seq]
+		if !b.extensions[ext] || b.opts.External.HasRelation(seq) {
+			continue
+		}
+		table, col := b.sequenceColumn(seq)
+		rows, pulled := b.opts.Data[table]
+		switch {
+		case pos == "":
+			b.warn("extension %s: configuration sequence %s could not be read, so its position, which pg_dump keeps, was not checked; a database rebuilt from this YAML starts it from its start value", ext, seq)
+		case table != "" && pulled:
+			if top, ok := maxInteger(rows, col); !ok || compareInteger(top, pos) < 0 {
+				reached := "none of them sets " + col
+				if ok {
+					reached = "they take it to " + top + " only"
+				}
+				b.warn("extension %s: configuration sequence %s has reached %s, which pg_dump keeps; a database rebuilt from this YAML advances it past the rows --data %s pulls, but %s; advance it with setval in a migration, or list it under external.relations", ext, seq, pos, table, reached)
+			}
+		case table != "" && b.opts.ConfigRows[table] > 0 && !b.opts.External.HasRelation(table):
+			tableSeqs[table] = append(tableSeqs[table], seq+" (at "+pos+")")
+		default:
+			b.warn("extension %s: configuration sequence %s has reached %s, which pg_dump keeps; a database rebuilt from this YAML starts it from its start value; advance it with setval in a migration, or list it under external.relations", ext, seq, pos)
+		}
+	}
+	for _, fq := range sortedKeys(b.opts.Data) {
+		lt, ext := b.live.Tables[fq], b.live.MemberExtension["rel:"+fq]
+		if _, config := b.live.ExtensionConfig[fq]; !config || lt == nil || !b.extensions[ext] {
+			continue
+		}
+		for _, name := range sortedKeys(lt.ConstraintDefs) {
+			m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+			if m == nil {
+				continue
+			}
+			if ref := relationKey(m[2]); ref != fq && b.opts.ConfigRows[ref] != 0 && !b.opts.External.HasRelation(ref) {
+				b.warn("extension %s: the rows --data pulls of configuration table %s reference rows of %s, which it does not pull, so a database rebuilt from this YAML rejects them (foreign key %s); pull them together with --data %s,%s", ext, fq, ref, name, fq, ref)
+			}
+		}
+	}
 	for _, fq := range sortedKeys(b.opts.ConfigRows) {
 		n, ext := b.opts.ConfigRows[fq], b.live.MemberExtension["rel:"+fq]
 		if _, pulled := b.opts.Data[fq]; pulled || n == 0 || !b.extensions[ext] || b.opts.External.HasRelation(fq) {
 			continue
 		}
+		advice := b.configAdvice(fq)
 		if n < 0 {
-			b.warn("extension %s: configuration table %s could not be read, so its rows, which pg_dump keeps and a database rebuilt from this YAML would lack, were not counted; pull them with --data %s, or list the table under external.relations", ext, fq, fq)
+			b.warn("extension %s: configuration table %s could not be read, so its rows, which pg_dump keeps and a database rebuilt from this YAML would lack, were not counted. %s", ext, fq, advice)
 			continue
 		}
 		rows := "rows"
 		if n == 1 {
 			rows = "row"
 		}
-		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry, so a database rebuilt from it would lack them; pull them with --data %s, or list the table under external.relations", ext, fq, n, rows, fq)
+		seqs := ""
+		if s := tableSeqs[fq]; len(s) > 0 {
+			seqs = ", and the position of its sequence " + strings.Join(s, ", ")
+		}
+		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry%s; a database rebuilt from it lacks them, unless the extension makes them again itself. %s", ext, fq, n, rows, seqs, advice)
 	}
+}
+
+// runtimeAdvice ends the report of configuration rows: what to do with rows
+// that are not settings to copy.
+const runtimeAdvice = "rows that describe objects the extension's functions create at run time (hypertables, partitions, queues) come back when a migration calls those functions instead, and listing the table under external.relations leaves it out of this report"
+
+// configAdvice says what to do about the rows of configuration table fq: to
+// pull them with --data, together with the configuration tables with rows
+// that its foreign keys reference, when pull can, and otherwise why it
+// cannot: the table, or one it references, has no primary key to identify
+// rows by, has a column of an object identifier type (regclass, oid, ...),
+// whose rows name objects of the database, or is external.
+func (b *builder) configAdvice(fq string) string {
+	tables, reason := []string{}, ""
+	seen := map[string]bool{}
+	var visit func(t string)
+	visit = func(t string) {
+		if seen[t] || reason != "" {
+			return
+		}
+		seen[t] = true
+		tables = append(tables, t)
+		lt := b.live.Tables[t]
+		if lt == nil {
+			return
+		}
+		which := "the table"
+		if t != fq {
+			which = "it references rows of " + t + ", which"
+		}
+		if len(pkColumns(lt)) == 0 {
+			reason = which + " has no primary key to identify rows by"
+			return
+		}
+		for _, cn := range sortedKeys(lt.Columns) {
+			if objectIdentifierType(lt.Columns[cn].Type) {
+				reason = fmt.Sprintf("%s has column %s of type %s, so its rows name objects of the database", which, cn, lt.Columns[cn].Type)
+				return
+			}
+		}
+		for _, name := range sortedKeys(lt.ConstraintDefs) {
+			m := fkRe.FindStringSubmatch(lt.ConstraintDefs[name])
+			if m == nil {
+				continue
+			}
+			ref := relationKey(m[2])
+			if _, config := b.live.ExtensionConfig[ref]; !config || ref == t {
+				continue
+			}
+			if _, pulled := b.opts.Data[ref]; pulled {
+				continue
+			}
+			if b.opts.External.HasRelation(ref) {
+				reason = which + " references rows of " + ref + ", an external relation"
+				return
+			}
+			if b.opts.ConfigRows[ref] != 0 {
+				visit(ref)
+			}
+		}
+	}
+	visit(fq)
+	if reason != "" {
+		return "--data cannot pull them, since " + reason + "; " + runtimeAdvice
+	}
+	with := ""
+	if len(tables) > 1 {
+		with = " (with the rows they reference)"
+	}
+	return "Pull them with --data " + strings.Join(tables, ",") + with + " if they are settings to copy; " + runtimeAdvice
+}
+
+// objectIdentifierType reports whether typ, as format_type prints it, is
+// oid or one of the reg* types, or an array of one.
+func objectIdentifierType(typ string) bool {
+	switch strings.TrimSuffix(strings.TrimSpace(typ), "[]") {
+	case "oid", "regclass", "regcollation", "regconfig", "regdictionary", "regnamespace", "regoper", "regoperator", "regproc", "regprocedure", "regrole", "regtype":
+		return true
+	}
+	return false
+}
+
+// sequenceColumn returns the configuration table and column that sequence
+// seq numbers: the column that owns it, or a column of a configuration
+// table whose default is nextval of it; "" when there is none.
+func (b *builder) sequenceColumn(seq string) (string, string) {
+	if ls := b.live.SequenceDefs[seq]; ls != nil && ls.Owner != "" {
+		if i := strings.LastIndexByte(ls.Owner, '.'); i > 0 {
+			return ls.Owner[:i], ls.Owner[i+1:]
+		}
+	}
+	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
+	for _, fq := range sortedKeys(b.live.ExtensionConfig) {
+		lt := b.live.Tables[fq]
+		if lt == nil {
+			continue
+		}
+		for _, cn := range sortedKeys(lt.Columns) {
+			lc := lt.Columns[cn]
+			if lc.IdentitySequence != nil && lc.IdentitySequence.Name == seq {
+				return fq, cn
+			}
+			if m := nextvalRe.FindStringSubmatch(strings.TrimSpace(lc.Default)); m != nil {
+				name := strings.ReplaceAll(m[1], `"`, "")
+				if name == seq || !strings.Contains(name, ".") && (schemaOf(fq)+"."+name == seq || "public."+name == seq) {
+					return fq, cn
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+// maxInteger returns, as decimal text, the largest integer that rows,
+// values as diff.TableRows reads them, hold in column col.
+func maxInteger(rows []map[string]any, col string) (string, bool) {
+	top, ok := "", false
+	for _, row := range rows {
+		n, isNum := row[col].(json.Number)
+		if !isNum {
+			continue
+		}
+		if _, err := n.Int64(); err != nil {
+			continue
+		}
+		if !ok || compareInteger(n.String(), top) > 0 {
+			top, ok = n.String(), true
+		}
+	}
+	return top, ok
+}
+
+// compareInteger compares two integers written in decimal.
+func compareInteger(a, b string) int {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return strings.Compare(a, b)
+	}
+	return cmp.Compare(x, y)
 }
 
 func (b *builder) defaultPrivileges() *node {

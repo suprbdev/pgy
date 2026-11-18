@@ -81,7 +81,14 @@ default privileges, and external settings.`,
             sort.Strings(configTables)
             configRows, err := diff.ConfigRowCounts(ctx, pool, live, configTables)
             if err != nil { fmt.Fprintln(os.Stderr, "warning: the rows of extension configuration tables were not counted:", err) }
-            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, OwnerKinds: cfg.Policy.RequireOwners, Roles: roles, Single: out == "", Data: data, External: cfg.External, ConfigRows: configRows})
+            configSeqs := []string{}
+            for fq := range live.ExtensionConfigSequences {
+                if !cfg.External.HasRelation(fq) { configSeqs = append(configSeqs, fq) }
+            }
+            sort.Strings(configSeqs)
+            seqValues, err := diff.ConfigSequenceValues(ctx, pool, configSeqs)
+            if err != nil { fmt.Fprintln(os.Stderr, "warning: the positions of extension configuration sequences were not read:", err) }
+            res, err := pull.Build(live, pull.Options{Schemas: schemas, ExcludeSchemas: nameList(excluded), DatabaseSettings: settings, MigrationsTable: migSchema + "." + migTable, Owners: owners, OwnerKinds: cfg.Policy.RequireOwners, Roles: roles, Single: out == "", Data: data, External: cfg.External, ConfigRows: configRows, ConfigSequences: seqValues})
             if err != nil { return err }
             for _, w := range res.Warnings { fmt.Fprintln(os.Stderr, "warning:", w) }
             strict := &strictFindings{}
