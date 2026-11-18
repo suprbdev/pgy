@@ -62,11 +62,31 @@ func TestExtensionConfigTableData(t *testing.T) {
 	}}
 	sql, warns := planSQL(t, live, d, Options{Unsafe: true, Prune: true})
 	wantSQL(t, sql,
-		`insert into "public"."spatial_ref_sys" ("auth_name", "srid") values ('local', 990001);`,
+		`insert into "public"."spatial_ref_sys" ("auth_name", "srid") values ('local', 990001) on conflict ("srid") do nothing;`,
 		`delete from only "public"."spatial_ref_sys" where "srid" = '990002';`,
 	)
 	if len(warns) > 0 {
 		t.Errorf("unexpected warnings: %v", warns)
+	}
+}
+
+func TestExtensionConfigRowsGoBeforeOtherDDL(t *testing.T) {
+	live := memberLive()
+	addMemberTable(live, "public.spatial_ref_sys", "postgis")
+	live.ExtensionConfig = map[string]string{"public.spatial_ref_sys": ""}
+	live.TableData = map[string]*LiveTableData{"public.spatial_ref_sys": {Missing: []int{0}}}
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"public.spatial_ref_sys": {Name: "public.spatial_ref_sys", Data: &schema.TableData{Key: []string{"srid"}, Rows: []map[string]any{{"srid": 990001}}}},
+		"public.places": {Name: "places", ColumnsSet: true, Columns: map[string]*schema.Column{"id": {Type: "integer"}},
+			Indexes: []*schema.Index{{Name: "places_id_idx", Columns: []string{"id"}}},
+			Data:    &schema.TableData{Key: []string{"id"}, Rows: []map[string]any{{"id": 1}}}},
+	}}
+	sql, _ := planSQL(t, live, d, Options{})
+	member := strings.Index(sql, `insert into "public"."spatial_ref_sys" ("srid") values (990001) on conflict ("srid") do nothing;`)
+	table, index := strings.Index(sql, `create table`), strings.Index(sql, `create index`)
+	rows := strings.Index(sql, `insert into "public"."places" ("id") values (1);`)
+	if member < 0 || table < 0 || index < 0 || rows < 0 || member > table || member > index || rows < index {
+		t.Errorf("an extension's rows go before the other DDL, which a table's own rows follow:\n%s", sql)
 	}
 }
 
