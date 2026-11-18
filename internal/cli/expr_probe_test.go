@@ -149,6 +149,8 @@ schema app:
 	for _, stmt := range []string{
 		`grant usage on schema app, pgy to ` + role,
 		`grant select on all tables in schema app, pgy to ` + role,
+		`alter table app.events owner to ` + role,
+		`alter table app.rooms owner to ` + role,
 	} {
 		if _, err := db.Exec(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)

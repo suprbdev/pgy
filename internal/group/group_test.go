@@ -411,20 +411,37 @@ func TestPlanHoistsDatabaseSettings(t *testing.T) {
     assertEmittedOnce(t, steps)
 }
 
-func TestPlanDefersSchemaGrantsUntilSchemaExists(t *testing.T) {
+func TestPlanSchemaBlockCreatesSchemaInItsStep(t *testing.T) {
     _, p := writeSchemas(t, map[string]string{
         "access.yml": "roles:\n  reader: {}\nschema app:\n  comment: App objects.\n  grants:\n    reader: [usage]\n",
         "app.yml":    "schema app:\n  table thing:\n    columns:\n      id: {type: int}\n",
     })
     steps := planFiles(t, nil, p("access.yml", "app.yml"), ModeFile, false)
     if got := stepNames(steps); !reflect.DeepEqual(got, []string{"access", "app"}) { t.Fatalf("got %v", got) }
-    if access := stepSQL(t, steps, "access"); strings.Contains(access, `schema "app"`) {
-        t.Fatalf("schema grants and comments must wait for the schema:\n%s", access)
+    access := stepSQL(t, steps, "access")
+    for _, want := range []string{`create schema if not exists "app"`, `grant usage on schema "app" to "reader"`, `comment on schema "app"`} {
+        if !strings.Contains(access, want) { t.Fatalf("access step missing %q:\n%s", want, access) }
+    }
+    if strings.Index(access, `create schema`) > strings.Index(access, `grant usage on schema`) {
+        t.Fatalf("the schema is created before its grants:\n%s", access)
     }
     app := stepSQL(t, steps, "app")
-    for _, want := range []string{`create schema if not exists "app"`, `grant usage on schema "app" to "reader"`, `comment on schema "app"`} {
-        if !strings.Contains(app, want) { t.Fatalf("app step missing %q:\n%s", want, app) }
+    if strings.Contains(app, `schema "app"`) || !strings.Contains(app, `create table if not exists "app"."thing"`) {
+        t.Fatalf("the app step creates the table in the schema the access step created:\n%s", app)
     }
+    assertEmittedOnce(t, steps)
+}
+
+func TestPlanEmptySchemaBlockGetsItsOwnStep(t *testing.T) {
+    _, p := writeSchemas(t, map[string]string{
+        "empty.yml": "schema reports: {}\n",
+        "app.yml":   "schema app:\n  table thing:\n    columns:\n      id: {type: int}\n",
+    })
+    steps := planFiles(t, nil, p("app.yml", "empty.yml"), ModeFile, false)
+    if sql := stepSQL(t, steps, "empty"); !strings.Contains(sql, `create schema if not exists "reports";`) {
+        t.Fatalf("an empty schema block creates its schema:\n%s", sql)
+    }
+    assertEmittedOnce(t, steps)
 }
 
 func TestPlanViewWaitsForTablesDespiteSoftCycle(t *testing.T) {

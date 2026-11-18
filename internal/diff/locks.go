@@ -20,8 +20,9 @@ type Warning struct {
     // privileges), dependents (a type change is blocked by objects pgy
     // can't recreate, an extension or a routine is kept because objects
     // still use it, or an extension update may be blocked by objects that
-    // use it), not_owner (--prune leaves an object alone because the
-    // connecting role may not drop it), or "" for the rest.
+    // use it), not_owner (the plan leaves out what needs the privileges of
+    // an object's owner, or --prune an object, because the connecting role
+    // lacks them), or "" for the rest.
     Kind      string `json:"kind,omitempty"`
 }
 
