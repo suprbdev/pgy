@@ -520,7 +520,7 @@ schema public:
         - {id: 101, name: added}
 `
 	sql := planData(declared)
-	if want := `insert into "public"."cfg" ("id", "name") values (101, 'added');` + "\n" + `delete from only "public"."cfg" where "id" = '100';`; sql != want {
+	if want := `insert into "public"."cfg" ("id", "name") values (101, 'added') on conflict ("id") do nothing;` + "\n" + `delete from only "public"."cfg" where "id" = '100';`; sql != want {
 		t.Errorf("only the rows the condition selects are pruned, got:\n%s\nwant:\n%s", sql, want)
 	}
 }
