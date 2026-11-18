@@ -2938,7 +2938,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired = viewsCreatedAsViews(live, desired)
-    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
+    pending := membersPending(live, extensions.Creates)
+    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pending)
     live, renames := applyRenames(live, desired)
     live = applyExprProbes(live, desired)
     liveTransforms := routineTransforms(live)
@@ -3371,6 +3372,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if attributeOnly(desired, "table", e.Key) {
                 if lt := live.Tables[e.Key]; lt != nil && len(dt.Triggers) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Triggers: dt.Triggers}, lt, &deferredFKs, &deferredTriggers, unsafe)
+                } else if lt == nil && pending {
+                    deferredTriggers = append(deferredTriggers, pendingTriggerStmts(e.Key, dt)...)
                 }
                 continue
             }
@@ -3577,7 +3580,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
     plan.Alters = append(plan.Alters, dataWrites...)
     plan.Alters = append(plan.Alters, deferredFKs...)
-    planPolicies(plan, live, desired, unsafe)
+    planPolicies(plan, live, desired, unsafe, pending)
     planPublications(plan, live, desired, opts)
     plan.Drops = append(plan.Drops, columnDrops...)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
@@ -6689,8 +6692,13 @@ func renderTrigger(fq string, tr *schema.Trigger) string {
 // planPolicies emits ENABLE/DISABLE ROW LEVEL SECURITY and policy create/drop
 // for all tables. Runs after every object create/alter (policies may reference
 // functions created later in the same plan than their table — dependsOn cannot
-// order this when the table itself is skipped as already live).
-func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe bool) {
+// order this when the table itself is skipped as already live). pending is
+// whether an extension of the plan may create tables (see membersPending):
+// the table of an attribute-only declaration that live lacks may then come
+// with row level security and policies of its own, so each declared policy
+// is dropped if it exists before it is created, and --unsafe disables what
+// the declaration turns off.
+func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe, pending bool) {
     tableNames := make([]string, 0, len(desired.Tables))
     for k := range desired.Tables { tableNames = append(tableNames, k) }
     sort.Strings(tableNames)
@@ -6699,6 +6707,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
         if dt == nil { continue }
         lt := live.Tables[fq]
         if foreignKindMismatch(dt, lt) { continue }
+        unknown := lt == nil && pending && attributeOnly(desired, "table", fq)
 
         // Row level security. nil means unmanaged: the live state is left
         // alone. Disabling widens access — every policy on the table stops
@@ -6708,7 +6717,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
                 if lt == nil || !lt.RLSEnabled {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s enable row level security;", pqIdent(fq)))
                 }
-            } else if unsafe && lt != nil && lt.RLSEnabled {
+            } else if unsafe && (lt != nil && lt.RLSEnabled || unknown) {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s disable row level security;", pqIdent(fq)))
             }
         }
@@ -6716,7 +6725,7 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             switch {
             case *f && (lt == nil || !lt.RLSForced):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s force row level security;", pqIdent(fq)))
-            case !*f && unsafe && lt != nil && lt.RLSForced:
+            case !*f && unsafe && (lt != nil && lt.RLSForced || unknown):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s no force row level security;", pqIdent(fq)))
             }
         }
@@ -6738,6 +6747,8 @@ func planPolicies(plan *PlanDiff, live *Live, desired *schema.Database, unsafe b
             if lp := livePolicies[polName]; lp != nil {
                 if policyMatchesLive(pol, lp, live.CurrentUser) { continue }
                 plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy %s on %s;", quoteIdent(polName), pqIdent(fq)))
+            } else if unknown {
+                plan.Alters = append(plan.Alters, fmt.Sprintf("drop policy if exists %s on %s;", quoteIdent(polName), pqIdent(fq)))
             }
             stmt := fmt.Sprintf("create policy %s on %s", quoteIdent(polName), pqIdent(fq))
             if pol.As == "restrictive" { stmt += " as restrictive" }

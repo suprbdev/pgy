@@ -277,6 +277,25 @@ func pendingGrants(liveG map[string]map[string]bool, desired map[string][]string
 	return out
 }
 
+// pendingTriggerStmts returns the statements that give fq, the table of an
+// attribute-only declaration dt that an extension of the plan may create,
+// the triggers dt declares: the extension may create triggers of the same
+// names, so each is dropped if it exists and created again.
+func pendingTriggerStmts(fq string, dt *schema.Table) []string {
+	out := []string{}
+	for _, tr := range dt.Triggers {
+		if tr == nil || tr.Procedure == "" {
+			continue
+		}
+		name := truncateIdent(tr.Name)
+		out = append(out, fmt.Sprintf("drop trigger if exists %s on %s;", quoteIdent(name), pqIdent(fq)), renderTrigger(fq, tr))
+		if s := triggerEnableStmt(fq, name, tr.Enabled, "origin"); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // membersPending reports whether live lacks objects that exist once the
 // plan's extension statements have run: stmts creates or updates an
 // extension, or an earlier step of the same plan created one.
