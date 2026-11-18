@@ -105,7 +105,7 @@ func queryUpdateDependents(batch *queryBatch, live *Live, names []string) {
 // of a plan, the ALTER EXTENSION ... UPDATE statements that can run before
 // everything else (see PlanDiff.ExtensionUpdates): those of installed
 // extensions whose new version requires only installed extensions, none of
-// them updated later in the plan, and whose dependent views and
+// them updated in the main migration, and whose dependent views and
 // materialized views are all still in live, the snapshot as the rest of the
 // plan sees it. An update the plan drops such a view for stays where it is,
 // since the drop has to precede it and share a transaction with it and with

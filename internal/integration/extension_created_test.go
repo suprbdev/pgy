@@ -210,7 +210,7 @@ schema public:
 		t.Errorf("want the warning about the extension's table, got %v", plan.Warnings)
 	}
 	applyPlan(t, db, plan)
-	if sql := diff.Render(planAsDiff(t, db, y, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+	if sql := diff.Render(planAsDiff(t, db, y, diff.Options{Unsafe: true})); sql != "" {
 		t.Fatalf("one migration must converge, the second diff has:\n%s\nafter:\n%s", sql, diff.Render(plan))
 	}
 	var n int

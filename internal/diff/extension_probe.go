@@ -182,7 +182,7 @@ func createdBy(live *Live, stmt string) bool {
 }
 
 // addNew adds to *dst the entries of src whose key have lacks and skip
-// doesn't hold, on a copy of *dst, which is not modified.
+// doesn't list, on a copy of *dst, which is not modified.
 func addNew[V any](dst *map[string]V, src, have map[string]V, skip map[string]bool) {
 	var out map[string]V
 	for k, v := range src {
