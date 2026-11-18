@@ -202,6 +202,10 @@ type Live struct{
     // (pg_extension.extconfig), "schema.table" -> the WHERE clause that
     // selects the rows pg_dump keeps (extcondition), "" for all of them.
     ExtensionConfig map[string]string
+    // ExtensionConfigSequences: the sequences extensions mark as
+    // configuration (pg_extension.extconfig), "schema.sequence", whose
+    // position pg_dump keeps.
+    ExtensionConfigSequences map[string]bool
     // OwnedSequences: "schema.seq" -> owned by a column (serial / identity /
     // OWNED BY), so it goes away with its column
     OwnedSequences map[string]bool
@@ -781,6 +785,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
         BaseTypes: map[string]bool{},
         OwnedSequences: map[string]bool{},
         ExtensionConfig: map[string]string{},
+        ExtensionConfigSequences: map[string]bool{},
     }
     batch := &queryBatch{}
     
@@ -2475,9 +2480,10 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool) (*Live, error) {
     batch.add(initPrivsQ, l.scanInitPrivs)
     batch.add(extensionConfigQ, func(rows pgx.Rows) error {
         for rows.Next() {
-            var table, condition string
-            if err := rows.Scan(&table, &condition); err != nil { return err }
-            l.ExtensionConfig[table] = condition
+            var rel, condition string
+            var sequence bool
+            if err := rows.Scan(&rel, &condition, &sequence); err != nil { return err }
+            if sequence { l.ExtensionConfigSequences[rel] = true } else { l.ExtensionConfig[rel] = condition }
         }
         return nil
     })

@@ -56,14 +56,15 @@ func userObjects(nsp, class, oid string) string {
             or %[1]s.nspname = 'pg_catalog' and exists (select from pg_depend ext_m where ext_m.classid = '%[2]s'::regclass and ext_m.objid = %[3]s and ext_m.deptype = 'e'))`, nsp, class, oid)
 }
 
-// extensionConfigQ lists the configuration tables of extensions
-// (pg_extension_config_dump) with the condition that selects the rows
-// pg_dump keeps of them, those an application added.
+// extensionConfigQ lists the configuration tables and sequences of
+// extensions (pg_extension_config_dump), with the condition that selects
+// the rows pg_dump keeps of a table, those an application added, and
+// whether the relation is a sequence, whose position pg_dump keeps.
 const extensionConfigQ = `
-    select n.nspname || '.' || c.relname, coalesce(u.condition, '')
+    select n.nspname || '.' || c.relname, coalesce(u.condition, ''), c.relkind = 'S'
     from pg_extension x
     cross join lateral unnest(x.extconfig, x.extcondition) u(rel, condition)
-    join pg_class c on c.oid = u.rel and c.relkind in ('r', 'p')
+    join pg_class c on c.oid = u.rel and c.relkind in ('r', 'p', 'S')
     join pg_namespace n on n.oid = c.relnamespace
 `
 

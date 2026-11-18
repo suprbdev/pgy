@@ -4,6 +4,7 @@
 package pull
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -57,6 +58,13 @@ type Options struct {
 	// not be read. Build reports the tables with rows that the YAML does
 	// not carry.
 	ConfigRows map[string]int64
+	// ConfigSequences holds, by "schema.sequence", the last value handed
+	// out by each sequence an extension marks as configuration, whose
+	// position pg_dump keeps (see diff.ConfigSequenceValues), "" for one
+	// that could not be read; a sequence that never handed out a value is
+	// absent. Build reports those whose position a database rebuilt from
+	// the YAML would not reach.
+	ConfigSequences map[string]string
 }
 
 // File is one generated YAML document.
@@ -2479,8 +2487,39 @@ func (b *builder) database() *node {
 // configRows reports the configuration tables of the extensions
 // database.yml creates that hold rows the YAML doesn't carry: rows their
 // condition selects (Options.ConfigRows), which pg_dump keeps, of a table
-// --data didn't ask for. External relations are left out.
+// --data didn't ask for. It also reports their configuration sequences
+// (Options.ConfigSequences) whose position a rebuilt database would not
+// reach: one that numbers a column of a table reported here is named with
+// it, since --data brings it along; one that numbers none, or a column of
+// a table without rows, is reported on its own, and so is one ahead of
+// the rows --data pulled, which a rebuilt database advances only past
+// them (see diff.dataSequenceStmt). External relations are left out.
 func (b *builder) configRows() {
+	tableSeqs := map[string][]string{}
+	for _, seq := range sortedKeys(b.opts.ConfigSequences) {
+		pos, ext := b.opts.ConfigSequences[seq], b.live.MemberExtension["rel:"+seq]
+		if !b.extensions[ext] || b.opts.External.HasRelation(seq) {
+			continue
+		}
+		table, col := b.sequenceColumn(seq)
+		rows, pulled := b.opts.Data[table]
+		switch {
+		case pos == "":
+			b.warn("extension %s: configuration sequence %s could not be read, so its position, which pg_dump keeps, was not checked; a database rebuilt from this YAML starts it from its start value", ext, seq)
+		case table != "" && pulled:
+			if top, ok := maxInteger(rows, col); !ok || compareInteger(top, pos) < 0 {
+				reached := "none of them sets " + col
+				if ok {
+					reached = "they take it to " + top + " only"
+				}
+				b.warn("extension %s: configuration sequence %s has reached %s, which pg_dump keeps; a database rebuilt from this YAML advances it past the rows --data %s pulls, but %s; advance it with setval in a migration, or list it under external.relations", ext, seq, pos, table, reached)
+			}
+		case table != "" && b.opts.ConfigRows[table] > 0 && !b.opts.External.HasRelation(table):
+			tableSeqs[table] = append(tableSeqs[table], seq+" (at "+pos+")")
+		default:
+			b.warn("extension %s: configuration sequence %s has reached %s, which pg_dump keeps; a database rebuilt from this YAML starts it from its start value; advance it with setval in a migration, or list it under external.relations", ext, seq, pos)
+		}
+	}
 	for _, fq := range sortedKeys(b.opts.ConfigRows) {
 		n, ext := b.opts.ConfigRows[fq], b.live.MemberExtension["rel:"+fq]
 		if _, pulled := b.opts.Data[fq]; pulled || n == 0 || !b.extensions[ext] || b.opts.External.HasRelation(fq) {
@@ -2494,8 +2533,72 @@ func (b *builder) configRows() {
 		if n == 1 {
 			rows = "row"
 		}
-		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry, so a database rebuilt from it would lack them; pull them with --data %s, or list the table under external.relations", ext, fq, n, rows, fq)
+		seqs := ""
+		if s := tableSeqs[fq]; len(s) > 0 {
+			seqs = ", and the position of its sequence " + strings.Join(s, ", ")
+		}
+		b.warn("extension %s: configuration table %s has %d %s that pg_dump keeps and this YAML does not carry%s, so a database rebuilt from it would lack them; pull them with --data %s, or list the table under external.relations", ext, fq, n, rows, seqs, fq)
 	}
+}
+
+// sequenceColumn returns the configuration table and column that sequence
+// seq numbers: the column that owns it, or a column of a configuration
+// table whose default is nextval of it; "" when there is none.
+func (b *builder) sequenceColumn(seq string) (string, string) {
+	if ls := b.live.SequenceDefs[seq]; ls != nil && ls.Owner != "" {
+		if i := strings.LastIndexByte(ls.Owner, '.'); i > 0 {
+			return ls.Owner[:i], ls.Owner[i+1:]
+		}
+	}
+	nextvalRe := regexp.MustCompile(`^nextval\('("?[^']+?"?)'::regclass\)$`)
+	for _, fq := range sortedKeys(b.live.ExtensionConfig) {
+		lt := b.live.Tables[fq]
+		if lt == nil {
+			continue
+		}
+		for _, cn := range sortedKeys(lt.Columns) {
+			lc := lt.Columns[cn]
+			if lc.IdentitySequence != nil && lc.IdentitySequence.Name == seq {
+				return fq, cn
+			}
+			if m := nextvalRe.FindStringSubmatch(strings.TrimSpace(lc.Default)); m != nil {
+				name := strings.ReplaceAll(m[1], `"`, "")
+				if name == seq || !strings.Contains(name, ".") && (schemaOf(fq)+"."+name == seq || "public."+name == seq) {
+					return fq, cn
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+// maxInteger returns, as decimal text, the largest integer that rows,
+// values as diff.TableRows reads them, hold in column col.
+func maxInteger(rows []map[string]any, col string) (string, bool) {
+	top, ok := "", false
+	for _, row := range rows {
+		n, isNum := row[col].(json.Number)
+		if !isNum {
+			continue
+		}
+		if _, err := n.Int64(); err != nil {
+			continue
+		}
+		if !ok || compareInteger(n.String(), top) > 0 {
+			top, ok = n.String(), true
+		}
+	}
+	return top, ok
+}
+
+// compareInteger compares two integers written in decimal.
+func compareInteger(a, b string) int {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return strings.Compare(a, b)
+	}
+	return cmp.Compare(x, y)
 }
 
 func (b *builder) defaultPrivileges() *node {

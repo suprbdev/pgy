@@ -37,6 +37,10 @@ type LiveTableData struct {
     // statements, so that a key the modifier changes (1.005 is stored as
     // 1.01) matches the stored row.
     KeyTypes map[string]string
+    // SequenceBehind reports that a sequence numbering one of the columns
+    // the rows give values (see dataSequences) would hand out one of those
+    // values again: it is not yet past their largest value.
+    SequenceBehind bool
 }
 
 // dataValue converts a decoded YAML value to the form it is sent to
@@ -309,7 +313,10 @@ func IntrospectData(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *s
 // get upserts. The rows of tables that do not exist yet are only checked
 // (see checkNewTableData). Of an extension's configuration table, only the
 // live rows its condition selects (Live.ExtensionConfig), the ones pg_dump
-// keeps, can be extra: the rest are the extension's.
+// keeps, can be extra: the rest are the extension's. A sequence that
+// numbers a column the rows give values and is not yet past the largest of
+// them is reported as LiveTableData.SequenceBehind (see
+// sequencesBehindQ).
 func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desired *schema.Database, opts Options) error {
     if l == nil || desired == nil { return nil }
     if l.TableData == nil { l.TableData = map[string]*LiveTableData{} }
@@ -317,6 +324,8 @@ func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desire
     desired = withUnmovedExtensions(l, desired)
     sc := scopeFor(l.SearchPath)
     newLabels := addsEnumLabels(l, desired)
+    var seqTables, seqOwners, seqCols, seqNames []string
+    var seqTops []int64
     for _, fq := range sortedKeys(desired.Tables) {
         dt := desired.Tables[fq]
         lt := l.Tables[fq]
@@ -451,8 +460,173 @@ func IntrospectDataWith(ctx context.Context, pool *pgxpool.Pool, l *Live, desire
             }
         }
         l.TableData[fq] = ld
+        for _, s := range dataSequences(l, desired, fq, dt) {
+            if s.seq == "" && (l.Tables[s.owner] == nil || l.Tables[s.owner].Columns[s.col] == nil) { continue }
+            seqTables, seqOwners, seqCols, seqNames, seqTops = append(seqTables, fq), append(seqOwners, pqIdent(s.owner)), append(seqCols, s.col), append(seqNames, s.seq), append(seqTops, s.top)
+        }
     }
+    if len(seqTables) == 0 { return nil }
+    batch := &queryBatch{}
+    batch.add(sequencesBehindQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var i int
+            if err := rows.Scan(&i); err != nil { return err }
+            if i >= 1 && i <= len(seqTables) && l.TableData[seqTables[i-1]] != nil { l.TableData[seqTables[i-1]].SequenceBehind = true }
+        }
+        return nil
+    }, seqOwners, seqCols, seqNames, seqTops)
+    if err := batch.run(ctx, pool); err != nil { return fmt.Errorf("data: sequences: %w", err) }
     return nil
+}
+
+// sequenceGuard is the condition, on the pg_sequence row q and a value
+// top, under which a data statement advances the sequence to top: the
+// sequence counts up, top is within its bounds, and the next value the
+// sequence would hand out, the one after its last value or, before it was
+// first used, its start, is not past top. The connecting role must be able
+// to read and set the sequence; otherwise the sequence is left alone.
+const sequenceGuard = `q.seqincrement > 0 and case when has_sequence_privilege(q.seqrelid, 'update') and has_sequence_privilege(q.seqrelid, 'select, usage') then %[1]s between coalesce(pg_sequence_last_value(q.seqrelid) + q.seqincrement, q.seqstart) and q.seqmax end`
+
+// sequencesBehindQ takes, for every column a sequence numbers (see
+// dataSequences), the table that declares the column ($1), the column
+// ($2), the sequence ("" for the one the column owns, $3) and the largest
+// value the declared rows give the column ($4), and returns the ordinal of
+// each entry whose sequence sequenceGuard would advance.
+var sequencesBehindQ = `
+    select u.i::int
+    from unnest($1::text[], $2::text[], $3::text[], $4::bigint[]) with ordinality u(tbl, col, seq, top, i)
+    join pg_sequence q on q.seqrelid = to_regclass(case when u.seq <> '' then u.seq else pg_get_serial_sequence(u.tbl, u.col) end)
+    where ` + fmt.Sprintf(sequenceGuard, "u.top")
+
+// dataSequence is a column of a table with data rows whose values a
+// sequence hands out: a serial or identity column, or one whose default is
+// nextval of a sequence. owner is the table that declares the column, seq
+// the sequence its default names ("" for a serial or identity column, whose
+// sequence pg_get_serial_sequence finds through owner), top the largest
+// value the declared rows give the column, and typed reports a column of
+// an integer type, whose largest value the migration reads from the table.
+type dataSequence struct {
+    col, owner, seq string
+    top             int64
+    typed           bool
+}
+
+// dataSequences returns the columns of table fq to which the declared rows
+// give integer values and that a sequence numbers, sorted by name. What the
+// YAML declares for a column decides, its own declaration or that of the
+// table it is inherited from; a column the YAML doesn't declare (a table
+// declared without columns) is looked up in live, and when the table
+// doesn't exist yet either (an extension of the plan creates it), counts
+// as one pg_get_serial_sequence may find a sequence for.
+func dataSequences(live *Live, desired *schema.Database, fq string, dt *schema.Table) []dataSequence {
+    if dt == nil || dt.Data == nil { return nil }
+    tops := map[string]int64{}
+    for _, row := range dt.Data.Rows {
+        for cn, v := range row {
+            if n, ok := dataInteger(v); ok {
+                if t, seen := tops[cn]; !seen || n > t { tops[cn] = n }
+            }
+        }
+    }
+    var lt *LiveTable
+    if live != nil { lt = live.Tables[fq] }
+    out := []dataSequence{}
+    for _, cn := range sortedKeys(tops) {
+        s := dataSequence{col: cn, owner: fq, top: tops[cn]}
+        if owner, c := declaredDataColumn(desired, fq, dt, cn, 0); c != nil {
+            s.owner = owner
+            if c.Identity == "" && !isSerialType(c.Type) {
+                name, ok := nextvalSequence(c.Default)
+                if !ok { continue }
+                s.seq = name
+            }
+            s.typed = isSerialType(c.Type) || isIntegerType(c.Type)
+        } else if lt != nil {
+            lc := lt.Columns[cn]
+            if lc == nil { continue }
+            if name, ok := nextvalSequence(lc.Default); ok {
+                s.seq = name
+            } else if lc.Identity == "" {
+                continue
+            }
+            s.typed = isIntegerType(lc.Type)
+        }
+        out = append(out, s)
+    }
+    return out
+}
+
+// declaredDataColumn returns the declaration of column cn of table fq that
+// has a type, its own or that of the partitioned or parent table it comes
+// from, with the table that declares it; nil when the YAML declares none.
+func declaredDataColumn(desired *schema.Database, fq string, dt *schema.Table, cn string, depth int) (string, *schema.Column) {
+    if dt == nil || depth > 16 { return "", nil }
+    if c := dt.Columns[cn]; c != nil && strings.TrimSpace(c.Type) != "" { return fq, c }
+    if desired == nil { return "", nil }
+    parents := append([]string{}, dt.Inherits...)
+    if dt.PartitionOf != "" { parents = append([]string{dt.PartitionOf}, parents...) }
+    for _, p := range parents {
+        p = qualifyName(p)
+        if owner, c := declaredDataColumn(desired, p, desired.Tables[p], cn, depth+1); c != nil { return owner, c }
+    }
+    return "", nil
+}
+
+var nextvalRe = regexp.MustCompile(`(?i)^\s*nextval\s*\(\s*'((?:[^']|'')+)'\s*(?:::\s*regclass\s*)?\)\s*$`)
+
+// nextvalSequence returns the sequence a column default of the form
+// nextval('name') names, as written.
+func nextvalSequence(def string) (string, bool) {
+    m := nextvalRe.FindStringSubmatch(def)
+    if m == nil { return "", false }
+    return strings.ReplaceAll(m[1], "''", "'"), true
+}
+
+// isIntegerType reports whether typ names smallint, integer or bigint.
+func isIntegerType(typ string) bool {
+    switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(typ), "pg_catalog.")) {
+    case "smallint", "integer", "int", "bigint", "int2", "int4", "int8":
+        return true
+    }
+    return false
+}
+
+var integerTextRe = regexp.MustCompile(`^-?[0-9]+$`)
+
+// dataInteger returns a declared value that is an integer, also when it is
+// written as a string, as pgy pull writes integers too long for a float.
+func dataInteger(v any) (int64, bool) {
+    switch x := v.(type) {
+    case int:
+        return int64(x), true
+    case int64:
+        return x, true
+    case uint64:
+        if x <= 1<<63-1 { return int64(x), true }
+    case string:
+        if integerTextRe.MatchString(x) {
+            if n, err := strconv.ParseInt(x, 10, 64); err == nil { return n, true }
+        }
+    }
+    return 0, false
+}
+
+// dataSequenceStmt returns the statement that advances the sequences of
+// seqs, the columns of table fq a sequence numbers, past the largest value
+// the table holds in them (the largest the declared rows give a column of
+// a type the migration cannot take the maximum of), so that the sequence
+// doesn't hand out a value the rows already use. sequenceGuard keeps it
+// from moving a sequence backwards.
+func dataSequenceStmt(fq string, seqs []dataSequence) string {
+    vals := make([]string, len(seqs))
+    for i, s := range seqs {
+        seq := quoteString(s.seq)
+        if s.seq == "" { seq = fmt.Sprintf("pg_get_serial_sequence(%s, %s)", quoteString(pqIdent(s.owner)), quoteString(s.col)) }
+        top := strconv.FormatInt(s.top, 10)
+        if s.typed { top = fmt.Sprintf("(select max(%s) from %s)", quoteIdent(s.col), pqIdent(fq)) }
+        vals[i] = "(" + seq + ", " + top + ")"
+    }
+    return "select setval(q.seqrelid, c.top) from (values " + strings.Join(vals, ", ") + ") c(seq, top) join pg_sequence q on q.seqrelid = c.seq::regclass where " + fmt.Sprintf(sequenceGuard, "c.top") + ";"
 }
 
 // dataTarget names table fq for reading or changing its own rows: ONLY for
@@ -728,7 +902,10 @@ func dataTableOrder(desired *schema.Database) []string {
 // differently, and is rewritten like any other column. A table created by
 // this plan gets all of its rows
 // inserted. An existing table without introspected data (IntrospectData was
-// not run) gets an upsert of every row.
+// not run) gets an upsert of every row. Each table whose rows the plan
+// writes, or whose sequences are behind them (LiveTableData.SequenceBehind),
+// is followed by the statement that advances the sequences of its columns
+// past them (see dataSequenceStmt).
 func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes []string) {
     order := dataTableOrder(desired)
     for _, fq := range order {
@@ -736,9 +913,21 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
         key := dt.DataKey()
         if len(key) == 0 { continue }
         ld := live.TableData[fq]
+        insert := func(row map[string]any) string { return dataInsert(fq, dt, row) }
+        seqs := dataSequences(live, desired, fq, dt)
+        sets := func(row map[string]any, cols []string) bool {
+            for _, s := range seqs {
+                if _, ok := dataInteger(row[s.col]); ok && (cols == nil || indexOf(cols, s.col) >= 0) { return true }
+            }
+            return false
+        }
+        stmts, advance := []string{}, false
         switch {
         case live.Tables[fq] == nil:
-            for _, row := range dt.Data.Rows { writes = append(writes, dataInsert(fq, dt, row)) }
+            for _, row := range dt.Data.Rows {
+                stmts = append(stmts, insert(row))
+                advance = advance || sets(row, nil)
+            }
         case ld == nil:
             for _, row := range dt.Data.Rows {
                 set := []string{}
@@ -747,11 +936,16 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 }
                 stmt := strings.TrimSuffix(dataInsert(fq, dt, row), ";") + " on conflict (" + joinIdentList(key) + ") do "
                 if len(set) == 0 { stmt += "nothing;" } else { stmt += "update set " + strings.Join(set, ", ") + ";" }
-                writes = append(writes, stmt)
+                stmts = append(stmts, stmt)
+                advance = advance || sets(row, nil)
             }
         default:
+            advance = ld.SequenceBehind
             for _, i := range ld.Missing {
-                if i < len(dt.Data.Rows) { writes = append(writes, dataInsert(fq, dt, dt.Data.Rows[i])) }
+                if i < len(dt.Data.Rows) {
+                    stmts = append(stmts, insert(dt.Data.Rows[i]))
+                    advance = advance || sets(dt.Data.Rows[i], nil)
+                }
             }
             idx := make([]int, 0, len(ld.Changed))
             for i := range ld.Changed { idx = append(idx, i) }
@@ -762,9 +956,12 @@ func planData(live *Live, desired *schema.Database, prune bool) (writes, deletes
                 set := []string{}
                 for _, cn := range ld.Changed[i] { set = append(set, fmt.Sprintf("%s = %s", quoteIdent(cn), dataSQL(fq, dt, cn, row[cn]))) }
                 if len(set) == 0 { continue }
-                writes = append(writes, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
+                stmts = append(stmts, fmt.Sprintf("update %s set %s where %s;", dataTarget(fq, partitioned(live, dt, fq)), strings.Join(set, ", "), dataKeyWhere(key, ld.KeyEquals, ld.KeyTypes, func(k string) string { return dataSQL(fq, dt, k, row[k]) })))
+                advance = advance || sets(row, ld.Changed[i])
             }
         }
+        if advance && len(seqs) > 0 { stmts = append(stmts, dataSequenceStmt(fq, seqs)) }
+        writes = append(writes, stmts...)
     }
     if prune {
         for i := len(order) - 1; i >= 0; i-- {
@@ -913,6 +1110,39 @@ func ConfigRowCounts(ctx context.Context, pool *pgxpool.Pool, l *Live, tables []
         })
     }
     if err := counts.run(ctx, pool); err != nil { return nil, fmt.Errorf("extension configuration tables: %w", err) }
+    return out, nil
+}
+
+// ConfigSequenceValues returns, for each sequence in seqs
+// ("schema.sequence"), the last value it handed out, as decimal text, the
+// position pg_dump keeps of an extension's configuration sequence. A
+// sequence that never handed out a value is left out, and one the
+// connecting role may not read maps to "".
+func ConfigSequenceValues(ctx context.Context, pool *pgxpool.Pool, seqs []string) (map[string]string, error) {
+    out := map[string]string{}
+    if len(seqs) == 0 { return out, nil }
+    names := make([]string, len(seqs))
+    for i, s := range seqs { names[i] = pqIdent(s) }
+    batch := &queryBatch{}
+    batch.add(`select u.i::int, has_sequence_privilege(c.oid, 'select, usage'),
+                      case when has_sequence_privilege(c.oid, 'select, usage') then pg_sequence_last_value(c.oid)::text end
+               from unnest($1::text[]) with ordinality u(s, i) join pg_class c on c.oid = to_regclass(u.s)`, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var i int
+            var readable bool
+            var last *string
+            if err := rows.Scan(&i, &readable, &last); err != nil { return err }
+            if i < 1 || i > len(seqs) { continue }
+            switch {
+            case !readable:
+                out[seqs[i-1]] = ""
+            case last != nil:
+                out[seqs[i-1]] = *last
+            }
+        }
+        return nil
+    }, names)
+    if err := batch.run(ctx, pool); err != nil { return nil, fmt.Errorf("extension configuration sequences: %w", err) }
     return out, nil
 }
 
