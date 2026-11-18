@@ -2163,6 +2163,7 @@ func (b *builder) views() {
 		if !ok {
 			continue
 		}
+		b.externalReads(k, mat)
 		m := newMap()
 		if deps := b.d.ViewDeps[k]; len(deps) > 0 {
 			ds := []string{}
@@ -2236,6 +2237,35 @@ func (b *builder) views() {
 		b.owner(m, "views", "rel:"+k)
 		add(blk, key, m)
 	}
+}
+
+// externalReads warns about view k (a materialized view when mat) when its
+// query reads external relations (external.relations) that the YAML
+// leaves out and nothing else creates: a database rebuilt from the YAML
+// lacks them, so the view cannot be created there, as for the view
+// TimescaleDB makes of a continuous aggregate, which reads the aggregate's
+// materialized hypertable. The view is still written, so the YAML keeps
+// describing the database it was pulled from. Relations in an external
+// schema, of an external role or of an extension are left out of the
+// check: the platform or the extension creates them.
+func (b *builder) externalReads(k string, mat bool) {
+	reads := []string{}
+	for _, ref := range b.d.ViewRelations[k] {
+		if b.opts.External.HasRelation(ref) && !b.opts.External.HasSchema(schemaOf(ref)) && !b.externalOwned("rel:"+ref) && !b.live.ExtensionMembers["rel:"+ref] {
+			reads = append(reads, ref)
+		}
+	}
+	if len(reads) == 0 {
+		return
+	}
+	kind, them := "view", "an external relation"
+	if mat {
+		kind = "materialized view"
+	}
+	if len(reads) > 1 {
+		them = "external relations"
+	}
+	b.warn("%s %s reads %s, %s that this YAML leaves out, so a database rebuilt from it cannot create the %s; list the %s under external.relations too, or declare it the way the extension that makes it does (see Extensions that create objects at run time in docs/hosted-platforms.md)", kind, k, strings.Join(reads, ", "), them, kind, kind)
 }
 
 // database builds database.yml: extensions, roles, default privileges,
