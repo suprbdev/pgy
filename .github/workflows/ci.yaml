@@ -69,6 +69,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: Install the PL/Perl, PL/Python and PL/Tcl runtimes
+        run: |
+          docker exec ${{ job.services.postgres.id }} apk add --no-cache perl python3 tcl
+          # plperl.so needs libperl.so, which alpine's perl installs only under core_perl/CORE
+          docker exec ${{ job.services.postgres.id }} ln -sf /usr/lib/perl5/core_perl/CORE/libperl.so /usr/lib/libperl.so
       - name: Integration tests (PostgreSQL ${{ matrix.postgres }})
         env:
           PGY_TEST_DSN: postgres://pgy:pgy@localhost:5433/pgytest

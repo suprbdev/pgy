@@ -12,6 +12,7 @@ import (
 
 	"github.com/suprbdev/pgy/internal/diff"
 	"github.com/suprbdev/pgy/internal/pull"
+	"github.com/suprbdev/pgy/internal/schema"
 	"github.com/suprbdev/pgy/internal/validate"
 )
 
@@ -656,17 +657,19 @@ schema public:
 	sql := convergeLive(t, db, y, diff.Options{Unsafe: true, Prune: true})
 	wantLines := []string{
 		`create extension if not exists "plperl";`,
-		fmt.Sprintf(`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plperl' and lanpltrusted) then revoke all on language "plperl" from public; grant usage on language "plperl" to %q; end if; end $$;`, dev),
+		`revoke usage on language "plperl" from public;`,
+		fmt.Sprintf(`grant usage on language "plperl" to %q;`, dev),
 		`set check_function_bodies = off;`,
 		`create function "public"."two"() returns integer language plperl as $$return 2;$$;`,
 		`reset check_function_bodies;`,
 	}
 	if strings.TrimSpace(sql) != strings.Join(wantLines, "\n") {
-		t.Errorf("got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))
+		t.Errorf("the probe knows the trusted language plperl brings, got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))
 	}
 	owner := db.Config().ConnConfig.User
-	if got, want := languageACLs(t, db)["plperl"], aclOf(owner, owner+"=U", dev+"=U"); got != want {
-		t.Errorf("plperl ACL = %q, want %q", got, want)
+	granted := aclOf(owner, owner+"=U", dev+"=U")
+	if got := languageACLs(t, db)["plperl"]; got != granted {
+		t.Errorf("plperl ACL = %q, want %q", got, granted)
 	}
 
 	pulled := pullAndRebuild(t, db, copy)
@@ -676,12 +679,66 @@ schema public:
 	if a, b := languageACLs(t, db), languageACLs(t, copy); !reflect.DeepEqual(a, b) {
 		t.Errorf("language ACLs %v were rebuilt as %v", a, b)
 	}
+
+	guardedLines := append([]string{
+		wantLines[0],
+		fmt.Sprintf(`do $$ begin if exists (select from pg_catalog.pg_language where lanname = 'plperl' and lanpltrusted) then revoke all on language "plperl" from public; grant usage on language "plperl" to %q; end if; end $$;`, dev),
+	}, wantLines[3:]...)
+	for _, how := range unprobedPlans {
+		guarded := freshDatabase(t, admin, "pgytest_language_plperl_"+how.name)
+		plan := planUnprobed(t, guarded, y, how.offline)
+		if msgs := warningMessages(plan); msgs != "" {
+			t.Errorf("%s: unexpected warnings:\n%s", how.name, msgs)
+		}
+		if sql := strings.TrimSpace(diff.Render(plan)); sql != strings.Join(guardedLines, "\n") {
+			t.Errorf("%s: the grants wait in a DO block for the language the extension may bring, got:\n%s\nwant:\n%s", how.name, sql, strings.Join(guardedLines, "\n"))
+		}
+		applyPlan(t, guarded, plan)
+		if got := languageACLs(t, guarded)["plperl"]; got != granted {
+			t.Errorf("%s: plperl ACL = %q, want %q", how.name, got, granted)
+		}
+		if sql := diff.Render(planExtensionsLive(t, guarded, y, diff.Options{Unsafe: true, Prune: true})); sql != "" {
+			t.Errorf("%s: one migration must converge, the second diff has:\n%s", how.name, sql)
+		}
+	}
+}
+
+// unprobedPlans are the ways pgy diff plans without learning what the
+// extensions a plan creates bring: with --from-empty, and with a connection
+// when the probe fails.
+var unprobedPlans = []struct {
+	name    string
+	offline bool
+}{{"from_empty", true}, {"probe_failed", false}}
+
+// planUnprobed plans y for db without the extension probe: against the
+// snapshot pgy diff --from-empty uses when offline is set, and otherwise
+// against db the way pgy diff does when the probe fails.
+func planUnprobed(t *testing.T, db *pgxpool.Pool, y string, offline bool) *diff.PlanDiff {
+	t.Helper()
+	ctx := context.Background()
+	d, err := schema.LoadAndMerge([]string{writeYAML(t, y)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offline {
+		return diff.PlanWith(offlineLive(), d, diff.Options{})
+	}
+	live, err := diff.Introspect(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := diff.IntrospectExtensions(ctx, db, live, d, diff.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	return diff.PlanWith(live, d, diff.Options{})
 }
 
 // TestIntegrationLanguagesOfPendingExtensions grants on languages an
 // extension of the same plan brings: one not named like the extension that
 // brings it, here through cascade, in a single migration, and an untrusted
-// one, whose statements are skipped instead of failing the migration.
+// one, which a plan that knows what the extensions bring reports and leaves
+// out, and a migration planned without knowing skips instead of failing.
 func TestIntegrationLanguagesOfPendingExtensions(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -700,25 +757,59 @@ languages:
   plperlu:
     grants: {DEV: [usage]}
 `, "DEV", dev)
+	const untrusted = "language plperlu is not trusted: only superusers can use it and PostgreSQL rejects GRANT and REVOKE on it; nothing is planned for it"
+	owner := db.Config().ConnConfig.User
+	granted := aclOf(owner, "="+"U", owner+"=U", dev+"=U")
+	checkACLs := func(how string, db *pgxpool.Pool) {
+		t.Helper()
+		acls := languageACLs(t, db)
+		if acls["plperl"] != granted {
+			t.Errorf("%s: plperl, which bool_plperl brings, is granted in the same migration: ACL %q, want %q", how, acls["plperl"], granted)
+		}
+		if acls["plperlu"] != "" {
+			t.Errorf("%s: nothing is granted on the untrusted plperlu, got ACL %q", how, acls["plperlu"])
+		}
+	}
+
 	plan := planExtensionsLive(t, db, y, diff.Options{})
-	if msgs := warningMessages(plan); msgs != "" {
-		t.Errorf("languages the plan's extensions may bring are not reported, got:\n%s", msgs)
+	if msgs := warningMessages(plan); msgs != untrusted {
+		t.Errorf("the probe finds the untrusted language, which is reported, got:\n%s", msgs)
+	}
+	wantLines := []string{
+		`create extension "bool_plperl" schema "public" cascade;`,
+		`create extension if not exists "plperlu" schema "pg_catalog";`,
+		fmt.Sprintf(`grant usage on language "plperl" to %q;`, dev),
+	}
+	if sql := strings.TrimSpace(diff.Render(plan)); sql != strings.Join(wantLines, "\n") {
+		t.Errorf("got:\n%s\nwant:\n%s", sql, strings.Join(wantLines, "\n"))
 	}
 	applyPlan(t, db, plan)
-	owner := db.Config().ConnConfig.User
-	acls := languageACLs(t, db)
-	if want := aclOf(owner, "="+"U", owner+"=U", dev+"=U"); acls["plperl"] != want {
-		t.Errorf("plperl, which bool_plperl brings, is granted in the same migration: ACL %q, want %q", acls["plperl"], want)
-	}
-	if acls["plperlu"] != "" {
-		t.Errorf("nothing is granted on the untrusted plperlu, got ACL %q", acls["plperlu"])
-	}
+	checkACLs("connected", db)
 	plan = planExtensionsLive(t, db, y, diff.Options{})
 	if sql := diff.Render(plan); sql != "" {
 		t.Errorf("a second diff must be empty, got:\n%s", sql)
 	}
-	if msgs := warningMessages(plan); !strings.Contains(msgs, "language plperlu is not trusted") {
-		t.Errorf("the untrusted language is reported once it exists, got:\n%s", msgs)
+	if msgs := warningMessages(plan); msgs != untrusted {
+		t.Errorf("the untrusted language is still reported, got:\n%s", msgs)
+	}
+
+	for _, how := range unprobedPlans {
+		guarded := freshDatabase(t, admin, "pgytest_language_pending_"+how.name)
+		plan := planUnprobed(t, guarded, y, how.offline)
+		if msgs := warningMessages(plan); msgs != "" {
+			t.Errorf("%s: languages the plan's extensions may bring are not reported, got:\n%s", how.name, msgs)
+		}
+		sql := diff.Render(plan)
+		for _, lang := range []string{"plperl", "plperlu"} {
+			if want := fmt.Sprintf(`do $$ begin if exists (select from pg_catalog.pg_language where lanname = '%s' and lanpltrusted) then grant usage on language %q to %q; end if; end $$;`, lang, lang, dev); !strings.Contains(sql, want) {
+				t.Errorf("%s: want\n%s\nin:\n%s", how.name, want, sql)
+			}
+		}
+		applyPlan(t, guarded, plan)
+		checkACLs(how.name, guarded)
+		if msgs := warningMessages(planExtensionsLive(t, guarded, y, diff.Options{})); msgs != untrusted {
+			t.Errorf("%s: the untrusted language is reported once it exists, got:\n%s", how.name, msgs)
+		}
 	}
 }
 
