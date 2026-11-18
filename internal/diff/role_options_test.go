@@ -28,7 +28,7 @@ func TestMembershipStmts(t *testing.T) {
 	live.RoleMembers["m"] = map[string]bool{"p": true}
 	live.RoleMemberOptions["m"] = map[string]*LiveMembership{"p": {Admin: true, Inherit: true, Set: true}}
 	got := strings.Join(membershipStmts(&PlanDiff{}, live, "m", "p", &schema.MembershipOptions{Admin: &no, Set: &no, Inherit: &yes}), "\n")
-	if got != "revoke admin option for \"p\" from \"m\";\ngrant \"p\" to \"m\" with set false;" {
+	if got != "revoke admin option for \"p\" from \"m\";\nrevoke set option for \"p\" from \"m\";" {
 		t.Errorf("changes: %s", got)
 	}
 	if got := membershipStmts(&PlanDiff{}, live, "m", "p", nil); len(got) != 0 {

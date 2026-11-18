@@ -107,6 +107,15 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 if o.Admin != nil { lm.Admin = *o.Admin }
                 if o.Inherit != nil { lm.Inherit = *o.Inherit }
                 if o.Set != nil { lm.Set = *o.Set }
+                if lm.Grants != nil {
+                    grants := append([]MembershipGrant{}, lm.Grants...)
+                    for i := range grants {
+                        if o.Admin != nil { grants[i].Admin = *o.Admin }
+                        if o.Inherit != nil { grants[i].Inherit = *o.Inherit }
+                        if o.Set != nil { grants[i].Set = *o.Set }
+                    }
+                    lm.Grants = grants
+                }
             }
             out.RoleMemberOptions[name][parent] = lm
         }

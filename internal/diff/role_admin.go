@@ -25,13 +25,16 @@ const (
 
 // roleChange is the role a planned statement changes and how. attrs holds
 // the attributes an ALTER ROLE ... WITH sets or clears (superuser,
-// createdb, replication, bypassrls, ...), grantor the role a REVOKE ...
-// GRANTED BY names.
+// createdb, replication, bypassrls, ...), grantor the role a GRANT or
+// REVOKE ... GRANTED BY names, and options whether that statement changes
+// the options of an existing grant (a REVOKE ... OPTION FOR, or a GRANT
+// that names its grantor) rather than granting or revoking the role.
 type roleChange struct {
 	role    string
 	kind    roleChangeKind
 	attrs   map[string]bool
 	grantor string
+	options bool
 }
 
 // readRoleSpec reads a role specification as the planner writes it, a
@@ -75,22 +78,34 @@ func roleStatement(stmt, currentUser string) (roleChange, bool) {
 			return roleChange{role: name, kind: roleComment}, true
 		}
 	case strings.HasPrefix(s, "grant "):
-		if name, rest, ok := readRoleSpec(s[len("grant "):], currentUser); ok && strings.HasPrefix(rest, " to ") {
-			return roleChange{role: name, kind: roleMembership}, true
+		name, rest, ok := readRoleSpec(s[len("grant "):], currentUser)
+		if !ok || !strings.HasPrefix(rest, " to ") {
+			break
 		}
+		grantor := grantedBy(rest, currentUser)
+		return roleChange{role: name, kind: roleMembership, grantor: grantor, options: grantor != ""}, true
 	case strings.HasPrefix(s, "revoke "):
-		body := trimWords(s[len("revoke "):], "admin option for ", "inherit option for ", "set option for ")
+		what := s[len("revoke "):]
+		body := trimWords(what, "admin option for ", "inherit option for ", "set option for ")
 		name, rest, ok := readRoleSpec(body, currentUser)
 		if !ok || !strings.HasPrefix(rest, " from ") {
 			break
 		}
-		c := roleChange{role: name, kind: roleMembership}
-		if at := strings.LastIndex(rest, " granted by "); at >= 0 {
-			c.grantor, _, _ = readRoleSpec(rest[at+len(" granted by "):], currentUser)
-		}
-		return c, true
+		return roleChange{role: name, kind: roleMembership, grantor: grantedBy(rest, currentUser), options: body != what}, true
 	}
 	return roleChange{}, false
+}
+
+// grantedBy returns the grantor the GRANTED BY clause at the end of rest,
+// the part of a GRANT or REVOKE of a role after its name, names; "" when
+// there is none.
+func grantedBy(rest, currentUser string) string {
+	at := strings.LastIndex(rest, " granted by ")
+	if at < 0 {
+		return ""
+	}
+	grantor, _, _ := readRoleSpec(rest[at+len(" granted by "):], currentUser)
+	return grantor
 }
 
 // roleOptionWords returns the attributes the options of an ALTER ROLE ...
@@ -135,6 +150,22 @@ func (l *Live) adminOf(role string) bool {
 	return false
 }
 
+// grantsAs reports whether the connecting role of l may run GRANT role ...
+// GRANTED BY grantor on PostgreSQL 16 and later, as far as the grantor
+// goes: it has the privileges of grantor (see Live.OwnerRoles; a superuser
+// has every role's, and unknown ones count as had), and grantor is the
+// bootstrap superuser or is a member of role WITH ADMIN OPTION itself.
+func (l *Live) grantsAs(grantor, role string) bool {
+	if cur := l.RoleDefs[l.CurrentUser]; (cur == nil || !cur.Superuser) && l.OwnerRoles != nil && !l.OwnerRoles[grantor] {
+		return false
+	}
+	if g := l.RoleDefs[grantor]; g != nil && g.Bootstrap {
+		return true
+	}
+	lm := l.RoleMemberOptions[grantor][role]
+	return lm != nil && lm.Admin
+}
+
 // roleDenied returns why PostgreSQL rejects c when the connecting role of
 // live runs it, cur being that role's attributes, as the clause that
 // follows "<role>, the connecting role," in a warning; "" when it doesn't.
@@ -173,6 +204,9 @@ func roleDenied(live *Live, cur *LiveRole, c roleChange) string {
 		case !pre16 && !admin:
 			return "does not have the ADMIN option on it, which PostgreSQL 16 and later need to grant or revoke a role"
 		case !pre16 && c.grantor != "" && live.OwnerRoles != nil && !live.OwnerRoles[c.grantor]:
+			if c.options {
+				return "does not have the privileges of " + c.grantor + ", whose grant of the membership the statement changes"
+			}
 			return "does not have the privileges of " + c.grantor + ", which granted the membership the statement revokes"
 		}
 	case roleSettings:
@@ -219,8 +253,8 @@ func roleDenied(live *Live, cur *LiveRole, c roleChange) string {
 // PostgreSQL 16 and later, altering a role or commenting on it takes the
 // CREATEROLE attribute and the ADMIN option on it (see Live.adminOf), which
 // a role holds on the roles it created; granting or revoking it takes the
-// ADMIN option, a REVOKE ... GRANTED BY the privileges of the grantor, and
-// changing CREATEDB, REPLICATION or BYPASSRLS those attributes. On
+// ADMIN option, a GRANT or REVOKE ... GRANTED BY the grantor's privileges,
+// and changing CREATEDB, REPLICATION or BYPASSRLS those attributes. On
 // PostgreSQL 15, CREATEROLE is enough, or the ADMIN option for a GRANT and
 // REVOKE, except that only a superuser may alter a replication role or
 // change REPLICATION or BYPASSRLS. A role may change its own settings. Each

@@ -3576,6 +3576,27 @@ func TestRoleCommentSkippedIfSame(t *testing.T) {
 	}
 }
 
+func TestRoleCommentExternalRoleLeftOut(t *testing.T) {
+	live := emptyLive()
+	live.Roles["plat"] = true
+	live.RoleComments["plat"] = "the platform's"
+	desired := &schema.Database{Roles: map[string]*schema.Role{
+		"plat": {Name: "plat", ConnectionLimit: -1, Comment: "ours"},
+	}}
+	opts := Options{External: &schema.External{Roles: []string{"plat"}}}
+	p := PlanWith(live, desired, opts)
+	if sql := Render(p); sql != "" {
+		t.Errorf("an external role keeps its comment, got:\n%s", sql)
+	}
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "role plat is external (the config's external.roles), so its attributes, settings, memberships and comment are left as they are") {
+		t.Errorf("want the external role warning, got %v", p.Warnings)
+	}
+	delete(live.Roles, "plat")
+	if p := PlanWith(live, desired, opts); !findAlter(p, `comment on role "plat" is 'ours';`) || len(p.Warnings) > 0 {
+		t.Errorf("an external role the plan creates gets its comment; alters: %v, warnings: %v", p.Alters, p.Warnings)
+	}
+}
+
 // --- sequences ---
 
 func seqDesired(key string, sq *schema.Sequence) *schema.Database {

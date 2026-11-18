@@ -319,6 +319,31 @@ type ColumnDependent struct {
 type LiveMembership struct {
     Admin, Inherit, Set bool
     Grantors []string // roles that granted the membership; PostgreSQL 16+ keeps one grant per grantor
+    // Grants: the grant of each of Grantors, in their order, with its own
+    // options; Admin, Inherit and Set are true when any of them has the
+    // option. nil when unknown (see LiveMembership.grants).
+    Grants []MembershipGrant
+}
+
+// MembershipGrant is one grant of a role membership: the role that granted
+// it and the options it gives. PostgreSQL 16 and later keep one per
+// grantor, and a GRANT or REVOKE of an option changes only the grant of
+// the grantor it names (GRANTED BY) or picks.
+type MembershipGrant struct {
+    Grantor string
+    Admin, Inherit, Set bool
+}
+
+// grants returns the grants of lm. Without Grants, each of Grantors, or
+// one unknown grantor ("") when there are none, has the options of lm.
+func (lm *LiveMembership) grants() []MembershipGrant {
+    if lm == nil { return nil }
+    if lm.Grants != nil { return lm.Grants }
+    grantors := lm.Grantors
+    if len(grantors) == 0 { grantors = []string{""} }
+    out := make([]MembershipGrant, 0, len(grantors))
+    for _, g := range grantors { out = append(out, MembershipGrant{Grantor: g, Admin: lm.Admin, Inherit: lm.Inherit, Set: lm.Set}) }
+    return out
 }
 
 // LiveSequence is a sequence's options from pg_sequence. Numeric options are
@@ -2012,14 +2037,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
 
     // Query role memberships
     memQ := `
-        select m.rolname, r.rolname, bool_or(am.admin_option),
-               bool_or(coalesce((to_jsonb(am) ->> 'inherit_option')::boolean, m.rolinherit)),
-               bool_or(coalesce((to_jsonb(am) ->> 'set_option')::boolean, true)),
-               array_agg(distinct coalesce(pg_get_userbyid(am.grantor), '') order by coalesce(pg_get_userbyid(am.grantor), ''))
-        from pg_auth_members am
-        join pg_roles m on m.oid = am.member
-        join pg_roles r on r.oid = am.roleid
-        where m.rolname not like 'pg\_%'
+        select g.member_name, g.role_name, bool_or(g.admin_opt), bool_or(g.inherit_opt), bool_or(g.set_opt),
+               array_agg(g.grantor_name order by g.grantor_name), array_agg(g.admin_opt order by g.grantor_name),
+               array_agg(g.inherit_opt order by g.grantor_name), array_agg(g.set_opt order by g.grantor_name)
+        from (
+            select m.rolname as member_name, r.rolname as role_name, coalesce(pg_get_userbyid(am.grantor), '') as grantor_name,
+                   am.admin_option as admin_opt,
+                   coalesce((to_jsonb(am) ->> 'inherit_option')::boolean, m.rolinherit) as inherit_opt,
+                   coalesce((to_jsonb(am) ->> 'set_option')::boolean, true) as set_opt
+            from pg_auth_members am
+            join pg_roles m on m.oid = am.member
+            join pg_roles r on r.oid = am.roleid
+            where m.rolname not like 'pg\_%'
+        ) g
         group by 1, 2
     `
     colDepQ := `
@@ -2095,9 +2125,15 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
     batch.add(memQ, func(memRows pgx.Rows) error {
         for memRows.Next() {
             var member, parent string
+            var admins, inherits, sets []bool
             lm := &LiveMembership{}
-            if err := memRows.Scan(&member, &parent, &lm.Admin, &lm.Inherit, &lm.Set, &lm.Grantors); err != nil {
+            if err := memRows.Scan(&member, &parent, &lm.Admin, &lm.Inherit, &lm.Set, &lm.Grantors, &admins, &inherits, &sets); err != nil {
                 return err
+            }
+            if len(admins) == len(lm.Grantors) && len(inherits) == len(lm.Grantors) && len(sets) == len(lm.Grantors) {
+                for i, g := range lm.Grantors {
+                    lm.Grants = append(lm.Grants, MembershipGrant{Grantor: g, Admin: admins[i], Inherit: inherits[i], Set: sets[i]})
+                }
             }
             if l.RoleMembers[member] == nil { l.RoleMembers[member] = map[string]bool{} }
             l.RoleMembers[member][parent] = true
@@ -3660,8 +3696,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // changed attributes and settings, and GRANT <parent> TO <role> for missing
 // memberships. Roles are never dropped. With prune, a role whose inRoles is
 // declared also loses the memberships it doesn't list, other than those in
-// external roles. An external role that exists is left as it is, with a
-// warning; settings that are external are never reset.
+// external roles. An external role that exists is left as it is, its
+// comment included (see planComments), with a warning; settings that are
+// external are never reset.
 func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool) {
     names := make([]string, 0, len(desired.Roles))
     for k := range desired.Roles { names = append(names, k) }
@@ -3670,7 +3707,7 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
         r := desired.Roles[name]
         if r == nil { continue }
         if desired.External.HasRole(name) && live.Roles[name] {
-            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s is external (the config's external.roles), so its attributes, settings and memberships are left as they are; its declaration only creates it where it is missing", name)})
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s is external (the config's external.roles), so its attributes, settings, memberships and comment are left as they are; its declaration only creates it where it is missing", name)})
             continue
         }
         if !live.Roles[name] {
@@ -3723,7 +3760,8 @@ func revokeMembershipStmts(live *Live, member string, declared []string) []strin
 }
 
 // membershipStmts grants parent to member with the options o sets, or, for
-// an existing membership, changes the options that differ. WITH INHERIT and
+// an existing membership, changes the options that differ (see
+// membershipOptionStmts for PostgreSQL 16 and later). WITH INHERIT and
 // WITH SET need PostgreSQL 16; on an older server they are skipped with a
 // warning.
 func membershipStmts(plan *PlanDiff, live *Live, member, parent string, o *schema.MembershipOptions) []string {
@@ -3754,6 +3792,7 @@ func membershipStmts(plan *PlanDiff, live *Live, member, parent string, o *schem
     }
     lm := live.RoleMemberOptions[member][parent]
     if lm == nil { return nil }
+    if live.ServerVersion >= 160000 { return membershipOptionStmts(live, member, parent, o, lm) }
     out := []string{}
     if o.Admin != nil && *o.Admin != lm.Admin {
         if *o.Admin {
@@ -3772,6 +3811,62 @@ func membershipStmts(plan *PlanDiff, live *Live, member, parent string, o *schem
         }
     }
     return out
+}
+
+// membershipOptionStmts changes the options o sets that differ on member's
+// existing membership lm in parent, on PostgreSQL 16 and later. There each
+// grant of a membership has options of its own, the membership has an
+// option when any of its grants has it, and a GRANT or REVOKE changes only
+// the grant of the grantor it names (GRANTED BY) or, without one, the one
+// PostgreSQL picks for the connecting role. An option o clears is revoked from every grant that has
+// it, GRANTED BY its grantor; leaveOutUnadministrable leaves out the ones
+// the connecting role may not run. An option o sets is granted again by
+// the grantor of a grant that the connecting role may grant as (see
+// Live.grantsAs), or else in a new grant of the connecting role, which
+// also clears the options whose defaults (INHERIT the member's attribute,
+// SET true) would give the membership one that o clears or it lacks.
+func membershipOptionStmts(live *Live, member, parent string, o *schema.MembershipOptions, lm *LiveMembership) []string {
+    grants := lm.grants()
+    inheritDefault := true
+    if lr := live.RoleDefs[member]; lr != nil { inheritDefault = lr.Inherit }
+    out, regrant, fresh := []string{}, []string{}, []string{}
+    for _, f := range []struct {
+        name string
+        want *bool
+        has  func(MembershipGrant) bool
+        def  bool
+    }{
+        {"admin", o.Admin, func(g MembershipGrant) bool { return g.Admin }, false},
+        {"inherit", o.Inherit, func(g MembershipGrant) bool { return g.Inherit }, inheritDefault},
+        {"set", o.Set, func(g MembershipGrant) bool { return g.Set }, true},
+    } {
+        have := false
+        for _, g := range grants { have = have || f.has(g) }
+        switch {
+        case f.want != nil && *f.want && !have:
+            regrant, fresh = append(regrant, f.name+" true"), append(fresh, f.name+" true")
+        case f.want != nil && !*f.want && have:
+            for _, g := range grants {
+                if !f.has(g) { continue }
+                by := ""
+                if g.Grantor != "" { by = " granted by " + grantRole(g.Grantor) }
+                out = append(out, fmt.Sprintf("revoke %s option for %s from %s%s;", f.name, grantRole(parent), grantRole(member), by))
+            }
+        }
+        if f.def && (f.want != nil && !*f.want || f.want == nil && !have) { fresh = append(fresh, f.name+" false") }
+    }
+    if len(regrant) == 0 { return out }
+    with := func(opts []string) string {
+        if len(opts) == 1 && opts[0] == "admin true" { return " with admin option" }
+        return " with " + strings.Join(opts, ", ")
+    }
+    target := grantRole(parent) + " to " + grantRole(member)
+    for _, g := range grants {
+        if g.Grantor != "" && live.grantsAs(g.Grantor, parent) {
+            return append(out, "grant "+target+with(regrant)+" granted by "+grantRole(g.Grantor)+";")
+        }
+    }
+    return append(out, "grant "+target+with(fresh)+";")
 }
 
 // normalizeValidUntil puts a VALID UNTIL value in the form introspection
@@ -5324,7 +5419,8 @@ func ownedByIdent(seq, s string) string {
 }
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
-// differs from live. Empty desired comment = unmanaged (never cleared).
+// differs from live. Empty desired comment = unmanaged (never cleared). An
+// external role that exists keeps its comment, as planRoles warns.
 func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
@@ -5345,7 +5441,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     sort.Strings(roleNames)
     for _, k := range roleNames {
         r := desired.Roles[k]
-        if r == nil { continue }
+        if r == nil || desired.External.HasRole(k) && live.Roles[k] { continue }
         comment("role "+grantRole(k), r.Comment, live.RoleComments[k])
     }
 
