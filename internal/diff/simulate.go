@@ -46,6 +46,9 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             if st != nil && st.Schema != "" { out.Schemas[st.Schema] = true }
         }
     }
+    for _, s := range desired.DeclaredSchemas() {
+        if !systemSchema(s) { out.Schemas[s] = true }
+    }
     for s, g := range desired.SchemaGrants {
         out.SchemaGrants[s] = simulateGrants(out.SchemaGrants[s], g)
     }

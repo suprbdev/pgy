@@ -228,7 +228,7 @@ Without flags, `pgy diff` only adds and adjusts. It creates missing objects, add
 
 Without `--unsafe`, `pgy diff` still plans those changes to report them: each statement it left out gets a `needs --unsafe, so it was left out` warning (the first 20 are printed; `--json` lists them all with kind `unsafe`), so a YAML change never goes unnoticed. `ci.fail_on: [unsafe]` makes `--strict` fail on them.
 
-`--unsafe --prune` also drops what the YAML no longer declares, in every schema the YAML declares at least one object in:
+`--unsafe --prune` also drops what the YAML no longer declares, in every schema the YAML declares at least one object in (a schema block without objects, such as `schema reports: {}` or one that only sets grants, creates its schema but doesn't put it in scope):
 
 - tables, views, materialized views, functions, procedures, aggregates, sequences, domains, enum/composite/range types, collations, text search configurations and dictionaries
 - triggers, foreign keys, check/unique/exclude constraints and indexes on declared tables, and indexes on declared materialized views

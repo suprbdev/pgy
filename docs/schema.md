@@ -170,6 +170,8 @@ schema public:
       - table public.users
 ```
 
+A `schema <name>:` block, or a `schemas:` entry, creates its schema where the database lacks it, also when it holds only `grants`, `comment` or `owner`, or nothing at all: `schema reports: {}`, which `pgy pull` writes for a schema without other objects. `public`, the system schemas (`pg_catalog`, `information_schema`) and the schemas the config's `external:` block lists are never created. When the plan creates an extension, a schema that only such a block asks for (no object pgy creates is in it) is created after the extension with `CREATE SCHEMA IF NOT EXISTS`, because the extension's script may create that schema itself and fail if it already exists. A block on its own doesn't put the schema in reach of `--prune`, which only drops what is undeclared in the schemas the YAML declares objects in: `schema reports: {}` or a `schema public:` block that only sets grants leaves the undeclared tables in that schema alone.
+
 ### Format 2: `tables:` map
 
 Supports tables only. Column order in `CREATE TABLE` is **not** preserved (sorted alphabetically).

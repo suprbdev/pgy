@@ -2938,7 +2938,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired = viewsCreatedAsViews(live, desired)
-    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, membersPending(live, extensions.Creates))
+    pendingMembers := membersPending(live, extensions.Creates)
+    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pendingMembers)
     live, renames := applyRenames(live, desired)
     live = applyExprProbes(live, desired)
     liveTransforms := routineTransforms(live)
@@ -3052,6 +3053,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
 
+    var schemasAfterExtensions []string
+    for _, s := range desired.DeclaredSchemas() {
+        if neededSchemas[s] || live.Schemas[s] { continue }
+        if pendingMembers { schemasAfterExtensions = append(schemasAfterExtensions, s) } else { neededSchemas[s] = true }
+    }
+
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
@@ -3085,6 +3092,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     updates, extensionCreates := separateExtensionUpdates(extensions.Creates, live, desired)
     plan.ExtensionUpdates = updates
     plan.Creates = append(plan.Creates, extensionCreates...)
+    for _, s := range schemasAfterExtensions {
+        if s == "public" || systemSchema(s) || desired.External.HasSchema(s) { continue }
+        plan.Creates = append(plan.Creates, fmt.Sprintf("create schema if not exists %s;", quoteIdent(s)))
+    }
     plan.Alters = append(plan.Alters, extensions.Alters...)
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, withoutExternalSettings(desired.External, live.DatabaseConfig, desired.DatabaseSettings)) {

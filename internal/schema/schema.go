@@ -50,6 +50,12 @@ type Database struct {
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
+    // Schemas holds the schemas a `schema <name>:` block or a schemas:
+    // entry declares, whatever the block holds, nothing included. pgy
+    // creates such a schema where it is missing. The block alone does not
+    // put the schema's undeclared objects in reach of --prune, which only
+    // considers the schemas the YAML declares objects in.
+    Schemas map[string]bool `yaml:"-"`
     DefaultPrivileges []*DefaultPrivilege `yaml:"-"`
     DatabaseSettings  map[string]string   `yaml:"-"` // ALTER DATABASE ... SET for the target database; nil = unmanaged
     DatabaseRoleSettings map[string]map[string]string `yaml:"-"` // role -> ALTER ROLE ... IN DATABASE ... SET settings
@@ -1114,6 +1120,10 @@ func Merge(dbs []*Database) *Database {
             if merged.SchemaOwners == nil { merged.SchemaOwners = map[string]string{} }
             for k, v := range d.SchemaOwners { merged.SchemaOwners[k] = v }
         }
+        for s := range d.Schemas {
+            if merged.Schemas == nil { merged.Schemas = map[string]bool{} }
+            merged.Schemas[s] = true
+        }
         merged.DefaultPrivileges = append(merged.DefaultPrivileges, d.DefaultPrivileges...)
         if d.DatabaseSettings != nil {
             if merged.DatabaseSettings == nil { merged.DatabaseSettings = map[string]string{} }
@@ -1147,6 +1157,27 @@ func cloneTable(t *Table) *Table {
     c.DependsOn = append([]string(nil), t.DependsOn...)
     c.ColumnOrder = append([]string(nil), t.ColumnOrder...)
     return &c
+}
+
+func (d *Database) declareSchema(name string) {
+    if name == "" { return }
+    if d.Schemas == nil { d.Schemas = map[string]bool{} }
+    d.Schemas[name] = true
+}
+
+// DeclaredSchemas returns, sorted, the schemas d has a block for: those in
+// Schemas and those whose grants, owner or comment it sets.
+func (d *Database) DeclaredSchemas() []string {
+    if d == nil { return nil }
+    seen := map[string]bool{}
+    for s := range d.Schemas { seen[s] = true }
+    for s := range d.SchemaGrants { seen[s] = true }
+    for s := range d.SchemaOwners { seen[s] = true }
+    for s := range d.SchemaComments { seen[s] = true }
+    out := make([]string, 0, len(seen))
+    for s := range seen { out = append(out, s) }
+    sort.Strings(out)
+    return out
 }
 
 func ownsColumns(t *Table) bool {
@@ -1214,6 +1245,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     if schRaw, ok := root["schemas"]; ok {
         if m, ok := schRaw.(map[string]any); ok {
             for schemaName, v := range m {
+                out.declareSchema(schemaName)
                 // intercept schema-level grants/comment so they are not parsed as tables
                 if inner, ok := v.(map[string]any); ok {
                     if gRaw, ok := inner["grants"]; ok {
@@ -1290,6 +1322,7 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
     for k, v := range root {
         if strings.HasPrefix(k, "schema ") {
             schemaName := bareName(strings.TrimSpace(strings.TrimPrefix(k, "schema ")))
+            out.declareSchema(schemaName)
             mergeSchemaBlock(out, schemaName, v)
             // fill column order from node if available
             fillColumnOrderFromNode(node, out, schemaName)
