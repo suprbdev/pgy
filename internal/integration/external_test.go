@@ -189,7 +189,7 @@ schema storage:
 	noExternal := opts
 	noExternal.External = nil
 	sql = planExternal(t, app, managed, noExternal)
-	for _, want := range []string{`revoke select on table "public"."todos" from ` + q(roles["plat_reader"]), "reset pgrst.db_schemas", `drop policy "platform_service"`, `drop trigger "platform_audit"`} {
+	for _, want := range []string{`revoke select on table "public"."todos" from ` + q(roles["plat_reader"]), "reset pgrst.db_schemas", `drop policy "platform_service"`, `delete from only "storage"."buckets"`} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("without the external block %q is planned, got:\n%s", want, sql)
 		}
