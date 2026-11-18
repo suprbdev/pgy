@@ -99,6 +99,9 @@ type Live struct{
     // (pg_has_role(current_user, role, 'USAGE'), itself included, every
     // role for a superuser); nil when unknown, and then any owner counts.
     OwnerRoles map[string]bool
+    // DatabaseOwner is the role that owns the connected database, which
+    // ALTER DATABASE ... SET needs; "" when unknown.
+    DatabaseOwner string
     // DatabaseConfig: ALTER DATABASE ... SET settings of the connected
     // database (for all roles): lower-cased name -> value
     DatabaseConfig map[string]string
@@ -2416,10 +2419,11 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
                       coalesce((select s.setconfig from pg_db_role_setting s join pg_database d on d.oid = s.setdatabase
                                 where d.datname = current_database() and s.setrole = 0), '{}'::text[]),
                       coalesce((select t.spcname::text from pg_database d join pg_tablespace t on t.oid = d.dattablespace where d.datname = current_database()), ''),
-                      current_setting('default_table_access_method')`, func(rows pgx.Rows) error {
+                      current_setting('default_table_access_method'),
+                      coalesce((select pg_get_userbyid(d.datdba)::text from pg_database d where d.datname = current_database()), '')`, func(rows pgx.Rows) error {
         for rows.Next() {
             var config []string
-            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace, &l.DefaultAccessMethod); err != nil { return err }
+            if err := rows.Scan(&l.CurrentUser, &l.ServerVersion, &config, &l.DefaultTablespace, &l.DefaultAccessMethod, &l.DatabaseOwner); err != nil { return err }
             l.DatabaseConfig = parseProconfig(config)
         }
         return nil
@@ -2950,14 +2954,16 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     desired = withExternal(desired, opts)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
+    base := live
     desired = expandAllPrivileges(desired, live.ServerVersion)
     extensions := &PlanDiff{}
     planExtensions(extensions, live, desired)
     desired = viewsCreatedAsViews(live, desired)
-    pending := membersPending(live, extensions.Creates)
+    pendingMembers := membersPending(live, extensions.Creates)
     extensions.Warnings = append(extensions.Warnings, offlineExtensionTablesWarning(live, desired, extensions.Creates)...)
-    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pending)
+    desired, attributeOnlyWarnings := resolveAttributeOnly(live, desired, pendingMembers)
     live, renames := applyRenames(live, desired)
+    renamed := live
     live = applyExprProbes(live, desired)
     liveTransforms := routineTransforms(live)
     live, recreated, recreateWarnings := recreateChangedFunctions(live, desired, unsafe)
@@ -3070,6 +3076,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         }
     }
 
+    var schemasAfterExtensions []string
+    for _, s := range desired.DeclaredSchemas() {
+        if neededSchemas[s] || live.Schemas[s] { continue }
+        if pendingMembers { schemasAfterExtensions = append(schemasAfterExtensions, s) } else { neededSchemas[s] = true }
+    }
+
     // Generate CREATE SCHEMA statements for missing schemas (public is always present)
     // SCHEMAS HAVE HIGHEST PRIORITY - must be created first
     schemaNames := make([]string, 0, len(neededSchemas))
@@ -3103,6 +3115,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     updates, extensionCreates := separateExtensionUpdates(extensions.Creates, live, desired)
     plan.ExtensionUpdates = updates
     plan.Creates = append(plan.Creates, extensionCreates...)
+    for _, s := range schemasAfterExtensions {
+        if s == "public" || systemSchema(s) || desired.External.HasSchema(s) { continue }
+        plan.Creates = append(plan.Creates, fmt.Sprintf("create schema if not exists %s;", quoteIdent(s)))
+    }
     plan.Alters = append(plan.Alters, extensions.Alters...)
     plan.Warnings = append(plan.Warnings, extensions.Warnings...)
     for _, c := range configClauses(desired.DatabaseSettings, withoutExternalSettings(desired.External, live.DatabaseConfig, desired.DatabaseSettings)) {
@@ -3389,7 +3405,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
             if attributeOnly(desired, "table", e.Key) {
                 if lt := live.Tables[e.Key]; lt != nil && len(dt.Triggers) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Triggers: dt.Triggers}, lt, &deferredFKs, &deferredTriggers, unsafe)
-                } else if lt == nil && pending {
+                } else if lt == nil && pendingMembers {
                     deferredTriggers = append(deferredTriggers, pendingTriggerStmts(e.Key, dt)...)
                 }
                 continue
@@ -3597,7 +3613,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
     plan.Alters = append(plan.Alters, dataWrites...)
     plan.Alters = append(plan.Alters, deferredFKs...)
-    planPolicies(plan, live, desired, unsafe, pending)
+    planPolicies(plan, live, desired, unsafe, pendingMembers)
     planPublications(plan, live, desired, opts)
     plan.Drops = append(plan.Drops, columnDrops...)
     plan.Alters = append(plan.Alters, planOwners(live, desired)...)
@@ -3625,6 +3641,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         planExtensionDrops(plan, live, desired, opts)
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
+    leaveOutNotOwned(plan, desired, base, renamed)
     if !keepsBodyChecks(plan, routineCreates) { plan.Creates = uncheckedRoutineCreates(plan.Creates, routineCreates) }
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, desired, plan)...)

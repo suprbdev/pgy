@@ -35,8 +35,8 @@ func TestExtensionSchemaPending(t *testing.T) {
 		},
 	}
 	sql, _ := planSQL(t, live, d, Options{})
-	if strings.Contains(sql, "create schema") {
-		t.Errorf("a schema that only declarations of existing objects name is the extension's to create:\n%s", sql)
+	if at := strings.Index(sql, `create schema if not exists "pdb";`); at < 0 || at < strings.Index(sql, "create extension") {
+		t.Errorf("a schema that only a schema block and declarations of existing objects name may be the extension's to create, so it is created after it, where it is still missing:\n%s", sql)
 	}
 	for _, want := range []string{
 		`revoke all on schema "pdb" from public;`,
@@ -53,7 +53,7 @@ func TestExtensionSchemaPending(t *testing.T) {
 	}
 
 	d.Tables["pdb.own"] = &schema.Table{Name: "pdb.own", ColumnsSet: true, Columns: map[string]*schema.Column{"id": {Type: "int"}}}
-	if sql, _ := planSQL(t, live, d, Options{}); !strings.Contains(sql, `create schema if not exists "pdb";`) {
-		t.Errorf("a table pgy creates still needs its schema:\n%s", sql)
+	if sql, _ := planSQL(t, live, d, Options{}); strings.Count(sql, `create schema if not exists "pdb";`) != 1 || strings.Index(sql, "create schema") > strings.Index(sql, "create extension") {
+		t.Errorf("a table pgy creates still needs its schema, ahead of everything:\n%s", sql)
 	}
 }

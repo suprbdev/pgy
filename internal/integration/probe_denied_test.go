@@ -82,7 +82,10 @@ func TestIntegrationProbesDenied(t *testing.T) {
 
 	want := []string{`alter table "hidden"."p" alter column "ttl" set default '1 hour'::interval;`}
 	for _, opts := range []diff.Options{{}, {Unsafe: true}} {
-		p := diff.PlanWith(live, d, opts)
+		if p := diff.PlanWith(live, d, opts); len(p.Alters) > 0 || len(p.Creates) > 0 || !strings.Contains(strings.Join(notOwnerMessages(p), "\n"), "table hidden.p is owned by ") {
+			t.Errorf("the role doesn't own hidden.p, so the change is left out with a not_owner warning (%+v), got %v %v", opts, p.Alters, p.Warnings)
+		}
+		p := diff.PlanWith(asOwner(live), d, opts)
 		if got := p.Creates; len(got) > 0 {
 			t.Errorf("nothing is replaced because a comparison couldn't run (%+v), got %v", opts, got)
 		}
