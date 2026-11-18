@@ -392,6 +392,9 @@ type queryBatch struct {
     // searchPath is the session's search_path (see Live.SearchPath), which
     // run reads before it pins the batch's own.
     searchPath []string
+    // setup holds statements that change the database, which run before
+    // the queries see it; the transaction is then rolled back.
+    setup []string
 }
 
 func (b *queryBatch) add(sql string, handle func(pgx.Rows) error, args ...any) {
@@ -406,19 +409,27 @@ func (b *queryBatch) add(sql string, handle func(pgx.Rows) error, args ...any) {
 // off: catalog queries never gain from it, and on large catalogs their cost
 // estimates cross jit_above_cost and compiling doubles introspection time.
 // The transaction's search_path is pinned (see pinSearchPathQ), so what
-// the queries deparse does not depend on the session.
+// the queries deparse does not depend on the session. With setup
+// statements the transaction is read-write, runs them on the session's
+// search_path first, and is rolled back.
 func (b *queryBatch) run(ctx context.Context, pool *pgxpool.Pool) error {
     batch := &pgx.Batch{}
-    batch.Queue("begin isolation level repeatable read read only")
+    begin, end := "begin isolation level repeatable read read only", "commit"
+    if len(b.setup) > 0 { begin, end = "begin isolation level repeatable read", "rollback" }
+    batch.Queue(begin)
     batch.Queue("set local jit = off")
+    for _, s := range b.setup { batch.Queue(s) }
     batch.Queue(sessionSearchPathQ)
     batch.Queue(pinSearchPathQ)
     for i, q := range b.sqls { batch.Queue(q, b.args[i]...) }
-    batch.Queue("commit")
+    batch.Queue(end)
     br := pool.SendBatch(ctx, batch)
     defer func() { _ = br.Close() }()
     for j := 0; j < 2; j++ {
         if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }
+    }
+    for _, s := range b.setup {
+        if _, err := br.Exec(); err != nil { return &setupError{stmt: s, err: err} }
     }
     if err := br.QueryRow().Scan(&b.searchPath); err != nil { return fmt.Errorf("introspection: %w", err) }
     if _, err := br.Exec(); err != nil { return fmt.Errorf("introspection: %w", err) }

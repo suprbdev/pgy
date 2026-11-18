@@ -104,21 +104,28 @@ func queryUpdateDependents(batch *queryBatch, live *Live, names []string) {
 // separateExtensionUpdates takes out of creates, the extension statements
 // of a plan, the ALTER EXTENSION ... UPDATE statements that can run before
 // everything else (see PlanDiff.ExtensionUpdates): those of installed
-// extensions whose new version requires only installed extensions, and
-// whose dependent views and materialized views are all still in live, the
-// snapshot as the rest of the plan sees it. An update the plan drops such a
-// view for stays where it is, since the drop has to precede it and share a
-// transaction with it and with the view's recreation.
+// extensions whose new version requires only installed extensions, none of
+// them updated in the main migration, and whose dependent views and
+// materialized views are all still in live, the snapshot as the rest of the
+// plan sees it. An update the plan drops such a view for stays where it is,
+// since the drop has to precede it and share a transaction with it and with
+// the view's recreation, and so do the updates of the extensions that
+// require it, which keeps every update after those of the extensions it
+// requires.
 func separateExtensionUpdates(creates []string, live *Live, desired *schema.Database) (updates, rest []string) {
-	movable := map[string]bool{}
+	movable, stays := map[string]bool{}, map[string]bool{}
 	for _, ext := range orderedExtensions(live, desired) {
 		le := live.ExtensionDefs[ext.Name]
 		if ext.Version == "" || !live.Extensions[ext.Name] || le == nil {
 			continue
 		}
+		stmt := fmt.Sprintf("alter extension %s update to %s;", quoteIdent(ext.Name), quoteString(ext.Version))
+		if !slices.Contains(creates, stmt) {
+			continue
+		}
 		ready := true
 		for _, r := range extensionRequires(live, ext) {
-			ready = ready && live.Extensions[r]
+			ready = ready && live.Extensions[r] && !stays[r]
 		}
 		for _, d := range le.UpdateDependents {
 			if d.Kind == "view" || d.Kind == "matview" {
@@ -129,7 +136,9 @@ func separateExtensionUpdates(creates []string, live *Live, desired *schema.Data
 			}
 		}
 		if ready {
-			movable[fmt.Sprintf("alter extension %s update to %s;", quoteIdent(ext.Name), quoteString(ext.Version))] = true
+			movable[stmt] = true
+		} else {
+			stays[ext.Name] = true
 		}
 	}
 	for _, s := range creates {

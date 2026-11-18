@@ -28,6 +28,9 @@ func planExtensionsLive(t *testing.T, pool *pgxpool.Pool, y string, opts diff.Op
 	if err := diff.IntrospectExtensions(ctx, pool, live, d, opts); err != nil {
 		t.Fatal(err)
 	}
+	if err := diff.ProbeExtensionObjects(ctx, pool, live, d, opts); err != nil {
+		t.Logf("pgy diff warns and plans without the extensions' objects: %v", err)
+	}
 	if err := diff.ProbeViews(ctx, pool, live, d); err != nil {
 		t.Fatal(err)
 	}
