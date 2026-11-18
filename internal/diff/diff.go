@@ -3696,8 +3696,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
 // changed attributes and settings, and GRANT <parent> TO <role> for missing
 // memberships. Roles are never dropped. With prune, a role whose inRoles is
 // declared also loses the memberships it doesn't list, other than those in
-// external roles. An external role that exists is left as it is, with a
-// warning; settings that are external are never reset.
+// external roles. An external role that exists is left as it is, its
+// comment included (see planComments), with a warning; settings that are
+// external are never reset.
 func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool) {
     names := make([]string, 0, len(desired.Roles))
     for k := range desired.Roles { names = append(names, k) }
@@ -3706,7 +3707,7 @@ func planRoles(plan *PlanDiff, live *Live, desired *schema.Database, prune bool)
         r := desired.Roles[name]
         if r == nil { continue }
         if desired.External.HasRole(name) && live.Roles[name] {
-            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s is external (the config's external.roles), so its attributes, settings and memberships are left as they are; its declaration only creates it where it is missing", name)})
+            plan.Warnings = append(plan.Warnings, Warning{Message: fmt.Sprintf("role %s is external (the config's external.roles), so its attributes, settings, memberships and comment are left as they are; its declaration only creates it where it is missing", name)})
             continue
         }
         if !live.Roles[name] {
@@ -5418,7 +5419,8 @@ func ownedByIdent(seq, s string) string {
 }
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
-// differs from live. Empty desired comment = unmanaged (never cleared).
+// differs from live. Empty desired comment = unmanaged (never cleared). An
+// external role that exists keeps its comment, as planRoles warns.
 func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
@@ -5439,7 +5441,7 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
     sort.Strings(roleNames)
     for _, k := range roleNames {
         r := desired.Roles[k]
-        if r == nil { continue }
+        if r == nil || desired.External.HasRole(k) && live.Roles[k] { continue }
         comment("role "+grantRole(k), r.Comment, live.RoleComments[k])
     }
 
