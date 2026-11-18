@@ -3649,6 +3649,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     }
     plan.Creates = append(append(viewDrops, partitionDetaches...), plan.Creates...)
     leaveOutNotOwned(plan, desired, base, renamed)
+    leaveOutUnadministrable(plan, desired, base)
     if !keepsBodyChecks(plan, routineCreates) { plan.Creates = uncheckedRoutineCreates(plan.Creates, routineCreates) }
     plan.Warnings = append(plan.Warnings, versionWarnings(live, desired)...)
     plan.Warnings = append(plan.Warnings, lockWarnings(live, desired, plan)...)
