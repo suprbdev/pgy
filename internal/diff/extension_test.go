@@ -89,6 +89,35 @@ func TestExtensionCreateOrderServerRequirements(t *testing.T) {
 	})
 }
 
+func TestExtensionCreateOrderUnavailableContribRequirements(t *testing.T) {
+	live := emptyLive()
+	live.ServerVersion = 180000
+	live.AvailableExtensions = map[string]*AvailableExtension{"hstore": {DefaultVersion: "1.8", Requires: map[string][]string{"1.8": {}}}}
+	d := &schema.Database{Extensions: []*schema.Extension{{Name: "bool_plperl"}, {Name: "hstore_plperl"}, {Name: "hstore"}, {Name: "plperl"}}}
+	p := Plan(live, d, false)
+	wantStatements(t, extensionCreates(p), []string{
+		`create extension "plperl";`,
+		`create extension "bool_plperl";`,
+		`create extension "hstore";`,
+		`create extension "hstore_plperl";`,
+	})
+	if len(p.Warnings) != 3 || !strings.Contains(p.Warnings[1].Message, "extension bool_plperl is not available on this server") {
+		t.Errorf("want a warning for each extension the server lacks, got %v", p.Warnings)
+	}
+
+	live.AvailableExtensions["plperl"] = &AvailableExtension{DefaultVersion: "1.0", Requires: map[string][]string{"1.0": {}}}
+	live.AvailableExtensions["bool_plperl"] = &AvailableExtension{DefaultVersion: "1.0", Requires: map[string][]string{"1.0": {"plperl"}}}
+	d.Extensions = []*schema.Extension{{Name: "bool_plperl", Version: "9.9"}, {Name: "plperl"}}
+	p = Plan(live, d, false)
+	wantStatements(t, extensionCreates(p), []string{
+		`create extension "plperl";`,
+		`create extension "bool_plperl" version '9.9';`,
+	})
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0].Message, "extension bool_plperl: version 9.9 is not available") {
+		t.Errorf("want a warning for the missing version, got %v", p.Warnings)
+	}
+}
+
 func TestExtensionCascadeMakesLaterCreatesIdempotent(t *testing.T) {
 	d := &schema.Database{Extensions: []*schema.Extension{{Name: "a_needs_b", Cascade: true}, {Name: "b_required"}}}
 	wantStatements(t, extensionCreates(Plan(emptyLive(), d, false)), []string{

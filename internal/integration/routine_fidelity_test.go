@@ -122,11 +122,10 @@ func TestIntegrationPLPythonIndentedBodyRunsAfterRebuild(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
 	src := freshDatabase(t, admin, "pgytest_routine_plpython")
-	if _, err := src.Exec(ctx, `create extension plpython3u`); err != nil {
-		t.Skipf("plpython3u is not available on this server: %v", err)
-	}
+	requireLanguage(t, src, "plpython3u")
 	dst := freshDatabase(t, admin, "pgytest_routine_plpython_copy")
 	if _, err := src.Exec(ctx, `
+		create extension plpython3u;
 		create extension hstore;
 		create extension hstore_plpython3u;
 		create function public.sign(a integer) returns integer language plpython3u as $$

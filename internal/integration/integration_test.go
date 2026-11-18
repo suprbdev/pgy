@@ -36,6 +36,20 @@ func connect(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// requireLanguage skips the test when db cannot create extension, a
+// procedural language such as plperl, whose runtime the server may lack.
+// With PGY_TEST_REQUIRE_PL set, as in CI, which installs the runtimes, the
+// test fails instead.
+func requireLanguage(t *testing.T, db *pgxpool.Pool, extension string) {
+	t.Helper()
+	if _, err := db.Exec(context.Background(), fmt.Sprintf("create extension %q; drop extension %q", extension, extension)); err != nil {
+		if os.Getenv("PGY_TEST_REQUIRE_PL") != "" {
+			t.Fatalf("this server cannot load %s, which PGY_TEST_REQUIRE_PL requires: %v", extension, err)
+		}
+		t.Skipf("this server cannot load %s: %v", extension, err)
+	}
+}
+
 // freshSchema creates a unique schema for each test and drops it on cleanup.
 func freshSchema(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()

@@ -42,7 +42,9 @@ func systemSchema(name string) bool {
 // extensionRequires returns the extensions ext has to be created after:
 // its dependsOn entries naming extensions, and the ones the version being
 // installed requires according to the server, or to contribRequires when
-// the server's extensions are unknown.
+// the server's extensions are unknown or the server lacks that version, so
+// that a migration planned against a server without the extension still
+// creates it in order where it is installed.
 func extensionRequires(live *Live, ext *schema.Extension) []string {
     out := []string{}
     for _, dep := range ext.DependsOn {
@@ -50,15 +52,12 @@ func extensionRequires(live *Live, ext *schema.Extension) []string {
             out = append(out, strings.Trim(strings.TrimSpace(name), `"`))
         }
     }
-    if live == nil || live.AvailableExtensions == nil {
-        return append(out, contribRequires[ext.Name]...)
+    if live != nil {
+        if av := live.AvailableExtensions[ext.Name]; av != nil {
+            if reqs, ok := av.Requires[cmp.Or(ext.Version, av.DefaultVersion)]; ok { return append(out, reqs...) }
+        }
     }
-    if av := live.AvailableExtensions[ext.Name]; av != nil {
-        version := ext.Version
-        if version == "" { version = av.DefaultVersion }
-        out = append(out, av.Requires[version]...)
-    }
-    return out
+    return append(out, contribRequires[ext.Name]...)
 }
 
 // orderedExtensions returns the declared extensions with each one after

@@ -270,6 +270,7 @@ schema app:
 func TestIntegrationExtensionCreateOrder(t *testing.T) {
 	admin := connect(t)
 	db := freshDatabase(t, admin, "pgytest_ext_order")
+	requireLanguage(t, db, "plperl")
 	const y = `
 extensions:
   - {name: bool_plperl, schema: public}
@@ -300,12 +301,7 @@ database:
 	for _, w := range plan.Warnings {
 		t.Errorf("unexpected warning: %s", w.Message)
 	}
-	if stmt, err := applyAsMigrations(context.Background(), db, plan); err != nil {
-		if strings.Contains(err.Error(), "could not load library") || strings.Contains(err.Error(), "could not access file") {
-			t.Skipf("this server cannot load PL/Perl: %v", err)
-		}
-		t.Fatalf("%q: %v", stmt, err)
-	}
+	applyPlan(t, db, plan)
 	if sql := diff.Render(planExtensionsLive(t, db, y, diff.Options{Unsafe: true, Prune: true})); sql != "" {
 		t.Errorf("second diff must be clean:\n%s", sql)
 	}
