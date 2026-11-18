@@ -907,8 +907,10 @@ func dependentViews(live *Live, byRelation map[string][]ColumnDependent, rel str
 // have to drop and create again with it: the dependents of a column whose
 // type changes, of a view it drops or of an extension update, and a new
 // object that a left-out statement creates. One warning of kind not_owner
-// names each such object and its owner, but for an owner the config's
-// external.roles lists. base is the snapshot the plan was made from,
+// names each such object and its owner, an owner the config's
+// external.roles lists included: everything left out here is something the
+// YAML asks for, since --prune leaves out what external roles own before.
+// base is the snapshot the plan was made from,
 // renamed the same after the plan's renames. Without a connection
 // (OwnerRoles nil) nothing is left out.
 func leaveOutNotOwned(plan *PlanDiff, desired *schema.Database, base, renamed *Live) {
@@ -1085,7 +1087,7 @@ func leaveOutNotOwned(plan *PlanDiff, desired *schema.Database, base, renamed *L
 	for _, k := range sortedKeys(denied) {
 		owner, isForeign := foreign(k)
 		root := uf.find(k)
-		if !isForeign || desired.External.HasRole(owner) {
+		if !isForeign {
 			continue
 		}
 		var coupled, others []string
@@ -1098,7 +1100,7 @@ func leaveOutNotOwned(plan *PlanDiff, desired *schema.Database, base, renamed *L
 		if len(removed[k])+len(coupled) == 0 {
 			continue
 		}
-		w := notOwnerLeftOutWarning(base, ix.describe(k), owner, removed[k], coupled, others, grantsOnly[k])
+		w := notOwnerLeftOutWarning(base, ix.describe(k), owner, removed[k], coupled, others, grantsOnly[k], desired.External.HasRole(owner))
 		merged := false
 		prefix := ix.describe(k) + " is owned by " + owner + ","
 		for i := range plan.Warnings {
@@ -1132,8 +1134,8 @@ func dropsRelations(head string) bool {
 // the owner's privileges, and coupled, those for the objects others names,
 // which can't run without them, or while the object depends on those
 // objects. grants says that only GRANT and REVOKE statements of its own
-// were rejected.
-func notOwnerLeftOutWarning(live *Live, object, owner string, own, coupled, others []string, grants bool) Warning {
+// were rejected, external that the config's external.roles lists owner.
+func notOwnerLeftOutWarning(live *Live, object, owner string, own, coupled, others []string, grants, external bool) Warning {
 	lacks := "does not have that role's privileges"
 	if grants {
 		lacks = "has neither that role's privileges nor the grant options the statements need"
@@ -1151,7 +1153,11 @@ func notOwnerLeftOutWarning(live *Live, object, owner string, own, coupled, othe
 		}
 		return line
 	}
-	head := fmt.Sprintf("%s is owned by %s, and %s, the connecting role, %s, so the plan leaves out ", object, owner, live.CurrentUser, lacks)
+	listed := ""
+	if external {
+		listed = ", which the config's external.roles lists,"
+	}
+	head := fmt.Sprintf("%s is owned by %s%s and %s, the connecting role, %s, so the plan leaves out ", object, owner, cmp.Or(listed, ","), live.CurrentUser, lacks)
 	if len(own) == 0 {
 		return Warning{Kind: "not_owner", Message: head + fmt.Sprintf("%s for %s, which PostgreSQL rejects while it depends on them (%s)", count(coupled), strings.Join(others, ", "), first(coupled))}
 	}

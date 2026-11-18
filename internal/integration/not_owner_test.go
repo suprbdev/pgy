@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/suprbdev/pgy/internal/diff"
+	"github.com/suprbdev/pgy/internal/schema"
 )
 
 // asOwner returns a copy of live that doesn't know which roles' privileges
@@ -152,6 +153,11 @@ schema app:
 	}
 	if len(got) != 4 || !strings.Contains(got[3], "table app.base") {
 		t.Errorf("want 4 not_owner warnings, the view's naming the table whose type change needs it, got %q", got)
+	}
+	external := opts
+	external.External = &schema.External{Roles: []string{team}}
+	if p := planExtensionsLive(t, pool, y, external); diff.Render(p) != sql || len(notOwnerMessages(p)) != 4 || !strings.Contains(strings.Join(notOwnerMessages(p), "\n"), "table app.theirs is owned by "+team+", which the config's external.roles lists, and "+app) {
+		t.Errorf("an external owner's objects get the same plan and warnings, saying the owner is external, got:\n%s%q", diff.Render(p), notOwnerMessages(p))
 	}
 	applyPlan(t, pool, plan)
 	again := planExtensionsLive(t, pool, y, opts)

@@ -165,11 +165,43 @@ func TestNotOwnerTriggerPrivilege(t *testing.T) {
 	}
 }
 
-func TestNotOwnerExternalRoleSilent(t *testing.T) {
-	d := &schema.Database{Tables: map[string]*schema.Table{"public.q": notOwnerTable("public.q", "'2 hours'::interval")}}
-	p := PlanWith(notOwnerLive(), d, Options{External: &schema.External{Roles: []string{"plat*"}}})
-	if sql := strings.TrimSpace(Render(p)); sql != "" || len(notOwnerWarnings(p)) > 0 {
-		t.Errorf("an external role's table is left alone without a warning:\n%s\n%v", sql, notOwnerWarnings(p))
+func TestNotOwnerExternalRoleWarnsForDeclaredChanges(t *testing.T) {
+	live := notOwnerLive()
+	live.Schemas["storage"] = true
+	live.Tables["storage.objects"] = &LiveTable{Columns: map[string]*LiveColumn{"id": {Type: "integer"}}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]string{"platform_trigger": "CREATE TRIGGER platform_trigger ..."}, Policies: map[string]*LivePolicy{}}
+	live.Tables["public.platform_log"] = &LiveTable{Columns: map[string]*LiveColumn{"id": {Type: "integer"}}, Constraints: map[string]bool{}, Indexes: map[string]bool{}, Triggers: map[string]string{}}
+	live.Owners["rel:storage.objects"], live.Owners["rel:public.platform_log"] = "platform", "platform"
+	live.Tables["public.q"].Triggers = map[string]string{"platform_q_trigger": "CREATE TRIGGER platform_q_trigger ..."}
+	q := notOwnerTable("public.q", "'2 hours'::interval")
+	q.Grants = map[string][]string{"reader": {"select"}}
+	q.Data = &schema.TableData{Key: []string{"id"}, Rows: []map[string]any{{"id": 1}}}
+	d := &schema.Database{Tables: map[string]*schema.Table{
+		"public.q":        q,
+		"storage.objects": {Name: "storage.objects", Policies: []*schema.Policy{{Name: "own_rows", Using: "true"}}},
+		"public.mine":     notOwnerTable("public.mine", "'01:00:00'::interval"),
+	}}
+	ext := &schema.External{Roles: []string{"plat*"}, Schemas: []string{"storage"}}
+	p := PlanWith(live, d, Options{Unsafe: true, Prune: true, External: ext})
+	if sql := strings.TrimSpace(Render(p)); sql != "" {
+		t.Errorf("nothing the connecting role may run is left:\n%s", sql)
+	}
+	got := notOwnerWarnings(p)
+	want := []string{
+		"table public.q is owned by platform, which the config's external.roles lists, and app, the connecting role, does not have that role's privileges, so the plan leaves out the 3 statements that need them",
+		"table storage.objects is owned by platform, which the config's external.roles lists, and app, the connecting role, does not have that role's privileges, so the plan leaves out the statement that needs them (create policy",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("a change the YAML asks for on an external role's object is reported, what --prune leaves out of it isn't; got %q", got)
+	}
+	for i := range want {
+		if !strings.HasPrefix(got[i], want[i]) {
+			t.Errorf("warning %d:\n got %q\nwant %q...", i, got[i], want[i])
+		}
+	}
+	for _, w := range got {
+		if strings.Contains(w, "platform_log") || strings.Contains(w, "--prune") {
+			t.Errorf("--prune leaves an external role's objects alone without a word, got %q", w)
+		}
 	}
 }
 
