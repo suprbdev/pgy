@@ -182,7 +182,7 @@ func TestRoleAdminMembershipOptionsAndRevokes(t *testing.T) {
 	wantSQL(t, Render(p), `revoke "old" from "member" granted by "app";`)
 	wantRoleWarnings(t, p,
 		`role old: app, the connecting role, does not have the privileges of pgy, which granted the membership the statement revokes, so the plan leaves out the statement (revoke "old" from "member" granted by "pgy";)`,
-		`role plat: app, the connecting role, does not have the ADMIN option on it, which PostgreSQL 16 and later need to grant or revoke a role, so the plan leaves out the statement (revoke admin option for "plat" from "member";)`)
+		`role plat: app, the connecting role, does not have the ADMIN option on it, which PostgreSQL 16 and later need to grant or revoke a role, so the plan leaves out the statement (revoke admin option for "plat" from "member" granted by "pgy";)`)
 }
 
 func TestRoleAdminAttributes(t *testing.T) {
@@ -326,7 +326,9 @@ func TestRoleStatement(t *testing.T) {
 		{`grant "p" to "m" with inherit false;`, roleChange{role: "p", kind: roleMembership}, true},
 		{`revoke "p" from "m";`, roleChange{role: "p", kind: roleMembership}, true},
 		{`revoke "p" from "m" granted by "g";`, roleChange{role: "p", kind: roleMembership, grantor: "g"}, true},
-		{`revoke admin option for "p" from "m";`, roleChange{role: "p", kind: roleMembership}, true},
+		{`revoke admin option for "p" from "m";`, roleChange{role: "p", kind: roleMembership, options: true}, true},
+		{`revoke inherit option for "p" from "m" granted by "g";`, roleChange{role: "p", kind: roleMembership, grantor: "g", options: true}, true},
+		{`grant "p" to "m" with set true granted by current_user;`, roleChange{role: "p", kind: roleMembership, grantor: "me", options: true}, true},
 		{`grant select on table "public"."t" to "m";`, roleChange{}, false},
 		{`revoke grant option for select on table "public"."t" from "m";`, roleChange{}, false},
 		{`alter table "public"."t" owner to "a";`, roleChange{}, false},
