@@ -93,6 +93,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if r.ValidUntil != "" && (out.RoleDefs[name] == nil || r.Managed["validUntil"]) { lr.ValidUntil = normalizeValidUntil(r.ValidUntil) }
         if r.Set != nil { lr.Config = simulateConfig(r.Set) }
+        if out.RoleDefs[name] == nil { simulateCreatorGrant(out, name) }
         out.RoleDefs[name] = lr
         for _, parent := range r.InRoles {
             if parent == "" { continue }
@@ -531,6 +532,23 @@ func simulateConfig(set map[string]string) map[string]string {
     out := map[string]string{}
     for k, v := range set { out[strings.ToLower(k)] = normalizeConfigValue(v) }
     return out
+}
+
+// simulateCreatorGrant records the membership in role that CREATE ROLE
+// gives the connecting role of out on PostgreSQL 16 and later when it is
+// not a superuser (see Live.CreatorGrant).
+func simulateCreatorGrant(out *Live, role string) {
+    cur := out.RoleDefs[out.CurrentUser]
+    if out.ServerVersion < 160000 || cur == nil || cur.Superuser || role == out.CurrentUser { return }
+    var grantors []string
+    for name, lr := range out.RoleDefs {
+        if lr != nil && lr.Bootstrap { grantors = []string{name} }
+    }
+    if out.RoleMembers[out.CurrentUser] == nil { out.RoleMembers[out.CurrentUser] = map[string]bool{} }
+    out.RoleMembers[out.CurrentUser][role] = true
+    if out.RoleMemberOptions == nil { out.RoleMemberOptions = map[string]map[string]*LiveMembership{} }
+    if out.RoleMemberOptions[out.CurrentUser] == nil { out.RoleMemberOptions[out.CurrentUser] = map[string]*LiveMembership{} }
+    out.RoleMemberOptions[out.CurrentUser][role] = &LiveMembership{Admin: true, Grantors: grantors}
 }
 
 func simulateTable(out *Live, fq string, dt *schema.Table) {

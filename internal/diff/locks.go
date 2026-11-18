@@ -21,8 +21,8 @@ type Warning struct {
     // can't recreate, an extension or a routine is kept because objects
     // still use it, or an extension update may be blocked by objects that
     // use it), not_owner (the plan leaves out what needs the privileges of
-    // an object's owner, or --prune an object, because the connecting role
-    // lacks them), or "" for the rest.
+    // an object's owner or of a role's administrator, or --prune an object,
+    // because the connecting role lacks them), or "" for the rest.
     Kind      string `json:"kind,omitempty"`
 }
 
