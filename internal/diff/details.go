@@ -26,6 +26,10 @@ type LiveDetails struct {
     TSParsers       map[string]string // text search configuration -> parser
     TSDictionaries  map[string]*schema.TSDictionary
     ViewDeps        map[string][]string // view or materialized view -> views / materialized views it reads
+    // ViewRelations: view or materialized view -> the tables, views,
+    // materialized views and foreign tables it reads, sorted, without
+    // those an extension owns.
+    ViewRelations map[string][]string
     Populated       map[string]bool     // materialized view -> has data
     // RoutineDeps: normalized routine signature -> dependsOn entries
     // ("table x", "view x", "function x(args)", ...) for routines with a
@@ -95,6 +99,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
         CompositeOrder: map[string][]string{}, Ranges: map[string]*schema.RangeDef{}, DomainTypes: map[string]LiveDomainType{},
         Collations: map[string]*schema.Collation{}, TSParsers: map[string]string{}, TSDictionaries: map[string]*schema.TSDictionary{},
         ViewDeps: map[string][]string{}, Populated: map[string]bool{}, RoutineDeps: map[string][]string{},
+        ViewRelations: map[string][]string{},
         TransformLanguages: map[string]bool{}, ExtensionUsers: map[string]map[string]bool{},
     }
     l.Details = d
@@ -214,20 +219,22 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                 d.Populated[rel] = populated
                 return nil
             }},
-        {`select distinct vn.nspname || '.' || v.relname, rn.nspname || '.' || r.relname
+        {`select distinct vn.nspname || '.' || v.relname, rn.nspname || '.' || r.relname, r.relkind in ('v', 'm')
           from pg_depend dep
           join pg_rewrite rw on rw.oid = dep.objid
           join pg_class v on v.oid = rw.ev_class join pg_namespace vn on vn.oid = v.relnamespace
           join pg_class r on r.oid = dep.refobjid join pg_namespace rn on rn.oid = r.relnamespace
           where dep.classid = 'pg_rewrite'::regclass and dep.refclassid = 'pg_class'::regclass
-          and v.oid <> r.oid and v.relkind in ('v', 'm') and r.relkind in ('v', 'm')
+          and v.oid <> r.oid and v.relkind in ('v', 'm') and r.relkind in ('r', 'p', 'v', 'm', 'f')
           and vn.nspname not in ('pg_catalog', 'information_schema') and rn.nspname not in ('pg_catalog', 'information_schema')
           order by 1, 2`,
             func(scan func(...any) error) error {
                 var view, ref string
-                if err := scan(&view, &ref); err != nil { return err }
+                var isView bool
+                if err := scan(&view, &ref, &isView); err != nil { return err }
                 if l.ExtensionMembers["rel:"+ref] { return nil }
-                d.ViewDeps[view] = append(d.ViewDeps[view], ref)
+                d.ViewRelations[view] = append(d.ViewRelations[view], ref)
+                if isView { d.ViewDeps[view] = append(d.ViewDeps[view], ref) }
                 return nil
             }},
         {`select n.nspname || '.' || t.typname, format_type(r.rngsubtype, null),
