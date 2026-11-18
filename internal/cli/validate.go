@@ -26,9 +26,8 @@ Exit codes:
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             cfg := FromContext(cmd.Context())
-            paths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
+            paths, err := schemaFiles(cfg)
             if err != nil { return err }
-            if len(paths) == 0 { return fmt.Errorf("no schema files found under %s", cfg.SchemaRoot) }
             issues := validate.FilesWith(paths, cfg.External)
             var policyIssues []validate.Issue
             if !cfg.Policy.Empty() && !validate.HasErrors(issues) {

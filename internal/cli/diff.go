@@ -69,7 +69,7 @@ Exit codes:
             }
             strict := &strictFindings{}
             opts := diff.Options{Unsafe: unsafe, Prune: prune, MigrationsTable: migSchema + "." + migTable, PublicGrants: cfg.Migrate.PublicGrants, KeepExtensions: cfg.KeepExtensions, External: cfg.External}
-            schemaPaths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
+            schemaPaths, err := schemaFiles(cfg)
             if err != nil {
                 return err
             }
@@ -272,6 +272,23 @@ Exit codes:
     c.Flags().StringVar(&split, "split", "", "Split the diff into one migration group per schema file (file) or directory (dir), ordered by dependencies")
     c.Flags().Lookup("split").NoOptDefVal = group.ModeFile
     return c
+}
+
+// schemaFiles returns the schema files cfg names or discovered under its
+// schema root (see resolveSchemaPaths), and an error when there are none:
+// the schema root does not exist or holds no YAML file, which would
+// otherwise compare the database with an empty schema. A project whose
+// schema is empty on purpose keeps a file holding {}.
+func schemaFiles(cfg *GlobalConfig) ([]string, error) {
+    paths, err := resolveSchemaPaths(cfg.SchemaRoot, cfg.Schemas)
+    if err != nil || len(paths) > 0 { return paths, err }
+    root := cfg.SchemaRoot
+    if root == "" { root = "." }
+    if _, err := os.Stat(root); err != nil {
+        if os.IsNotExist(err) { return nil, fmt.Errorf("schema root %s does not exist; point --schema-root, PGY_SCHEMA_ROOT or schema_root in the config at the directory with the YAML files", root) }
+        return nil, err
+    }
+    return nil, fmt.Errorf("no schema files found under %s; a schema without objects needs a YAML file too, such as one that holds {}", root)
 }
 
 func resolveSchemaPaths(root string, schemas []string) ([]string, error) {
