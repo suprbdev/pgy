@@ -53,7 +53,8 @@
           "sequences": { "$ref": "#/definitions/grants" },
           "functions": { "$ref": "#/definitions/grants" },
           "types": { "$ref": "#/definitions/grants" },
-          "schemas": { "$ref": "#/definitions/grants" }
+          "schemas": { "$ref": "#/definitions/grants" },
+          "largeObjects": { "$ref": "#/definitions/grants", "description": "Large objects (PostgreSQL 18+): select, update. Cannot be limited with in." }
         },
         "additionalProperties": false
       }
@@ -1080,6 +1081,20 @@
           "description": "Materialized views: indexes, same format as table indexes (a unique index enables REFRESH ... CONCURRENTLY).",
           "additionalProperties": { "$ref": "#/definitions/index" }
         },
+        "columns": {
+          "type": "object",
+          "description": "Materialized views: settings of the view's columns (ALTER MATERIALIZED VIEW ... ALTER COLUMN). Columns and settings not listed are unmanaged.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "compression": { "type": "string", "enum": ["pglz", "lz4", "default"], "description": "TOAST compression method (applies to newly written values)." },
+              "storage": { "type": "string", "enum": ["plain", "external", "extended", "main"], "description": "Column storage mode (SET STORAGE)." },
+              "statisticsTarget": { "type": "integer", "minimum": -1, "description": "Per-column statistics target (SET STATISTICS); -1 restores the default." },
+              "nDistinct": { "type": "number", "minimum": -1, "description": "Planner override for the number of distinct values (SET (n_distinct = ...)). 0 removes the override." }
+            },
+            "additionalProperties": false
+          }
+        },
         "triggers": {
           "type": "object",
           "description": "Plain views: triggers, typically timing: instead of, to make the view writable.",
@@ -1120,6 +1135,7 @@
         "accessMethod": ["query"],
         "with": ["query"],
         "indexes": ["query"],
+        "columns": ["query"],
         "triggers": ["query"],
         "rules": ["query"],
         "columnDefaults": ["query"]
@@ -1420,13 +1436,17 @@
         },
         "checks": {
           "type": "object",
-          "description": "Named CHECK constraints (name: expression, referencing VALUE), or name: {check, comment} to also comment the constraint. Authoritative: with --unsafe, undeclared checks are dropped and changed ones replaced.",
+          "description": "Named CHECK constraints (name: expression, referencing VALUE), or name: {check, comment, notValid} to also comment the constraint or add it NOT VALID. Authoritative: with --unsafe, undeclared checks are dropped and changed ones replaced.",
           "additionalProperties": {
             "oneOf": [
               { "type": "string", "minLength": 1 },
               {
                 "type": "object",
-                "properties": { "check": { "type": "string", "minLength": 1 }, "comment": { "type": "string" } },
+                "properties": {
+                  "check": { "type": "string", "minLength": 1 },
+                  "comment": { "type": "string" },
+                  "notValid": { "type": "boolean", "description": "Add the check NOT VALID: values already stored in columns of the domain aren't checked. Removing it validates the check." }
+                },
                 "required": ["check"],
                 "additionalProperties": false
               }

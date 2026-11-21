@@ -1178,15 +1178,15 @@ A view or materialized view declared without `query` is never created: the decla
 
 pgy drops a view and creates it again from the YAML when its columns change (above), when the type of a column it uses changes ([Column alterations](#column-alterations)) and around an extension update ([Updating extensions](#updating-extensions)). In all three cases the new view gets back what the old one had:
 
-- what the YAML declares for it: `comment`, `grants`, `columnGrants`, `owner`, options, `columnComments`, `columnDefaults`, `triggers`, `rules` and, for a materialized view, `indexes`;
-- what the YAML leaves unmanaged, restored from the database: the grants on the view and on the columns `columnGrants` doesn't list, the comment, column comments and column defaults, the owner, the options, and the comments of declared triggers and rules;
+- what the YAML declares for it: `comment`, `grants`, `columnGrants`, `owner`, options, `columnComments`, `columnDefaults`, `triggers`, `rules` and, for a materialized view, `indexes` and `columns`;
+- what the YAML leaves unmanaged, restored from the database: the grants on the view and on the columns `columnGrants` doesn't list, the comment, column comments and column defaults, a materialized view's column settings, the owner, the options, and the comments of declared triggers and rules;
 - triggers and rules the YAML doesn't list, created again from their definitions in the database, with their comments. With `--prune`, which drops them anyway, they are not.
 
 A materialized view is refilled; indexes on it that the YAML doesn't declare are not created again.
 
 ### Materialized Views
 
-Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`; a changed query is handled as described under [Views](#views) (there is no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible.
+Use `materialized view <name>:` keys. Created with `CREATE MATERIALIZED VIEW IF NOT EXISTS`; a changed query is handled as described under [Views](#views) (there is no `REFRESH` support). `withData: false` creates it `WITH NO DATA`. `with` sets storage parameters such as `fillfactor` or `autovacuum_enabled`, diffed like [table storage parameters](#tables) (`ALTER MATERIALIZED VIEW ... SET / RESET`). `indexes:` takes the same entries as table indexes and is diffed the same way. A unique index makes `REFRESH MATERIALIZED VIEW CONCURRENTLY` possible. `columns:` sets the `compression`, `storage`, `statisticsTarget` and `nDistinct` of the view's columns, which work as on [table columns](#columns) and are diffed against live (`ALTER MATERIALIZED VIEW ... ALTER COLUMN`); the columns themselves come from the query, so nothing else goes there, and columns and settings left out are unmanaged.
 
 ```yaml
 schema public:
@@ -1195,6 +1195,8 @@ schema public:
     withData: false
     with: {autovacuum_enabled: false}
     tablespace: archive
+    columns:
+      status: {compression: lz4, statisticsTarget: 1000}
     indexes:
       user_stats_status:
         columns: [status]
@@ -1215,6 +1217,7 @@ schema public:
 | `tablespace` | string | Materialized views only. See [Tablespaces](#tablespaces). Omitted = unmanaged |
 | `accessMethod` | string | Materialized views only. Table access method (`USING`); changing it rewrites the view and needs `--unsafe`. See [Access methods](#access-methods). Omitted = unmanaged |
 | `indexes` | map | Materialized views only. Same format as [table indexes](#indexes) |
+| `columns` | map | Materialized views only. View column → `{compression, storage, statisticsTarget, nDistinct}`. Columns and settings not listed are unmanaged |
 | `triggers` | map | Plain views only. Same format as [table triggers](#triggers), usually `timing: instead of` (always `FOR EACH ROW`) to make a view writable |
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
 | `columnDefaults` | map | Views only. View column → `DEFAULT` expression, used by `INSERT`s through the view (`ALTER VIEW ... ALTER COLUMN ... SET DEFAULT`). Diffed against live, [as an expression](#how-expressions-are-compared); columns not listed are unmanaged |
@@ -1276,7 +1279,7 @@ Emitted as `CREATE TYPE ... AS RANGE (subtype = ..., ...)`, together with the mu
 
 ## Domains
 
-Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with an optional default, `NOT NULL`, and `CHECK` constraints: one with `check`, or several named ones with `checks` (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`. For an existing domain, `default` and `notNull` are diffed (`ALTER DOMAIN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`; removing `default` drops it). On PostgreSQL 17+, `notNullName` names the NOT NULL constraint (default `<domain>_not_null`), and a different live name is renamed. The `check` constraint is matched by `constraintName`, or by PostgreSQL's default `<domain>_check` name: a missing one is added, while a changed or removed one is dropped and re-added only under `--unsafe`, since adding a domain constraint validates every column that uses the domain. The default and the checks are [compared as expressions](#how-expressions-are-compared), through the server where the text differs. The base type and collation cannot be changed in place; `pgy diff` warns when the base type differs from the live one, which it compares like a column type, [through the server](#how-types-are-compared) where the text differs. Comments are diffed against live.
+Domains are defined inside `schema <name>:` blocks using `domain <name>:` keys. A domain is a named base type with an optional default, `NOT NULL`, and `CHECK` constraints: one with `check`, or several named ones with `checks` (the value under test is referenced as `VALUE`). Created with `CREATE DOMAIN`. For an existing domain, `default` and `notNull` are diffed (`ALTER DOMAIN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`; removing `default` drops it). On PostgreSQL 17+, `notNullName` names the NOT NULL constraint (default `<domain>_not_null`), and a different live name is renamed. The `check` constraint is matched by `constraintName`, or by PostgreSQL's default `<domain>_check` name: a missing one is added, while a changed or removed one is dropped and re-added only under `--unsafe`, since adding a domain constraint validates every column that uses the domain. A check in `checks` with `notValid: true` is added with `ALTER DOMAIN ... ADD CONSTRAINT ... NOT VALID`, also when the domain is created, so the values already stored aren't checked; removing `notValid` validates it with `ALTER DOMAIN ... VALIDATE CONSTRAINT`, and pgy validates a `NOT VALID` check it finds that the YAML doesn't mark `notValid`. A check validated outside pgy while the YAML still says `notValid: true` is not treated as a change. The default and the checks are [compared as expressions](#how-expressions-are-compared), through the server where the text differs. The base type and collation cannot be changed in place; `pgy diff` warns when the base type differs from the live one, which it compares like a column type, [through the server](#how-types-are-compared) where the text differs. Comments are diffed against live.
 
 ```yaml
 schema public:
@@ -1292,6 +1295,7 @@ schema public:
     checks:                     # several named checks
       score_min: VALUE >= 0
       score_max: VALUE <= 100
+      score_even: {check: VALUE % 2 = 0, notValid: true}
 
   table users:
     dependsOn:
@@ -1309,7 +1313,7 @@ schema public:
 | `notNull` | boolean | `NOT NULL` constraint (`nullable: false` also accepted) |
 | `check` | string | `CHECK` expression; use `value` to reference the value being tested |
 | `constraintName` | string | Optional name for the `CHECK` constraint |
-| `checks` | map | Named `CHECK` constraints (`name: expression`, or `name: {check: expression, comment: text}` to also set `COMMENT ON CONSTRAINT ... ON DOMAIN`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
+| `checks` | map | Named `CHECK` constraints (`name: expression`, or `name: {check: expression, comment: text, notValid: true}` to also set `COMMENT ON CONSTRAINT ... ON DOMAIN` or add the check `NOT VALID`). When present, the declared set is authoritative: a missing check is added, and with `--unsafe` a changed one is replaced and an undeclared one dropped. Can be combined with `check` |
 | `comment` | string | `COMMENT ON DOMAIN` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -1345,7 +1349,7 @@ schema public:
 | `cache` | integer | Number of values preallocated per session |
 | `cycle` | boolean | Wrap around when the limit is reached |
 | `unlogged` | boolean | `CREATE UNLOGGED SEQUENCE`: changes aren't WAL-logged, so the sequence resets after a crash and isn't replicated. Sequences of identity and serial columns follow their table's `unlogged` setting instead |
-| `ownedBy` | string | `table.column` (or `schema.table.column`; the table must be in the sequence's schema) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan |
+| `ownedBy` | string | `table.column` (or `schema.table.column`; the table must be in the sequence's schema) — sequence is dropped with the column. Emitted as `ALTER SEQUENCE ... OWNED BY` after all tables are created, so it works even when the owning table is created in the same plan. A sequence owned by a column has its table's owner, which PostgreSQL changes together with the table's, so its `owner` is not applied: `pgy validate` warns about one, and `pgy pull` doesn't write one |
 | `comment` | string | `COMMENT ON SEQUENCE` (diffed against live) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 
@@ -1853,7 +1857,7 @@ defaultPrivileges:
     functions: {public: []}   # stop granting EXECUTE to PUBLIC by default
 ```
 
-Kinds are `tables`, `sequences`, `functions`, `types` and `schemas` (the last only without `in`). Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. `select with grant option` sets up the privilege `WITH GRANT OPTION`, as in grants blocks. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them. An object created by the plan that declares its own `grants` is compared against what those defaults give it, so grants it doesn't list are revoked in the same migration. `grants: {}` therefore keeps a new table free of them. When a database has default privileges that some older objects lack, `pgy pull` writes `grants: {}` on those objects, so a rebuild doesn't hand them grants the original never had.
+Kinds are `tables`, `sequences`, `functions`, `types`, `schemas` and, from PostgreSQL 18, `largeObjects` (`select`, `update`; `ALTER DEFAULT PRIVILEGES ... ON LARGE OBJECTS`). The last two only work without `in`, and `pgy diff` warns that `largeObjects` needs PostgreSQL 18 on an older server. Like grants, the list for each grantee is authoritative: missing privileges are granted, extra ones revoked, and an empty list revokes everything. Grantees not listed are unmanaged. `select with grant option` sets up the privilege `WITH GRANT OPTION`, as in grants blocks. The implicit `EXECUTE` on functions and `USAGE` on types that PostgreSQL gives `PUBLIC` count as live privileges. Default privileges are emitted right after schemas, before any object is created, so objects created by the same migration already receive them. An object created by the plan that declares its own `grants` is compared against what those defaults give it, so grants it doesn't list are revoked in the same migration. `grants: {}` therefore keeps a new table free of them. When a database has default privileges that some older objects lack, `pgy pull` writes `grants: {}` on those objects, so a rebuild doesn't hand them grants the original never had.
 
 ### Column-Level Grants
 

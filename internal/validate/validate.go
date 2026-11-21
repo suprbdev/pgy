@@ -467,6 +467,9 @@ func Database(d *schema.Database) []Issue {
 			if !vw.Materialized && len(vw.Indexes) > 0 {
 				add(Error, kind+k, "indexes are for materialized views; PostgreSQL cannot index a view")
 			}
+			if !vw.Materialized && len(vw.Columns) > 0 {
+				add(Error, kind+k, "columns are for materialized views; a view stores nothing, so its columns have no storage, compression or statistics")
+			}
 			if !vw.Materialized && vw.WithData != nil {
 				add(Warning, kind+k, "withData is for materialized views and is ignored")
 			}
@@ -577,6 +580,9 @@ func Database(d *schema.Database) []Issue {
 				if t := d.Tables[s+"."+table]; t != nil && len(t.Columns) > 0 && t.Columns[column] == nil {
 					add(Error, "sequence "+k, "owned by unknown column %s", sq.OwnedBy)
 				}
+				if sq.Owner != "" {
+					add(Warning, "sequence "+k, "is owned by column %s, so it always has the owner of table %s.%s; owner is ignored", sq.OwnedBy, s, table)
+				}
 			}
 		}
 	}
@@ -596,6 +602,9 @@ func Database(d *schema.Database) []Issue {
 	for i, dp := range d.DefaultPrivileges {
 		if dp != nil && len(dp.Schemas) > 0 && dp.Grants["schemas"] != nil {
 			add(Error, fmt.Sprintf("defaultPrivileges[%d]", i), "schemas defaults cannot be limited with in")
+		}
+		if dp != nil && len(dp.Schemas) > 0 && dp.Grants["largeObjects"] != nil {
+			add(Error, fmt.Sprintf("defaultPrivileges[%d]", i), "largeObjects defaults cannot be limited with in")
 		}
 	}
 	for _, name := range sortedKeys(d.Publications) {
