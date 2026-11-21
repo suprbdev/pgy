@@ -183,3 +183,21 @@ func TestInheritedNotNullValidatedCopyAlter(t *testing.T) {
 		t.Errorf("a NOT VALID copy is validated in the no-transaction migration, got %q, %v", Render(p), p.Concurrent)
 	}
 }
+
+func TestInheritedNotNullValidatedCopyReadded(t *testing.T) {
+	live := emptyLive()
+	live.ServerVersion = 180000
+	live.Schemas["app"] = true
+	base, kid := newLiveTable(), newLiveTable()
+	base.Columns["e"] = &LiveColumn{Type: "text", Nullable: true}
+	kid.Columns["e"] = &LiveColumn{Type: "text", Nullable: true, Inherited: true}
+	kid.Inherits = []string{"app.base"}
+	live.Tables["app.base"], live.Tables["app.kid"] = base, kid
+	p := Plan(live, notValidCopyDB(), false)
+	if !findAlter(p, `alter table "app"."base" add constraint "base_e_nn" not null "e" not valid;`) {
+		t.Fatalf("the parent's NOT VALID constraint is added again:\n%s", Render(p))
+	}
+	if len(p.Concurrent) != 1 || p.Concurrent[0] != `alter table "app"."kid" validate constraint "base_e_nn";` {
+		t.Errorf("the child's copy is validated in the no-transaction migration after the parent adds it, got %v", p.Concurrent)
+	}
+}

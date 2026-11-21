@@ -4440,6 +4440,8 @@ func inheritedOverrideStmts(desired *schema.Database, live *Live, fq, cn string,
             concurrent = append(concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
         case lc == nil && root != nil && !root.Nullable && root.NotValid && (liveRoot == nil || liveRoot.Nullable):
             alters = append(alters, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(notNullConstraintName(rootFq, cn, root))))
+        case lc != nil && lc.Nullable && root != nil && !root.Nullable && root.NotValid && liveRoot != nil && liveRoot.Nullable:
+            concurrent = append(concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(notNullConstraintName(rootFq, cn, root))))
         }
     }
     return alters, concurrent
