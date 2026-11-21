@@ -173,13 +173,13 @@ func TestTypeChangeResetsDefault(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.live.Nullable, tc.want.Nullable = true, true
-			got := strings.Join(alterColumnStmts("public.t", "attrs", tc.want, tc.live, nil, true, 170000, func(string) {}), "|")
+			got := strings.Join(alterColumnStmts("public.t", "attrs", tc.want, tc.live, nil, true, 170000, "", func(string) {}), "|")
 			if got != tc.sql {
 				t.Errorf("\n got %s\nwant %s", got, tc.sql)
 			}
 		})
 	}
-	safe := strings.Join(alterColumnStmts("public.t", "attrs", &schema.Column{Type: "jsonb", Default: "'{}'::jsonb", Nullable: true}, &LiveColumn{Type: "hstore", Default: "''::hstore", Nullable: true}, nil, false, 170000, func(string) {}), "|")
+	safe := strings.Join(alterColumnStmts("public.t", "attrs", &schema.Column{Type: "jsonb", Default: "'{}'::jsonb", Nullable: true}, &LiveColumn{Type: "hstore", Default: "''::hstore", Nullable: true}, nil, false, 170000, "", func(string) {}), "|")
 	if safe != `alter table "public"."t" alter column "attrs" set default '{}'::jsonb;` {
 		t.Errorf("without --unsafe only the changed default is set, got %s", safe)
 	}

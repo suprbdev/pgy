@@ -504,7 +504,8 @@ func TestIntegrationPullReportsLanguagesAndTransforms(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, opts := range []pull.Options{{}, {Schemas: []string{"app"}}} {
-		res, err := pull.Build(introspectAll(t, db), opts)
+		live := introspectAll(t, db)
+		res, err := pull.Build(live, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -530,7 +531,11 @@ func TestIntegrationPullReportsLanguagesAndTransforms(t *testing.T) {
 				database = string(f.Content)
 			}
 		}
-		if want := "foreignDataWrappers:\n  second_pg:\n    handler: public.postgres_fdw_handler\n    validator: public.postgres_fdw_validator\n    options: {}\n"; !contains(database, want) {
+		connection := ""
+		if live.ServerVersion >= 190000 {
+			connection = "    connection: \"\"\n"
+		}
+		if want := "foreignDataWrappers:\n  second_pg:\n    handler: public.postgres_fdw_handler\n    validator: public.postgres_fdw_validator\n" + connection + "    options: {}\n"; !contains(database, want) {
 			t.Errorf("want:\n%s\nin database.yml:\n%s", want, database)
 		}
 	}

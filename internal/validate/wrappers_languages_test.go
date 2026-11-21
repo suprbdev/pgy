@@ -52,7 +52,7 @@ foreignDataWrappers:
 `)
 	got := messages(Files([]string{p}))
 	for _, want := range []string{
-		"error: foreign-data wrapper postgres_fdw: extension postgres_fdw creates this wrapper with its own handler and validator",
+		"error: foreign-data wrapper postgres_fdw: extension postgres_fdw creates this wrapper with its own handler, validator and connection function",
 		"error: foreign-data wrapper file_fdw: extension file_fdw creates this wrapper",
 		"error: foreign-data wrapper dblink_fdw: extension dblink creates this wrapper",
 		"error: foreign-data wrapper mysql_fdw: extension mysql_fdw creates this wrapper",
@@ -65,6 +65,22 @@ foreignDataWrappers:
 		if strings.Contains(got, "foreign-data wrapper "+name) {
 			t.Errorf("a wrapper no declared extension creates may have a handler, got:\n%s", got)
 		}
+	}
+}
+
+func TestValidateForeignDataWrapperOfExtensionTakesNoConnection(t *testing.T) {
+	p := write(t, t.TempDir(), "wrappers.yml", `
+extensions: [postgres_fdw]
+foreignDataWrappers:
+  postgres_fdw: {connection: ""}
+  mine: {handler: postgres_fdw_handler, connection: public.postgres_fdw_connection}
+`)
+	got := messages(Files([]string{p}))
+	if !strings.Contains(got, "error: foreign-data wrapper postgres_fdw: extension postgres_fdw creates this wrapper") {
+		t.Errorf("a connection key on an extension's wrapper must be rejected, got:\n%s", got)
+	}
+	if strings.Contains(got, "foreign-data wrapper mine") {
+		t.Errorf("a wrapper no declared extension creates may have a connection function, got:\n%s", got)
 	}
 }
 

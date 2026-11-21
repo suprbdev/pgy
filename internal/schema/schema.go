@@ -147,10 +147,11 @@ type ForeignDataWrapper struct {
     Name      string
     Handler   string            // HANDLER function, optionally schema-qualified; see ManagesHandler
     Validator string            // VALIDATOR function, optionally schema-qualified; see ManagesValidator
-    // HandlerSet and ValidatorSet report a handler or validator key in the
-    // YAML, so that an empty value (NO HANDLER, NO VALIDATOR) can be told
-    // from a key left out.
-    HandlerSet, ValidatorSet bool
+    Connection string           // CONNECTION function (PostgreSQL 19+), optionally schema-qualified; see ManagesConnection
+    // HandlerSet, ValidatorSet and ConnectionSet report a handler, validator
+    // or connection key in the YAML, so that an empty value (NO HANDLER, NO
+    // VALIDATOR, NO CONNECTION) can be told from a key left out.
+    HandlerSet, ValidatorSet, ConnectionSet bool
     Options   map[string]string // OPTIONS; nil = unmanaged, present = authoritative
     Owner     string            // "" = unmanaged
     Grants    map[string][]string // role -> privileges (usage); nil = unmanaged
@@ -166,6 +167,10 @@ func (w *ForeignDataWrapper) ManagesHandler() bool { return w.HandlerSet || w.Ha
 // ManagesValidator reports whether w declares its validator, which may be
 // none; see ManagesHandler.
 func (w *ForeignDataWrapper) ManagesValidator() bool { return w.ValidatorSet || w.Validator != "" }
+
+// ManagesConnection reports whether w declares its connection function,
+// which may be none; see ManagesHandler.
+func (w *ForeignDataWrapper) ManagesConnection() bool { return w.ConnectionSet || w.Connection != "" }
 
 // Language is a languages entry: the privileges of a procedural language
 // that exists already or that an extension creates.
@@ -266,6 +271,8 @@ type ForeignTable struct {
 type Publication struct {
     Name             string
     AllTables        bool
+    AllSequences     bool                // FOR ALL SEQUENCES (PostgreSQL 19+)
+    Except           []*PublicationTable // FOR ALL TABLES EXCEPT (PostgreSQL 19+): Table and Only
     Tables           []*PublicationTable
     Schemas          []string // FOR TABLES IN SCHEMA
     Publish          []string // insert | update | delete | truncate; nil = all
@@ -807,7 +814,7 @@ type Aggregate struct {
     // Options holds the other CREATE AGGREGATE options by SQL name (sspace,
     // finalfunc_extra, finalfunc_modify, serialfunc, deserialfunc, msfunc,
     // minvfunc, mstype, msspace, mfinalfunc, mfinalfunc_extra,
-    // mfinalfunc_modify, minitcond, sortop, hypothetical). Options left out
+    // mfinalfunc_modify, minitcond, sortop, support, hypothetical). Options left out
     // are unmanaged. An empty value means unset, except for minitcond, whose
     // empty string is an initial condition.
     Options     map[string]string
@@ -833,7 +840,7 @@ var AggregateOptions = [][2]string{
     {"serialfunc", "serialfunc"}, {"deserialfunc", "deserialfunc"},
     {"msfunc", "msfunc"}, {"minvfunc", "minvfunc"}, {"mstype", "mstype"}, {"msspace", "msspace"},
     {"mfinalfunc", "mfinalfunc"}, {"mfinalfuncExtra", "mfinalfunc_extra"}, {"mfinalfuncModify", "mfinalfunc_modify"},
-    {"minitcond", "minitcond"}, {"sortop", "sortop"}, {"hypothetical", "hypothetical"},
+    {"minitcond", "minitcond"}, {"sortop", "sortop"}, {"support", "support"}, {"hypothetical", "hypothetical"},
 }
 
 // Procedure is a CREATE PROCEDURE declaration (PostgreSQL 11+). Unlike
@@ -2651,7 +2658,7 @@ func TopologicalSort(d *Database) ([]Entity, error) {
     for k, ag := range d.Aggregates {
         if ag == nil { continue }
         deps := ag.DependsOn
-        for _, fn := range []string{ag.SFunc, ag.FinalFunc, ag.CombineFunc} {
+        for _, fn := range []string{ag.SFunc, ag.FinalFunc, ag.CombineFunc, ag.Options["support"]} {
             if fn != "" && len(resolveRoutine(fn, d.Functions)) > 0 { deps = append(append([]string{}, deps...), "function "+fn) }
         }
         e := Entity{Key: k, Kind: "aggregate", DependsOn: append(deps, typeRefDeps(d, k, append(argTypes(strings.ReplaceAll(strings.ToLower(ag.ArgsSig), " order by ", ", ")), ag.SType)...)...)}
@@ -3164,10 +3171,10 @@ func parseServers(v any) map[string]*Server {
     return out
 }
 
-// parseForeignDataWrappers parses { name: {handler, validator, options,
-// owner, grants, comment, renamedFrom} }. A handler or validator may be
-// written with the empty argument list of the function, and as the empty
-// string for none.
+// parseForeignDataWrappers parses { name: {handler, validator, connection,
+// options, owner, grants, comment, renamedFrom} }. A handler, validator or
+// connection function may be written with the empty argument list of the
+// function, and as the empty string for none.
 func parseForeignDataWrappers(v any) map[string]*ForeignDataWrapper {
     out := map[string]*ForeignDataWrapper{}
     m, ok := v.(map[string]any)
@@ -3181,6 +3188,7 @@ func parseForeignDataWrappers(v any) map[string]*ForeignDataWrapper {
         if b, ok := raw.(map[string]any); ok {
             w.Handler, w.HandlerSet = function(b["handler"])
             w.Validator, w.ValidatorSet = function(b["validator"])
+            w.Connection, w.ConnectionSet = function(b["connection"])
             if o, ok := b["options"].(map[string]any); ok { w.Options = stringMap(o) }
             if o, ok := b["owner"].(string); ok { w.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { w.Grants = parseGrants(g) }
@@ -3287,9 +3295,10 @@ func fillScalarTexts(m *yaml.Node, out map[string]string) {
     }
 }
 
-// parsePublications parses { name: {allTables, tables, schemas, publish,
-// viaPartitionRoot, comment} }. A tables entry is a table name or
-// {table, columns, where}.
+// parsePublications parses { name: {allTables, allSequences, except,
+// tables, schemas, publish, viaPartitionRoot, comment} }. A tables entry is
+// a table name or {table, columns, where, only}; an except entry is a table
+// name or {table, only}.
 func parsePublications(v any) map[string]*Publication {
     m, ok := v.(map[string]any)
     if !ok { return map[string]*Publication{} }
@@ -3298,6 +3307,21 @@ func parsePublications(v any) map[string]*Publication {
         p := &Publication{Name: name}
         if dm, ok := def.(map[string]any); ok {
             if b, ok := dm["allTables"].(bool); ok { p.AllTables = b }
+            if b, ok := dm["allSequences"].(bool); ok { p.AllSequences = b }
+            if arr, ok := dm["except"].([]any); ok {
+                for _, it := range arr {
+                    switch x := it.(type) {
+                    case string:
+                        p.Except = append(p.Except, &PublicationTable{Table: qualify("", strings.TrimSpace(x))})
+                    case map[string]any:
+                        tn, _ := x["table"].(string)
+                        if tn == "" { continue }
+                        pt := &PublicationTable{Table: qualify("", strings.TrimSpace(tn))}
+                        if o, ok := x["only"].(bool); ok { pt.Only = o }
+                        p.Except = append(p.Except, pt)
+                    }
+                }
+            }
             if arr, ok := dm["tables"].([]any); ok {
                 for _, it := range arr {
                     switch x := it.(type) {

@@ -33,8 +33,10 @@ var (
     lockIndexRe     = regexp.MustCompile(`^create( unique)? index if not exists (` + quotedName + `) on ` + lockFQ)
     lockConstraintRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add constraint (` + quotedName + `) (foreign key|check|unique|exclude)`)
     lockPrimaryKeyRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add primary key`)
+    lockEnforceRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` alter constraint (` + quotedName + `) enforced;$`)
     lockNotNullRe   = regexp.MustCompile(`^alter table ` + lockFQ + ` (?:alter column (` + quotedName + `) set not null|add constraint ` + quotedName + ` not null (` + quotedName + `));$`)
     lockTypeRe      = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) type (.+);$`)
+    lockSetExpressionRe = regexp.MustCompile(`^alter table ` + lockFQ + ` alter column (` + quotedName + `) set expression as `)
     lockLoggedRe    = regexp.MustCompile(`^alter table ` + lockFQ + ` set (logged|unlogged);$`)
     lockAccessMethodRe = regexp.MustCompile(`^alter (table|materialized view) ` + lockFQ + ` set access method (` + quotedName + `);$`)
     lockAddColumnRe = regexp.MustCompile(`^alter table ` + lockFQ + ` add column (` + quotedName + `) (.+);$`)
@@ -65,9 +67,9 @@ func unquoteFQ(s string) string {
 // lockWarnings returns a warning for each statement in p that locks or
 // rewrites a table present in live (the snapshot the plan was made
 // against): index builds without CONCURRENTLY, constraints validated while
-// they are added, SET NOT NULL, rewriting type changes, SET LOGGED /
-// UNLOGGED, SET ACCESS METHOD, and added columns whose values must be
-// computed per row.
+// they are added or enforced, SET NOT NULL, rewriting type changes, SET
+// EXPRESSION that rewrites or checks the rows, SET LOGGED / UNLOGGED, SET
+// ACCESS METHOD, and added columns whose values must be computed per row.
 // desired supplies the volatility of the functions it declares.
 func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
     if live == nil { return nil }
@@ -94,7 +96,7 @@ func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
         if m := lockConstraintRe.FindStringSubmatch(stmt); m != nil {
             fq, name := unquoteFQ(m[1]), unquoteFQ(m[2])
             if !exists(fq) { continue }
-            notValid := strings.Contains(stmt, " not valid")
+            notValid := strings.Contains(stmt, " not valid") || strings.HasSuffix(stmt, " not enforced;")
             switch m[3] {
             case "foreign key":
                 if lt := live.Tables[fq]; !notValid && lt != nil && lt.Partitioned && live.ServerVersion > 0 && live.ServerVersion < 180000 {
@@ -108,6 +110,16 @@ func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
                 }
             default:
                 warn(fq, stmt, "adding %s %s builds its index under an ACCESS EXCLUSIVE lock, blocking reads and writes on %s", m[3], name, fq)
+            }
+            continue
+        }
+        if m := lockEnforceRe.FindStringSubmatch(stmt); m != nil {
+            fq, name := unquoteFQ(m[1]), unquoteFQ(m[2])
+            if !exists(fq) { continue }
+            if strings.HasPrefix(strings.ToUpper(live.Tables[fq].ConstraintDefs[name]), "FOREIGN KEY") {
+                warn(fq, stmt, "enforcing foreign key %s checks every row of %s under an ACCESS EXCLUSIVE lock, blocking reads and writes on it and writes to the referenced table; without validate: immediate, pgy adds it again NOT VALID and validates it without blocking writes", name, fq)
+            } else {
+                warn(fq, stmt, "enforcing check %s scans all of %s under an ACCESS EXCLUSIVE lock; without validate: immediate, pgy adds it again NOT VALID and validates it without blocking writes", name, fq)
             }
             continue
         }
@@ -132,6 +144,17 @@ func lockWarnings(live *Live, desired *schema.Database, p *PlanDiff) []Warning {
             if i := strings.Index(to, " collate "); i >= 0 { to = to[:i] }
             if using || typeChangeRewrites(lt.Columns[col].Type, to) {
                 warn(fq, stmt, "changing %s.%s from %s to %s rewrites the table and its indexes under an ACCESS EXCLUSIVE lock", fq, col, lt.Columns[col].Type, to)
+            }
+            continue
+        }
+        if m := lockSetExpressionRe.FindStringSubmatch(stmt); m != nil {
+            fq, col := unquoteFQ(m[1]), unquoteFQ(m[2])
+            lt := live.Tables[fq]
+            if lt == nil || lt.Foreign != nil || lt.Columns[col] == nil { continue }
+            if lc := lt.Columns[col]; !lc.Virtual {
+                warn(fq, stmt, "SET EXPRESSION on %s.%s rewrites %s and its indexes under an ACCESS EXCLUSIVE lock", fq, col, fq)
+            } else if against := virtualExpressionChecks(lt, col); against != "" {
+                warn(fq, stmt, "SET EXPRESSION on virtual generated column %s.%s checks every row of %s against %s under an ACCESS EXCLUSIVE lock", fq, col, fq, against)
             }
             continue
         }
@@ -171,6 +194,20 @@ func KeepExisting(ws []Warning, live *Live, desired *schema.Database) []Warning 
         if w.Kind != "lock" || renamed != nil && (renamed.Tables[w.Table] != nil || renamed.MatViewTables[w.Table] != nil) { out = append(out, w) }
     }
     return out
+}
+
+// virtualExpressionChecks lists what SET EXPRESSION on virtual generated
+// column col of lt checks every row against, or returns "": its NOT NULL
+// constraint and the validated, enforced check constraints that use it.
+func virtualExpressionChecks(lt *LiveTable, col string) string {
+    out := []string{}
+    if !lt.Columns[col].Nullable { out = append(out, "its NOT NULL constraint") }
+    uses := columnRefs(col)
+    for _, name := range sortedKeys(lt.ConstraintDefs) {
+        def := lt.ConstraintDefs[name]
+        if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(def)), "CHECK") && !liveNotValid(def) && !liveNotEnforced(def) && uses(def) { out = append(out, "check "+name) }
+    }
+    return strings.Join(out, ", ")
 }
 
 // hasNotNullCheck reports whether lt has a validated CHECK (col IS NOT

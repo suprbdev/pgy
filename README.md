@@ -214,7 +214,7 @@ policy:
 `pgy pull --schema app` (or `--exclude-schema platform` for everything else) writes the objects of the pulled schemas and only the database-wide objects they need, so that the YAML rebuilds a database without the other schemas:
 
 - **Extensions** installed in a pulled schema or used by an object in one: a column or domain of the extension's type, an index with its operator class, a default, constraint, trigger, view or SQL-standard routine body that calls its functions (calls in bodies written as text are not recorded by PostgreSQL and do not count). The extensions these require, and those that provide the foreign-data wrapper of a pulled server or own a pulled language entry, are written too.
-- **Publications** that publish tables or schemas of the pulled schemas and nothing else. One that also publishes tables of other schemas is left out with a warning, since writing only part of it would take the other tables out of it. `FOR ALL TABLES` publications are left out.
+- **Publications** that publish tables or schemas of the pulled schemas and nothing else. One that also publishes tables of other schemas is left out with a warning, since writing only part of it would take the other tables out of it. `FOR ALL TABLES` and `FOR ALL SEQUENCES` publications are left out.
 - **Event triggers** whose function is in a pulled schema.
 - **Database settings** (the `database:` block) are left out, since they belong to the database as a whole and may hold secrets such as a hosting platform's `app.settings.jwt_secret`. `--database-settings` writes them anyway.
 

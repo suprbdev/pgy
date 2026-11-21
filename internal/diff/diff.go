@@ -254,9 +254,13 @@ type LiveForeignTable struct {
 
 // LivePublication is a publication from pg_publication and its table and
 // schema memberships. Tables maps "schema.table" to its column list (nil =
-// all columns, sorted) and row filter.
+// all columns, sorted) and row filter. Except maps the tables a FOR ALL
+// TABLES publication leaves out (PostgreSQL 19+) to whether it leaves out
+// only the table and not its inheritance children.
 type LivePublication struct {
     AllTables bool
+    AllSequences bool
+    Except    map[string]bool
     Publish   []string // enabled actions in insert, update, delete, truncate order
     ViaRoot   bool
     GeneratedColumns string // publish_generated_columns: none | stored; "" before PostgreSQL 18
@@ -1233,7 +1237,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
                coalesce(nullif(a.aggmfinalfn::text, '-'), ''), a.aggmfinalextra::text,
                case a.aggmfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
                coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end,
-               (a.aggkind = 'h')::text, a.agginitval is not null, a.aggminitval is not null
+               coalesce(nullif(p.prosupport::text, '-'), ''), (a.aggkind = 'h')::text, a.agginitval is not null, a.aggminitval is not null
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -1560,7 +1564,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
                coalesce(d.description, ''),
                case to_jsonb(p) ->> 'pubgencols' when 's' then 'stored' when 'n' then 'none' else '' end,
-               pg_get_userbyid(p.pubowner)
+               pg_get_userbyid(p.pubowner), coalesce((to_jsonb(p) ->> 'puballsequences')::bool, false)
         from pg_publication p
         left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
     `
@@ -1569,7 +1573,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
             var name string
             var ins, upd, del, trunc bool
             lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
-            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns, &lp.Owner); err != nil {
+            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns, &lp.Owner, &lp.AllSequences); err != nil {
                 return err
             }
             for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
@@ -1580,22 +1584,28 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         return nil
     })
 
-    // A table published without ONLY also publishes its inheritance
-    // children, each with its own pg_publication_rel row; those are left
-    // out, since declaring the parent again would publish them twice.
+    // A table published or excepted (PostgreSQL 19) without ONLY brings its
+    // inheritance children along, each with its own pg_publication_rel row;
+    // those are left out, since declaring the parent again would publish them
+    // twice. prexcept is new in PostgreSQL 19.
     pubRelQ := `
+        with rel as (
+            select r.prpubid, r.prrelid, r.prqual, r.prattrs, coalesce((to_jsonb(r) ->> 'prexcept')::bool, false) as prexcept
+            from pg_publication_rel r
+        )
         select p.pubname, n.nspname || '.' || c.relname, coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''),
                (select array_agg(a.attname::text order by a.attname) from pg_attribute a
                 where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs)),
                c.relkind = 'r' and exists (select 1 from pg_inherits i where i.inhparent = pr.prrelid
-                   and not exists (select 1 from pg_publication_rel x where x.prpubid = pr.prpubid and x.prrelid = i.inhrelid))
-        from pg_publication_rel pr
+                   and not exists (select 1 from rel x where x.prpubid = pr.prpubid and x.prrelid = i.inhrelid and x.prexcept = pr.prexcept)),
+               pr.prexcept
+        from rel pr
         join pg_publication p on p.oid = pr.prpubid
         join pg_class c on c.oid = pr.prrelid
         join pg_namespace n on n.oid = c.relnamespace
         where not exists (
             select 1 from pg_inherits i
-            join pg_publication_rel ppr on ppr.prrelid = i.inhparent and ppr.prpubid = pr.prpubid
+            join rel ppr on ppr.prrelid = i.inhparent and ppr.prpubid = pr.prpubid and ppr.prexcept = pr.prexcept
             where i.inhrelid = pr.prrelid
             and coalesce(pg_get_expr(ppr.prqual, ppr.prrelid), '') = coalesce(pg_get_expr(pr.prqual, pr.prrelid), '')
             and coalesce((select array_agg(a.attname::text order by a.attname) from pg_attribute a where a.attrelid = ppr.prrelid and a.attnum = any(ppr.prattrs)), '{}')
@@ -1605,11 +1615,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         for pubRelRows.Next() {
             var pub, table, where string
             var cols []string
-            var only bool
-            if err := pubRelRows.Scan(&pub, &table, &where, &cols, &only); err != nil {
+            var only, except bool
+            if err := pubRelRows.Scan(&pub, &table, &where, &cols, &only, &except); err != nil {
                 return err
             }
-            if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where, Only: only} }
+            lp := l.Publications[pub]
+            switch {
+            case lp == nil:
+            case except:
+                if lp.Except == nil { lp.Except = map[string]bool{} }
+                lp.Except[table] = only
+            default:
+                lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where, Only: only}
+            }
         }
         return nil
     })
@@ -2964,6 +2982,20 @@ type PlanDiff struct{
     // parts coordinates the indexes of partition trees while the plan is
     // built.
     parts *partitionIndexPlan
+    // pubsSet names the publications whose SET ALL ... went before an
+    // ATTACH PARTITION (see exceptBeforeAttach).
+    pubsSet map[string]bool
+    // replaced holds the constraints, as "table\x00name", that the plan
+    // drops and adds again without --unsafe, so their comments are set
+    // again.
+    replaced map[string]bool
+}
+
+// replaceConstraint records that the plan drops constraint name of table fq
+// and adds it again.
+func (p *PlanDiff) replaceConstraint(fq, name string) {
+    if p.replaced == nil { p.replaced = map[string]bool{} }
+    p.replaced[fq+"\x00"+name] = true
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -3555,6 +3587,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, pc := range dt.PrimaryKey { pkCols[constraintColumnName(pc)] = true }
                 plan.Creates = append(plan.Creates, typeChangePre[fq]...)
                 if attachesPartition(dt, lt) {
+                    plan.Creates = append(plan.Creates, exceptBeforeAttach(plan, live, desired, fq)...)
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
                     plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
                 } else if lb, ok := live.PartitionBounds[fq]; ok && unsafe && dt.PartitionOf != "" && lt.IsPartition && partitionMoved(dt, lb) {
@@ -3610,7 +3643,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                             plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
                         }
                     }
-                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
+                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, generatedChangeBlocked(live, fq, c, lc), func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })
                     if len(typeChangePre[fq]) > 0 {
@@ -3670,7 +3703,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     grantStmts, grantWarnings := planGrantsWarned(live, desired, opts.PublicGrants)
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
-    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe, plan.replaced)...)
     plan.Alters = append(plan.Alters, routinePost...)
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
@@ -4377,9 +4410,12 @@ func isNumericLiteral(s string) bool {
 
 // planPublications reconciles publications after every table create and
 // alter. Membership changes emit ALTER PUBLICATION ... SET (or DROP when the
-// desired publication has no members); option changes SET (...). Switching
-// to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
-// every table, so it requires --unsafe, as does --prune dropping
+// desired publication has no members); option changes SET (...). Changes
+// among FOR ALL TABLES [EXCEPT], FOR ALL SEQUENCES and their combination
+// emit SET ALL ..., as does a switch from members to them on PostgreSQL 19
+// (after dropping the members). Any other switch to or from FOR ALL TABLES
+// needs DROP + CREATE, which briefly unpublishes every table, so it requires
+// --unsafe (see publicationInPlace), as does --prune dropping
 // publications missing from a present publications block, but for external
 // ones (see externalPublication) and those the connecting role may not drop
 // (see Live.OwnerRoles), which are reported.
@@ -4396,15 +4432,16 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
         }
         ident := quoteIdent(truncateIdent(name))
         lp := live.Publications[truncateIdent(name)]
-        if lp != nil && lp.AllTables != p.AllTables {
+        if lp != nil && !publicationInPlace(lp, p, live.ServerVersion) {
             if !opts.Unsafe { continue }
             plan.Alters = append(plan.Alters, fmt.Sprintf("drop publication %s;", ident))
             lp = nil
         }
+        all := publicationAllObjects(p)
         if lp == nil {
             stmt := "create publication " + ident
-            if p.AllTables {
-                stmt += " for all tables"
+            if all != "" {
+                stmt += " for " + all
             } else if members := publicationMembers(p); members != "" {
                 stmt += " for " + members
             }
@@ -4416,20 +4453,16 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
             }
             continue
         }
-        if !p.AllTables && !publicationMembersMatch(p, lp) {
+        switch {
+        case plan.pubsSet[truncateIdent(name)]:
+        case all != "" && !publicationAllMatch(p, lp):
+            if !lp.AllTables && !lp.AllSequences { plan.Alters = append(plan.Alters, publicationDropMembers(ident, lp)...) }
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set %s;", ident, all))
+        case all == "" && !publicationMembersMatch(p, lp):
             if members := publicationMembers(p); members != "" {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set %s;", ident, members))
             } else {
-                if len(lp.Tables) > 0 {
-                    tables := sortedKeys(lp.Tables)
-                    for i, t := range tables { tables[i] = pqIdent(t) }
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop table %s;", ident, strings.Join(tables, ", ")))
-                }
-                if len(lp.Schemas) > 0 {
-                    schemas := make([]string, len(lp.Schemas))
-                    for i, s := range lp.Schemas { schemas[i] = quoteIdent(s) }
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
-                }
+                plan.Alters = append(plan.Alters, publicationDropMembers(ident, lp)...)
             }
         }
         if with := publicationWith(p, lp); with != "" {
@@ -4451,6 +4484,113 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
         }
         plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name)))
     }
+}
+
+// exceptBeforeAttach returns the SET ALL TABLES statements that take table
+// fq out of the EXCEPT lists of live publications before it is attached as
+// a partition, which PostgreSQL 19 rejects while a publication excepts it.
+// Only fq leaves each list; planPublications makes the rest of the change.
+// A publication the YAML doesn't declare with allTables and without fq in
+// except is reported instead.
+func exceptBeforeAttach(plan *PlanDiff, live *Live, desired *schema.Database, fq string) []string {
+    out := []string{}
+    for _, name := range sortedKeys(live.Publications) {
+        lp := live.Publications[name]
+        if _, ok := lp.Except[fq]; !ok { continue }
+        var p *schema.Publication
+        for _, dn := range sortedKeys(desired.Publications) {
+            if truncateIdent(dn) == name { p = desired.Publications[dn] }
+        }
+        excepted := false
+        if p != nil {
+            for _, t := range p.Except { excepted = excepted || t.Table == fq }
+        }
+        if p == nil || !p.AllTables || excepted {
+            plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("publication %s excepts %s, which PostgreSQL rejects for a partition, so ATTACH PARTITION fails; declare the publication with allTables and without %s in except", name, fq, fq)})
+            continue
+        }
+        early := &LivePublication{AllTables: true, AllSequences: lp.AllSequences, Except: map[string]bool{}}
+        spec := &schema.Publication{AllTables: true, AllSequences: lp.AllSequences}
+        for _, t := range sortedKeys(lp.Except) {
+            if t == fq { continue }
+            early.Except[t] = lp.Except[t]
+            spec.Except = append(spec.Except, &schema.PublicationTable{Table: t, Only: lp.Except[t]})
+        }
+        out = append(out, fmt.Sprintf("alter publication %s set %s;", quoteIdent(name), publicationAllObjects(spec)))
+        if publicationAllMatch(p, early) {
+            if plan.pubsSet == nil { plan.pubsSet = map[string]bool{} }
+            plan.pubsSet[name] = true
+        }
+    }
+    return out
+}
+
+// publicationInPlace reports whether ALTER PUBLICATION can turn lp into p.
+// PostgreSQL 19 can SET ALL TABLES or ALL SEQUENCES on a publication that
+// publishes either or nothing, but never SET TABLE or TABLES IN SCHEMA on
+// one that publishes all tables or sequences; earlier servers can switch
+// neither way.
+func publicationInPlace(lp *LivePublication, p *schema.Publication, version int) bool {
+    switch {
+    case lp.AllTables || lp.AllSequences:
+        return p.AllTables || p.AllSequences
+    case p.AllTables || p.AllSequences:
+        return version >= 190000
+    }
+    return true
+}
+
+// publicationAllObjects renders p's ALL TABLES [EXCEPT (...)] and ALL
+// SEQUENCES list, "" when p publishes neither.
+func publicationAllObjects(p *schema.Publication) string {
+    parts := []string{}
+    if p.AllTables {
+        entry := "all tables"
+        if len(p.Except) > 0 {
+            except := make([]string, len(p.Except))
+            for i, t := range p.Except {
+                except[i] = "table " + pqIdent(t.Table)
+                if t.Only { except[i] = "table only " + pqIdent(t.Table) }
+            }
+            entry += " except (" + strings.Join(except, ", ") + ")"
+        }
+        parts = append(parts, entry)
+    }
+    if p.AllSequences { parts = append(parts, "all sequences") }
+    return strings.Join(parts, ", ")
+}
+
+// publicationAllMatch reports whether lp publishes all tables, with the
+// same exceptions, and all sequences exactly when p does.
+func publicationAllMatch(p *schema.Publication, lp *LivePublication) bool {
+    if p.AllTables != lp.AllTables || p.AllSequences != lp.AllSequences { return false }
+    if !p.AllTables { return true }
+    if len(p.Except) != len(lp.Except) { return false }
+    for _, t := range p.Except {
+        if only, ok := lp.Except[t.Table]; !ok || only != t.Only { return false }
+    }
+    return true
+}
+
+// publicationDropMembers returns the ALTER PUBLICATION ... DROP statements
+// that empty lp: ONLY for a table published without its children, which
+// PostgreSQL would otherwise try to drop too.
+func publicationDropMembers(ident string, lp *LivePublication) []string {
+    out := []string{}
+    if len(lp.Tables) > 0 {
+        tables := sortedKeys(lp.Tables)
+        for i, t := range tables {
+            tables[i] = pqIdent(t)
+            if lp.Tables[t].Only { tables[i] = "only " + pqIdent(t) }
+        }
+        out = append(out, fmt.Sprintf("alter publication %s drop table %s;", ident, strings.Join(tables, ", ")))
+    }
+    if len(lp.Schemas) > 0 {
+        schemas := make([]string, len(lp.Schemas))
+        for i, s := range lp.Schemas { schemas[i] = quoteIdent(s) }
+        out = append(out, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
+    }
+    return out
 }
 
 // publicationMembers renders the TABLE ... / TABLES IN SCHEMA ... list.
@@ -5428,8 +5568,10 @@ func ownedByIdent(seq, s string) string {
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared). An
-// external role that exists keeps its comment, as planRoles warns.
-func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
+// external role that exists keeps its comment, as planRoles warns. A
+// constraint in replaced ("table\x00name"), which the plan drops and adds
+// again, gets its comment again.
+func planComments(live *Live, desired *schema.Database, unsafe bool, replaced map[string]bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
         if want != "" && want != have {
@@ -5531,14 +5673,14 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
             have := ""
-            if lt != nil && !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe) { have = lt.ConstraintComments[fkName] }
+            if lt != nil && (foreignKeyEnforcedOnly(live, lt, fkName, fk) || !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe)) && !replaced[k+"\x00"+fkName] { have = lt.ConstraintComments[fkName] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(fkName), pqIdent(k)), fk.Comment, have)
         }
         for _, ct := range dt.Constraints {
             if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
             name := truncateIdent(ct.Name)
             have := ""
-            if lt != nil && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct)) { have = lt.ConstraintComments[name] }
+            if lt != nil && !replaced[k+"\x00"+name] && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct) || checkEnforcedOnly(live, lt, name, ct)) { have = lt.ConstraintComments[name] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(name), pqIdent(k)), ct.Comment, have)
         }
         for _, tr := range dt.Triggers {
@@ -6364,12 +6506,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[fkName] {
             liveDef, ok := liveConstraintDefs[fkName]
+            toggle := foreignKeyEnforcedOnly(live, lt, fkName, fk)
             switch {
+            case toggle && (fk.NotEnforced || immediate && !fk.NotValid):
+                *deferredFKs = append(*deferredFKs, enforcedStmt(fq, fkName, fk.NotEnforced))
+            case toggle:
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, fkName)
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef) && immediate:
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                plan.replaceConstraint(fq, fkName)
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             }
@@ -6558,12 +6708,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
+            toggle := checkEnforcedOnly(live, lt, ctName, ct)
             switch {
+            case toggle && (live.ServerVersion <= 0 || live.ServerVersion >= 190000) && (ct.NotEnforced || immediate && !ct.NotValid):
+                plan.Alters = append(plan.Alters, enforcedStmt(fq, ctName, ct.NotEnforced))
+            case toggle:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, ctName)
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef) && immediate:
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                plan.replaceConstraint(fq, ctName)
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
@@ -6972,8 +7130,10 @@ func RenderMain(p *PlanDiff) string {
 // default left in place to the new type and gives up when no implicit or
 // assignment cast exists. Identity changes go through identityAlterStmts;
 // identity/serial columns keep their generated defaults and implicit NOT
-// NULL.
-func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
+// NULL. A changed generated expression gets SET EXPRESSION under --unsafe,
+// unless blocked (see generatedChangeBlocked) says why the column can't
+// change in place, when recreateColumnDependents drops and adds it instead.
+func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, blocked string, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
 
@@ -7006,13 +7166,15 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 
     if c.Generated != "" || lc.Generated != "" {
         switch {
-        case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
+        case c.Generated != "" && lc.Generated != "" && (blocked != "" || !constraintDefsEqual(c.Generated, lc.Generated)):
             switch {
-            case serverVersion > 0 && serverVersion < 170000:
-                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, serverVersion/10000)) }
+            case blocked != "":
+                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but %s; --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, blocked)) }
             case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }
+        case c.Generated == "" && lc.Virtual:
+            warn(fmt.Sprintf("column %s.%s is declared plain but is a virtual generated column, and PostgreSQL has DROP EXPRESSION only for stored ones; add a plain column under another name, copy %s into it and drop %s in a hand-written migration", fq, cn, cn, cn))
         case c.Generated == "" && lc.Generated != "":
             if unsafe { out = append(out, target+" drop expression;") }
         case c.Generated != "" && lc.Generated == "":
@@ -7468,6 +7630,47 @@ func renderFKDef(fk *schema.ForeignKey) string {
 // constraint NOT VALID.
 func liveNotValid(def string) bool {
     return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT VALID")
+}
+
+// liveNotEnforced reports whether a pg_get_constraintdef() output marks the
+// constraint NOT ENFORCED.
+func liveNotEnforced(def string) bool {
+    return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT ENFORCED")
+}
+
+// foreignKeyEnforcedOnly reports whether foreign key name of lt differs
+// from fk only in being enforced or not, on a server that knows NOT
+// ENFORCED (PostgreSQL 18+).
+func foreignKeyEnforcedOnly(live *Live, lt *LiveTable, name string, fk *schema.ForeignKey) bool {
+    if lt == nil || !enforcedToggled(live, fk.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *fk
+    flipped.NotEnforced = !fk.NotEnforced
+    return constraintDefsEqual(renderFKDef(&flipped), lt.ConstraintDefs[name])
+}
+
+// checkEnforcedOnly is foreignKeyEnforcedOnly for check constraint ct.
+func checkEnforcedOnly(live *Live, lt *LiveTable, name string, ct *schema.Constraint) bool {
+    if lt == nil || !strings.EqualFold(ct.Type, "check") || !enforcedToggled(live, ct.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *ct
+    flipped.NotEnforced = !ct.NotEnforced
+    return constraintMatchesLive(lt, name, &flipped)
+}
+
+// enforcedToggled reports whether constraint name, declared notEnforced,
+// is enforced the other way in its live definition in defs, on a server
+// that knows NOT ENFORCED.
+func enforcedToggled(live *Live, notEnforced bool, defs map[string]string, name string) bool {
+    def, ok := defs[name]
+    return ok && notEnforced != liveNotEnforced(def) && (live.ServerVersion <= 0 || live.ServerVersion >= 180000)
+}
+
+// enforcedStmt changes constraint name of table fq to NOT ENFORCED, or to
+// ENFORCED, which checks every row under an ACCESS EXCLUSIVE lock.
+// PostgreSQL 18 does this for foreign keys, 19 for check constraints too.
+func enforcedStmt(fq, name string, notEnforced bool) string {
+    state := "enforced"
+    if notEnforced { state = "not enforced" }
+    return fmt.Sprintf("alter table %s alter constraint %s %s;", pqIdent(fq), quoteIdent(name), state)
 }
 
 // validityClause renders NOT VALID / NOT ENFORCED. A constraint that is not
@@ -8379,7 +8582,7 @@ func isMultiWordTypeStart(first, second string) bool {
 // once.
 func versionWarnings(live *Live, desired *schema.Database) []Warning {
     v := live.ServerVersion
-    if v <= 0 || v >= 180000 || desired == nil { return nil }
+    if v <= 0 || v >= 190000 || desired == nil { return nil }
     out := []Warning{}
     need := func(what string, version int) {
         if v < version*10000 {
@@ -8391,23 +8594,23 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
         if t == nil { continue }
         lt := live.Tables[fq]
         for _, cn := range sortedKeys(t.Columns) {
-            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil) {
+            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil || !lt.Columns[cn].Virtual) {
                 need(fmt.Sprintf("virtual generated column %s.%s", fq, cn), 18)
             }
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
                 need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
             }
-            if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable {
+            if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable && v < 180000 {
                 out = append(out, Warning{Message: fmt.Sprintf("notNullName on column %s.%s is ignored: PostgreSQL %d does not record a name for a column's NOT NULL constraint (PostgreSQL 18 does)", fq, cn, v/10000)})
             }
         }
         for _, ct := range t.Constraints {
-            if ct != nil && ct.NotEnforced && (lt == nil || !lt.Constraints[ct.Name]) {
+            if ct != nil && ct.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(ct.Name)])) {
                 need(fmt.Sprintf("constraint %s on %s (enforced: false)", ct.Name, fq), 18)
             }
         }
         for _, fk := range t.ForeignKeys {
-            if fk != nil && fk.NotEnforced && (lt == nil || !lt.Constraints[fk.Name]) {
+            if fk != nil && fk.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(fk.Name)])) {
                 need(fmt.Sprintf("foreign key %s on %s (enforced: false)", fk.Name, fq), 18)
             }
         }
@@ -8434,6 +8637,26 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
     for _, k := range sortedKeys(desired.Collations) {
         if co := desired.Collations[k]; co != nil && co.Rules != "" && !live.Collations[k] {
             need(fmt.Sprintf("collation %s's rules", k), 16)
+        }
+    }
+    for _, k := range sortedKeys(desired.ForeignDataWrappers) {
+        if w := desired.ForeignDataWrappers[k]; w != nil && w.Connection != "" {
+            need(fmt.Sprintf("the connection function of foreign-data wrapper %s", k), 19)
+        }
+    }
+    for _, k := range sortedKeys(desired.Aggregates) {
+        if ag := desired.Aggregates[k]; ag != nil && ag.Options["support"] != "" {
+            need(fmt.Sprintf("the support function of aggregate %s", k), 19)
+        }
+    }
+    for _, name := range sortedKeys(desired.Publications) {
+        p, lp := desired.Publications[name], live.Publications[truncateIdent(name)]
+        if p == nil { continue }
+        if p.AllSequences && (lp == nil || !lp.AllSequences) {
+            need(fmt.Sprintf("allSequences on publication %s", name), 19)
+        }
+        if p.AllTables && len(p.Except) > 0 && (lp == nil || len(lp.Except) == 0) {
+            need(fmt.Sprintf("except on publication %s", name), 19)
         }
     }
     return out

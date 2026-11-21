@@ -11,12 +11,14 @@ import (
 
 // LiveWrapper is a foreign-data wrapper from pg_foreign_data_wrapper.
 type LiveWrapper struct {
-	// Handler and Validator are "schema.function", or "" for none.
-	Handler   string
-	Validator string
-	Options   map[string]string
-	Owner     string
-	Comment   string
+	// Handler, Validator and Connection are "schema.function", or "" for
+	// none. Connection is always "" before PostgreSQL 19.
+	Handler    string
+	Validator  string
+	Connection string
+	Options    map[string]string
+	Owner      string
+	Comment    string
 	// Grants: fdwacl, owner excluded: role -> privilege ("usage", "usage*"
 	// with grant option)
 	Grants map[string]map[string]bool
@@ -28,10 +30,12 @@ type LiveWrapper struct {
 
 // wrapperQ reads every foreign-data wrapper, one row per privilege held by
 // a role other than its owner and one with an empty grantee for a wrapper
-// without any.
+// without any. fdwconnection (PostgreSQL 19) is read through to_jsonb, as
+// older servers lack the column.
 const wrapperQ = `
     select w.fdwname, pg_get_userbyid(w.fdwowner),
            coalesce(hn.nspname || '.' || h.proname, ''), coalesce(vn.nspname || '.' || v.proname, ''),
+           coalesce(kn.nspname || '.' || k.proname, ''),
            coalesce(w.fdwoptions, '{}'::text[]), coalesce(c.description, ''),
            coalesce(pg_get_userbyid(x.extowner), ''),
            coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
@@ -41,6 +45,8 @@ const wrapperQ = `
     left join pg_namespace hn on hn.oid = h.pronamespace
     left join pg_proc v on v.oid = w.fdwvalidator
     left join pg_namespace vn on vn.oid = v.pronamespace
+    left join pg_proc k on k.oid = (to_jsonb(w) ->> 'fdwconnection')::oid
+    left join pg_namespace kn on kn.oid = k.pronamespace
     left join pg_description c on c.classoid = 'pg_foreign_data_wrapper'::regclass and c.objoid = w.oid and c.objsubid = 0
     left join pg_depend m on m.classid = 'pg_foreign_data_wrapper'::regclass and m.objid = w.oid and m.deptype = 'e'
     left join pg_extension x on x.oid = m.refobjid
@@ -52,7 +58,7 @@ func (l *Live) scanWrappers(rows pgx.Rows) error {
 		var name, grantee, priv string
 		var options []string
 		w := &LiveWrapper{}
-		if err := rows.Scan(&name, &w.Owner, &w.Handler, &w.Validator, &options, &w.Comment, &w.ExtensionOwner, &grantee, &priv); err != nil {
+		if err := rows.Scan(&name, &w.Owner, &w.Handler, &w.Validator, &w.Connection, &options, &w.Comment, &w.ExtensionOwner, &grantee, &priv); err != nil {
 			return err
 		}
 		if have := l.Wrappers[name]; have != nil {
@@ -112,9 +118,9 @@ func sameWrapperFunction(want, have string) bool {
 // ahead of the servers that use them. A wrapper an extension owns (see
 // wrapperExtension) is never created, and of its declaration only the
 // options, owner, privileges and comment are applied. Any other wrapper is
-// created when the database lacks it. The handler and validator of a live
-// one are compared only when the declaration manages them (see
-// schema.ForeignDataWrapper.ManagesHandler), and a handler changed under
+// created when the database lacks it. The handler, validator and connection
+// function of a live one are compared only when the declaration manages them
+// (see schema.ForeignDataWrapper.ManagesHandler), and a handler changed under
 // foreign tables is reported. Privileges follow the rules of
 // planGrantsWarned for objects that give PUBLIC nothing by default.
 // Dropping undeclared wrappers is part of pruning; see pruneWrappers.
@@ -143,8 +149,8 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 		var liveG map[string]map[string]bool
 		switch {
 		case owned:
-			if w.ManagesHandler() || w.ManagesValidator() {
-				warn("foreign-data wrapper %s belongs to extension %s, which defines its handler and validator; the ones declared for it are ignored", name, extension)
+			if w.ManagesHandler() || w.ManagesValidator() || w.ManagesConnection() {
+				warn("foreign-data wrapper %s belongs to extension %s, which defines its handler, validator and connection function; the ones declared for it are ignored", name, extension)
 			}
 			var liveOptions map[string]string
 			if lw != nil {
@@ -164,6 +170,9 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 			if w.Validator != "" {
 				stmt += " validator " + pqIdent(w.Validator)
 			}
+			if w.Connection != "" {
+				stmt += " connection " + pqIdent(w.Connection)
+			}
 			plan.Creates = append(plan.Creates, stmt+fdwOptionsClause(w.Options)+";")
 		default:
 			liveOwner, liveG = lw.Owner, lw.Grants
@@ -172,7 +181,7 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 				keyword    string
 				managed    bool
 				want, have string
-			}{{"handler", w.ManagesHandler(), w.Handler, lw.Handler}, {"validator", w.ManagesValidator(), w.Validator, lw.Validator}} {
+			}{{"handler", w.ManagesHandler(), w.Handler, lw.Handler}, {"validator", w.ManagesValidator(), w.Validator, lw.Validator}, {"connection", w.ManagesConnection(), w.Connection, lw.Connection}} {
 				switch {
 				case !f.managed || sameWrapperFunction(f.want, f.have):
 				case f.want == "":
@@ -311,6 +320,9 @@ func simulateWrappers(out *Live, desired *schema.Database) {
 			}
 			if w.ManagesValidator() {
 				lw.Validator = w.Validator
+			}
+			if w.ManagesConnection() {
+				lw.Connection = w.Connection
 			}
 		} else if prev == nil {
 			out.ExtensionMembers["fdw:"+name] = true
