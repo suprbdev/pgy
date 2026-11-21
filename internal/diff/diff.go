@@ -4327,7 +4327,7 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, serve
 func inheritedOverrideStmts(desired *schema.Database, live *Live, fq, cn string, dt *schema.Table, c *schema.Column, lc *LiveColumn, creating, unsafe bool, warn func(string)) (alters, concurrent []string) {
     rootFq, root, liveRoot := declaringColumn(desired, live, dt, cn)
     inline := inlineInherited(desired, live, dt, cn, c)
-    if c.Generated != "" && (lc != nil && lc.Generated != "" || lc == nil && !(creating && inline != nil && inline.Generated != "")) {
+    if c.Generated != "" && (lc != nil && lc.Generated != "" || lc == nil && (!creating || inline == nil || inline.Generated == "")) {
         clobbered := unsafe && root != nil && liveRoot != nil && root.Generated != "" && liveRoot.Generated != "" && !constraintDefsEqual(root.Generated, liveRoot.Generated)
         switch {
         case lc != nil && constraintDefsEqual(c.Generated, lc.Generated) && !clobbered, lc != nil && !unsafe:
@@ -4344,7 +4344,7 @@ func inheritedOverrideStmts(desired *schema.Database, live *Live, fq, cn string,
             warn(fmt.Sprintf("column %s.%s: its NOT NULL constraint %s is inherited from %s, and PostgreSQL cannot rename an inherited constraint, so it keeps that name rather than notNullName %s", fq, cn, lc.NotNullName, rootFq, name))
         }
     }
-    if c.NotValidSet && !c.NotValid && !(c.NullableSet && c.Nullable) {
+    if c.NotValidSet && !c.NotValid && (!c.NullableSet || !c.Nullable) {
         switch {
         case lc != nil && lc.NotNullNotValid != "":
             concurrent = append(concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
