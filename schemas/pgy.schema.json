@@ -163,7 +163,26 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication to or from it requires --unsafe (drop + create)." },
+          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication from it to tables or schemas requires --unsafe (drop + create), as does switching to it before PostgreSQL 19." },
+          "except": {
+            "type": "array",
+            "description": "FOR ALL TABLES EXCEPT (PostgreSQL 19+): tables allTables leaves out, with their inheritance children unless only is set. Needs allTables.",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "properties": {
+                    "table": { "type": "string", "minLength": 1 },
+                    "only": { "type": "boolean", "description": "EXCEPT (TABLE ONLY ...): leave out the table but not its inheritance children." }
+                  },
+                  "required": ["table"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "allSequences": { "type": "boolean", "description": "FOR ALL SEQUENCES (PostgreSQL 19+): publish every sequence, alone or with allTables. Cannot be combined with tables or schemas." },
           "tables": {
             "type": "array",
             "items": {

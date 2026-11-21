@@ -606,6 +606,17 @@ func Database(d *schema.Database) []Issue {
 		if p.AllTables && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
 			add(Error, "publication "+name, "allTables cannot be combined with tables or schemas")
 		}
+		if p.AllSequences && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
+			add(Error, "publication "+name, "allSequences cannot be combined with tables or schemas")
+		}
+		if len(p.Except) > 0 && !p.AllTables {
+			add(Error, "publication "+name, "except needs allTables: true")
+		}
+		for _, pt := range p.Except {
+			if t := d.Tables[pt.Table]; t != nil && t.PartitionOf != "" {
+				add(Error, "publication "+name, "except cannot list partition %s; list its partitioned table", pt.Table)
+			}
+		}
 		listed := map[string]bool{}
 		for _, pt := range p.Tables {
 			listed[pt.Table] = true

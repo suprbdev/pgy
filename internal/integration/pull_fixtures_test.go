@@ -17,7 +17,8 @@ import (
 // TestIntegrationPullFixtures loads each SQL schema in testdata/pull into a
 // fresh database, pulls it with owners, and requires the pulled YAML to
 // diff clean against that database and to rebuild an identical schema in a
-// second fresh database.
+// second fresh database. A fixture whose name ends in _pg19 needs
+// PostgreSQL 19.
 func TestIntegrationPullFixtures(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -28,6 +29,9 @@ func TestIntegrationPullFixtures(t *testing.T) {
 	for _, f := range fixtures {
 		name := strings.TrimSuffix(filepath.Base(f), ".sql")
 		t.Run(name, func(t *testing.T) {
+			if strings.HasSuffix(name, "_pg19") {
+				requireServerVersion(t, 190000)
+			}
 			sql, err := os.ReadFile(f)
 			if err != nil {
 				t.Fatal(err)
