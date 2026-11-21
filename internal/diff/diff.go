@@ -1237,7 +1237,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
                coalesce(nullif(a.aggmfinalfn::text, '-'), ''), a.aggmfinalextra::text,
                case a.aggmfinalmodify when 'r' then 'read_only' when 's' then 'shareable' else 'read_write' end,
                coalesce(a.aggminitval, ''), case when a.aggsortop = 0 then '' else a.aggsortop::regoper::text end,
-               (a.aggkind = 'h')::text, a.agginitval is not null, a.aggminitval is not null
+               coalesce(nullif(p.prosupport::text, '-'), ''), (a.aggkind = 'h')::text, a.agginitval is not null, a.aggminitval is not null
         from pg_aggregate a
         join pg_proc p on p.oid = a.aggfnoid
         join pg_namespace n on n.oid = p.pronamespace
@@ -8555,6 +8555,16 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
     for _, k := range sortedKeys(desired.Collations) {
         if co := desired.Collations[k]; co != nil && co.Rules != "" && !live.Collations[k] {
             need(fmt.Sprintf("collation %s's rules", k), 16)
+        }
+    }
+    for _, k := range sortedKeys(desired.ForeignDataWrappers) {
+        if w := desired.ForeignDataWrappers[k]; w != nil && w.Connection != "" {
+            need(fmt.Sprintf("the connection function of foreign-data wrapper %s", k), 19)
+        }
+    }
+    for _, k := range sortedKeys(desired.Aggregates) {
+        if ag := desired.Aggregates[k]; ag != nil && ag.Options["support"] != "" {
+            need(fmt.Sprintf("the support function of aggregate %s", k), 19)
         }
     }
     for _, name := range sortedKeys(desired.Publications) {

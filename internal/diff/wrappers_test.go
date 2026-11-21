@@ -485,3 +485,65 @@ func TestForeignDataWrapperSimulated(t *testing.T) {
 		t.Errorf("Simulate must not modify its input")
 	}
 }
+
+func TestForeignDataWrapperConnectionCreate(t *testing.T) {
+	d := wrapperDB(map[string]*schema.ForeignDataWrapper{
+		"pg2":  {Name: "pg2", Handler: "postgres_fdw_handler", Validator: "postgres_fdw_validator", Connection: "public.postgres_fdw_connection"},
+		"none": {Name: "none", ConnectionSet: true},
+	})
+	sql, warns := planSQL(t, wrapperLive(), d, Options{})
+	wantSQL(t, sql,
+		`create foreign data wrapper "none";`,
+		`create foreign data wrapper "pg2" handler "postgres_fdw_handler" validator "postgres_fdw_validator" connection "public"."postgres_fdw_connection";`,
+	)
+	if len(warns) > 0 {
+		t.Errorf("unexpected warnings: %v", warns)
+	}
+}
+
+func TestForeignDataWrapperConnectionSkippedIfExists(t *testing.T) {
+	live := wrapperLive()
+	live.Wrappers["pg2"] = &LiveWrapper{Handler: "public.postgres_fdw_handler", Connection: "public.postgres_fdw_connection", Owner: "owner"}
+	live.Wrappers["none"] = &LiveWrapper{Owner: "owner"}
+	d := wrapperDB(map[string]*schema.ForeignDataWrapper{
+		"pg2":  {Name: "pg2", Handler: "postgres_fdw_handler", Connection: "postgres_fdw_connection"},
+		"none": {Name: "none", ConnectionSet: true},
+	})
+	if sql, warns := planSQL(t, live, d, Options{}); sql != "" || len(warns) > 0 {
+		t.Errorf("wrappers with the declared connection function must be skipped, got:\n%s%v", sql, warns)
+	}
+	if sql, _ := planSQL(t, Simulate(wrapperLive(), d), d, Options{}); sql != "" {
+		t.Errorf("a plan against the state the first one leaves must be empty, got:\n%s", sql)
+	}
+}
+
+func TestForeignDataWrapperConnectionAltered(t *testing.T) {
+	for name, c := range map[string]struct {
+		live, want string
+		set        bool
+		sql        string
+	}{
+		"another function": {"public.c", "ext.c2", true, `alter foreign data wrapper "w" connection "ext"."c2";`},
+		"a first function": {"", "public.c", true, `alter foreign data wrapper "w" connection "public"."c";`},
+		"none":             {"public.c", "", true, `alter foreign data wrapper "w" no connection;`},
+		"left out":         {"public.c", "", false, ``},
+	} {
+		live := wrapperLive()
+		live.Wrappers["w"] = &LiveWrapper{Handler: "public.h", Connection: c.live, Owner: "owner"}
+		d := wrapperDB(map[string]*schema.ForeignDataWrapper{"w": {Name: "w", Connection: c.want, ConnectionSet: c.set}})
+		sql, warns := planSQL(t, live, d, Options{})
+		if strings.TrimSpace(sql) != c.sql || len(warns) > 0 {
+			t.Errorf("%s: got\n%s%v\nwant\n%s", name, sql, warns, c.sql)
+		}
+	}
+}
+
+func TestForeignDataWrapperOfExtensionIgnoresConnection(t *testing.T) {
+	live := wrapperLive()
+	addMemberWrapper(live, "postgres_fdw", "postgres_fdw")
+	d := wrapperDB(map[string]*schema.ForeignDataWrapper{"postgres_fdw": {Name: "postgres_fdw", ConnectionSet: true}})
+	sql, warns := planSQL(t, live, d, Options{})
+	if sql != "" || len(warns) != 1 || !strings.Contains(warns[0].Message, "defines its handler, validator and connection function") {
+		t.Errorf("a connection on an extension's wrapper is ignored, with a warning, got:\n%s%v", sql, warns)
+	}
+}
