@@ -49,6 +49,8 @@ var (
 //     cast-stripped live form ('1 day'::interval)
 //   - quoted numeric literals ('-1', as PostgreSQL stores negative constants)
 //     are unquoted
+//   - decimal constants compared with something lose the zeros that only
+//     set their scale (see canonicalizeComparedNumbers)
 //
 // Single-quoted string literals are never rewritten.
 func canonicalizeExpr(s string) string { return canonicalizeExprNoting(s, nil) }
@@ -57,6 +59,7 @@ func canonicalizeExpr(s string) string { return canonicalizeExprNoting(s, nil) }
 // is not nil, the casts and schema qualifiers it removes (see exprDrops).
 func canonicalizeExprNoting(s string, d *exprDrops) string {
     masked, lits := maskStringLiterals(s)
+    masked = canonicalizeComparedNumbers(masked, lits)
     r := newDropRecorder(d, lits)
     masked = r.unqualifyPath(activeScope(), masked)
     masked = r.replace(exprCatalogRe, masked, "$1", (*dropRecorder).qualifierAt)

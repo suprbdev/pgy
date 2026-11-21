@@ -903,8 +903,10 @@ func (e *liveEdit) procedure(norm string) *LiveProcedure {
 
 // applyExprProbes returns live with the server's verdict on each definition
 // of live.ExprProbes. Where the probe deparsed the declared definition to
-// exactly the live text, the live definition takes the declared spelling,
-// so the comparisons of the plan find the two equal. Where it deparsed it to
+// exactly the live text, or to text that differs only in the scale of
+// compared constants (see sameComparedNumbers), the live definition takes
+// the declared spelling, so the comparisons of the plan find the two
+// equal. Where it deparsed it to
 // something else although the text comparison takes the two for the same,
 // the live definition is marked changed (see exprChanged), so they find
 // the two different. A definition the probe couldn't attach or didn't
@@ -938,7 +940,7 @@ func applyExprProbesAs(live *Live, desired *schema.Database, simulated bool) *Li
 			continue
 		}
 		switch parts, live := s.canonical(p.Parts), s.live(); {
-		case slices.Equal(live, parts):
+		case slices.EqualFunc(live, parts, sameComparedNumbers):
 			s.spell(e)
 		case slices.Equal(live, p.Live) && s.equal():
 			if simulated {
