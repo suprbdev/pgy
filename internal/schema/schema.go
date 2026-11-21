@@ -115,6 +115,7 @@ type View struct {
     Tablespace      string            // materialized views: TABLESPACE; "" = unmanaged
     AccessMethod    string            // materialized views: USING table access method; "" = unmanaged
     Indexes         []*Index // materialized views only
+    Columns         map[string]*Column // materialized views: column -> compression, storage, statisticsTarget, nDistinct; a column not listed is unmanaged
     Triggers        []*Trigger // plain views: INSTEAD OF triggers
     Rules           []*Rule    // plain views
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
@@ -294,8 +295,8 @@ type PublicationTable struct {
 // DefaultPrivilege is one ALTER DEFAULT PRIVILEGES scope: objects created
 // later by ForRole ("" = the connecting role), in Schemas (empty = in any
 // schema), get Grants: object kind (tables, sequences, functions, types,
-// schemas) -> role -> privileges. Roles not listed are unmanaged; an empty
-// list revokes everything from that role.
+// schemas, largeObjects) -> role -> privileges. Roles not listed are
+// unmanaged; an empty list revokes everything from that role.
 type DefaultPrivilege struct {
     ForRole string
     Schemas []string
@@ -454,6 +455,7 @@ type Domain struct {
     ConstraintName string // optional name for the CHECK constraint
     Checks         map[string]string // constraint name -> CHECK expression; nil = only Check is managed
     CheckComments  map[string]string // constraint name -> COMMENT ON CONSTRAINT text
+    CheckNotValid  map[string]bool   // constraint name -> added NOT VALID (values already stored aren't checked)
     Owner          string // "" = unmanaged
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
     RevokePublic   bool   // revoke PUBLIC's default USAGE
@@ -3044,6 +3046,7 @@ func parseView(schemaName, key string, body any) *View {
         for k, v := range w { vw.With[k] = scalarToString(v) }
     }
     if ixRaw, ok := m["indexes"]; ok { vw.Indexes = parseIndexes(ixRaw) }
+    if cs, ok := m["columns"].(map[string]any); ok { vw.Columns = parseColumns(cs) }
     if trRaw, ok := m["triggers"]; ok { vw.Triggers = parseTriggers(trRaw) }
     if rRaw, ok := m["rules"]; ok { vw.Rules = parseRules(rRaw) }
     if cc, ok := m["columnComments"].(map[string]any); ok {
@@ -3092,7 +3095,8 @@ func parseSequence(schemaName, key string, body any) *Sequence {
 }
 
 // parseDefaultPrivileges parses a list of {for, in, tables, sequences,
-// functions, types, schemas} entries; each kind maps role -> privileges.
+// functions, types, schemas, largeObjects} entries; each kind maps role ->
+// privileges.
 func parseDefaultPrivileges(v any) []*DefaultPrivilege {
     arr, ok := v.([]any)
     if !ok { return nil }
@@ -3108,7 +3112,7 @@ func parseDefaultPrivileges(v any) []*DefaultPrivilege {
         case []any:
             dp.Schemas = parseStringListFromNode(in)
         }
-        for _, kind := range []string{"tables", "sequences", "functions", "types", "schemas"} {
+        for _, kind := range []string{"tables", "sequences", "functions", "types", "schemas", "largeObjects"} {
             if g, ok := m[kind]; ok {
                 if parsed := parseGrants(g); parsed != nil { dp.Grants[kind] = parsed }
             }
@@ -3455,6 +3459,10 @@ func parseDomain(schemaName, key string, body any) *Domain {
                 if c, ok := e["comment"].(string); ok {
                     if dm.CheckComments == nil { dm.CheckComments = map[string]string{} }
                     dm.CheckComments[n] = c
+                }
+                if b, ok := e["notValid"].(bool); ok && b {
+                    if dm.CheckNotValid == nil { dm.CheckNotValid = map[string]bool{} }
+                    dm.CheckNotValid[n] = true
                 }
             }
         }

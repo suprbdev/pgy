@@ -48,9 +48,9 @@ type LiveDetails struct {
     ExtensionUsers map[string]map[string]bool
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, text search
-    // parsers and templates, procedural languages, transforms and access
-    // methods), excluding extension members and objects other objects
-    // create (such as a range type's multirange casts).
+    // parsers and templates, procedural languages, transforms, access
+    // methods and user mappings), excluding extension members and objects
+    // other objects create (such as a range type's multirange casts).
     Unsupported []UnsupportedObject
 }
 
@@ -59,7 +59,8 @@ type LiveDetails struct {
 // methods). Detail holds extra information for some kinds; it is empty for
 // the others.
 // Owner is the role that owns the object, "" for kinds without an owner
-// (text search parsers and templates, casts, transforms, access methods).
+// (text search parsers and templates, casts, transforms, access methods);
+// for a user mapping it is the owner of its server.
 type UnsupportedObject struct {
     Kind, Schema, Name, Detail, Owner string
 }
@@ -120,6 +121,8 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
             union all select 'access method', 0::oid, a.amname::text, 'pg_am'::regclass, a.oid, '', 0::oid from pg_am a where a.oid >= 16384
             union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, '', 0::oid
               from pg_transform t join pg_language l on l.oid = t.trflang
+            union all select 'user mapping', 0::oid, 'for ' || quote_ident(um.usename) || ' server ' || quote_ident(um.srvname), 'pg_user_mapping'::regclass, um.umid, '', s.srvowner
+              from pg_user_mappings um join pg_foreign_server s on s.oid = um.srvid
         )
         select distinct o.kind, coalesce(n.nspname, ''), o.name, o.detail, case when o.owner = 0 then '' else coalesce(pg_get_userbyid(o.owner), '') end
         from objs o left join pg_namespace n on n.oid = o.nsp

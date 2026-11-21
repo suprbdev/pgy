@@ -943,6 +943,36 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         }
         return nil
     })
+    matViewColQ := `
+        select n.nspname, c.relname, a.attname,
+               case a.attcompression when 'p' then 'pglz' when 'l' then 'lz4' else '' end,
+               case a.attstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
+               case ty.typstorage when 'p' then 'plain' when 'e' then 'external' when 'm' then 'main' else 'extended' end,
+               nullif(coalesce(a.attstattarget::int, -1), -1),
+               coalesce(a.attoptions, '{}'::text[])
+        from pg_attribute a
+        join pg_class c on c.oid = a.attrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_type ty on ty.oid = a.atttypid
+        where a.attnum > 0 and not a.attisdropped
+        and c.relkind = 'm'
+        and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+        and n.nspname !~ '^pg_(toast_)?temp_'
+    `
+    batch.add(matViewColQ, func(rows pgx.Rows) error {
+        for rows.Next() {
+            var schemaName, viewName, colName, compression, storage, typeStorage string
+            var statTarget *int
+            var attoptions []string
+            if err := rows.Scan(&schemaName, &viewName, &colName, &compression, &storage, &typeStorage, &statTarget, &attoptions); err != nil { return err }
+            lt := l.MatViewTables[schemaName+"."+viewName]
+            if lt == nil { continue }
+            lc := &LiveColumn{Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, Nullable: true}
+            if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
+            lt.Columns[colName] = lc
+        }
+        return nil
+    })
 
     // Query columns to enrich table info. Uses pg_catalog rather than
     // information_schema so format_type keeps type modifiers (varchar(255))
@@ -2453,7 +2483,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
     dAclQ := `
         select pg_get_userbyid(d.defaclrole), coalesce(n.nspname, ''),
                case d.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions'
-                    when 'T' then 'types' when 'n' then 'schemas' else d.defaclobjtype::text end,
+                    when 'T' then 'types' when 'n' then 'schemas' when 'L' then 'largeObjects' else d.defaclobjtype::text end,
                coalesce(case when a.grantee = 0 then 'public' else pg_get_userbyid(a.grantee) end, ''),
                coalesce(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, ''), coalesce(a.grantee = d.defaclrole, false)
         from pg_default_acl d
@@ -3444,6 +3474,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 continue
             }
             plan.Creates = append(plan.Creates, renderDomain(e.Key, dm))
+            for _, n := range sortedKeys(dm.Checks) {
+                if dm.Checks[n] != "" && dm.CheckNotValid[n] {
+                    plan.Creates = append(plan.Creates, fmt.Sprintf("alter domain %s add constraint %s check (%s) not valid;", pqIdent(e.Key), quoteIdent(n), dm.Checks[n]))
+                }
+            }
         case "sequence":
             sq, ok := desired.Sequences[e.Key]
             if !ok || sq == nil { continue }
@@ -3480,6 +3515,9 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if len(vw.Indexes) > 0 {
                     applyTableConstraints(plan, live, e.Key, &schema.Table{Indexes: vw.Indexes}, live.MatViewTables[e.Key], &deferredFKs, &deferredTriggers, unsafe)
                 }
+                var lt *LiveTable
+                if live.MatViews[e.Key] { lt = live.MatViewTables[e.Key] }
+                plan.Alters = append(plan.Alters, matViewColumnStmts(e.Key, vw, lt)...)
             } else {
                 opts := viewOptions(vw)
                 if live.Views[e.Key] && !vw.Replace && !replaceViews[e.Key] {
@@ -4142,6 +4180,15 @@ func domainCheckName(fq string, dm *schema.Domain) string {
     return truncateIdent(fq[strings.IndexByte(fq, '.')+1:] + "_check")
 }
 
+// domainCheckNotValid reports whether the domain's check name (truncated as
+// PostgreSQL stores it) is declared notValid.
+func domainCheckNotValid(dm *schema.Domain, name string) bool {
+    for n, b := range dm.CheckNotValid {
+        if b && truncateIdent(n) == name { return true }
+    }
+    return false
+}
+
 // desiredDomainChecks returns a domain's CHECK constraints by name: the
 // single check plus the checks map.
 func desiredDomainChecks(fq string, dm *schema.Domain) map[string]string {
@@ -4196,13 +4243,16 @@ func domainAlterStmts(fq string, dm *schema.Domain, ld *LiveDomain, unsafe bool)
         }
     }
     for _, name := range sortedKeys(want) {
-        add := fmt.Sprintf("%s add constraint %s check (%s);", target, quoteIdent(name), want[name])
+        notValid := domainCheckNotValid(dm, name)
+        add := fmt.Sprintf("%s add constraint %s check (%s)%s;", target, quoteIdent(name), want[name], validityClause(notValid, false))
         liveDef, exists := ld.Checks[name]
         switch {
         case !exists:
             out = append(out, add)
         case unsafe && !constraintDefsEqual("check ("+want[name]+")", liveDef):
             out = append(out, drop(name), add)
+        case !notValid && liveNotValid(liveDef):
+            out = append(out, fmt.Sprintf("%s validate constraint %s;", target, quoteIdent(name)))
         }
     }
     return out
@@ -4312,6 +4362,34 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, serve
         out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
     }
     return append(out, attributeOptionStmts(target, c, lc)...)
+}
+
+// matViewColumnStmts sets the storage, compression, statistics target and
+// n_distinct that materialized view fq's columns block declares. Settings
+// and columns left out are unmanaged. lt is the live materialized view, nil
+// for one this plan creates.
+func matViewColumnStmts(fq string, vw *schema.View, lt *LiveTable) []string {
+    out := []string{}
+    for _, cn := range sortedKeys(vw.Columns) {
+        c := vw.Columns[cn]
+        if c == nil { continue }
+        lc := &LiveColumn{}
+        if lt != nil && lt.Columns[cn] != nil { lc = lt.Columns[cn] }
+        target := fmt.Sprintf("alter materialized view %s alter column %s", pqIdent(fq), quoteIdent(cn))
+        if c.Storage != "" && c.Storage != lc.Storage {
+            out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
+        }
+        if c.Compression != "" {
+            want := c.Compression
+            if want == "default" { want = "" }
+            if want != lc.Compression { out = append(out, fmt.Sprintf("%s set compression %s;", target, c.Compression)) }
+        }
+        if c.StatisticsTarget != nil && *c.StatisticsTarget != statisticsTargetOf(lc) {
+            out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
+        }
+        out = append(out, attributeOptionStmts(target, c, lc)...)
+    }
+    return out
 }
 
 // inheritedOverrideStmts sets what a partition or inheritance child fq
@@ -5701,7 +5779,7 @@ func renderDomain(fq string, dm *schema.Domain) string {
         parts = append(parts, fmt.Sprintf("check (%s)", dm.Check))
     }
     for _, n := range sortedKeys(dm.Checks) {
-        if dm.Checks[n] != "" { parts = append(parts, fmt.Sprintf("constraint %s check (%s)", quoteIdent(n), dm.Checks[n])) }
+        if dm.Checks[n] != "" && !dm.CheckNotValid[n] { parts = append(parts, fmt.Sprintf("constraint %s check (%s)", quoteIdent(n), dm.Checks[n])) }
     }
     return strings.Join(parts, " ") + ";"
 }
@@ -5972,7 +6050,11 @@ func planOwners(live *Live, desired *schema.Database) []string {
         if dm := desired.Domains[k]; dm != nil { owner("domain", pqIdent(k), dm.Owner, "type:"+k) }
     }
     for _, k := range sortedKeys(desired.Sequences) {
-        if sq := desired.Sequences[k]; sq != nil { owner("sequence", pqIdent(k), sq.Owner, "rel:"+k) }
+        sq := desired.Sequences[k]
+        if sq == nil { continue }
+        linked := qualifyOwnedBy(k, sq.OwnedBy) != ""
+        if ls := live.SequenceDefs[k]; sq.OwnedBy == "" && ls != nil { linked = ls.Owner != "" }
+        if !linked { owner("sequence", pqIdent(k), sq.Owner, "rel:"+k) }
     }
     for _, k := range sortedKeys(desired.Tables) {
         if dt := desired.Tables[k]; dt != nil { owner("table", pqIdent(k), dt.Owner, "rel:"+k) }
@@ -6025,6 +6107,8 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
         schemas := dp.Schemas
         if len(schemas) == 0 { schemas = []string{""} }
         for _, kind := range sortedKeys(dp.Grants) {
+            objects := kind
+            if kind == "largeObjects" { objects = "large objects" }
             for _, nsp := range schemas {
                 key := role + "|" + nsp + "|" + kind
                 liveG := map[string]map[string]bool{}
@@ -6047,9 +6131,9 @@ func planDefaultPrivileges(live *Live, desired *schema.Database) []string {
                     for _, p := range sortedKeys(have["public"]) {
                         if b := strings.TrimSuffix(p, "*"); !keep[b] { extra = append(extra, b) }
                     }
-                    if len(extra) > 0 { revokes = append(revokes, fmt.Sprintf("%s revoke %s on %s from public;", prefix, strings.Join(extra, ", "), kind)) }
+                    if len(extra) > 0 { revokes = append(revokes, fmt.Sprintf("%s revoke %s on %s from public;", prefix, strings.Join(extra, ", "), objects)) }
                 }
-                rv, gr := roleGrantStmts(want, have, func(privs []string) string { return strings.Join(privs, ", ") + " on " + kind })
+                rv, gr := roleGrantStmts(want, have, func(privs []string) string { return strings.Join(privs, ", ") + " on " + objects })
                 for _, s := range rv { revokes = append(revokes, prefix+" "+s) }
                 for _, s := range gr { grants = append(grants, prefix+" "+s) }
             }
@@ -8796,6 +8880,7 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
     }
     for i, dp := range desired.DefaultPrivileges {
         if dp != nil { maintain(fmt.Sprintf("defaultPrivileges[%d]", i), dp.Grants["tables"], nil) }
+        if dp != nil && len(dp.Grants["largeObjects"]) > 0 { need(fmt.Sprintf("largeObjects in defaultPrivileges[%d]", i), 18) }
     }
     for _, k := range sortedKeys(desired.Collations) {
         if co := desired.Collations[k]; co != nil && co.Rules != "" && !live.Collations[k] {

@@ -4,6 +4,7 @@ import (
     "fmt"
     "regexp"
     "sort"
+    "strconv"
     "strings"
 
     "github.com/suprbdev/pgy/internal/schema"
@@ -719,8 +720,8 @@ func recreateView(live, out *Live, desired *schema.Database, v string, prune boo
 // restoreView returns the statements that give view v, created again from
 // vw, back what it has in live and vw leaves unmanaged: the grants on the
 // view and on the columns vw declares no grants for, its comment, column
-// comments and column defaults, its owner, and the comments of its declared
-// triggers and rules.
+// comments and column defaults, the column settings of a materialized view,
+// its owner, and the comments of its declared triggers and rules.
 // The triggers and rules vw doesn't declare are created again from their
 // live definitions, with their comments, unless prune drops them anyway.
 func restoreView(live *Live, vw *schema.View, v string, prune bool) []string {
@@ -752,6 +753,20 @@ func restoreView(live *Live, vw *schema.View, v string, prune bool) []string {
         if _, managed := vw.ColumnDefaults[col]; !managed {
             out = append(out, fmt.Sprintf("alter view %s alter column %s set default %s;", pqIdent(v), quoteIdent(col), live.ViewColumnDefaults[v][col]))
         }
+    }
+    if mt := live.MatViewTables[v]; mt != nil && live.MatViews[v] {
+        keep := map[string]*schema.Column{}
+        for col, lc := range mt.Columns {
+            c := vw.Columns[col]
+            if c == nil { c = &schema.Column{} }
+            k := &schema.Column{}
+            if c.Storage == "" && lc.TypeStorage != "" && lc.Storage != lc.TypeStorage { k.Storage = lc.Storage }
+            if c.Compression == "" { k.Compression = lc.Compression }
+            if c.StatisticsTarget == nil { k.StatisticsTarget = lc.StatisticsTarget }
+            if f, err := strconv.ParseFloat(lc.Options["n_distinct"], 64); err == nil && c.NDistinct == nil { k.NDistinct = &f }
+            keep[col] = k
+        }
+        out = append(out, matViewColumnStmts(v, &schema.View{Columns: keep}, nil)...)
     }
     if vt := live.ViewTables[v]; vt != nil {
         triggers, rules := map[string]*schema.Trigger{}, map[string]*schema.Rule{}

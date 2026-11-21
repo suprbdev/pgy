@@ -10,8 +10,8 @@ import (
 // allPrivileges returns the privileges GRANT ALL gives on an object of kind
 // on a server running version (as Live.ServerVersion): table (which views,
 // materialized views and foreign tables share), column, sequence, routine,
-// schema, or any other kind, whose only privilege is USAGE. Tables gained
-// MAINTAIN in PostgreSQL 17. The list is sorted.
+// schema, large object, or any other kind, whose only privilege is USAGE.
+// Tables gained MAINTAIN in PostgreSQL 17. The list is sorted.
 func allPrivileges(kind string, version int) []string {
 	switch kind {
 	case "table":
@@ -27,13 +27,15 @@ func allPrivileges(kind string, version int) []string {
 		return []string{"execute"}
 	case "schema":
 		return []string{"create", "usage"}
+	case "large object":
+		return []string{"select", "update"}
 	}
 	return []string{"usage"}
 }
 
 // defaultPrivilegeKinds maps the object kinds of a defaultPrivileges entry
 // to the kinds of allPrivileges.
-var defaultPrivilegeKinds = map[string]string{"tables": "table", "sequences": "sequence", "functions": "routine", "types": "type", "schemas": "schema"}
+var defaultPrivilegeKinds = map[string]string{"tables": "table", "sequences": "sequence", "functions": "routine", "types": "type", "schemas": "schema", "largeObjects": "large object"}
 
 // expandAllList returns privs, one role's list from a grants block, with
 // ALL and ALL PRIVILEGES replaced by the privileges in set, keeping a grant

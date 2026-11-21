@@ -257,7 +257,10 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if dm == nil || dm.Type == "" { continue }
         out.Domains[k] = true
         ld := &LiveDomain{Default: dm.Default, NotNull: dm.NotNull, Checks: map[string]string{}}
-        for name, e := range desiredDomainChecks(k, dm) { ld.Checks[name] = "CHECK (" + e + ")" }
+        for name, e := range desiredDomainChecks(k, dm) {
+            ld.Checks[name] = "CHECK (" + e + ")"
+            if domainCheckNotValid(dm, name) { ld.Checks[name] += notValidSuffix }
+        }
         ld.CheckComments = map[string]string{}
         for name, c := range dm.CheckComments { ld.CheckComments[truncateIdent(name)] = c }
         out.DomainDefs[k] = ld
@@ -382,6 +385,34 @@ func Simulate(live *Live, desired *schema.Database) *Live {
                 lt := out.MatViewTables[k]
                 if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
                 lt.AccessMethod = vw.AccessMethod
+            }
+            if len(vw.Columns) > 0 {
+                lt := out.MatViewTables[k]
+                if lt == nil { lt = &LiveTable{}; out.MatViewTables[k] = lt }
+                ensureLiveTableMaps(lt)
+                for cn, c := range vw.Columns {
+                    if c == nil { continue }
+                    lc := &LiveColumn{Nullable: true}
+                    if prev := lt.Columns[cn]; prev != nil { cp := *prev; lc = &cp }
+                    switch c.Compression {
+                    case "":
+                    case "default": lc.Compression = ""
+                    default: lc.Compression = c.Compression
+                    }
+                    if c.Storage != "" { lc.Storage = c.Storage }
+                    if c.StatisticsTarget != nil {
+                        lc.StatisticsTarget = nil
+                        if v := *c.StatisticsTarget; v >= 0 { lc.StatisticsTarget = &v }
+                    }
+                    if c.NDistinct != nil {
+                        opts := map[string]string{}
+                        for o, ov := range lc.Options { opts[o] = ov }
+                        delete(opts, "n_distinct")
+                        if *c.NDistinct != 0 { opts["n_distinct"] = strconv.FormatFloat(*c.NDistinct, 'g', -1, 64) }
+                        lc.Options = opts
+                    }
+                    lt.Columns[cn] = lc
+                }
             }
             if len(vw.Indexes) > 0 {
                 lt := out.MatViewTables[k]

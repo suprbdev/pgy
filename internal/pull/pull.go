@@ -387,6 +387,8 @@ func (b *builder) unsupported() {
 	for _, o := range b.live.Details.Unsupported {
 		switch {
 		case b.opts.External.HasRole(o.Owner):
+		case o.Kind == "user mapping":
+			b.warn("user mapping %s was left out: pgy doesn't manage user mappings, whose options hold credentials; create it by hand on the database you rebuild", o.Name)
 		case o.Schema == "":
 			b.warn("%s %s is not supported by pgy and was left out", o.Kind, o.Name)
 		case !b.wantSchema(o.Schema):
@@ -743,21 +745,30 @@ func (b *builder) domains() {
 				}
 			}
 			names := sortedKeys(ld.Checks)
-			if len(names) > 1 || len(ld.CheckComments) > 0 {
+			defs, notValid := map[string]string{}, map[string]bool{}
+			for _, n := range names {
+				def, nv := strings.CutSuffix(ld.Checks[n], " NOT VALID")
+				defs[n] = stripCheck(def)
+				notValid[n] = nv
+			}
+			if len(names) > 1 || len(ld.CheckComments) > 0 || (len(names) == 1 && notValid[names[0]]) {
 				cs := newMap()
 				for _, n := range names {
-					if c := ld.CheckComments[n]; c != "" {
+					if c := ld.CheckComments[n]; c != "" || notValid[n] {
 						e := flowMap()
-						add(e, "check", str(stripCheck(ld.Checks[n])))
-						add(e, "comment", str(c))
+						add(e, "check", str(defs[n]))
+						if notValid[n] {
+							add(e, "notValid", boolean(true))
+						}
+						addStr(e, "comment", c)
 						add(cs, n, e)
 						continue
 					}
-					add(cs, n, str(stripCheck(ld.Checks[n])))
+					add(cs, n, str(defs[n]))
 				}
 				add(m, "checks", cs)
 			} else if len(names) == 1 {
-				add(m, "check", str(stripCheck(ld.Checks[names[0]])))
+				add(m, "check", str(defs[names[0]]))
 				if names[0] != name+"_check" {
 					add(m, "constraintName", str(names[0]))
 				}
@@ -949,7 +960,9 @@ func (b *builder) sequences() {
 			add(m, "grants", g)
 		}
 		addStr(m, "comment", b.live.RelComments[k])
-		b.owner(m, "sequences", "rel:"+k)
+		if ls.Owner == "" {
+			b.owner(m, "sequences", "rel:"+k)
+		}
 		add(blk, "sequence "+schema.QuoteName(name), m)
 	}
 }
@@ -1499,6 +1512,27 @@ func inheritedColumnNode(fq, cn string, lc, parent *diff.LiveColumn) *node {
 		}
 	}
 	addStr(c, "comment", lc.Comment)
+	if len(c.Content) == 0 {
+		return nil
+	}
+	return c
+}
+
+// matViewColumnNode returns the settings of a materialized view column that
+// differ from those CREATE MATERIALIZED VIEW gives it: storage, compression,
+// statistics target and n_distinct. It returns nil when there are none.
+func matViewColumnNode(lc *diff.LiveColumn) *node {
+	c := flowMap()
+	if lc.Storage != "" && lc.TypeStorage != "" && lc.Storage != lc.TypeStorage {
+		add(c, "storage", str(lc.Storage))
+	}
+	addStr(c, "compression", lc.Compression)
+	if lc.StatisticsTarget != nil {
+		add(c, "statisticsTarget", num(strconv.Itoa(*lc.StatisticsTarget)))
+	}
+	if v, err := strconv.ParseFloat(lc.Options["n_distinct"], 64); err == nil {
+		add(c, "nDistinct", floatNum(v))
+	}
 	if len(c.Content) == 0 {
 		return nil
 	}
@@ -2227,6 +2261,15 @@ func (b *builder) views() {
 				addStr(m, "tablespace", lt.Tablespace)
 				b.accessMethod(m, k, lt)
 				b.indexes(m, k, lt)
+				cols := newMap()
+				for _, cn := range sortedKeys(lt.Columns) {
+					if c := matViewColumnNode(lt.Columns[cn]); c != nil {
+						add(cols, cn, c)
+					}
+				}
+				if len(cols.Content) > 0 {
+					add(m, "columns", cols)
+				}
 			}
 		} else {
 			opts := b.live.ViewOptions[k]
