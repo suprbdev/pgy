@@ -4,7 +4,7 @@ This document tracks `pgy`'s support for various PostgreSQL features within its 
 
 Features are grouped by relative complexity and impact on the diffing engine.
 
-Supported servers: PostgreSQL 15, 16, 17 and 18 (the integration suite runs against each in CI). Syntax specific to a newer release is emitted only when the YAML asks for it: `nullsNotDistinct` needs 15+ (the floor anyway), changing a generated expression in place needs 17+ (before, the column is dropped and added again), and `virtual` generated columns, `enforced: false` and temporal `without overlaps`/`period` keys need 18+.
+Supported servers: PostgreSQL 15, 16, 17, 18 and 19 (the integration suite runs against each in CI). Syntax specific to a newer release is emitted only when the YAML asks for it: `nullsNotDistinct` needs 15+ (the floor anyway), changing a generated expression in place needs 17+ (before, the column is dropped and added again), and `virtual` generated columns, `enforced: false` and temporal `without overlaps`/`period` keys need 18+.
 
 ## Level 1: Basic Schema & Tables
 These are the foundational elements required for almost any relational database application.
@@ -99,7 +99,7 @@ Advanced PostgreSQL-specific capabilities for niche use cases.
 
 ## Test Coverage
 
-`make test` runs the unit tests. With `PGY_TEST_DSN` set to a PostgreSQL database, it also runs the integration tests, which CI runs against PostgreSQL 15, 16, 17 and 18. The tests that need PL/Perl or PL/Python skip on a server that cannot load them. The `postgres:*-alpine` images ship these languages without the runtimes they link against, so CI installs the runtimes into its service containers (`apk add perl python3 tcl`, plus a `libperl.so` link in `/usr/lib`). It also sets `PGY_TEST_REQUIRE_PL`, which makes those tests fail instead of skip when a language does not load.
+`make test` runs the unit tests. With `PGY_TEST_DSN` set to a PostgreSQL database, it also runs the integration tests, which CI runs against PostgreSQL 15, 16, 17, 18 and 19. The tests that need PL/Perl or PL/Python skip on a server that cannot load them. The `postgres:*-alpine` images ship these languages without the runtimes they link against, so CI installs the runtimes into its service containers (`apk add perl python3 tcl`, plus a `libperl.so` link in `/usr/lib`). It also sets `PGY_TEST_REQUIRE_PL`, which makes those tests fail instead of skip when a language does not load.
 
 | Where | What it checks |
 |-------|----------------|
