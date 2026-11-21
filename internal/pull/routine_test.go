@@ -196,6 +196,26 @@ func TestPulledAggregateEmptyInitCond(t *testing.T) {
 	}
 }
 
+func TestPulledAggregateSupport(t *testing.T) {
+	live := routineLive()
+	for name, support := range map[string]string{"with": "app.total_support", "without": ""} {
+		sig := "app." + name + "(bigint)"
+		live.AggregateDefs[sig] = &diff.LiveAggregate{SFunc: "int8pl", SType: "bigint", Parallel: "unsafe", Options: map[string]string{"support": support}}
+		live.FunctionDefs[sig] = &diff.LiveFunction{Signature: sig, Kind: "a"}
+	}
+	out, d, _ := buildSingle(t, live)
+	with, without := d.Aggregates["app.with(bigint)"], d.Aggregates["app.without(bigint)"]
+	if with == nil || without == nil {
+		t.Fatalf("aggregates not pulled:\n%s", out)
+	}
+	if with.Options["support"] != "app.total_support" {
+		t.Errorf("the support function must be pulled:\n%s", out)
+	}
+	if _, ok := without.Options["support"]; ok {
+		t.Errorf("an aggregate without a support function is pulled without the key:\n%s", out)
+	}
+}
+
 func TestUnsupportedDatabaseWideObjectsReported(t *testing.T) {
 	for _, opts := range []Options{{}, {Schemas: []string{"app"}}} {
 		live := routineLive()

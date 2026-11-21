@@ -1,6 +1,9 @@
 package schema
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestStatisticsTargetUnloggedSequenceAndAttributeCommentParse(t *testing.T) {
 	db, err := parseFlexibleDatabase([]byte(`
@@ -108,6 +111,57 @@ schema app:
 	for k, v := range want {
 		if ag.Options[k] != v {
 			t.Errorf("%s = %q, want %q", k, ag.Options[k], v)
+		}
+	}
+}
+
+func TestAggregateSupportParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+schema app:
+  aggregate total(int8):
+    sfunc: int8pl
+    stype: int8
+    support: " app.total_support "
+  aggregate plain(int8):
+    sfunc: int8pl
+    stype: int8
+    support: ""
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ag := db.Aggregates["app.total(int8)"]; ag == nil || ag.Options["support"] != "app.total_support" {
+		t.Errorf("total = %+v", ag)
+	}
+	if ag := db.Aggregates["app.plain(int8)"]; ag == nil {
+		t.Error("plain is missing")
+	} else if v, ok := ag.Options["support"]; !ok || v != "" {
+		t.Errorf("an empty support is a managed option that means none: %+v", ag.Options)
+	}
+}
+
+func TestTopologicalSortAggregateDependsOnSupport(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+schema app:
+  function zz_support(internal):
+    returns: internal
+    language: internal
+    body: int8inc_support
+  aggregate total(int8):
+    sfunc: int8pl
+    stype: int8
+    support: app.zz_support
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sorted, err := TopologicalSort(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range sorted {
+		if e.Kind == "aggregate" && !slices.Contains(e.DependsOn, "function app.zz_support") {
+			t.Errorf("the aggregate must depend on its support function: %+v", e)
 		}
 	}
 }
