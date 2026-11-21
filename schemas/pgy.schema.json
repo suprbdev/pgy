@@ -119,6 +119,10 @@
             "type": "string",
             "description": "VALIDATOR function, optionally schema-qualified. The empty string means NO VALIDATOR. Omitted = unmanaged: an existing wrapper keeps its validator, and a new one is created without. Not allowed on a wrapper an extension owns."
           },
+          "connection": {
+            "type": "string",
+            "description": "CONNECTION function (PostgreSQL 19+), optionally schema-qualified, e.g. public.postgres_fdw_connection: a function (oid, oid, internal) returning text that builds the connection string of a server and user mapping. The empty string means NO CONNECTION. Omitted = unmanaged, like handler. Not allowed on a wrapper an extension owns."
+          },
           "options": {
             "type": "object",
             "description": "Wrapper options (OPTIONS (...)). Authoritative when present: unlisted options are dropped. Omitted = unmanaged.",
@@ -163,7 +167,26 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication to or from it requires --unsafe (drop + create)." },
+          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication from it to tables or schemas requires --unsafe (drop + create), as does switching to it before PostgreSQL 19." },
+          "except": {
+            "type": "array",
+            "description": "FOR ALL TABLES EXCEPT (PostgreSQL 19+): tables allTables leaves out, with their inheritance children unless only is set. Needs allTables.",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "properties": {
+                    "table": { "type": "string", "minLength": 1 },
+                    "only": { "type": "boolean", "description": "EXCEPT (TABLE ONLY ...): leave out the table but not its inheritance children." }
+                  },
+                  "required": ["table"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "allSequences": { "type": "boolean", "description": "FOR ALL SEQUENCES (PostgreSQL 19+): publish every sequence, alone or with allTables. Cannot be combined with tables or schemas." },
           "tables": {
             "type": "array",
             "items": {
@@ -1222,6 +1245,7 @@
         "mfinalfuncModify": { "type": "string", "enum": ["read_only", "shareable", "read_write"] },
         "minitcond": { "$ref": "#/definitions/scalar", "description": "Moving-aggregate initial state value." },
         "sortop": { "type": "string", "description": "Sort operator for min/max-like aggregates, e.g. > or myschema.>." },
+        "support": { "type": "string", "description": "SUPPORT function (PostgreSQL 19+): a planner support function (internal) returning internal. The empty string means none." },
         "hypothetical": { "type": "boolean", "description": "HYPOTHETICAL: an ordered-set aggregate whose direct arguments are matched to the aggregated ones, as rank and dense_rank are (the args must use ORDER BY)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
@@ -1233,7 +1257,7 @@
         "sfunc": ["stype"], "stype": ["sfunc"], "finalfunc": ["sfunc"], "combinefunc": ["sfunc"], "initcond": ["sfunc"], "parallel": ["sfunc"],
         "sspace": ["sfunc"], "finalfuncExtra": ["sfunc"], "finalfuncModify": ["sfunc"], "serialfunc": ["sfunc"], "deserialfunc": ["sfunc"],
         "msfunc": ["sfunc"], "minvfunc": ["sfunc"], "mstype": ["sfunc"], "msspace": ["sfunc"], "mfinalfunc": ["sfunc"], "mfinalfuncExtra": ["sfunc"],
-        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "hypothetical": ["sfunc"]
+        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "support": ["sfunc"], "hypothetical": ["sfunc"]
       },
       "additionalProperties": false
     },

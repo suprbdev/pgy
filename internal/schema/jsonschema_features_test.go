@@ -17,6 +17,11 @@ publications:
     viaPartitionRoot: true
     comment: cdc
   all: {allTables: true}
+  rest:
+    allTables: true
+    except: [public.audit, {table: public.events, only: true}]
+    allSequences: true
+  seqs: {allSequences: true}
 defaultPrivileges:
   - for: app_owner
     in: [public]

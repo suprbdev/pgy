@@ -609,6 +609,17 @@ func Database(d *schema.Database) []Issue {
 		if p.AllTables && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
 			add(Error, "publication "+name, "allTables cannot be combined with tables or schemas")
 		}
+		if p.AllSequences && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
+			add(Error, "publication "+name, "allSequences cannot be combined with tables or schemas")
+		}
+		if len(p.Except) > 0 && !p.AllTables {
+			add(Error, "publication "+name, "except needs allTables: true")
+		}
+		for _, pt := range p.Except {
+			if t := d.Tables[pt.Table]; t != nil && t.PartitionOf != "" {
+				add(Error, "publication "+name, "except cannot list partition %s; list its partitioned table", pt.Table)
+			}
+		}
 		listed := map[string]bool{}
 		for _, pt := range p.Tables {
 			listed[pt.Table] = true
@@ -1173,8 +1184,8 @@ func checkWrappersAndLanguages(d *schema.Database, add func(Severity, string, st
 		}
 		obj := "foreign-data wrapper " + k
 		usageOnly(obj, w.Grants)
-		if ext := d.WrapperExtension(k); ext != "" && (w.ManagesHandler() || w.ManagesValidator()) {
-			add(Error, obj, "extension %s creates this wrapper with its own handler and validator, so the entry cannot set them; it manages the wrapper's options, owner, grants and comment", ext)
+		if ext := d.WrapperExtension(k); ext != "" && (w.ManagesHandler() || w.ManagesValidator() || w.ManagesConnection()) {
+			add(Error, obj, "extension %s creates this wrapper with its own handler, validator and connection function, so the entry cannot set them; it manages the wrapper's options, owner, grants and comment", ext)
 		}
 		if w.RenamedFrom == "" {
 			continue

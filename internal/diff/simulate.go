@@ -180,8 +180,8 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     }
     for name, p := range desired.Publications {
         if p == nil { continue }
-        lp := &LivePublication{AllTables: p.AllTables, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
-        if prev := out.Publications[truncateIdent(name)]; prev != nil && prev.AllTables == p.AllTables {
+        lp := &LivePublication{AllTables: p.AllTables, AllSequences: p.AllSequences, Tables: map[string]LivePublicationTable{}, Publish: []string{"insert", "update", "delete", "truncate"}, Comment: p.Comment}
+        if prev := out.Publications[truncateIdent(name)]; prev != nil && publicationInPlace(prev, p, out.ServerVersion) {
             lp.Publish, lp.ViaRoot, lp.GeneratedColumns = prev.Publish, prev.ViaRoot, prev.GeneratedColumns
             if p.Comment == "" { lp.Comment = prev.Comment }
         }
@@ -193,6 +193,12 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             sort.Strings(cols)
             if len(cols) == 0 { cols = nil }
             lp.Tables[t.Table] = LivePublicationTable{Columns: cols, Where: t.Where, Only: t.Only}
+        }
+        if p.AllTables {
+            for _, t := range p.Except {
+                if lp.Except == nil { lp.Except = map[string]bool{} }
+                lp.Except[t.Table] = t.Only
+            }
         }
         lp.Schemas = append([]string(nil), p.Schemas...)
         sort.Strings(lp.Schemas)
@@ -808,7 +814,7 @@ func cloneLive(l *Live) *Live {
         Servers:            cloneMap(l.Servers, func(s *LiveServer) *LiveServer { c := *s; c.Options = cloneMap(s.Options, nil); return &c }),
         Wrappers:           cloneMap(l.Wrappers, func(w *LiveWrapper) *LiveWrapper { c := *w; c.Options = cloneMap(w.Options, nil); return &c }),
         Languages:          cloneMap(l.Languages, func(g *LiveLanguage) *LiveLanguage { c := *g; return &c }),
-        Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
+        Publications:       cloneMap(l.Publications, func(p *LivePublication) *LivePublication { c := *p; c.Tables = cloneMap(p.Tables, nil); c.Except = cloneMap(p.Except, nil); c.Schemas = append([]string(nil), p.Schemas...); return &c }),
         EventTriggers:      cloneMap(l.EventTriggers, func(e *LiveEventTrigger) *LiveEventTrigger { c := *e; c.Tags = append([]string(nil), e.Tags...); return &c }),
         CollationComments:  cloneMap(l.CollationComments, nil),
         SequenceDefs:       cloneMap(l.SequenceDefs, func(s *LiveSequence) *LiveSequence { c := *s; return &c }),

@@ -330,7 +330,7 @@ func collectEdges(d *schema.Database, ix *index, hard, soft func([]ref)) {
         if ag == nil { continue }
         hard(ix.resolveDeps(ag.DependsOn))
         hard(ix.mentions(ag.ArgsSig+" "+ag.SType, typeKinds))
-        hard(ix.mentions(ag.SFunc+" "+ag.FinalFunc+" "+ag.CombineFunc, callKinds))
+        hard(ix.mentions(ag.SFunc+" "+ag.FinalFunc+" "+ag.CombineFunc+" "+ag.Options["support"], callKinds))
     }
     for _, dm := range d.Domains {
         if dm == nil { continue }

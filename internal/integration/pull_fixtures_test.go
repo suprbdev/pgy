@@ -24,7 +24,8 @@ var fixtureVersionRe = regexp.MustCompile(`\A-- requires server_version_num (\d+
 // fresh database, pulls it with owners, and requires the pulled YAML to
 // diff clean against that database and to rebuild an identical schema in a
 // second fresh database. A fixture whose first line names a minimum
-// server_version_num is skipped on older servers.
+// server_version_num, or whose name ends in _pg19, is skipped on older
+// servers.
 func TestIntegrationPullFixtures(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -35,6 +36,9 @@ func TestIntegrationPullFixtures(t *testing.T) {
 	for _, f := range fixtures {
 		name := strings.TrimSuffix(filepath.Base(f), ".sql")
 		t.Run(name, func(t *testing.T) {
+			if strings.HasSuffix(name, "_pg19") {
+				requireServerVersion(t, 190000)
+			}
 			sql, err := os.ReadFile(f)
 			if err != nil {
 				t.Fatal(err)
