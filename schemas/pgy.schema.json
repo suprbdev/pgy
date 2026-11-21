@@ -120,6 +120,10 @@
             "type": "string",
             "description": "VALIDATOR function, optionally schema-qualified. The empty string means NO VALIDATOR. Omitted = unmanaged: an existing wrapper keeps its validator, and a new one is created without. Not allowed on a wrapper an extension owns."
           },
+          "connection": {
+            "type": "string",
+            "description": "CONNECTION function (PostgreSQL 19+), optionally schema-qualified, e.g. public.postgres_fdw_connection: a function (oid, oid, internal) returning text that builds the connection string of a server and user mapping. The empty string means NO CONNECTION. Omitted = unmanaged, like handler. Not allowed on a wrapper an extension owns."
+          },
           "options": {
             "type": "object",
             "description": "Wrapper options (OPTIONS (...)). Authoritative when present: unlisted options are dropped. Omitted = unmanaged.",
@@ -1233,6 +1237,7 @@
         "mfinalfuncModify": { "type": "string", "enum": ["read_only", "shareable", "read_write"] },
         "minitcond": { "$ref": "#/definitions/scalar", "description": "Moving-aggregate initial state value." },
         "sortop": { "type": "string", "description": "Sort operator for min/max-like aggregates, e.g. > or myschema.>." },
+        "support": { "type": "string", "description": "SUPPORT function (PostgreSQL 19+): a planner support function (internal) returning internal. The empty string means none." },
         "hypothetical": { "type": "boolean", "description": "HYPOTHETICAL: an ordered-set aggregate whose direct arguments are matched to the aggregated ones, as rank and dense_rank are (the args must use ORDER BY)." },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
@@ -1244,7 +1249,7 @@
         "sfunc": ["stype"], "stype": ["sfunc"], "finalfunc": ["sfunc"], "combinefunc": ["sfunc"], "initcond": ["sfunc"], "parallel": ["sfunc"],
         "sspace": ["sfunc"], "finalfuncExtra": ["sfunc"], "finalfuncModify": ["sfunc"], "serialfunc": ["sfunc"], "deserialfunc": ["sfunc"],
         "msfunc": ["sfunc"], "minvfunc": ["sfunc"], "mstype": ["sfunc"], "msspace": ["sfunc"], "mfinalfunc": ["sfunc"], "mfinalfuncExtra": ["sfunc"],
-        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "hypothetical": ["sfunc"]
+        "mfinalfuncModify": ["sfunc"], "minitcond": ["sfunc"], "sortop": ["sfunc"], "support": ["sfunc"], "hypothetical": ["sfunc"]
       },
       "additionalProperties": false
     },

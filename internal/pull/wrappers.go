@@ -36,13 +36,13 @@ func (b *builder) languages() *node {
 }
 
 // wrappers renders the foreign-data wrappers. One that no extension owns is
-// written in full, with an empty handler or validator where it has none, so
-// that one set later is noticed. Of an extension's wrapper only what is no
-// longer as the extension left it is written, and nothing at all for an
-// untouched one: its options, the grantees whose privileges changed, its
-// comment, and with Options.Owners an owner other than the extension's.
-// Wrappers that an external role or an external extension owns are left
-// out.
+// written in full, with an empty handler, validator or (on PostgreSQL 19+)
+// connection function where it has none, so that one set later is noticed.
+// Of an extension's wrapper only what is no longer as the extension left it
+// is written, and nothing at all for an untouched one: its options, the
+// grantees whose privileges changed, its comment, and with Options.Owners
+// an owner other than the extension's. Wrappers that an external role or an
+// external extension owns are left out.
 func (b *builder) wrappers() *node {
 	out := newMap()
 	for _, name := range sortedKeys(b.live.Wrappers) {
@@ -61,6 +61,9 @@ func (b *builder) wrappers() *node {
 		} else {
 			add(w, "handler", str(strings.TrimPrefix(lw.Handler, "pg_catalog.")))
 			add(w, "validator", str(strings.TrimPrefix(lw.Validator, "pg_catalog.")))
+			if lw.Connection != "" || b.live.ServerVersion >= 190000 {
+				add(w, "connection", str(strings.TrimPrefix(lw.Connection, "pg_catalog.")))
+			}
 			add(w, "options", stringsNode(lw.Options))
 		}
 		if b.opts.Owners && lw.Owner != owner {
