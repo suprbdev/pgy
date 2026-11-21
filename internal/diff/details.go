@@ -48,19 +48,19 @@ type LiveDetails struct {
     ExtensionUsers map[string]map[string]bool
     // Unsupported lists objects pgy cannot express (operators, operator
     // classes and families, conversions, base types, casts, text search
-    // parsers and templates, procedural languages, transforms and user
-    // mappings),
-    // excluding extension members and objects other objects create (such as
-    // a range type's multirange casts).
+    // parsers and templates, procedural languages, transforms, access
+    // methods and user mappings), excluding extension members and objects
+    // other objects create (such as a range type's multirange casts).
     Unsupported []UnsupportedObject
 }
 
 // UnsupportedObject is a database object pgy has no YAML for. Schema is
-// empty for kinds that live outside schemas (languages, transforms). Detail
-// holds extra information for some kinds; it is empty for the others.
+// empty for kinds that live outside schemas (languages, transforms, access
+// methods). Detail holds extra information for some kinds; it is empty for
+// the others.
 // Owner is the role that owns the object, "" for kinds without an owner
-// (text search parsers and templates, casts, transforms); for a user
-// mapping it is the owner of its server.
+// (text search parsers and templates, casts, transforms, access methods);
+// for a user mapping it is the owner of its server.
 type UnsupportedObject struct {
     Kind, Schema, Name, Detail, Owner string
 }
@@ -118,6 +118,7 @@ func introspectDetailsOnce(ctx context.Context, pool *pgxpool.Pool, l *Live) err
                    '(' || format_type(c.castsource, null) || ' as ' || format_type(c.casttarget, null) || ')', 'pg_cast'::regclass, c.oid, '', 0::oid
               from pg_cast c join pg_type st on st.oid = c.castsource join pg_type tt on tt.oid = c.casttarget where c.oid >= 16384
             union all select 'language', 0::oid, l.lanname::text, 'pg_language'::regclass, l.oid, '', l.lanowner from pg_language l where l.lanispl
+            union all select 'access method', 0::oid, a.amname::text, 'pg_am'::regclass, a.oid, '', 0::oid from pg_am a where a.oid >= 16384
             union all select 'transform', 0::oid, 'for ' || format_type(t.trftype, null) || ' language ' || l.lanname, 'pg_transform'::regclass, t.oid, '', 0::oid
               from pg_transform t join pg_language l on l.oid = t.trflang
             union all select 'user mapping', 0::oid, 'for ' || quote_ident(um.usename) || ' server ' || quote_ident(um.srvname), 'pg_user_mapping'::regclass, um.umid, '', s.srvowner

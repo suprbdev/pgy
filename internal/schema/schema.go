@@ -272,6 +272,8 @@ type ForeignTable struct {
 type Publication struct {
     Name             string
     AllTables        bool
+    AllSequences     bool                // FOR ALL SEQUENCES (PostgreSQL 19+)
+    Except           []*PublicationTable // FOR ALL TABLES EXCEPT (PostgreSQL 19+): Table and Only
     Tables           []*PublicationTable
     Schemas          []string // FOR TABLES IN SCHEMA
     Publish          []string // insert | update | delete | truncate; nil = all
@@ -626,6 +628,8 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    NotValidSet bool `yaml:"-"` // notValid was written; notValid: false on a partition's or child's inherited column asks for a validated copy of the parent's NOT VALID NOT NULL
+    NotNullNoInherit bool `yaml:"notNullNoInherit"` // the NOT NULL constraint is NO INHERIT, so children don't get it (PostgreSQL 18+)
     Validate string `yaml:"validate"` // NOT NULL on an existing column: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
@@ -1687,7 +1691,8 @@ func parseColumnSpec(spec any) *Column {
         if id, ok := m["identity"]; ok { c.Identity, c.IdentityOptions = parseIdentity(id), parseIdentityOptions(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
-        if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["notValid"].(bool); ok { c.NotValid, c.NotValidSet = v, true }
+        if v, ok := m["notNullNoInherit"].(bool); ok { c.NotNullNoInherit = v }
         if v, ok := m["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }
@@ -3297,9 +3302,10 @@ func fillScalarTexts(m *yaml.Node, out map[string]string) {
     }
 }
 
-// parsePublications parses { name: {allTables, tables, schemas, publish,
-// viaPartitionRoot, comment} }. A tables entry is a table name or
-// {table, columns, where}.
+// parsePublications parses { name: {allTables, allSequences, except,
+// tables, schemas, publish, viaPartitionRoot, comment} }. A tables entry is
+// a table name or {table, columns, where, only}; an except entry is a table
+// name or {table, only}.
 func parsePublications(v any) map[string]*Publication {
     m, ok := v.(map[string]any)
     if !ok { return map[string]*Publication{} }
@@ -3308,6 +3314,21 @@ func parsePublications(v any) map[string]*Publication {
         p := &Publication{Name: name}
         if dm, ok := def.(map[string]any); ok {
             if b, ok := dm["allTables"].(bool); ok { p.AllTables = b }
+            if b, ok := dm["allSequences"].(bool); ok { p.AllSequences = b }
+            if arr, ok := dm["except"].([]any); ok {
+                for _, it := range arr {
+                    switch x := it.(type) {
+                    case string:
+                        p.Except = append(p.Except, &PublicationTable{Table: qualify("", strings.TrimSpace(x))})
+                    case map[string]any:
+                        tn, _ := x["table"].(string)
+                        if tn == "" { continue }
+                        pt := &PublicationTable{Table: qualify("", strings.TrimSpace(tn))}
+                        if o, ok := x["only"].(bool); ok { pt.Only = o }
+                        p.Except = append(p.Except, pt)
+                    }
+                }
+            }
             if arr, ok := dm["tables"].([]any); ok {
                 for _, it := range arr {
                     switch x := it.(type) {

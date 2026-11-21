@@ -353,12 +353,15 @@ func Database(d *schema.Database) []Issue {
 			if c == nil {
 				continue
 			}
-			if c.NotNullName != "" {
+			if c.NotNullName != "" && c.Nullable {
+				add(Warning, obj, "column %s sets notNullName but is nullable, so there is no NOT NULL constraint to name", cn)
+			}
+			if c.NotNullNoInherit {
 				switch {
-				case t.PartitionOf != "" || t.Of != "" || strings.TrimSpace(c.Type) == "":
-					add(Warning, obj, "column %s: notNullName is ignored on a column of a partition, a typed table or an inheritance child; it names the constraint of a column the table declares with a type", cn)
+				case t.PartitionBy != nil:
+					add(Error, obj, "column %s: notNullNoInherit is not allowed on a partitioned table, whose partitions must have its NOT NULL constraints", cn)
 				case c.Nullable:
-					add(Warning, obj, "column %s sets notNullName but is nullable, so there is no NOT NULL constraint to name", cn)
+					add(Warning, obj, "column %s sets notNullNoInherit but is nullable, so there is no NOT NULL constraint to keep from children", cn)
 				}
 			}
 			if t.Of != "" {
@@ -614,6 +617,17 @@ func Database(d *schema.Database) []Issue {
 		}
 		if p.AllTables && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
 			add(Error, "publication "+name, "allTables cannot be combined with tables or schemas")
+		}
+		if p.AllSequences && (len(p.Tables) > 0 || len(p.Schemas) > 0) {
+			add(Error, "publication "+name, "allSequences cannot be combined with tables or schemas")
+		}
+		if len(p.Except) > 0 && !p.AllTables {
+			add(Error, "publication "+name, "except needs allTables: true")
+		}
+		for _, pt := range p.Except {
+			if t := d.Tables[pt.Table]; t != nil && t.PartitionOf != "" {
+				add(Error, "publication "+name, "except cannot list partition %s; list its partitioned table", pt.Table)
+			}
 		}
 		listed := map[string]bool{}
 		for _, pt := range p.Tables {

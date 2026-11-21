@@ -1,0 +1,21 @@
+-- requires server_version_num 180000
+create schema nn;
+create table nn.p (id int, a int, b text not null, e text);
+alter table nn.p add constraint p_a_nn not null a no inherit;
+create table nn.early () inherits (nn.p);
+alter table nn.p add constraint p_e_nn not null e not valid;
+create table nn.kid () inherits (nn.p);
+alter table nn.p add constraint p_id_nn not null id no inherit not valid;
+create table nn.ch (x int constraint ch_x_nn not null no inherit) inherits (nn.p);
+alter table nn.ch alter column a set not null;
+alter table nn.ch alter constraint ch_a_not_null no inherit;
+create table nn.audit (id int, at int, who text not null) partition by range (at);
+create table nn.audit_lo partition of nn.audit for values from (minvalue) to (0);
+alter table nn.audit add constraint audit_id_nn not null id not valid;
+create table nn.audit_hi partition of nn.audit for values from (0) to (maxvalue);
+create table nn.named (b text constraint named_b_nn not null) inherits (nn.p);
+create table nn.m (id int not null, k text not null, v int) partition by list (k);
+create table nn.m_a partition of nn.m for values in ('a');
+create table nn.m_b (id int not null, k text not null, v int);
+alter table nn.m attach partition nn.m_b for values in ('b');
+create table nn.m_c partition of nn.m (v constraint m_c_v_nn not null) for values in ('c');

@@ -168,7 +168,26 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication to or from it requires --unsafe (drop + create)." },
+          "allTables": { "type": "boolean", "description": "FOR ALL TABLES. Switching a live publication from it to tables or schemas requires --unsafe (drop + create), as does switching to it before PostgreSQL 19." },
+          "except": {
+            "type": "array",
+            "description": "FOR ALL TABLES EXCEPT (PostgreSQL 19+): tables allTables leaves out, with their inheritance children unless only is set. Needs allTables.",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "properties": {
+                    "table": { "type": "string", "minLength": 1 },
+                    "only": { "type": "boolean", "description": "EXCEPT (TABLE ONLY ...): leave out the table but not its inheritance children." }
+                  },
+                  "required": ["table"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "allSequences": { "type": "boolean", "description": "FOR ALL SEQUENCES (PostgreSQL 19+): publish every sequence, alone or with allTables. Cannot be combined with tables or schemas." },
           "tables": {
             "type": "array",
             "items": {
@@ -607,7 +626,7 @@
         "generated": {
           "type": "string",
           "minLength": 1,
-          "description": "Generated column expression: GENERATED ALWAYS AS (expr) STORED. Overrides default and identity."
+          "description": "Generated column expression: GENERATED ALWAYS AS (expr) STORED. Overrides default and identity. On a partition's or inheritance child's inherited column, its own expression (PostgreSQL 16+ when created, 17+ to change)."
         },
         "collate": { "type": "string", "minLength": 1, "description": "COLLATE for the column, e.g. C or und-x-icu. Changing it on a live column requires --unsafe." },
         "compression": { "type": "string", "enum": ["pglz", "lz4", "default"], "description": "TOAST compression method (applies to newly written values)." },
@@ -621,7 +640,11 @@
         },
         "notValid": {
           "type": "boolean",
-          "description": "Keep the column's NOT NULL constraint NOT VALID, so existing rows aren't checked and pgy diff never validates it. PostgreSQL 18+."
+          "description": "Keep the column's NOT NULL constraint NOT VALID, so existing rows aren't checked and pgy diff never validates it. On a partition's or inheritance child's inherited column, false validates this table's copy of the parent's NOT VALID NOT NULL. PostgreSQL 18+."
+        },
+        "notNullNoInherit": {
+          "type": "boolean",
+          "description": "Make the column's NOT NULL constraint NO INHERIT, so inheritance children don't get it (ALTER CONSTRAINT ... [NO] INHERIT changes it in place). Not allowed on a partitioned table. PostgreSQL 18+."
         },
         "validate": {
           "type": "string",
@@ -631,7 +654,7 @@
         "notNullName": {
           "type": "string",
           "minLength": 1,
-          "description": "Name of the column's NOT NULL constraint (PostgreSQL 18+); default <table>_<column>_not_null. A live constraint with another name is renamed. Ignored before PostgreSQL 18."
+          "description": "Name of the column's NOT NULL constraint (PostgreSQL 18+); default <table>_<column>_not_null. A live constraint with another name is renamed. On a partition's or inheritance child's inherited column, names its own constraint or its copy of the parent's (set when the table is created; an inherited copy cannot be renamed). Ignored before PostgreSQL 18."
         },
         "using": {
           "type": "string",
@@ -664,6 +687,7 @@
         "generated": { "type": "string", "minLength": 1 },
         "virtual": { "type": "boolean" },
         "notValid": { "type": "boolean" },
+        "notNullNoInherit": { "type": "boolean" },
         "validate": { "type": "string", "enum": ["immediate", "later"] },
         "notNullName": { "type": "string", "minLength": 1 },
         "collate": { "type": "string", "minLength": 1 },

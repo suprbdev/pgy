@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,10 +16,16 @@ import (
 	"github.com/suprbdev/pgy/internal/validate"
 )
 
+// fixtureVersionRe matches the first line of a fixture that needs a newer
+// server: "-- requires server_version_num 180000".
+var fixtureVersionRe = regexp.MustCompile(`\A-- requires server_version_num (\d+)\n`)
+
 // TestIntegrationPullFixtures loads each SQL schema in testdata/pull into a
 // fresh database, pulls it with owners, and requires the pulled YAML to
 // diff clean against that database and to rebuild an identical schema in a
-// second fresh database.
+// second fresh database. A fixture whose first line names a minimum
+// server_version_num, or whose name ends in _pg19, is skipped on older
+// servers.
 func TestIntegrationPullFixtures(t *testing.T) {
 	admin := connect(t)
 	ctx := context.Background()
@@ -28,9 +36,16 @@ func TestIntegrationPullFixtures(t *testing.T) {
 	for _, f := range fixtures {
 		name := strings.TrimSuffix(filepath.Base(f), ".sql")
 		t.Run(name, func(t *testing.T) {
+			if strings.HasSuffix(name, "_pg19") {
+				requireServerVersion(t, 190000)
+			}
 			sql, err := os.ReadFile(f)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if m := fixtureVersionRe.FindSubmatch(sql); m != nil {
+				v, _ := strconv.Atoi(string(m[1]))
+				requireServerVersion(t, v)
 			}
 			src := freshDatabase(t, admin, "pgytest_pull_"+name)
 			if _, err := src.Exec(ctx, string(sql)); err != nil {

@@ -76,12 +76,12 @@ func recreateColumnDependents(live *Live, desired *schema.Database, opts Options
                 for _, cn := range why.retyped {
                     warns = append(warns, Warning{Table: fq, Kind: "dependents", Message: fmt.Sprintf("changing the type of %s.%s: generated column %s uses it, and PostgreSQL rejects the change while it does; pgy can't drop %s and add it again, because %s, so do that in a hand-written migration", fq, cn, g, g, reason)})
                 }
-                if why.expression {
-                    warns = append(warns, Warning{Table: fq, Message: fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17), and pgy can't drop the column and add it again, because %s; do that in a hand-written migration", fq, g, live.ServerVersion/10000, reason)})
+                if why.expression != "" {
+                    warns = append(warns, Warning{Table: fq, Message: fmt.Sprintf("generated column %s.%s changed, but %s, and pgy can't drop the column and add it again, because %s; do that in a hand-written migration", fq, g, why.expression, reason)})
                 }
                 continue
             }
-            because := fmt.Sprintf("PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION", live.ServerVersion/10000)
+            because := why.expression
             if len(why.retyped) > 0 {
                 cols := make([]string, len(why.retyped))
                 for i, cn := range why.retyped { cols[i] = fq + "." + cn }
@@ -287,8 +287,8 @@ func declarationsOf(fq string, dt *schema.Table, lt *LiveTable) tableDeclaration
 
 // generatedInTheWay returns the generated columns that stand in the way of
 // the plan under --unsafe: those that use a column whose type changes
-// (changing), and, before PostgreSQL 17, which has no SET EXPRESSION, those
-// whose expression changes. A stored one that the YAML drops or declares as
+// (changing), and those that change where ALTER COLUMN can't change them
+// (see generatedChangeBlocked). A stored one that the YAML drops or declares as
 // a plain column goes in plain, to lose its expression first. One the YAML
 // still declares generated goes in regenerate, by table and column, with
 // why: it is to be dropped and added again, if regenerationBlocker allows
@@ -319,25 +319,73 @@ func generatedInTheWay(live *Live, desired *schema.Database, changing map[string
             }
         }
     }
-    if !opts.Unsafe || live.ServerVersion <= 0 || live.ServerVersion >= 170000 { return regenerate, plain, warns }
+    if !opts.Unsafe { return regenerate, plain, warns }
     for _, fq := range sortedKeys(desired.Tables) {
         dt, lt := desired.Tables[fq], live.Tables[fq]
         if dt == nil || lt == nil || dt.PartitionOf != "" { continue }
         for _, g := range sortedKeys(dt.Columns) {
             c, lc := dt.Columns[g], lt.Columns[g]
-            if c == nil || lc == nil || lc.Inherited || c.Generated == "" || lc.Generated == "" || constraintDefsEqual(c.Generated, lc.Generated) { continue }
-            add(fq, g).expression = true
+            if c == nil || lc == nil || lc.Inherited { continue }
+            if why := generatedChangeBlocked(live, fq, c, lc); why != "" { add(fq, g).expression = why }
         }
     }
     return regenerate, plain, warns
 }
 
+// generatedChangeBlocked returns why ALTER COLUMN can't turn generated
+// column lc of table fq in live into the declared generated column c, or ""
+// when it can or nothing changes. No version turns a stored generated
+// column into a virtual one or back (before PostgreSQL 18, which has no
+// virtual columns, versionWarnings reports a declared one).
+// PostgreSQL 16 has no SET EXPRESSION, and PostgreSQL 18 rejects it on a
+// virtual column while the table, one of its partitions or an inheritance
+// child of it has a check constraint, whatever its columns, NOT VALID or
+// NOT ENFORCED (NOT NULL constraints don't count).
+func generatedChangeBlocked(live *Live, fq string, c *schema.Column, lc *LiveColumn) string {
+    if c == nil || lc == nil || c.Generated == "" || lc.Generated == "" { return "" }
+    v := live.ServerVersion
+    if c.Virtual != lc.Virtual {
+        if c.Virtual && v > 0 && v < 180000 { return "" }
+        from, to := "a stored", "a virtual"
+        if lc.Virtual { from, to = to, from }
+        return fmt.Sprintf("PostgreSQL can't turn %s generated column into %s one in place", from, to)
+    }
+    if constraintDefsEqual(c.Generated, lc.Generated) { return "" }
+    switch {
+    case v > 0 && v < 170000:
+        return fmt.Sprintf("PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17)", v/10000)
+    case v >= 180000 && v < 190000 && lc != nil && lc.Virtual && hasCheckConstraintBelow(live, fq, map[string]bool{}):
+        return fmt.Sprintf("PostgreSQL %d rejects SET EXPRESSION on a virtual generated column while its table, or a partition or child table of it, has a check constraint (19 allows it)", v/10000)
+    }
+    return ""
+}
+
+// hasCheckConstraintBelow reports whether table fq of live, one of its
+// partitions or one of the tables that inherit from it, at any depth, has a
+// check constraint. seen guards against visiting a table twice.
+func hasCheckConstraintBelow(live *Live, fq string, seen map[string]bool) bool {
+    if seen[fq] { return false }
+    seen[fq] = true
+    lt := live.Tables[fq]
+    if lt == nil { return false }
+    for _, def := range lt.ConstraintDefs {
+        if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(def)), "CHECK") { return true }
+    }
+    for _, part := range live.Partitions[fq] {
+        if hasCheckConstraintBelow(live, part, seen) { return true }
+    }
+    for _, tn := range sortedKeys(live.Tables) {
+        if indexOf(live.Tables[tn].Inherits, fq) >= 0 && hasCheckConstraintBelow(live, tn, seen) { return true }
+    }
+    return false
+}
+
 // regeneration says why a generated column has to be dropped and added
-// again: it uses the retyped columns of its table, or its expression
-// changed on a server without SET EXPRESSION.
+// again: it uses the retyped columns of its table, or it changed where
+// ALTER COLUMN can't change it, for the reason expression gives.
 type regeneration struct {
     retyped    []string
-    expression bool
+    expression string
 }
 
 // regenerationBlocker returns why generated column g of table fq can't be

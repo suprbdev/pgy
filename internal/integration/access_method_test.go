@@ -56,6 +56,7 @@ func TestIntegrationAccessMethods(t *testing.T) {
 		create table x.plain (id int primary key);
 		create table x.p (id int, at int) partition by range (at)`+partitionedUsing+`;
 		create table x.p1 partition of x.p for values from (0) to (10) using heap2;
+		create table x.p2 partition of x.p for values from (10) to (20) using heap;
 		create materialized view x.mv using heap2 as select 1 as one;
 		insert into x.t values (1, 'a'), (2, 'b');`); err != nil {
 		t.Fatal(err)
@@ -75,12 +76,15 @@ func TestIntegrationAccessMethods(t *testing.T) {
 		}
 		paths, all = append(paths, p), all+string(f.Content)
 	}
-	want := 3
+	heap := 0
 	if version >= 170000 {
-		want = 4
+		heap = 1
 	}
-	if n := strings.Count(all, "accessMethod: heap2"); n != want || strings.Contains(all, "accessMethod: heap\n") {
-		t.Errorf("want accessMethod: heap2 on t, p1 and mv (and p from PostgreSQL 17 on), %d objects, and nothing for the default heap; got %d in:\n%s", want, n, all)
+	if n := strings.Count(all, "accessMethod: heap2"); n != 3 || strings.Count(all, "accessMethod: heap\n") != heap {
+		t.Errorf("want accessMethod: heap2 on t, mv and p1 (p instead from PostgreSQL 17 on, whose partitions get it), and heap only on p2 under p's heap2 from PostgreSQL 17 on; got %d in:\n%s", n, all)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "access method heap2 is not supported by pgy and was left out") {
+		t.Errorf("pull must report the access method it cannot express, got %v", res.Warnings)
 	}
 	pulled, err := schema.LoadAndMerge(paths)
 	if err != nil {
@@ -101,7 +105,7 @@ func TestIntegrationAccessMethods(t *testing.T) {
 	if sql := diff.Render(diff.PlanWith(introspectAll(t, dst), pulled, opts)); sql != "" {
 		t.Errorf("rebuilt database differs from the pulled YAML:\n%s", sql)
 	}
-	if got, want := accessMethods(t, dst), accessMethods(t, src); len(got) != len(want) || got["t"] != "heap2" || got["p1"] != "heap2" || got["mv"] != "heap2" || got["p"] != want["p"] || got["plain"] != "heap" {
+	if got, want := accessMethods(t, dst), accessMethods(t, src); len(got) != len(want) || got["t"] != "heap2" || got["p1"] != "heap2" || got["mv"] != "heap2" || got["p"] != want["p"] || got["p2"] != "heap" || got["plain"] != "heap" {
 		t.Errorf("rebuilt access methods %v, source %v", got, want)
 	}
 

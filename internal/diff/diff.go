@@ -109,6 +109,10 @@ type Live struct{
     // connected database
     DatabaseRoleConfig map[string]map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
+    // UnknownSettings holds the lower-cased names of the settings the YAML
+    // declares that the server does not recognise (see IntrospectSettings);
+    // the plan leaves them out. nil when they were not checked.
+    UnknownSettings map[string]bool
     // Offline marks a Live that stands for an empty database rather than
     // one that was introspected (pgy diff --from-empty), so there is no
     // connected role and no server to report on.
@@ -254,9 +258,13 @@ type LiveForeignTable struct {
 
 // LivePublication is a publication from pg_publication and its table and
 // schema memberships. Tables maps "schema.table" to its column list (nil =
-// all columns, sorted) and row filter.
+// all columns, sorted) and row filter. Except maps the tables a FOR ALL
+// TABLES publication leaves out (PostgreSQL 19+) to whether it leaves out
+// only the table and not its inheritance children.
 type LivePublication struct {
     AllTables bool
+    AllSequences bool
+    Except    map[string]bool
     Publish   []string // enabled actions in insert, update, delete, truncate order
     ViaRoot   bool
     GeneratedColumns string // publish_generated_columns: none | stored; "" before PostgreSQL 18
@@ -648,6 +656,12 @@ type LiveIndex struct {
 type LiveIndexOpclass struct {
     Name    string
     Default bool
+    // Contested is true when the operator class belongs to an extension or
+    // an extension has another class for the same type and access method.
+    // Which of those is the default can differ between server versions:
+    // btree_gist's gist_inet_ops is the GiST default for inet before
+    // PostgreSQL 19, core's inet_ops from 19 on.
+    Contested bool
     // Collation is the key column's COLLATE when it differs from the
     // collation of the column or expression itself; "" otherwise.
     Collation string
@@ -713,6 +727,9 @@ type LiveColumn struct{
     // NotNullName names the column's not-null constraint, valid or not;
     // "" before PostgreSQL 18, which records none for a table column.
     NotNullName string
+    // NotNullNoInherit: the column's not-null constraint is NO INHERIT
+    // (PostgreSQL 18+), so children don't get it.
+    NotNullNoInherit bool
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -977,7 +994,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
                a.attinhcount > 0,
                coalesce(a.attoptions, '{}'::text[]),
                coalesce(a.attfdwoptions, '{}'::text[]),
-               coalesce(nn.conname, ''), coalesce(nn.convalidated, true)
+               coalesce(nn.conname, ''), coalesce(nn.convalidated, true), coalesce(nn.connoinherit, false)
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -1002,12 +1019,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
             var inherited bool
             var attoptions, fdwoptions []string
             var notNullName string
-            var notNullValid bool
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions, &notNullName, &notNullValid); err != nil { return err }
+            var notNullValid, notNullNoInherit bool
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions, &notNullName, &notNullValid, &notNullNoInherit); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited, NotNullName: notNullName}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited, NotNullName: notNullName, NotNullNoInherit: notNullNoInherit}
             if !notNullValid { lc.NotNullNotValid = notNullName }
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
@@ -1083,6 +1100,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
+               exists (select 1 from pg_opclass eo join pg_depend d on d.classid = 'pg_opclass'::regclass and d.objid = eo.oid and d.deptype = 'e'
+                       where eo.opcmethod = op.opcmethod and eo.opcintype = op.opcintype),
                case when x.indcollation[k.ord] = 0 then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                x.indkey[k.ord] > 0 and x.indcollation[k.ord] <> ta.attcollation,
                case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, 0, true) else '' end,
@@ -1109,16 +1128,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
             var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef, column string
-            var opcDefault, columnCollated bool
+            var opcDefault, opcContested, columnCollated bool
             var ord, target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &opcContested, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
                 return err
             }
             collation := ""
             if columnCollated || (indexDef != "" && indexKeyCollated(indexDef, keyDef, ord)) { collation = keyCollation }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Contested: opcContested, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -1590,7 +1609,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         select p.pubname, p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
                coalesce(d.description, ''),
                case to_jsonb(p) ->> 'pubgencols' when 's' then 'stored' when 'n' then 'none' else '' end,
-               pg_get_userbyid(p.pubowner)
+               pg_get_userbyid(p.pubowner), coalesce((to_jsonb(p) ->> 'puballsequences')::bool, false)
         from pg_publication p
         left join pg_description d on d.objoid = p.oid and d.classoid = 'pg_publication'::regclass
     `
@@ -1599,7 +1618,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
             var name string
             var ins, upd, del, trunc bool
             lp := &LivePublication{Tables: map[string]LivePublicationTable{}}
-            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns, &lp.Owner); err != nil {
+            if err := pubRows.Scan(&name, &lp.AllTables, &ins, &upd, &del, &trunc, &lp.ViaRoot, &lp.Comment, &lp.GeneratedColumns, &lp.Owner, &lp.AllSequences); err != nil {
                 return err
             }
             for _, a := range []struct{ on bool; name string }{{ins, "insert"}, {upd, "update"}, {del, "delete"}, {trunc, "truncate"}} {
@@ -1610,22 +1629,28 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         return nil
     })
 
-    // A table published without ONLY also publishes its inheritance
-    // children, each with its own pg_publication_rel row; those are left
-    // out, since declaring the parent again would publish them twice.
+    // A table published or excepted (PostgreSQL 19) without ONLY brings its
+    // inheritance children along, each with its own pg_publication_rel row;
+    // those are left out, since declaring the parent again would publish them
+    // twice. prexcept is new in PostgreSQL 19.
     pubRelQ := `
+        with rel as (
+            select r.prpubid, r.prrelid, r.prqual, r.prattrs, coalesce((to_jsonb(r) ->> 'prexcept')::bool, false) as prexcept
+            from pg_publication_rel r
+        )
         select p.pubname, n.nspname || '.' || c.relname, coalesce(pg_get_expr(pr.prqual, pr.prrelid), ''),
                (select array_agg(a.attname::text order by a.attname) from pg_attribute a
                 where a.attrelid = pr.prrelid and a.attnum = any(pr.prattrs)),
                c.relkind = 'r' and exists (select 1 from pg_inherits i where i.inhparent = pr.prrelid
-                   and not exists (select 1 from pg_publication_rel x where x.prpubid = pr.prpubid and x.prrelid = i.inhrelid))
-        from pg_publication_rel pr
+                   and not exists (select 1 from rel x where x.prpubid = pr.prpubid and x.prrelid = i.inhrelid and x.prexcept = pr.prexcept)),
+               pr.prexcept
+        from rel pr
         join pg_publication p on p.oid = pr.prpubid
         join pg_class c on c.oid = pr.prrelid
         join pg_namespace n on n.oid = c.relnamespace
         where not exists (
             select 1 from pg_inherits i
-            join pg_publication_rel ppr on ppr.prrelid = i.inhparent and ppr.prpubid = pr.prpubid
+            join rel ppr on ppr.prrelid = i.inhparent and ppr.prpubid = pr.prpubid and ppr.prexcept = pr.prexcept
             where i.inhrelid = pr.prrelid
             and coalesce(pg_get_expr(ppr.prqual, ppr.prrelid), '') = coalesce(pg_get_expr(pr.prqual, pr.prrelid), '')
             and coalesce((select array_agg(a.attname::text order by a.attname) from pg_attribute a where a.attrelid = ppr.prrelid and a.attnum = any(ppr.prattrs)), '{}')
@@ -1635,11 +1660,19 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         for pubRelRows.Next() {
             var pub, table, where string
             var cols []string
-            var only bool
-            if err := pubRelRows.Scan(&pub, &table, &where, &cols, &only); err != nil {
+            var only, except bool
+            if err := pubRelRows.Scan(&pub, &table, &where, &cols, &only, &except); err != nil {
                 return err
             }
-            if lp := l.Publications[pub]; lp != nil { lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where, Only: only} }
+            lp := l.Publications[pub]
+            switch {
+            case lp == nil:
+            case except:
+                if lp.Except == nil { lp.Except = map[string]bool{} }
+                lp.Except[table] = only
+            default:
+                lp.Tables[table] = LivePublicationTable{Columns: cols, Where: where, Only: only}
+            }
         }
         return nil
     })
@@ -2994,6 +3027,20 @@ type PlanDiff struct{
     // parts coordinates the indexes of partition trees while the plan is
     // built.
     parts *partitionIndexPlan
+    // pubsSet names the publications whose SET ALL ... went before an
+    // ATTACH PARTITION (see exceptBeforeAttach).
+    pubsSet map[string]bool
+    // replaced holds the constraints, as "table\x00name", that the plan
+    // drops and adds again without --unsafe, so their comments are set
+    // again.
+    replaced map[string]bool
+}
+
+// replaceConstraint records that the plan drops constraint name of table fq
+// and adds it again.
+func (p *PlanDiff) replaceConstraint(fq, name string) {
+    if p.replaced == nil { p.replaced = map[string]bool{} }
+    p.replaced[fq+"\x00"+name] = true
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -3024,6 +3071,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live = withExtensionObjects(live, desired)
     desired = withExternal(desired, opts)
+    desired, settingWarnings := withoutUnknownSettings(live, desired)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     base := live
@@ -3053,6 +3101,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     live, typeChangeEarly, typeChangePre, typeChangePost, readdedColumns, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
+    recreateWarnings = append(recreateWarnings, settingWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -3198,6 +3247,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
     memberData, dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
+    dataFirst, dataTriggers := dataFirstTables(live, desired), []string{}
+    triggersOf := func(fq string) *[]string {
+        if dataFirst[fq] { return &dataTriggers }
+        return &deferredTriggers
+    }
     plan.Creates = append(plan.Creates, memberData...)
     planLanguages(plan, live, desired, opts.PublicGrants)
     planWrappers(plan, live, desired, opts.PublicGrants)
@@ -3504,15 +3558,28 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                         using := accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
+                        overrides := []string{}
+                        for _, cn := range sortedKeys(dt.Columns) {
+                            col := inlineInherited(desired, live, dt, cn, dt.Columns[cn])
+                            if col == nil { continue }
+                            clause := quoteIdent(cn)
+                            if col.NotNullName != "" { clause += " constraint " + quoteIdent(col.NotNullName) + " not null" }
+                            if col.Generated != "" { clause += " " + generatedClause(col) }
+                            overrides = append(overrides, clause)
+                        }
+                        withCols := ""
+                        if len(overrides) > 0 { withCols = " (" + strings.Join(overrides, ", ") + ")" }
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s%s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), withCols, renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
                         if c == nil { continue }
-                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...)
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil, live.ServerVersion)...)
+                        alters, _ := inheritedOverrideStmts(desired, live, fq, cn, dt, c, nil, true, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
                         if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignColumnOptionStmts(fq, cn, c)...) }
                     }
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
@@ -3543,7 +3610,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                     sort.Strings(cols)
                 }
-                for _, cn := range inherited { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil)...) }
+                for _, cn := range inherited {
+                    if col := inlineInherited(desired, live, dt, cn, dt.Columns[cn]); col != nil { cols = append(cols, renderColumn(cn, col)) }
+                    plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil, live.ServerVersion)...)
+                    alters, _ := inheritedOverrideStmts(desired, live, fq, cn, dt, dt.Columns[cn], nil, true, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                    plan.Alters = append(plan.Alters, alters...)
+                }
                 for _, cn := range sortedKeys(dt.Columns) {
                     if c := dt.Columns[cn]; c != nil && c.NotValid && !c.Nullable && !inheritedColumn(dt, c, nil) {
                         plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn, c))
@@ -3558,7 +3630,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.Foreign != nil {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s)%s server %s%s;", pqIdent(fq), strings.Join(cols, ", "), inherits, quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 unlogged := ""
@@ -3572,7 +3644,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
             } else {
@@ -3588,6 +3660,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 for _, pc := range dt.PrimaryKey { pkCols[constraintColumnName(pc)] = true }
                 plan.Creates = append(plan.Creates, typeChangePre[fq]...)
                 if attachesPartition(dt, lt) {
+                    plan.Creates = append(plan.Creates, exceptBeforeAttach(plan, live, desired, fq)...)
                     plan.Creates = append(plan.Creates, fmt.Sprintf("alter table %s attach partition %s %s;", pqIdent(dt.PartitionOf), pqIdent(fq), renderPartitionBound(dt.Partition)))
                     plan.Warnings = append(plan.Warnings, Warning{Table: fq, Kind: "lock", Message: fmt.Sprintf("ATTACH PARTITION %s scans it under an ACCESS EXCLUSIVE lock to check its rows fit the bound, unless a validated CHECK constraint already implies the bound", fq)})
                 } else if lb, ok := live.PartitionBounds[fq]; ok && unsafe && dt.PartitionOf != "" && lt.IsPartition && partitionMoved(dt, lb) {
@@ -3600,7 +3673,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
                 } else {
                     for _, cn := range sortedKeys(dt.Columns) {
-                        if c, lc := dt.Columns[cn], lt.Columns[cn]; c != nil && lc != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...) }
+                        c, lc := dt.Columns[cn], lt.Columns[cn]
+                        if c == nil { continue }
+                        if lc != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc, live.ServerVersion)...) }
+                        alters, concurrent := inheritedOverrideStmts(desired, live, fq, cn, dt, c, lc, false, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
+                        plan.Concurrent = append(plan.Concurrent, concurrent...)
                     }
                 }
                 sort.Strings(colNames)
@@ -3609,7 +3687,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
                     if (ok && inheritedColumn(dt, c, lc)) || (!ok && inheritedColumn(dt, c, nil)) {
-                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...)
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc, live.ServerVersion)...)
+                        alters, concurrent := inheritedOverrideStmts(desired, live, fq, cn, dt, c, lc, false, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
+                        plan.Concurrent = append(plan.Concurrent, concurrent...)
                         continue
                     }
                     if !ok {
@@ -3626,10 +3707,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         continue
                     }
                     if name := notNullNotValidName(fq, cn, c, lc, lt, dt, pkCols, live.ServerVersion); name != "" {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), quoteIdent(cn)))
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s%s not valid;", pqIdent(fq), quoteIdent(name), quoteIdent(cn), noInheritClause(c)))
                         if !c.NotValid { plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name))) }
                         enforced := *lc
-                        enforced.Nullable = false
+                        enforced.Nullable, enforced.NotNullNoInherit = false, c.NotNullNoInherit
                         lc = &enforced
                     } else {
                         pending := lc.NotNullNotValid
@@ -3643,7 +3724,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                             plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
                         }
                     }
-                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
+                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, generatedChangeBlocked(live, fq, c, lc), func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })
                     if len(typeChangePre[fq]) > 0 {
@@ -3657,7 +3738,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s set tablespace %s;", pqIdent(fq), quoteIdent(dt.Tablespace)))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("table "+fq, fq)) }
                 }
-                if dt.Foreign == nil { plan.Alters = append(plan.Alters, accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
+                if dt.Foreign == nil {
+                    stmts := accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                    if lt.Partitioned { plan.Creates = append(plan.Creates, stmts...) } else { plan.Alters = append(plan.Alters, stmts...) }
+                }
                 plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
@@ -3693,6 +3777,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, dataWrites...)
+    if len(dataWrites) > 0 && dataDefersEvents(live, desired) { plan.Alters = append(plan.Alters, "set constraints all immediate;") }
+    plan.Alters = append(plan.Alters, dataTriggers...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe, pendingMembers)
     planPublications(plan, live, desired, opts)
@@ -3701,11 +3787,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     grantStmts, grantWarnings := planGrantsWarned(live, desired, opts.PublicGrants)
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
-    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe, plan.replaced)...)
     plan.Alters = append(plan.Alters, routinePost...)
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
+    if len(dataDeletes) > 0 && dataDefersEvents(live, desired) { dataDeletes = append(dataDeletes, "set constraints all immediate;") }
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
         early, late, pruneWarnings := planPrune(live, desired, opts.MigrationsTable, plan.Drops)
@@ -4244,10 +4331,12 @@ func typedTableUses(live *Live, fq string) bool {
 
 // inheritedColumnStmts sets what a partition or inheritance child declares
 // for column cn it inherits: a default, NOT NULL (only when nullable is
-// written, and only adding it), storage, compression, the statistics
-// target and n_distinct. Settings left out are unmanaged, so the parent's
-// copies stay. lc is the live column, nil for a table this plan creates.
-func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []string {
+// written, and only adding it, NO INHERIT with notNullNoInherit and named
+// with notNullName from PostgreSQL 18 on), storage, compression, the
+// statistics target and n_distinct. Settings left out are unmanaged, so the
+// parent's copies stay. lc is the live column, nil for a table this plan
+// creates.
+func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, serverVersion int) []string {
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
     if lc == nil { lc = &LiveColumn{Nullable: true} }
     out := []string{}
@@ -4255,7 +4344,11 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []str
         out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
     }
     if c.NullableSet && !c.Nullable && lc.Nullable {
-        out = append(out, target+" set not null;")
+        if c.NotNullNoInherit || c.NotNullName != "" && serverVersion >= 180000 {
+            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s%s;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c)))
+        } else {
+            out = append(out, target+" set not null;")
+        }
     }
     if c.Storage != "" && c.Storage != lc.Storage {
         out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
@@ -4297,6 +4390,95 @@ func matViewColumnStmts(fq string, vw *schema.View, lt *LiveTable) []string {
         out = append(out, attributeOptionStmts(target, c, lc)...)
     }
     return out
+}
+
+// inheritedOverrideStmts sets what a partition or inheritance child fq
+// declares for inherited column cn beyond inheritedColumnStmts: its own
+// generation expression, with ALTER TABLE ONLY ... SET EXPRESSION
+// (PostgreSQL 17+) so the child's own children keep theirs, and, with
+// notValid: false, a validated copy of the parent's NOT VALID NOT NULL.
+// creating is set for a table this plan creates, whose CREATE sets the
+// expression when inlineInherited allows; lc is nil for a column the table
+// doesn't have yet, which gets both right away. An existing column gets a
+// changed expression only under unsafe, as a declared column does, and its
+// copy validated in the no-transaction migration.
+func inheritedOverrideStmts(desired *schema.Database, live *Live, fq, cn string, dt *schema.Table, c *schema.Column, lc *LiveColumn, creating, unsafe bool, warn func(string)) (alters, concurrent []string) {
+    rootFq, root, liveRoot := declaringColumn(desired, live, dt, cn)
+    inline := inlineInherited(desired, live, dt, cn, c)
+    if c.Generated != "" && (lc != nil && lc.Generated != "" || lc == nil && (!creating || inline == nil || inline.Generated == "")) {
+        clobbered := unsafe && root != nil && liveRoot != nil && root.Generated != "" && liveRoot.Generated != "" && !constraintDefsEqual(root.Generated, liveRoot.Generated)
+        switch {
+        case lc != nil && constraintDefsEqual(c.Generated, lc.Generated) && !clobbered, lc != nil && !unsafe:
+        case live.ServerVersion > 0 && live.ServerVersion < 170000:
+            warn(fmt.Sprintf("column %s.%s overrides its parent's generation expression, which needs ALTER COLUMN ... SET EXPRESSION (PostgreSQL 17+), and the server runs PostgreSQL %d; it keeps the parent's", fq, cn, live.ServerVersion/10000))
+        default:
+            alters = append(alters, fmt.Sprintf("alter table only %s alter column %s set expression as (%s);", pqIdent(fq), quoteIdent(cn), c.Generated))
+        }
+    }
+    if name := truncateIdent(c.NotNullName); lc != nil && name != "" && !lc.Nullable && lc.NotNullName != "" && lc.NotNullName != name && live.ServerVersion >= 180000 && root != nil {
+        if root.Nullable || root.NotNullNoInherit {
+            alters = append(alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(lc.NotNullName), quoteIdent(name)))
+        } else {
+            warn(fmt.Sprintf("column %s.%s: its NOT NULL constraint %s is inherited from %s, and PostgreSQL cannot rename an inherited constraint, so it keeps that name rather than notNullName %s", fq, cn, lc.NotNullName, rootFq, name))
+        }
+    }
+    if c.NotValidSet && !c.NotValid && (!c.NullableSet || !c.Nullable) {
+        switch {
+        case lc != nil && lc.NotNullNotValid != "":
+            concurrent = append(concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
+        case lc == nil && root != nil && !root.Nullable && root.NotValid && (liveRoot == nil || liveRoot.Nullable):
+            alters = append(alters, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(notNullConstraintName(rootFq, cn, root))))
+        }
+    }
+    return alters, concurrent
+}
+
+// inlineInherited returns the column a CREATE TABLE of partition or
+// inheritance child dt declares to give inherited column c what it keeps of
+// its own and only CREATE can set: its own generation expression (PostgreSQL
+// 16+), and a name for its copy of the parent's NOT NULL constraint
+// (notNullName, PostgreSQL 18+), which PostgreSQL cannot rename once the copy
+// is inherited. The column has the type, collation and generated kind of
+// the column it inherits, which PostgreSQL merges it with; a partition's
+// CREATE takes only the constraint and the expression. It returns nil when
+// c sets neither or no ancestor declares the column.
+func inlineInherited(desired *schema.Database, live *Live, dt *schema.Table, cn string, c *schema.Column) *schema.Column {
+    if c == nil || dt.Foreign != nil || dt.Of != "" { return nil }
+    _, root, _ := declaringColumn(desired, live, dt, cn)
+    if root == nil || strings.TrimSpace(root.Type) == "" { return nil }
+    col := &schema.Column{Type: root.Type, Collate: root.Collate, Nullable: true}
+    if c.Generated != "" && root.Generated != "" { col.Generated, col.Virtual = c.Generated, root.Virtual }
+    if c.NotNullName != "" && !root.Nullable && !root.NotNullNoInherit && !root.NotValid && (live.ServerVersion == 0 || live.ServerVersion >= 180000) {
+        col.Nullable, col.NotNullName = false, truncateIdent(c.NotNullName)
+    }
+    if col.Generated == "" && col.NotNullName == "" { return nil }
+    return col
+}
+
+// declaringColumn follows partition and inheritance parents up from dt to
+// the table that declares column cn rather than inheriting it, and returns
+// that table, its declared column and its live column (nil when it doesn't
+// exist yet). It returns a nil column when no ancestor declares cn.
+func declaringColumn(desired *schema.Database, live *Live, dt *schema.Table, cn string) (string, *schema.Column, *LiveColumn) {
+    seen := map[string]bool{}
+    parents := func(t *schema.Table) []string {
+        if t.PartitionOf != "" { return []string{t.PartitionOf} }
+        return t.Inherits
+    }
+    queue := parents(dt)
+    for len(queue) > 0 {
+        p := queue[0]
+        queue = queue[1:]
+        pt := desired.Tables[p]
+        if seen[p] || pt == nil { continue }
+        seen[p] = true
+        pc := pt.Columns[cn]
+        var lpc *LiveColumn
+        if lt := live.Tables[p]; lt != nil { lpc = lt.Columns[cn] }
+        if pc != nil && !inheritedColumn(pt, pc, lpc) { return p, pc, lpc }
+        queue = append(queue, parents(pt)...)
+    }
+    return "", nil, nil
 }
 
 // attachesPartition reports whether the plan attaches existing table lt to
@@ -4447,9 +4629,12 @@ func isNumericLiteral(s string) bool {
 
 // planPublications reconciles publications after every table create and
 // alter. Membership changes emit ALTER PUBLICATION ... SET (or DROP when the
-// desired publication has no members); option changes SET (...). Switching
-// to or from FOR ALL TABLES needs DROP + CREATE, which briefly unpublishes
-// every table, so it requires --unsafe, as does --prune dropping
+// desired publication has no members); option changes SET (...). Changes
+// among FOR ALL TABLES [EXCEPT], FOR ALL SEQUENCES and their combination
+// emit SET ALL ..., as does a switch from members to them on PostgreSQL 19
+// (after dropping the members). Any other switch to or from FOR ALL TABLES
+// needs DROP + CREATE, which briefly unpublishes every table, so it requires
+// --unsafe (see publicationInPlace), as does --prune dropping
 // publications missing from a present publications block, but for external
 // ones (see externalPublication) and those the connecting role may not drop
 // (see Live.OwnerRoles), which are reported.
@@ -4466,15 +4651,16 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
         }
         ident := quoteIdent(truncateIdent(name))
         lp := live.Publications[truncateIdent(name)]
-        if lp != nil && lp.AllTables != p.AllTables {
+        if lp != nil && !publicationInPlace(lp, p, live.ServerVersion) {
             if !opts.Unsafe { continue }
             plan.Alters = append(plan.Alters, fmt.Sprintf("drop publication %s;", ident))
             lp = nil
         }
+        all := publicationAllObjects(p)
         if lp == nil {
             stmt := "create publication " + ident
-            if p.AllTables {
-                stmt += " for all tables"
+            if all != "" {
+                stmt += " for " + all
             } else if members := publicationMembers(p); members != "" {
                 stmt += " for " + members
             }
@@ -4486,20 +4672,16 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
             }
             continue
         }
-        if !p.AllTables && !publicationMembersMatch(p, lp) {
+        switch {
+        case plan.pubsSet[truncateIdent(name)]:
+        case all != "" && !publicationAllMatch(p, lp):
+            if !lp.AllTables && !lp.AllSequences { plan.Alters = append(plan.Alters, publicationDropMembers(ident, lp)...) }
+            plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set %s;", ident, all))
+        case all == "" && !publicationMembersMatch(p, lp):
             if members := publicationMembers(p); members != "" {
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s set %s;", ident, members))
             } else {
-                if len(lp.Tables) > 0 {
-                    tables := sortedKeys(lp.Tables)
-                    for i, t := range tables { tables[i] = pqIdent(t) }
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop table %s;", ident, strings.Join(tables, ", ")))
-                }
-                if len(lp.Schemas) > 0 {
-                    schemas := make([]string, len(lp.Schemas))
-                    for i, s := range lp.Schemas { schemas[i] = quoteIdent(s) }
-                    plan.Alters = append(plan.Alters, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
-                }
+                plan.Alters = append(plan.Alters, publicationDropMembers(ident, lp)...)
             }
         }
         if with := publicationWith(p, lp); with != "" {
@@ -4521,6 +4703,113 @@ func planPublications(plan *PlanDiff, live *Live, desired *schema.Database, opts
         }
         plan.Drops = append(plan.Drops, fmt.Sprintf("drop publication %s;", quoteIdent(name)))
     }
+}
+
+// exceptBeforeAttach returns the SET ALL TABLES statements that take table
+// fq out of the EXCEPT lists of live publications before it is attached as
+// a partition, which PostgreSQL 19 rejects while a publication excepts it.
+// Only fq leaves each list; planPublications makes the rest of the change.
+// A publication the YAML doesn't declare with allTables and without fq in
+// except is reported instead.
+func exceptBeforeAttach(plan *PlanDiff, live *Live, desired *schema.Database, fq string) []string {
+    out := []string{}
+    for _, name := range sortedKeys(live.Publications) {
+        lp := live.Publications[name]
+        if _, ok := lp.Except[fq]; !ok { continue }
+        var p *schema.Publication
+        for _, dn := range sortedKeys(desired.Publications) {
+            if truncateIdent(dn) == name { p = desired.Publications[dn] }
+        }
+        excepted := false
+        if p != nil {
+            for _, t := range p.Except { excepted = excepted || t.Table == fq }
+        }
+        if p == nil || !p.AllTables || excepted {
+            plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: fmt.Sprintf("publication %s excepts %s, which PostgreSQL rejects for a partition, so ATTACH PARTITION fails; declare the publication with allTables and without %s in except", name, fq, fq)})
+            continue
+        }
+        early := &LivePublication{AllTables: true, AllSequences: lp.AllSequences, Except: map[string]bool{}}
+        spec := &schema.Publication{AllTables: true, AllSequences: lp.AllSequences}
+        for _, t := range sortedKeys(lp.Except) {
+            if t == fq { continue }
+            early.Except[t] = lp.Except[t]
+            spec.Except = append(spec.Except, &schema.PublicationTable{Table: t, Only: lp.Except[t]})
+        }
+        out = append(out, fmt.Sprintf("alter publication %s set %s;", quoteIdent(name), publicationAllObjects(spec)))
+        if publicationAllMatch(p, early) {
+            if plan.pubsSet == nil { plan.pubsSet = map[string]bool{} }
+            plan.pubsSet[name] = true
+        }
+    }
+    return out
+}
+
+// publicationInPlace reports whether ALTER PUBLICATION can turn lp into p.
+// PostgreSQL 19 can SET ALL TABLES or ALL SEQUENCES on a publication that
+// publishes either or nothing, but never SET TABLE or TABLES IN SCHEMA on
+// one that publishes all tables or sequences; earlier servers can switch
+// neither way.
+func publicationInPlace(lp *LivePublication, p *schema.Publication, version int) bool {
+    switch {
+    case lp.AllTables || lp.AllSequences:
+        return p.AllTables || p.AllSequences
+    case p.AllTables || p.AllSequences:
+        return version >= 190000
+    }
+    return true
+}
+
+// publicationAllObjects renders p's ALL TABLES [EXCEPT (...)] and ALL
+// SEQUENCES list, "" when p publishes neither.
+func publicationAllObjects(p *schema.Publication) string {
+    parts := []string{}
+    if p.AllTables {
+        entry := "all tables"
+        if len(p.Except) > 0 {
+            except := make([]string, len(p.Except))
+            for i, t := range p.Except {
+                except[i] = "table " + pqIdent(t.Table)
+                if t.Only { except[i] = "table only " + pqIdent(t.Table) }
+            }
+            entry += " except (" + strings.Join(except, ", ") + ")"
+        }
+        parts = append(parts, entry)
+    }
+    if p.AllSequences { parts = append(parts, "all sequences") }
+    return strings.Join(parts, ", ")
+}
+
+// publicationAllMatch reports whether lp publishes all tables, with the
+// same exceptions, and all sequences exactly when p does.
+func publicationAllMatch(p *schema.Publication, lp *LivePublication) bool {
+    if p.AllTables != lp.AllTables || p.AllSequences != lp.AllSequences { return false }
+    if !p.AllTables { return true }
+    if len(p.Except) != len(lp.Except) { return false }
+    for _, t := range p.Except {
+        if only, ok := lp.Except[t.Table]; !ok || only != t.Only { return false }
+    }
+    return true
+}
+
+// publicationDropMembers returns the ALTER PUBLICATION ... DROP statements
+// that empty lp: ONLY for a table published without its children, which
+// PostgreSQL would otherwise try to drop too.
+func publicationDropMembers(ident string, lp *LivePublication) []string {
+    out := []string{}
+    if len(lp.Tables) > 0 {
+        tables := sortedKeys(lp.Tables)
+        for i, t := range tables {
+            tables[i] = pqIdent(t)
+            if lp.Tables[t].Only { tables[i] = "only " + pqIdent(t) }
+        }
+        out = append(out, fmt.Sprintf("alter publication %s drop table %s;", ident, strings.Join(tables, ", ")))
+    }
+    if len(lp.Schemas) > 0 {
+        schemas := make([]string, len(lp.Schemas))
+        for i, s := range lp.Schemas { schemas[i] = quoteIdent(s) }
+        out = append(out, fmt.Sprintf("alter publication %s drop tables in schema %s;", ident, strings.Join(schemas, ", ")))
+    }
+    return out
 }
 
 // publicationMembers renders the TABLE ... / TABLES IN SCHEMA ... list.
@@ -4816,7 +5105,14 @@ func hasForeignPartition(live *Live, fq string) bool {
 // its declared name or PostgreSQL's default one, for a column declared
 // notValid.
 func notValidNotNullStmt(fq, cn string, c *schema.Column) string {
-    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn))
+    return fmt.Sprintf("alter table %s add constraint %s not null %s%s not valid;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c))
+}
+
+// noInheritClause returns " no inherit" for a column whose NOT NULL
+// constraint is declared notNullNoInherit, or "".
+func noInheritClause(c *schema.Column) string {
+    if c.NotNullNoInherit { return " no inherit" }
+    return ""
 }
 
 func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
@@ -5498,8 +5794,10 @@ func ownedByIdent(seq, s string) string {
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared). An
-// external role that exists keeps its comment, as planRoles warns.
-func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
+// external role that exists keeps its comment, as planRoles warns. A
+// constraint in replaced ("table\x00name"), which the plan drops and adds
+// again, gets its comment again.
+func planComments(live *Live, desired *schema.Database, unsafe bool, replaced map[string]bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
         if want != "" && want != have {
@@ -5601,14 +5899,14 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
             have := ""
-            if lt != nil && !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe) { have = lt.ConstraintComments[fkName] }
+            if lt != nil && (foreignKeyEnforcedOnly(live, lt, fkName, fk) || !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe)) && !replaced[k+"\x00"+fkName] { have = lt.ConstraintComments[fkName] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(fkName), pqIdent(k)), fk.Comment, have)
         }
         for _, ct := range dt.Constraints {
             if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
             name := truncateIdent(ct.Name)
             have := ""
-            if lt != nil && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct)) { have = lt.ConstraintComments[name] }
+            if lt != nil && !replaced[k+"\x00"+name] && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct) || checkEnforcedOnly(live, lt, name, ct)) { have = lt.ConstraintComments[name] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(name), pqIdent(k)), ct.Comment, have)
         }
         for _, tr := range dt.Triggers {
@@ -6440,12 +6738,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[fkName] {
             liveDef, ok := liveConstraintDefs[fkName]
+            toggle := foreignKeyEnforcedOnly(live, lt, fkName, fk)
             switch {
+            case toggle && (fk.NotEnforced || immediate && !fk.NotValid):
+                *deferredFKs = append(*deferredFKs, enforcedStmt(fq, fkName, fk.NotEnforced))
+            case toggle:
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, fkName)
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef) && immediate:
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                plan.replaceConstraint(fq, fkName)
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             }
@@ -6634,12 +6940,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
+            toggle := checkEnforcedOnly(live, lt, ctName, ct)
             switch {
+            case toggle && (live.ServerVersion <= 0 || live.ServerVersion >= 190000) && (ct.NotEnforced || immediate && !ct.NotValid):
+                plan.Alters = append(plan.Alters, enforcedStmt(fq, ctName, ct.NotEnforced))
+            case toggle:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, ctName)
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef) && immediate:
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                plan.replaceConstraint(fq, ctName)
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
@@ -7048,8 +7362,10 @@ func RenderMain(p *PlanDiff) string {
 // default left in place to the new type and gives up when no implicit or
 // assignment cast exists. Identity changes go through identityAlterStmts;
 // identity/serial columns keep their generated defaults and implicit NOT
-// NULL.
-func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
+// NULL. A changed generated expression gets SET EXPRESSION under --unsafe,
+// unless blocked (see generatedChangeBlocked) says why the column can't
+// change in place, when recreateColumnDependents drops and adds it instead.
+func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, blocked string, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
 
@@ -7082,13 +7398,15 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 
     if c.Generated != "" || lc.Generated != "" {
         switch {
-        case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
+        case c.Generated != "" && lc.Generated != "" && (blocked != "" || !constraintDefsEqual(c.Generated, lc.Generated)):
             switch {
-            case serverVersion > 0 && serverVersion < 170000:
-                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, serverVersion/10000)) }
+            case blocked != "":
+                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but %s; --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, blocked)) }
             case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }
+        case c.Generated == "" && lc.Virtual:
+            warn(fmt.Sprintf("column %s.%s is declared plain but is a virtual generated column, and PostgreSQL has DROP EXPRESSION only for stored ones; add a plain column under another name, copy %s into it and drop %s in a hand-written migration", fq, cn, cn, cn))
         case c.Generated == "" && lc.Generated != "":
             if unsafe { out = append(out, target+" drop expression;") }
         case c.Generated != "" && lc.Generated == "":
@@ -7107,11 +7425,17 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     }
 
     if !c.Nullable && lc.Nullable {
-        if c.NotNullName != "" && serverVersion >= 180000 {
-            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s;", pqIdent(fq), quoteIdent(truncateIdent(c.NotNullName)), quoteIdent(cn)))
+        if (c.NotNullName != "" || c.NotNullNoInherit) && serverVersion >= 180000 {
+            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s%s;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c)))
         } else {
             out = append(out, target+" set not null;")
         }
+    }
+    if !c.Nullable && !lc.Nullable && lc.NotNullName != "" && c.NotNullNoInherit != lc.NotNullNoInherit && serverVersion >= 180000 {
+        name, inherit := lc.NotNullName, "inherit"
+        if r := notNullRename(c, lc); r != "" { name = r }
+        if c.NotNullNoInherit { inherit = "no inherit" }
+        out = append(out, fmt.Sprintf("alter table %s alter constraint %s %s;", pqIdent(fq), quoteIdent(name), inherit))
     }
     out = append(out, identityAlterStmts(fq, target, c, lc, unsafe)...)
     droppingIdentity := lc.Identity != "" && c.Identity == "" && unsafe && c.Generated == ""
@@ -7546,6 +7870,47 @@ func liveNotValid(def string) bool {
     return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT VALID")
 }
 
+// liveNotEnforced reports whether a pg_get_constraintdef() output marks the
+// constraint NOT ENFORCED.
+func liveNotEnforced(def string) bool {
+    return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT ENFORCED")
+}
+
+// foreignKeyEnforcedOnly reports whether foreign key name of lt differs
+// from fk only in being enforced or not, on a server that knows NOT
+// ENFORCED (PostgreSQL 18+).
+func foreignKeyEnforcedOnly(live *Live, lt *LiveTable, name string, fk *schema.ForeignKey) bool {
+    if lt == nil || !enforcedToggled(live, fk.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *fk
+    flipped.NotEnforced = !fk.NotEnforced
+    return constraintDefsEqual(renderFKDef(&flipped), lt.ConstraintDefs[name])
+}
+
+// checkEnforcedOnly is foreignKeyEnforcedOnly for check constraint ct.
+func checkEnforcedOnly(live *Live, lt *LiveTable, name string, ct *schema.Constraint) bool {
+    if lt == nil || !strings.EqualFold(ct.Type, "check") || !enforcedToggled(live, ct.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *ct
+    flipped.NotEnforced = !ct.NotEnforced
+    return constraintMatchesLive(lt, name, &flipped)
+}
+
+// enforcedToggled reports whether constraint name, declared notEnforced,
+// is enforced the other way in its live definition in defs, on a server
+// that knows NOT ENFORCED.
+func enforcedToggled(live *Live, notEnforced bool, defs map[string]string, name string) bool {
+    def, ok := defs[name]
+    return ok && notEnforced != liveNotEnforced(def) && (live.ServerVersion <= 0 || live.ServerVersion >= 180000)
+}
+
+// enforcedStmt changes constraint name of table fq to NOT ENFORCED, or to
+// ENFORCED, which checks every row under an ACCESS EXCLUSIVE lock.
+// PostgreSQL 18 does this for foreign keys, 19 for check constraints too.
+func enforcedStmt(fq, name string, notEnforced bool) string {
+    state := "enforced"
+    if notEnforced { state = "not enforced" }
+    return fmt.Sprintf("alter table %s alter constraint %s %s;", pqIdent(fq), quoteIdent(name), state)
+}
+
 // validityClause renders NOT VALID / NOT ENFORCED. A constraint that is not
 // enforced is never validated, and pg_get_constraintdef() then prints only
 // NOT ENFORCED.
@@ -7924,12 +8289,10 @@ func renderColumn(name string, c *schema.Column) string {
     if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
     if !c.Nullable && !c.NotValid {
         if c.NotNullName != "" { parts = append(parts, "constraint "+quoteIdent(c.NotNullName)) }
-        parts = append(parts, "not null")
+        parts = append(parts, "not null"+noInheritClause(c))
     }
     if c.Generated != "" {
-        kind := "stored"
-        if c.Virtual { kind = "virtual" }
-        parts = append(parts, "generated always as ("+c.Generated+") "+kind)
+        parts = append(parts, generatedClause(c))
     } else if c.Identity != "" {
         // identity columns cannot also have a default expression
         parts = append(parts, "generated "+c.Identity+" as identity"+identityOptionsClause(c.IdentityOptions))
@@ -7937,6 +8300,14 @@ func renderColumn(name string, c *schema.Column) string {
         parts = append(parts, "default "+c.Default)
     }
     return strings.Join(parts, " ")
+}
+
+// generatedClause renders GENERATED ALWAYS AS (...) STORED or VIRTUAL for
+// generated column c.
+func generatedClause(c *schema.Column) string {
+    kind := "stored"
+    if c.Virtual { kind = "virtual" }
+    return "generated always as (" + c.Generated + ") " + kind
 }
 
 // pqIdent quotes a name, or a "schema.name" pair split at the first dot,
@@ -8467,23 +8838,26 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
         if t == nil { continue }
         lt := live.Tables[fq]
         for _, cn := range sortedKeys(t.Columns) {
-            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil) {
+            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil || !lt.Columns[cn].Virtual) {
                 need(fmt.Sprintf("virtual generated column %s.%s", fq, cn), 18)
             }
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
                 need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
+            }
+            if c := t.Columns[cn]; c != nil && c.NotNullNoInherit && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || !lt.Columns[cn].NotNullNoInherit) {
+                need(fmt.Sprintf("notNullNoInherit on column %s.%s", fq, cn), 18)
             }
             if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable && v < 180000 {
                 out = append(out, Warning{Message: fmt.Sprintf("notNullName on column %s.%s is ignored: PostgreSQL %d does not record a name for a column's NOT NULL constraint (PostgreSQL 18 does)", fq, cn, v/10000)})
             }
         }
         for _, ct := range t.Constraints {
-            if ct != nil && ct.NotEnforced && (lt == nil || !lt.Constraints[ct.Name]) {
+            if ct != nil && ct.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(ct.Name)])) {
                 need(fmt.Sprintf("constraint %s on %s (enforced: false)", ct.Name, fq), 18)
             }
         }
         for _, fk := range t.ForeignKeys {
-            if fk != nil && fk.NotEnforced && (lt == nil || !lt.Constraints[fk.Name]) {
+            if fk != nil && fk.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(fk.Name)])) {
                 need(fmt.Sprintf("foreign key %s on %s (enforced: false)", fk.Name, fq), 18)
             }
         }
@@ -8521,6 +8895,16 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
     for _, k := range sortedKeys(desired.Aggregates) {
         if ag := desired.Aggregates[k]; ag != nil && ag.Options["support"] != "" {
             need(fmt.Sprintf("the support function of aggregate %s", k), 19)
+        }
+    }
+    for _, name := range sortedKeys(desired.Publications) {
+        p, lp := desired.Publications[name], live.Publications[truncateIdent(name)]
+        if p == nil { continue }
+        if p.AllSequences && (lp == nil || !lp.AllSequences) {
+            need(fmt.Sprintf("allSequences on publication %s", name), 19)
+        }
+        if p.AllTables && len(p.Except) > 0 && (lp == nil || len(lp.Except) == 0) {
+            need(fmt.Sprintf("except on publication %s", name), 19)
         }
     }
     return out

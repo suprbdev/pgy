@@ -225,12 +225,13 @@ type constraintSlot struct {
 	lt       *LiveTable
 	exclude  bool
 	// def is the declared definition as the probe attaches it, without
-	// what is changed in place: NOT VALID, and an exclusion constraint's
-	// index storage parameters and tablespace.
+	// what is changed in place: NOT VALID, NOT ENFORCED, and an exclusion
+	// constraint's index storage parameters and tablespace.
 	def string
 }
 
 const notValidSuffix = " NOT VALID"
+const notEnforcedSuffix = " NOT ENFORCED"
 
 func newConstraintSlot(fq string, ct *schema.Constraint, lt *LiveTable) exprSlot {
 	if ct == nil || lt == nil {
@@ -244,7 +245,7 @@ func newConstraintSlot(fq string, ct *schema.Constraint, lt *LiveTable) exprSlot
 	switch strings.ToLower(ct.Type) {
 	case "check":
 		c := *ct
-		c.NotValid = false
+		c.NotValid, c.NotEnforced = false, false
 		s.def = renderConstraintDef(&c)
 	case "exclude":
 		core, ok := excludeCore(ct.Expression)
@@ -258,7 +259,13 @@ func newConstraintSlot(fq string, ct *schema.Constraint, lt *LiveTable) exprSlot
 	return s
 }
 
-func (s *constraintSlot) equal() bool      { return constraintMatchesLive(s.lt, s.name, s.ct) }
+func (s *constraintSlot) equal() bool {
+	c := *s.ct
+	if !s.exclude {
+		c.NotEnforced = liveNotEnforced(s.lt.ConstraintDefs[s.name])
+	}
+	return constraintMatchesLive(s.lt, s.name, &c)
+}
 func (s *constraintSlot) declared() string { return s.def }
 func (s *constraintSlot) live() []string {
 	return s.canonical([]string{s.lt.ConstraintDefs[s.name]})
@@ -273,7 +280,7 @@ func (s *constraintSlot) attach(target string, id int) probeAttach {
 func (s *constraintSlot) canonical(parts []string) []string {
 	out := make([]string, len(parts))
 	for i, p := range parts {
-		p = strings.TrimSuffix(strings.TrimSpace(p), notValidSuffix)
+		p = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(p), notValidSuffix), notEnforcedSuffix)
 		if s.exclude && len(p) > len("EXCLUDE ") {
 			if core, ok := excludeCore(p[len("EXCLUDE "):]); ok {
 				p = "EXCLUDE " + core
@@ -288,8 +295,11 @@ func (s *constraintSlot) spell(e *liveEdit) {
 	if s.exclude {
 		def = "EXCLUDE " + strings.TrimSpace(s.ct.Expression) + deferralClause(s.ct.Deferrable, s.ct.InitiallyDeferred)
 	}
-	if liveNotValid(s.lt.ConstraintDefs[s.name]) {
+	switch {
+	case liveNotValid(s.lt.ConstraintDefs[s.name]):
 		def += notValidSuffix
+	case liveNotEnforced(s.lt.ConstraintDefs[s.name]):
+		def += notEnforcedSuffix
 	}
 	e.table(s.fq).ConstraintDefs[s.name] = def
 }
