@@ -34,6 +34,7 @@ func filterLive() *diff.Live {
 			"mixed":    {Publish: all, Tables: map[string]diff.LivePublicationTable{"app.notes": {}, "platform.users": {}}},
 			"empty":    {Publish: all},
 			"every":    {Publish: all, AllTables: true},
+			"seqs":     {Publish: all, AllSequences: true},
 		},
 		EventTriggers: map[string]*diff.LiveEventTrigger{
 			"app_ddl":      {Event: "ddl_command_end", Function: "app.ddl_log", Enabled: "origin"},
@@ -61,7 +62,7 @@ func TestPullSchemaFilterDatabaseObjects(t *testing.T) {
 				t.Errorf("%+v: missing %q in:\n%s", opts, want, got)
 			}
 		}
-		for _, unwanted := range []string{"pgcrypto", "platform:", "mixed:", "empty:", "every:", "platform_ddl", "database:", "jwt_secret", "schema platform"} {
+		for _, unwanted := range []string{"pgcrypto", "platform:", "mixed:", "empty:", "every:", "seqs:", "platform_ddl", "database:", "jwt_secret", "schema platform"} {
 			if strings.Contains(got, unwanted) {
 				t.Errorf("%+v: %q must be left out:\n%s", opts, unwanted, got)
 			}
@@ -69,7 +70,7 @@ func TestPullSchemaFilterDatabaseObjects(t *testing.T) {
 		warnings := strings.Join(res.Warnings, "\n")
 		for _, want := range []string{
 			"publication mixed also publishes platform.users, outside the pulled schemas, so it was left out",
-			"publications: lists only the publications of the pulled schemas; pgy diff --unsafe --prune with this YAML would drop the others: empty, every, mixed, platform",
+			"publications: lists only the publications of the pulled schemas; pgy diff --unsafe --prune with this YAML would drop the others: empty, every, mixed, platform, seqs",
 			"eventTriggers: lists only the event triggers of the pulled schemas; pgy diff --unsafe --prune with this YAML would drop the others: platform_ddl",
 		} {
 			if !strings.Contains(warnings, want) {
@@ -91,7 +92,7 @@ func TestPullSchemaFilterDatabaseObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(res.Files[0].Content)
-	for _, want := range []string{"name: pgcrypto", "mixed:", "empty:", "every:", "platform_ddl:", "jwt_secret"} {
+	for _, want := range []string{"name: pgcrypto", "mixed:", "empty:", "every:", "seqs:", "platform_ddl:", "jwt_secret"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a pull of every schema writes everything; missing %q in:\n%s", want, got)
 		}

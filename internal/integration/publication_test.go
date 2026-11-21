@@ -82,3 +82,31 @@ publications:
 	})
 	assertYAMLIdempotent(t, map[string]string{"stored": y})
 }
+
+func TestIntegrationPublicationEmptiedWithOnlyTable(t *testing.T) {
+	pool := connect(t)
+	sch := freshSchema(t, pool)
+	ctx := context.Background()
+	name := sch + "_only"
+	t.Cleanup(func() { pool.Exec(context.Background(), `drop publication if exists "`+name+`"`) }) //nolint
+	tables := map[string]*schema.Table{
+		sch + ".base": {Name: "base", Columns: map[string]*schema.Column{"id": {Type: "int", PrimaryKey: true}}},
+		sch + ".ext":  {Name: "ext", Columns: map[string]*schema.Column{"extra": {Type: "int", Nullable: true}}, Inherits: []string{sch + ".base"}},
+	}
+	for i, p := range []*schema.Publication{{Tables: []*schema.PublicationTable{{Table: sch + ".base", Only: true}}}, {}} {
+		p.Name = name
+		d := &schema.Database{Tables: tables, Publications: map[string]*schema.Publication{name: p}}
+		live, err := diff.Introspect(ctx, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyPlan(t, pool, diff.Plan(live, d, false))
+		live, err = diff.Introspect(ctx, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sql := diff.Render(diff.Plan(live, d, false)); sql != "" {
+			t.Fatalf("step %d: expected no changes after apply, got:\n%s", i, sql)
+		}
+	}
+}

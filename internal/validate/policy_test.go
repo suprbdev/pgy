@@ -453,6 +453,46 @@ schema app:
 	}
 }
 
+func TestValidatePublicationAllSequencesAndExcept(t *testing.T) {
+	path := write(t, t.TempDir(), "pub.yml", `
+publications:
+  mixed:
+    allSequences: true
+    tables: [app.base]
+  loose:
+    except: [app.base]
+  part:
+    allTables: true
+    except: [app.p1]
+  fine:
+    allTables: true
+    except: [app.base, {table: app.p, only: true}]
+    allSequences: true
+schema app:
+  table base:
+    columns: {id: {type: int, primaryKey: true}}
+  table p:
+    columns: {id: {type: int}}
+    partitionBy: {range: [id]}
+  table p1:
+    partitionOf: app.p
+    forValues: {from: [0], to: [10]}
+`)
+	got := messages(Files([]string{path}))
+	for _, want := range []string{
+		"publication mixed: allSequences cannot be combined with tables or schemas",
+		"publication loose: except needs allTables: true",
+		"publication part: except cannot list partition app.p1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "publication fine") {
+		t.Errorf("publication fine is valid but was flagged:\n%s", got)
+	}
+}
+
 func TestValidateTablespaces(t *testing.T) {
 	path := write(t, t.TempDir(), "ts.yml", `
 servers:

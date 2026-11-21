@@ -271,6 +271,8 @@ type ForeignTable struct {
 type Publication struct {
     Name             string
     AllTables        bool
+    AllSequences     bool                // FOR ALL SEQUENCES (PostgreSQL 19+)
+    Except           []*PublicationTable // FOR ALL TABLES EXCEPT (PostgreSQL 19+): Table and Only
     Tables           []*PublicationTable
     Schemas          []string // FOR TABLES IN SCHEMA
     Publish          []string // insert | update | delete | truncate; nil = all
@@ -3293,9 +3295,10 @@ func fillScalarTexts(m *yaml.Node, out map[string]string) {
     }
 }
 
-// parsePublications parses { name: {allTables, tables, schemas, publish,
-// viaPartitionRoot, comment} }. A tables entry is a table name or
-// {table, columns, where}.
+// parsePublications parses { name: {allTables, allSequences, except,
+// tables, schemas, publish, viaPartitionRoot, comment} }. A tables entry is
+// a table name or {table, columns, where, only}; an except entry is a table
+// name or {table, only}.
 func parsePublications(v any) map[string]*Publication {
     m, ok := v.(map[string]any)
     if !ok { return map[string]*Publication{} }
@@ -3304,6 +3307,21 @@ func parsePublications(v any) map[string]*Publication {
         p := &Publication{Name: name}
         if dm, ok := def.(map[string]any); ok {
             if b, ok := dm["allTables"].(bool); ok { p.AllTables = b }
+            if b, ok := dm["allSequences"].(bool); ok { p.AllSequences = b }
+            if arr, ok := dm["except"].([]any); ok {
+                for _, it := range arr {
+                    switch x := it.(type) {
+                    case string:
+                        p.Except = append(p.Except, &PublicationTable{Table: qualify("", strings.TrimSpace(x))})
+                    case map[string]any:
+                        tn, _ := x["table"].(string)
+                        if tn == "" { continue }
+                        pt := &PublicationTable{Table: qualify("", strings.TrimSpace(tn))}
+                        if o, ok := x["only"].(bool); ok { pt.Only = o }
+                        p.Except = append(p.Except, pt)
+                    }
+                }
+            }
             if arr, ok := dm["tables"].([]any); ok {
                 for _, it := range arr {
                     switch x := it.(type) {

@@ -31,3 +31,28 @@ publications:
 		t.Errorf("unexpected all_pub: %+v", a)
 	}
 }
+
+func TestPublicationAllSequencesAndExceptParse(t *testing.T) {
+	db, err := parseFlexibleDatabase([]byte(`
+publications:
+  rest:
+    allTables: true
+    except: [audit, {table: app.events, only: true}, {table: app.log}]
+    allSequences: true
+  seqs:
+    allSequences: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := db.Publications["rest"]
+	if p == nil || !p.AllTables || !p.AllSequences || len(p.Except) != 3 ||
+		p.Except[0].Table != "public.audit" || p.Except[0].Only ||
+		p.Except[1].Table != "app.events" || !p.Except[1].Only ||
+		p.Except[2].Table != "app.log" || p.Except[2].Only || len(p.Tables) != 0 {
+		t.Errorf("unexpected rest: %+v", p)
+	}
+	if s := db.Publications["seqs"]; s == nil || s.AllTables || !s.AllSequences || s.Except != nil {
+		t.Errorf("unexpected seqs: %+v", s)
+	}
+}
