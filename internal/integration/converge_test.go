@@ -36,7 +36,8 @@ func convergeYAML(t *testing.T, pool *pgxpool.Pool, sch, y string) string {
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
-// introspect reads the live schema and compares the data rows d declares.
+// introspect reads the live schema, compares the data rows d declares and
+// checks the settings it declares.
 func introspect(t *testing.T, pool *pgxpool.Pool, d *schema.Database) *diff.Live {
 	t.Helper()
 	ctx := context.Background()
@@ -45,6 +46,9 @@ func introspect(t *testing.T, pool *pgxpool.Pool, d *schema.Database) *diff.Live
 		t.Fatal(err)
 	}
 	if err := diff.IntrospectData(ctx, pool, live, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := diff.IntrospectSettings(ctx, pool, live, d); err != nil {
 		t.Fatal(err)
 	}
 	return live

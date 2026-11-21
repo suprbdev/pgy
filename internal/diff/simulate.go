@@ -819,6 +819,7 @@ func cloneLive(l *Live) *Live {
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),
         ServerVersion:      l.ServerVersion,
+        UnknownSettings:    l.UnknownSettings,
         Offline:            l.Offline,
         DefaultTablespace:  l.DefaultTablespace,
         DefaultAccessMethod: l.DefaultAccessMethod,
