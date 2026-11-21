@@ -993,6 +993,64 @@ func planData(live *Live, desired *schema.Database, prune bool) (early, writes, 
     return early, writes, deletes
 }
 
+// dataFirstTables returns the tables the plan creates and inserts data rows
+// into (see planData), with the partitions it creates under them. Their
+// triggers and rules are created after the rows, as pg_dump restores them,
+// so that the rows neither fire them (an audit trigger filling another
+// table) nor leave the events of a deferred constraint trigger pending,
+// which makes a later ALTER TABLE on the table fail.
+func dataFirstTables(live *Live, desired *schema.Database) map[string]bool {
+    out := map[string]bool{}
+    for fq, dt := range desired.Tables {
+        if dt == nil || dt.Data == nil || len(dt.Data.Rows) == 0 || live.Tables[fq] != nil || dt.AttributeOnly() || len(dt.DataKey()) == 0 { continue }
+        out[fq] = true
+    }
+    for fq, dt := range desired.Tables {
+        if dt == nil || live.Tables[fq] != nil { continue }
+        for p, depth := dt.PartitionOf, 0; p != "" && depth < 32; depth++ {
+            p = qualifyName(p)
+            if out[p] {
+                out[fq] = true
+                break
+            }
+            if desired.Tables[p] == nil { break }
+            p = desired.Tables[p].PartitionOf
+        }
+    }
+    return out
+}
+
+// dataDefersEvents reports whether writing or deleting the data rows of a
+// table that exists can leave deferred trigger events pending until the end
+// of the transaction: some live table has an initially deferred constraint
+// trigger or constraint, or desired declares an initially deferred trigger
+// on a table that exists, which the plan creates before the rows. A table
+// with pending trigger events cannot be altered (SQLSTATE 55006), so the
+// plan fires them with SET CONSTRAINTS ALL IMMEDIATE after the rows.
+func dataDefersEvents(live *Live, desired *schema.Database) bool {
+    existing := false
+    for fq, dt := range desired.Tables {
+        if dt != nil && dt.Data != nil && live.Tables[fq] != nil && live.MemberExtension["rel:"+fq] == "" { existing = true }
+    }
+    if !existing { return false }
+    for fq, dt := range desired.Tables {
+        if dt == nil || live.Tables[fq] == nil { continue }
+        for _, tr := range dt.Triggers {
+            if tr != nil && tr.InitiallyDeferred { return true }
+        }
+    }
+    for _, lt := range live.Tables {
+        if lt == nil { continue }
+        for _, def := range lt.Triggers {
+            if strings.Contains(strings.ToUpper(def), "INITIALLY DEFERRED") { return true }
+        }
+        for _, def := range lt.ConstraintDefs {
+            if strings.Contains(strings.ToUpper(def), "INITIALLY DEFERRED") { return true }
+        }
+    }
+    return false
+}
+
 func partitioned(live *Live, dt *schema.Table, fq string) bool {
     if dt != nil && dt.PartitionBy != nil { return true }
     lt := live.Tables[fq]
