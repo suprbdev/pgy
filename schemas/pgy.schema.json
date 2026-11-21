@@ -94,6 +94,7 @@
             "description": "Owner role (ALTER SERVER ... OWNER TO), diffed against live."
           },
           "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the server (usage), e.g. {app_user: [usage]}." },
+          "grantedBy": { "$ref": "#/definitions/grantedBy" },
           "comment": {
             "type": "string"
           },
@@ -136,6 +137,7 @@
             "description": "Owner role (ALTER FOREIGN DATA WRAPPER ... OWNER TO), diffed against live. PostgreSQL requires it to be a superuser."
           },
           "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the wrapper (usage, or all, which stands for it), e.g. {app_owner: [usage]}, which a role that is not a superuser needs to create or own a server. On an extension's wrapper, what the extension granted is left alone unless its grantee is listed." },
+          "grantedBy": { "$ref": "#/definitions/grantedBy" },
           "comment": {
             "type": "string",
             "description": "COMMENT ON FOREIGN DATA WRAPPER."
@@ -154,11 +156,10 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "grants"
-        ],
+        "anyOf": [{ "required": ["grants"] }, { "required": ["grantedBy"] }],
         "properties": {
-          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the language (usage, or all, which stands for it), e.g. {app_dev: [usage], public: []}. PUBLIC's default USAGE is left alone unless public is listed; public: [] revokes it." }
+          "grants": { "$ref": "#/definitions/grants", "description": "Privileges on the language (usage, or all, which stands for it), e.g. {app_dev: [usage], public: []}. PUBLIC's default USAGE is left alone unless public is listed; public: [] revokes it." },
+          "grantedBy": { "$ref": "#/definitions/grantedBy" }
         }
       }
     },
@@ -318,6 +319,11 @@
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/stringList" }
     },
+    "grantedBy": {
+      "description": "Grants made by roles other than the object's owner, which record that role as their grantor: `{ <grantor>: { <role>: [select, insert, ...] } }`, each grantor's grants written as in a grants block. Authoritative for each grantor listed: a grant of that grantor the block doesn't declare is revoked. Grants of other grantors are the grants block's. Planned as GRANT ... GRANTED BY on PostgreSQL 19, and as SET ROLE <grantor>; GRANT ...; RESET ROLE; before; the grantor needs the grant option of each privilege (from the grants block, or another grantor's grantedBy entry). A grantor that is the owner is the same as listing the grants under grants.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/grants" }
+    },
     "scalar": {
       "description": "A YAML scalar (string, number, boolean, or date) rendered into SQL.",
       "type": ["string", "number", "boolean"]
@@ -369,6 +375,7 @@
       "properties": {
         "owner": { "type": "string", "description": "Owner role (ALTER SCHEMA ... OWNER TO), diffed against live." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "comment": { "type": "string" }
       },
       "additionalProperties": { "$ref": "#/definitions/table" }
@@ -379,6 +386,7 @@
       "properties": {
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "comment": { "type": "string" }
       },
       "patternProperties": {
@@ -472,6 +480,7 @@
           "description": "true = ENABLE ROW LEVEL SECURITY, false = DISABLE (requires --unsafe). Omit to leave unmanaged."
         },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
         "partitionBy": { "$ref": "#/definitions/partitionBy" },
@@ -577,6 +586,7 @@
         "rowLevelSecurity": { "type": "boolean" },
         "forceRowLevelSecurity": { "type": "boolean" },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" },
         "partitionBy": { "$ref": "#/definitions/partitionBy" },
@@ -661,6 +671,7 @@
           "description": "USING expression applied when the column type changes (ALTER COLUMN ... TYPE ... USING)."
         },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "comment": { "type": "string" }
       },
       "additionalProperties": false
@@ -698,6 +709,7 @@
         "nDistinctInherited": { "type": "number", "minimum": -1 },
         "using": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "comment": { "type": "string" }
       },
       "required": ["name", "type"],
@@ -981,6 +993,7 @@
         },
         "body": { "type": "string", "description": "Function body SQL." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "revokePublic": {
           "type": "boolean",
           "description": "Revoke the default PUBLIC execute privilege (security-definer pattern)."
@@ -1014,6 +1027,7 @@
         },
         "body": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "revokePublic": { "type": "boolean" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
@@ -1033,6 +1047,7 @@
         "renamedLabels": { "type": "object", "description": "Enums: new label -> previous label (ALTER TYPE ... RENAME VALUE).", "additionalProperties": { "type": "string", "minLength": 1 } },
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "revokePublic": { "type": "boolean", "description": "Revoke PUBLIC's default USAGE (REVOKE USAGE ... FROM PUBLIC)." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "enum": ["enum", "composite", "range"] },
@@ -1143,12 +1158,18 @@
           "description": "Column privileges per view column (GRANT select (col) ON TABLE ...): `{ <column>: { <role>: [select, insert, update, references] } }`, authoritative for each column listed, like a table column's grants. Columns not listed are unmanaged.",
           "additionalProperties": { "$ref": "#/definitions/grants" }
         },
+        "columnGrantedBy": {
+          "type": "object",
+          "description": "Column privileges per view column granted by roles other than the owner: `{ <column>: { <grantor>: { <role>: [select] } } }`, like a table column's grantedBy.",
+          "additionalProperties": { "$ref": "#/definitions/grantedBy" }
+        },
         "rules": {
           "type": "object",
           "description": "Plain views: rewrite rules.",
           "additionalProperties": { "$ref": "#/definitions/rule" }
         },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "dependsOn": { "$ref": "#/definitions/stringList" },
         "comment": { "type": "string" }
       },
@@ -1176,6 +1197,7 @@
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "as": { "type": "string", "enum": ["smallint", "integer", "bigint", "int", "int2", "int4", "int8"] },
         "increment": { "type": ["integer", "string"] },
@@ -1267,6 +1289,7 @@
         "comment": { "type": "string" },
         "owner": { "type": "string" },
         "grants": { "$ref": "#/definitions/grants", "description": "Role -> privileges (execute), granted ON FUNCTION." },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "revokePublic": { "type": "boolean", "description": "Revoke PUBLIC's default EXECUTE." }
       },
       "dependencies": {
@@ -1335,6 +1358,9 @@
         },
         "grants": {
           "$ref": "#/definitions/grants"
+        },
+        "grantedBy": {
+          "$ref": "#/definitions/grantedBy"
         },
         "owner": {
           "type": "string",
@@ -1407,6 +1433,9 @@
         "grants": {
           "$ref": "#/definitions/grants"
         },
+        "grantedBy": {
+          "$ref": "#/definitions/grantedBy"
+        },
         "renamedFrom": {
           "type": "string",
           "minLength": 1,
@@ -1446,6 +1475,7 @@
       "properties": {
         "renamedFrom": { "type": "string", "minLength": 1, "description": "Previous name. When only that name exists live, pgy renames it (ALTER ... RENAME) instead of creating a new object; once applied it is a no-op." },
         "grants": { "$ref": "#/definitions/grants" },
+        "grantedBy": { "$ref": "#/definitions/grantedBy" },
         "revokePublic": { "type": "boolean", "description": "Revoke PUBLIC's default USAGE (REVOKE USAGE ... FROM PUBLIC)." },
         "owner": { "type": "string", "description": "Owner role (ALTER ... OWNER TO), diffed against live." },
         "type": { "type": "string", "description": "Underlying base type." },

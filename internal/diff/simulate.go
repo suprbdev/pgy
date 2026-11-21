@@ -52,6 +52,9 @@ func Simulate(live *Live, desired *schema.Database) *Live {
     for s, g := range desired.SchemaGrants {
         out.SchemaGrants[s] = simulateGrants(out.SchemaGrants[s], g)
     }
+    for s, gb := range desired.SchemaGrantedBy {
+        out.SchemaGrants[s] = simulateGrantedBy(out, "schema:"+s, "", objectOwner(out, "schema:"+s, desired.SchemaOwners[s]), out.SchemaGrants[s], desired.SchemaGrants[s] != nil, gb)
+    }
     for s, cm := range desired.SchemaComments {
         if cm != "" { out.SchemaComments[s] = cm }
     }
@@ -151,6 +154,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         }
         if td.Comment != "" { out.TypeComments[k] = td.Comment }
         if td.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], td.Grants) }
+        if td.GrantedBy != nil { out.TypeGrants[k] = simulateGrantedBy(out, "type:"+k, "", objectOwner(out, "type:"+k, td.Owner), out.TypeGrants[k], td.Grants != nil, td.GrantedBy) }
         if td.RevokePublic {
             if out.TypePublicRevoked == nil { out.TypePublicRevoked = map[string]bool{} }
             out.TypePublicRevoked[k] = true
@@ -175,6 +179,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if s.Options != nil { ls.Options = cloneMap(s.Options, nil) }
         if prev := out.Servers[name]; prev != nil { ls.Grants = prev.Grants }
         if s.Grants != nil { ls.Grants = simulateGrants(ls.Grants, s.Grants) }
+        if s.GrantedBy != nil { ls.Grants = simulateGrantedBy(out, "srv:"+name, "", resolveRole(ls.Owner, out.CurrentUser), ls.Grants, s.Grants != nil, s.GrantedBy) }
         if out.Servers == nil { out.Servers = map[string]*LiveServer{} }
         out.Servers[name] = ls
     }
@@ -265,6 +270,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         for name, c := range dm.CheckComments { ld.CheckComments[truncateIdent(name)] = c }
         out.DomainDefs[k] = ld
         if dm.Grants != nil { out.TypeGrants[k] = simulateGrants(out.TypeGrants[k], dm.Grants) }
+        if dm.GrantedBy != nil { out.TypeGrants[k] = simulateGrantedBy(out, "type:"+k, "", objectOwner(out, "type:"+k, dm.Owner), out.TypeGrants[k], dm.Grants != nil, dm.GrantedBy) }
         if dm.RevokePublic {
             if out.TypePublicRevoked == nil { out.TypePublicRevoked = map[string]bool{} }
             out.TypePublicRevoked[k] = true
@@ -290,6 +296,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         out.SequenceDefs[k] = ls
         if sq.Comment != "" { out.RelComments[k] = sq.Comment }
         if sq.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], sq.Grants) }
+        if sq.GrantedBy != nil { out.TableGrants[k] = simulateGrantedBy(out, "rel:"+k, "", objectOwner(out, "rel:"+k, sq.Owner), out.TableGrants[k], sq.Grants != nil, sq.GrantedBy) }
     }
 
     for k, f := range desired.Functions {
@@ -329,6 +336,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             out.FunctionPublicExec[norm] = true
         }
         if pr.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], pr.Grants) }
+        if pr.GrantedBy != nil { out.FunctionGrants[norm] = simulateGrantedBy(out, "proc:"+norm, "", objectOwner(out, "proc:"+norm, pr.Owner), out.FunctionGrants[norm], pr.Grants != nil, pr.GrantedBy) }
         if pr.Comment != "" { out.FunctionComments[norm] = pr.Comment }
     }
 
@@ -336,6 +344,7 @@ func Simulate(live *Live, desired *schema.Database) *Live {
         if ag == nil { continue }
         norm := normalizeFunctionSignature(schema.RoutineName(k) + aggregateArgs(ag.ArgsSig))
         if ag.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], ag.Grants) }
+        if ag.GrantedBy != nil { out.FunctionGrants[norm] = simulateGrantedBy(out, "proc:"+norm, "", objectOwner(out, "proc:"+norm, ag.Owner), out.FunctionGrants[norm], ag.Grants != nil, ag.GrantedBy) }
         if ag.RevokePublic {
             out.FunctionPublicExec[norm] = false
         } else if out.AggregateDefs[norm] == nil && !ag.AttributeOnly() {
@@ -455,10 +464,15 @@ func Simulate(live *Live, desired *schema.Database) *Live {
             }
         }
         if vw.Grants != nil { out.TableGrants[k] = simulateGrants(out.TableGrants[k], vw.Grants) }
+        if vw.GrantedBy != nil { out.TableGrants[k] = simulateGrantedBy(out, "rel:"+k, "", objectOwner(out, "rel:"+k, vw.Owner), out.TableGrants[k], vw.Grants != nil, vw.GrantedBy) }
         for col, g := range vw.ColumnGrants {
             if g == nil { continue }
             if out.ColumnGrants[k] == nil { out.ColumnGrants[k] = map[string]map[string]map[string]bool{} }
             out.ColumnGrants[k][col] = simulateGrants(out.ColumnGrants[k][col], g)
+        }
+        for col, gb := range vw.ColumnGrantedBy {
+            if out.ColumnGrants[k] == nil { out.ColumnGrants[k] = map[string]map[string]map[string]bool{} }
+            out.ColumnGrants[k][col] = simulateGrantedBy(out, "rel:"+k, col, objectOwner(out, "rel:"+k, vw.Owner), out.ColumnGrants[k][col], vw.ColumnGrants[col] != nil, gb)
         }
         if vw.Comment != "" { out.RelComments[k] = vw.Comment }
         for col, cm := range vw.ColumnComments {
@@ -520,6 +534,7 @@ func simulateFunction(out *Live, k string, f *schema.Function) {
     }
     if f.RevokePublic { out.FunctionPublicExec[norm] = false }
     if f.Grants != nil { out.FunctionGrants[norm] = simulateGrants(out.FunctionGrants[norm], f.Grants) }
+    if f.GrantedBy != nil { out.FunctionGrants[norm] = simulateGrantedBy(out, "proc:"+norm, "", objectOwner(out, "proc:"+norm, f.Owner), out.FunctionGrants[norm], f.Grants != nil, f.GrantedBy) }
     if f.Comment != "" { out.FunctionComments[norm] = f.Comment }
 }
 
@@ -674,6 +689,10 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             if out.ColumnGrants[fq] == nil { out.ColumnGrants[fq] = map[string]map[string]map[string]bool{} }
             out.ColumnGrants[fq][cn] = simulateGrants(out.ColumnGrants[fq][cn], c.Grants)
         }
+        if c.GrantedBy != nil {
+            if out.ColumnGrants[fq] == nil { out.ColumnGrants[fq] = map[string]map[string]map[string]bool{} }
+            out.ColumnGrants[fq][cn] = simulateGrantedBy(out, "rel:"+fq, cn, objectOwner(out, "rel:"+fq, dt.Owner), out.ColumnGrants[fq][cn], c.Grants != nil, c.GrantedBy)
+        }
     }
     if len(dt.PrimaryKey) > 0 { lt.HasPK = true }
     if lt.HasPK {
@@ -781,6 +800,7 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
     if dt.Tablespace != "" { lt.Tablespace = dt.Tablespace }
     if dt.AccessMethod != "" { lt.AccessMethod = dt.AccessMethod }
     if dt.Grants != nil { out.TableGrants[fq] = simulateGrants(out.TableGrants[fq], dt.Grants) }
+    if dt.GrantedBy != nil { out.TableGrants[fq] = simulateGrantedBy(out, "rel:"+fq, "", objectOwner(out, "rel:"+fq, dt.Owner), out.TableGrants[fq], dt.Grants != nil, dt.GrantedBy) }
     if dt.Comment != "" { out.RelComments[fq] = dt.Comment }
 }
 

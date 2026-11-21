@@ -113,7 +113,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		default:
 			owner, liveG = ll.Owner, memberLiveGrants(live, mode, "language:"+name, "usage", ll.Grants, desiredG)
 		}
-		if l.Grants == nil {
+		if l.Grants == nil && l.GrantedBy == nil {
 			continue
 		}
 		liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
@@ -121,7 +121,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		if reason, ok := publicRevokedByExtension(live, mode, "language:"+name, "usage", desiredG); ok {
 			covers, why = true, reason
 		}
-		revokes, grants := ownedGrantDiffBy("language "+quoteIdent(name), desiredG, liveG, owner, covers, live.revoker("language:"+name, "", "language "+quoteIdent(name), owner, &plan.Warnings))
+		revokes, grants := ownedGrantDiffBy("language "+quoteIdent(name), desiredG, liveG, owner, covers, live.grantedByRevoker("language:"+name, "", "language "+quoteIdent(name), owner, l.GrantedBy, &plan.Warnings))
 		if _, listed := desiredG["public"]; !listed {
 			plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, why)...)
 		}
@@ -148,7 +148,7 @@ func ifTrustedLanguage(name string, stmts []string) string {
 // desired leaves behind.
 func simulateLanguages(out *Live, desired *schema.Database) {
 	for name, l := range desired.Languages {
-		if l == nil || l.Grants == nil {
+		if l == nil || l.Grants == nil && l.GrantedBy == nil {
 			continue
 		}
 		ll := &LiveLanguage{Owner: out.CurrentUser, Trusted: true, Grants: map[string]map[string]bool{"public": {"usage": true}}}
@@ -158,7 +158,12 @@ func simulateLanguages(out *Live, desired *schema.Database) {
 		if !ll.Trusted {
 			continue
 		}
-		ll.Grants = simulateACL(ll.Grants["public"], resolveGrantRoles(l.Grants, out.CurrentUser))
+		if l.Grants != nil {
+			ll.Grants = simulateACL(ll.Grants["public"], resolveGrantRoles(l.Grants, out.CurrentUser))
+		}
+		if l.GrantedBy != nil {
+			ll.Grants = simulateGrantedBy(out, "language:"+name, "", ll.Owner, ll.Grants, l.Grants != nil, l.GrantedBy)
+		}
 		if out.Languages == nil {
 			out.Languages = map[string]*LiveLanguage{}
 		}

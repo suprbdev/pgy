@@ -23,9 +23,11 @@ func (b *builder) languages() *node {
 		if !owned {
 			initial = map[string]map[string]bool{"public": {"usage": true}}
 		}
+		l := newMap()
 		if g := grantsNode(diff.GrantChanges(ll.Grants, initial)); g != nil {
-			l := newMap()
 			add(l, "grants", g)
+		}
+		if b.grantedBy(l, "language:"+name, "") || len(l.Content) > 0 {
 			add(out, name, l)
 		}
 	}
@@ -72,6 +74,7 @@ func (b *builder) wrappers() *node {
 		if g := grantsNode(grants); g != nil {
 			add(w, "grants", g)
 		}
+		b.grantedBy(w, "fdw:"+name, "")
 		addStr(w, "comment", lw.Comment)
 		if owned && len(w.Content) == 0 {
 			continue

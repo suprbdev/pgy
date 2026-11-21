@@ -48,6 +48,7 @@ type Database struct {
     // manages, by name. Languages are never created or dropped.
     Languages map[string]*Language `yaml:"-"`
     SchemaGrants map[string]map[string][]string `yaml:"-"` // schema name -> role -> privileges
+    SchemaGrantedBy map[string]GrantedBy `yaml:"-"`         // schema name -> grantedBy block
     SchemaComments map[string]string `yaml:"-"`            // schema name -> comment
     SchemaOwners map[string]string `yaml:"-"`              // schema name -> owner role
     // Schemas holds the schemas a `schema <name>:` block or a schemas:
@@ -105,6 +106,7 @@ type View struct {
     Comment      string
     Replace      bool // always emit CREATE OR REPLACE (live view definitions cannot be reliably text-compared)
     Grants       map[string][]string // role -> privileges; nil means unmanaged
+    GrantedBy    GrantedBy // grants of other roles than the owner; nil = none
     Owner        string // "" = unmanaged
     SecurityInvoker *bool  // views: security_invoker option (PostgreSQL 15+); nil = unmanaged
     SecurityBarrier *bool  // views: security_barrier option; nil = unmanaged
@@ -121,6 +123,7 @@ type View struct {
     ColumnComments  map[string]string // view column -> COMMENT ON COLUMN text
     ColumnDefaults  map[string]string // plain views: column -> DEFAULT expression, used by inserts through the view
     ColumnGrants    map[string]map[string][]string // view column -> role -> column privileges; a column not listed is unmanaged
+    ColumnGrantedBy map[string]GrantedBy // view column -> grantedBy block
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -136,6 +139,7 @@ type Server struct {
     Options map[string]string // OPTIONS; nil = unmanaged, present = authoritative
     Owner   string            // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
+    GrantedBy GrantedBy
     Comment string
     RenamedFrom string // previous name; emitted as ALTER SERVER ... RENAME TO when only the old name exists live
 }
@@ -156,6 +160,7 @@ type ForeignDataWrapper struct {
     Options   map[string]string // OPTIONS; nil = unmanaged, present = authoritative
     Owner     string            // "" = unmanaged
     Grants    map[string][]string // role -> privileges (usage); nil = unmanaged
+    GrantedBy GrantedBy
     Comment   string
     RenamedFrom string // previous name; emitted as ALTER FOREIGN DATA WRAPPER ... RENAME TO when only the old name exists live
 }
@@ -178,7 +183,14 @@ func (w *ForeignDataWrapper) ManagesConnection() bool { return w.ConnectionSet |
 type Language struct {
     Name   string
     Grants map[string][]string // role -> privileges (usage); nil = unmanaged
+    GrantedBy GrantedBy
 }
+
+// GrantedBy is a grantedBy block: the grants of roles other than the
+// object's owner, grantor -> grantee -> privileges, spelled as in a grants
+// block. It is authoritative for each grantor it lists, and leaves the
+// grants of other grantors to the grants block.
+type GrantedBy map[string]map[string][]string
 
 // contribWrappers maps the foreign-data wrappers that PostgreSQL's own
 // extensions create to their extension.
@@ -425,6 +437,7 @@ type Sequence struct {
     OwnedBy   string // table.column (or schema.table.column)
     Owner     string // "" = unmanaged
     Grants    map[string][]string // role -> privileges (usage, select, update); nil = unmanaged
+    GrantedBy GrantedBy
     DependsOn []string `yaml:"dependsOn"`
     Comment   string
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
@@ -458,6 +471,7 @@ type Domain struct {
     CheckNotValid  map[string]bool   // constraint name -> added NOT VALID (values already stored aren't checked)
     Owner          string // "" = unmanaged
     Grants         map[string][]string // role -> privileges (usage); nil = unmanaged
+    GrantedBy      GrantedBy
     RevokePublic   bool   // revoke PUBLIC's default USAGE
     DependsOn      []string `yaml:"dependsOn"`
     Comment        string
@@ -493,6 +507,7 @@ type Table struct {
     ColumnOrder []string       `yaml:"-"`
     DependsOn []string         `yaml:"dependsOn"`
     Grants map[string][]string `yaml:"-"` // role -> privileges; nil means unmanaged
+    GrantedBy GrantedBy        `yaml:"-"`
     Owner  string              `yaml:"-"` // "" = unmanaged
     // RowLevelSecurity is tri-state: nil means unmanaged (RLS state is left
     // alone), true means ENABLE, false means DISABLE (gated behind --unsafe,
@@ -641,6 +656,7 @@ type Column struct {
     FDWOptions map[string]string `yaml:"-"` // foreign table columns: OPTIONS (...); nil = unmanaged
     Using    string `yaml:"using"`    // USING expression for ALTER COLUMN ... TYPE
     Grants   map[string][]string `yaml:"-"` // role -> column privileges; nil means unmanaged
+    GrantedBy GrantedBy `yaml:"-"`
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
 }
 
@@ -751,6 +767,7 @@ type TypeDef struct {
     Comment string
     Owner   string // "" = unmanaged
     Grants  map[string][]string // role -> privileges (usage); nil = unmanaged
+    GrantedBy GrantedBy
     RevokePublic bool // revoke PUBLIC's default USAGE
     RenamedFrom string `yaml:"-"` // previous name; emitted as ALTER ... RENAME when only the old name exists live
     RenamedLabels map[string]string `yaml:"-"` // enum label -> previous label (ALTER TYPE ... RENAME VALUE)
@@ -794,6 +811,7 @@ type Function struct {
     Replace bool
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
+    GrantedBy GrantedBy
     RevokePublic bool          // revoke default PUBLIC execute (security-definer pattern)
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
@@ -826,6 +844,7 @@ type Aggregate struct {
     Comment     string
     Owner       string
     Grants      map[string][]string // role -> privileges (execute); nil = unmanaged
+    GrantedBy   GrantedBy
     RevokePublic bool               // revoke PUBLIC's default EXECUTE
 }
 
@@ -864,6 +883,7 @@ type Procedure struct {
     Replace  bool // re-emit a SQL-standard body; see Function.Replace
     DependsOn []string `yaml:"dependsOn"`
     Grants map[string][]string // role -> privileges; nil means unmanaged
+    GrantedBy GrantedBy
     RevokePublic bool          // revoke default PUBLIC execute
     Comment string             // empty means unmanaged
     Owner   string             // "" = unmanaged
@@ -962,6 +982,9 @@ func Merge(dbs []*Database) *Database {
                 existing.ColumnsSet = existing.ColumnsSet || t.ColumnsSet
                 if t.Grants != nil {
                     existing.Grants = t.Grants
+                }
+                if t.GrantedBy != nil {
+                    existing.GrantedBy = t.GrantedBy
                 }
                 if t.RowLevelSecurity != nil {
                     existing.RowLevelSecurity = t.RowLevelSecurity
@@ -1127,6 +1150,10 @@ func Merge(dbs []*Database) *Database {
             if merged.SchemaGrants == nil { merged.SchemaGrants = map[string]map[string][]string{} }
             for k, v := range d.SchemaGrants { merged.SchemaGrants[k] = v }
         }
+        if len(d.SchemaGrantedBy) > 0 {
+            if merged.SchemaGrantedBy == nil { merged.SchemaGrantedBy = map[string]GrantedBy{} }
+            for k, v := range d.SchemaGrantedBy { merged.SchemaGrantedBy[k] = v }
+        }
         if len(d.SchemaOwners) > 0 {
             if merged.SchemaOwners == nil { merged.SchemaOwners = map[string]string{} }
             for k, v := range d.SchemaOwners { merged.SchemaOwners[k] = v }
@@ -1183,6 +1210,7 @@ func (d *Database) DeclaredSchemas() []string {
     seen := map[string]bool{}
     for s := range d.Schemas { seen[s] = true }
     for s := range d.SchemaGrants { seen[s] = true }
+    for s := range d.SchemaGrantedBy { seen[s] = true }
     for s := range d.SchemaOwners { seen[s] = true }
     for s := range d.SchemaComments { seen[s] = true }
     out := make([]string, 0, len(seen))
@@ -1264,6 +1292,13 @@ func parseFlexibleDatabase(b []byte) (*Database, error) {
                             if out.SchemaGrants == nil { out.SchemaGrants = map[string]map[string][]string{} }
                             out.SchemaGrants[schemaName] = g
                             delete(inner, "grants")
+                        }
+                    }
+                    if gRaw, ok := inner["grantedBy"]; ok {
+                        if g := parseGrantedBy(gRaw); g != nil {
+                            if out.SchemaGrantedBy == nil { out.SchemaGrantedBy = map[string]GrantedBy{} }
+                            out.SchemaGrantedBy[schemaName] = g
+                            delete(inner, "grantedBy")
                         }
                     }
                     if cm, ok := inner["comment"].(string); ok {
@@ -1426,6 +1461,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
                 if gRaw, ok := m["grants"]; ok {
                     t.Grants = parseGrants(gRaw)
                 }
+                if gRaw, ok := m["grantedBy"]; ok { t.GrantedBy = parseGrantedBy(gRaw) }
                 if rls, ok := m["rowLevelSecurity"].(bool); ok {
                     t.RowLevelSecurity = &rls
                 }
@@ -1486,6 +1522,7 @@ func mergeTablesInto(db *Database, defaultSchema string, v any) {
             if gRaw, ok := m["grants"]; ok {
                 t.Grants = parseGrants(gRaw)
             }
+            if gRaw, ok := m["grantedBy"]; ok { t.GrantedBy = parseGrantedBy(gRaw) }
             if rls, ok := m["rowLevelSecurity"].(bool); ok {
                 t.RowLevelSecurity = &rls
             }
@@ -1557,6 +1594,7 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if gRaw, ok := inner["grants"]; ok {
                     t.Grants = parseGrants(gRaw)
                 }
+                if gRaw, ok := inner["grantedBy"]; ok { t.GrantedBy = parseGrantedBy(gRaw) }
                 if rls, ok := inner["rowLevelSecurity"].(bool); ok {
                     t.RowLevelSecurity = &rls
                 }
@@ -1645,6 +1683,11 @@ func mergeSchemaBlock(db *Database, schemaName string, v any) {
                 if db.SchemaGrants == nil { db.SchemaGrants = map[string]map[string][]string{} }
                 db.SchemaGrants[schemaName] = g
             }
+        } else if key == "grantedBy" {
+            if g := parseGrantedBy(body); g != nil {
+                if db.SchemaGrantedBy == nil { db.SchemaGrantedBy = map[string]GrantedBy{} }
+                db.SchemaGrantedBy[schemaName] = g
+            }
         } else if key == "owner" {
             if o, ok := body.(string); ok && strings.TrimSpace(o) != "" {
                 if db.SchemaOwners == nil { db.SchemaOwners = map[string]string{} }
@@ -1704,6 +1747,7 @@ func parseColumnSpec(spec any) *Column {
     if o, ok := m["options"].(map[string]any); ok { c.FDWOptions = stringMap(o) }
         if u, ok := m["using"].(string); ok { c.Using = u }
         if gRaw, ok := m["grants"]; ok { c.Grants = parseGrants(gRaw) }
+        if gRaw, ok := m["grantedBy"]; ok { c.GrantedBy = parseGrantedBy(gRaw) }
     }
     return c
 }
@@ -1864,6 +1908,21 @@ func parseGrants(v any) map[string][]string {
         }
         sort.Strings(list)
         out[role] = list
+    }
+    return out
+}
+
+// parseGrantedBy parses a grantedBy block, { grantor: { grantee: [priv,
+// ...] } }, each grantor's grants as parseGrants parses a grants block; a
+// grantor mapped to nothing grants nothing. It returns nil when v is not a
+// mapping.
+func parseGrantedBy(v any) GrantedBy {
+    m, ok := v.(map[string]any)
+    if !ok { return nil }
+    out := GrantedBy{}
+    for grantor, g := range m {
+        out[grantor] = parseGrants(g)
+        if out[grantor] == nil { out[grantor] = map[string][]string{} }
     }
     return out
 }
@@ -2374,6 +2433,7 @@ func parseFunction(schemaName, key string, body any) *Function {
         fn.DependsOn = parseStringListFromNode(dep)
     }
     if gRaw, ok := m["grants"]; ok { fn.Grants = parseGrants(gRaw) }
+    if gRaw, ok := m["grantedBy"]; ok { fn.GrantedBy = parseGrantedBy(gRaw) }
     if rp, ok := m["revokePublic"].(bool); ok { fn.RevokePublic = rp }
     if cm, ok := m["comment"].(string); ok { fn.Comment = cm }
     if o, ok := m["owner"].(string); ok { fn.Owner = strings.TrimSpace(o) }
@@ -2425,6 +2485,7 @@ func parseAggregate(schemaName, key string, body any) *Aggregate {
     ag.Comment = str("comment")
     ag.Owner = str("owner")
     if g, ok := m["grants"]; ok { ag.Grants = parseGrants(g) }
+    if g, ok := m["grantedBy"]; ok { ag.GrantedBy = parseGrantedBy(g) }
     if b, ok := m["revokePublic"].(bool); ok { ag.RevokePublic = b }
     return ag
 }
@@ -2456,6 +2517,7 @@ func parseProcedure(schemaName, key string, body any) *Procedure {
         pr.DependsOn = parseStringListFromNode(dep)
     }
     if gRaw, ok := m["grants"]; ok { pr.Grants = parseGrants(gRaw) }
+    if gRaw, ok := m["grantedBy"]; ok { pr.GrantedBy = parseGrantedBy(gRaw) }
     if rp, ok := m["revokePublic"].(bool); ok { pr.RevokePublic = rp }
     if cm, ok := m["comment"].(string); ok { pr.Comment = cm }
     if o, ok := m["owner"].(string); ok { pr.Owner = strings.TrimSpace(o) }
@@ -2509,6 +2571,7 @@ func parseType(schemaName, key string, body any) *TypeDef {
     if cm, ok := m["comment"].(string); ok { td.Comment = cm }
     if o, ok := m["owner"].(string); ok { td.Owner = strings.TrimSpace(o) }
     if g, ok := m["grants"]; ok { td.Grants = parseGrants(g) }
+    if g, ok := m["grantedBy"]; ok { td.GrantedBy = parseGrantedBy(g) }
     if rp, ok := m["revokePublic"].(bool); ok { td.RevokePublic = rp }
     return td
 }
@@ -3034,6 +3097,7 @@ func parseView(schemaName, key string, body any) *View {
     if cm, ok := m["comment"].(string); ok { vw.Comment = cm }
     if rp, ok := m["replace"].(bool); ok { vw.Replace = rp }
     if gRaw, ok := m["grants"]; ok { vw.Grants = parseGrants(gRaw) }
+    if gRaw, ok := m["grantedBy"]; ok { vw.GrantedBy = parseGrantedBy(gRaw) }
     if o, ok := m["owner"].(string); ok { vw.Owner = strings.TrimSpace(o) }
     if b, ok := m["securityInvoker"].(bool); ok { vw.SecurityInvoker = &b }
     if b, ok := m["securityBarrier"].(bool); ok { vw.SecurityBarrier = &b }
@@ -3067,6 +3131,12 @@ func parseView(schemaName, key string, body any) *View {
             if g := parseGrants(v); g != nil { vw.ColumnGrants[col] = g }
         }
     }
+    if cg, ok := m["columnGrantedBy"].(map[string]any); ok {
+        vw.ColumnGrantedBy = map[string]GrantedBy{}
+        for col, v := range cg {
+            if g := parseGrantedBy(v); g != nil { vw.ColumnGrantedBy[col] = g }
+        }
+    }
     return vw
 }
 
@@ -3091,6 +3161,7 @@ func parseSequence(schemaName, key string, body any) *Sequence {
     if cm, ok := m["comment"].(string); ok { sq.Comment = cm }
     if o, ok := m["owner"].(string); ok { sq.Owner = strings.TrimSpace(o) }
     if g, ok := m["grants"]; ok { sq.Grants = parseGrants(g) }
+    if g, ok := m["grantedBy"]; ok { sq.GrantedBy = parseGrantedBy(g) }
     return sq
 }
 
@@ -3170,6 +3241,7 @@ func parseServers(v any) map[string]*Server {
             if o, ok := b["options"].(map[string]any); ok { s.Options = stringMap(o) }
             if o, ok := b["owner"].(string); ok { s.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { s.Grants = parseGrants(g) }
+            if g, ok := b["grantedBy"]; ok { s.GrantedBy = parseGrantedBy(g) }
             if c, ok := b["comment"].(string); ok { s.Comment = c }
             if v, ok := b["renamedFrom"].(string); ok { s.RenamedFrom = strings.TrimSpace(v) }
         }
@@ -3199,6 +3271,7 @@ func parseForeignDataWrappers(v any) map[string]*ForeignDataWrapper {
             if o, ok := b["options"].(map[string]any); ok { w.Options = stringMap(o) }
             if o, ok := b["owner"].(string); ok { w.Owner = strings.TrimSpace(o) }
             if g, ok := b["grants"]; ok { w.Grants = parseGrants(g) }
+            if g, ok := b["grantedBy"]; ok { w.GrantedBy = parseGrantedBy(g) }
             if c, ok := b["comment"].(string); ok { w.Comment = c }
             if v, ok := b["renamedFrom"].(string); ok { w.RenamedFrom = strings.TrimSpace(v) }
         }
@@ -3216,6 +3289,7 @@ func parseLanguages(v any) map[string]*Language {
         l := &Language{Name: name}
         if b, ok := raw.(map[string]any); ok {
             if g, ok := b["grants"]; ok { l.Grants = parseGrants(g) }
+            if g, ok := b["grantedBy"]; ok { l.GrantedBy = parseGrantedBy(g) }
         }
         out[name] = l
     }
@@ -3473,6 +3547,7 @@ func parseDomain(schemaName, key string, body any) *Domain {
     if cm, ok := m["comment"].(string); ok { dm.Comment = cm }
     if o, ok := m["owner"].(string); ok { dm.Owner = strings.TrimSpace(o) }
     if g, ok := m["grants"]; ok { dm.Grants = parseGrants(g) }
+    if g, ok := m["grantedBy"]; ok { dm.GrantedBy = parseGrantedBy(g) }
     if rp, ok := m["revokePublic"].(bool); ok { dm.RevokePublic = rp }
     return dm
 }

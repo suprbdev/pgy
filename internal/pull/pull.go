@@ -90,7 +90,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	if opts.MigrationsTable == "" {
 		opts.MigrationsTable = "pgy.migrations"
 	}
-	b := &builder{live: live, d: live.Details, opts: opts, res: &Result{}, blocks: map[string]*node{}}
+	b := &builder{live: withoutForeignGrants(live), d: live.Details, opts: opts, res: &Result{}, blocks: map[string]*node{}}
 	b.collectSerials()
 	b.schemas()
 	b.unsupported()
@@ -103,7 +103,6 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.aggregates()
 	b.tables()
 	b.views()
-	b.foreignGrants()
 
 	single := newMap()
 	emit := func(name string, doc *node) error {
@@ -123,6 +122,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	b.foreignGrants()
 	b.configRows()
 	for _, name := range sortedKeys(b.blocks) {
 		blk := b.blocks[name]
@@ -162,6 +162,10 @@ type builder struct {
 	identitySeqs map[string]string
 	// extensions: the extensions database.yml creates
 	extensions map[string]bool
+	// grantedByWritten: the objects, and columns, a grantedBy block was
+	// written for, keyed by builder.grantedBy's key and column, joined
+	// with a NUL.
+	grantedByWritten map[string]bool
 }
 
 func (b *builder) warn(format string, args ...any) {
@@ -431,9 +435,6 @@ func (b *builder) memberGrants(key, publicDefault string, current map[string]map
 		return nil
 	}
 	changes := diff.GrantChanges(current, initial)
-	if len(changes) == 0 {
-		return nil
-	}
 	m := newMap()
 	if privs, ok := changes["public"]; ok && len(privs) == 0 && publicDefault != "" {
 		add(m, "revokePublic", boolean(true))
@@ -441,6 +442,9 @@ func (b *builder) memberGrants(key, publicDefault string, current map[string]map
 	}
 	if g := grantsNode(changes); g != nil {
 		add(m, "grants", g)
+	}
+	if !b.grantedBy(m, key, "") && len(m.Content) == 0 {
+		return nil
 	}
 	return m
 }
@@ -579,6 +583,7 @@ func (b *builder) schemas() {
 		if g := grantsNode(b.live.SchemaGrants[s]); g != nil {
 			add(blk, "grants", g)
 		}
+		b.grantedBy(blk, "schema:"+s, "")
 		if b.extensionSchema(s) && len(blk.Content) == 0 {
 			continue
 		}
@@ -705,6 +710,7 @@ func (b *builder) types() {
 		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(t, "grants", g)
 		}
+		b.grantedBy(t, "type:"+k, "")
 		if b.live.TypePublicRevoked[k] {
 			add(t, "revokePublic", boolean(true))
 		}
@@ -778,6 +784,7 @@ func (b *builder) domains() {
 		if g := b.grantsFor(b.live.TypeGrants[k], k, "types"); g != nil {
 			add(m, "grants", g)
 		}
+		b.grantedBy(m, "type:"+k, "")
 		if b.live.TypePublicRevoked[k] {
 			add(m, "revokePublic", boolean(true))
 		}
@@ -960,6 +967,7 @@ func (b *builder) sequences() {
 		if g := b.grantsFor(b.live.TableGrants[k], k, "sequences"); g != nil {
 			add(m, "grants", g)
 		}
+		b.grantedBy(m, "rel:"+k, "")
 		addStr(m, "comment", b.live.RelComments[k])
 		if ls.Owner == "" {
 			b.owner(m, "sequences", "rel:"+k)
@@ -974,7 +982,7 @@ func (b *builder) sequences() {
 func (b *builder) columnSequence(k, column string) {
 	g := b.grantsFor(b.live.TableGrants[k], k, "sequences")
 	comment := b.live.RelComments[k]
-	if g == nil && comment == "" {
+	if g == nil && comment == "" && len(b.live.ForeignGrantors("rel:"+k, "")) == 0 {
 		return
 	}
 	blk, name, ok := b.block(k)
@@ -985,6 +993,7 @@ func (b *builder) columnSequence(k, column string) {
 	if g != nil {
 		add(m, "grants", g)
 	}
+	b.grantedBy(m, "rel:"+k, "")
 	addStr(m, "comment", comment)
 	if strings.Count(column, ".") >= 2 {
 		table, _ := b.ownerColumn(column)
@@ -1073,6 +1082,7 @@ func (b *builder) routines() {
 		if g := b.grantsFor(b.live.FunctionGrants[norm], r.Schema+"."+r.Name, "functions"); g != nil {
 			add(m, "grants", g)
 		}
+		b.grantedBy(m, "proc:"+norm, "")
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, kindOf(r)+"s", "proc:"+norm)
 		add(blk, key, m)
@@ -1167,6 +1177,7 @@ func (b *builder) aggregates() {
 		if g := b.grantsFor(b.live.FunctionGrants[norm], name, "functions"); g != nil {
 			add(m, "grants", g)
 		}
+		b.grantedBy(m, "proc:"+norm, "")
 		addStr(m, "comment", b.live.FunctionComments[norm])
 		b.owner(m, "aggregates", "proc:"+norm)
 		add(blk, "aggregate "+schema.QuoteName(short)+args, m)
@@ -1308,6 +1319,7 @@ func (b *builder) tables() {
 		if g := b.grantsFor(b.live.TableGrants[fq], fq, "tables"); g != nil {
 			add(t, "grants", g)
 		}
+		b.grantedBy(t, "rel:"+fq, "")
 		addStr(t, "comment", b.live.RelComments[fq])
 		b.owner(t, "tables", "rel:"+fq)
 		key := "table "
@@ -1347,6 +1359,7 @@ func (b *builder) servers() *node {
 		if g := grantsNode(ls.Grants); g != nil {
 			add(s, "grants", g)
 		}
+		b.grantedBy(s, "srv:"+name, "")
 		addStr(s, "comment", ls.Comment)
 		add(out, name, s)
 	}
@@ -1438,6 +1451,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 		if g := grantsNode(b.live.ColumnGrants[fq][cn]); g != nil {
 			add(c, "grants", g)
 		}
+		b.grantedBy(c, "rel:"+fq, cn)
 		addStr(c, "comment", lc.Comment)
 		add(cols, cn, c)
 	}
@@ -2289,6 +2303,7 @@ func (b *builder) views() {
 		if g := b.grantsFor(b.live.TableGrants[k], k, "tables"); g != nil {
 			add(m, "grants", g)
 		}
+		b.grantedBy(m, "rel:"+k, "")
 		if cg := b.live.ColumnGrants[k]; len(cg) > 0 {
 			gm := newMap()
 			for _, col := range sortedKeys(cg) {
@@ -2298,6 +2313,18 @@ func (b *builder) views() {
 			}
 			if len(gm.Content) > 0 {
 				add(m, "columnGrants", gm)
+			}
+		}
+		if cg := b.live.ColumnGrantors[k]; len(cg) > 0 {
+			gm := newMap()
+			for _, col := range sortedKeys(cg) {
+				c := newMap()
+				if b.grantedBy(c, "rel:"+k, col) {
+					add(gm, col, c.Content[1])
+				}
+			}
+			if len(gm.Content) > 0 {
+				add(m, "columnGrantedBy", gm)
 			}
 		}
 		addStr(m, "comment", b.live.RelComments[k])

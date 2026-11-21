@@ -226,8 +226,8 @@ func TestForeignGrants(t *testing.T) {
 	live.ColumnGrantors = map[string]map[string]LiveGrantors{"app.t": {"a": {"reader": {"update*": {"admin"}}}}}
 	got := live.ForeignGrants()
 	want := []ForeignGrant{
-		{Object: "table app.t", Schema: "app", Grantee: "reader", Privilege: "select", Grantor: "admin"},
-		{Object: "table app.t", Schema: "app", Column: "a", Grantee: "reader", Privilege: "update*", Grantor: "admin"},
+		{Object: "table app.t", Schema: "app", Key: "rel:app.t", Grantee: "reader", Privilege: "select", Grantor: "admin"},
+		{Object: "table app.t", Schema: "app", Key: "rel:app.t", Column: "a", Grantee: "reader", Privilege: "update*", Grantor: "admin"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ForeignGrants leaves out the owner's and the connecting role's grants:\n got %+v\nwant %+v", got, want)

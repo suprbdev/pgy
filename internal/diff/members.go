@@ -525,7 +525,7 @@ func resolveAttributeOnly(live *Live, desired *schema.Database, pending bool) (*
 // owns: everything an attribute-only declaration manages (see
 // schema.Table.AttributeOnly).
 func memberTable(dt *schema.Table) *schema.Table {
-	out := &schema.Table{Name: dt.Name, Grants: dt.Grants, Owner: dt.Owner, Comment: dt.Comment, DependsOn: dt.DependsOn,
+	out := &schema.Table{Name: dt.Name, Grants: dt.Grants, GrantedBy: dt.GrantedBy, Owner: dt.Owner, Comment: dt.Comment, DependsOn: dt.DependsOn,
 		RowLevelSecurity: dt.RowLevelSecurity, ForceRowLevelSecurity: dt.ForceRowLevelSecurity, Policies: dt.Policies, Data: dt.Data}
 	if dt.Foreign != nil {
 		out.Foreign = &schema.ForeignTable{}
