@@ -75,6 +75,37 @@ func TestBuildForeignDataWrappers(t *testing.T) {
 	}
 }
 
+func TestBuildForeignDataWrapperConnection(t *testing.T) {
+	live := func(version int) *diff.Live {
+		return &diff.Live{
+			CurrentUser:   "me",
+			ServerVersion: version,
+			Wrappers: map[string]*diff.LiveWrapper{
+				"pg2":  {Handler: "public.postgres_fdw_handler", Connection: "public.postgres_fdw_connection", Options: map[string]string{}, Owner: "me"},
+				"bare": {Options: map[string]string{}, Owner: "me"},
+			},
+		}
+	}
+	want := `foreignDataWrappers:
+  bare:
+    handler: ""
+    validator: ""
+    connection: ""
+    options: {}
+  pg2:
+    handler: public.postgres_fdw_handler
+    validator: ""
+    connection: public.postgres_fdw_connection
+    options: {}
+`
+	if got := buildDatabase(t, live(190000), Options{}); got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if got := buildDatabase(t, live(180000), Options{}); !strings.Contains(got, "connection: public.postgres_fdw_connection") || strings.Contains(got, `connection: ""`) {
+		t.Errorf("before PostgreSQL 19 only a connection function the wrapper has is written, got:\n%s", got)
+	}
+}
+
 func TestBuildForeignDataWrappersOfExtensionsUntouched(t *testing.T) {
 	live := &diff.Live{
 		CurrentUser: "me",
