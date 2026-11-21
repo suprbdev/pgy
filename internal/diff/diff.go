@@ -727,6 +727,9 @@ type LiveColumn struct{
     // NotNullName names the column's not-null constraint, valid or not;
     // "" before PostgreSQL 18, which records none for a table column.
     NotNullName string
+    // NotNullNoInherit: the column's not-null constraint is NO INHERIT
+    // (PostgreSQL 18+), so children don't get it.
+    NotNullNoInherit bool
     Inherited   bool   // the column comes from a parent table (attinhcount > 0); the parent owns its definition
     CollationSchema string // schema of Collation when it is not in pg_catalog
     TypeStorage string     // the column type's default storage
@@ -961,7 +964,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
                a.attinhcount > 0,
                coalesce(a.attoptions, '{}'::text[]),
                coalesce(a.attfdwoptions, '{}'::text[]),
-               coalesce(nn.conname, ''), coalesce(nn.convalidated, true)
+               coalesce(nn.conname, ''), coalesce(nn.convalidated, true), coalesce(nn.connoinherit, false)
         from pg_attribute a
         join pg_class c on c.oid = a.attrelid
         join pg_namespace n on n.oid = c.relnamespace
@@ -986,12 +989,12 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
             var inherited bool
             var attoptions, fdwoptions []string
             var notNullName string
-            var notNullValid bool
-            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions, &notNullName, &notNullValid); err != nil { return err }
+            var notNullValid, notNullNoInherit bool
+            if err := rows.Scan(&schemaName, &tableName, &colName, &dataType, &nullable, &def, &identity, &generated, &collation, &compression, &storage, &statTarget, &collSchema, &typeStorage, &inherited, &attoptions, &fdwoptions, &notNullName, &notNullValid, &notNullNoInherit); err != nil { return err }
             key := fmt.Sprintf("%s.%s", schemaName, tableName)
             t := l.Tables[key]
             if t == nil { t = newLiveTable(); l.Tables[key] = t }
-            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited, NotNullName: notNullName}
+            lc := &LiveColumn{Type: dataType, Nullable: nullable, Default: def, Identity: identity, Collation: collation, Compression: compression, Storage: storage, TypeStorage: typeStorage, StatisticsTarget: statTarget, CollationSchema: collSchema, Inherited: inherited, NotNullName: notNullName, NotNullNoInherit: notNullNoInherit}
             if !notNullValid { lc.NotNullNotValid = notNullName }
             if generated != "" { lc.Generated, lc.Default, lc.Virtual = def, "", generated == "v" }
             if len(attoptions) > 0 { lc.Options = parseProconfig(attoptions) }
@@ -3517,12 +3520,25 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         if dt.PartitionBy != nil { sub = " partition by " + renderPartitionBy(dt.PartitionBy) }
                         if dt.Unlogged != nil && *dt.Unlogged { unlogged = "unlogged " }
                         using := accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
-                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
+                        overrides := []string{}
+                        for _, cn := range sortedKeys(dt.Columns) {
+                            col := inlineInherited(desired, live, dt, cn, dt.Columns[cn])
+                            if col == nil { continue }
+                            clause := quoteIdent(cn)
+                            if col.NotNullName != "" { clause += " constraint " + quoteIdent(col.NotNullName) + " not null" }
+                            if col.Generated != "" { clause += " " + generatedClause(col) }
+                            overrides = append(overrides, clause)
+                        }
+                        withCols := ""
+                        if len(overrides) > 0 { withCols = " (" + strings.Join(overrides, ", ") + ")" }
+                        plan.Creates = append(plan.Creates, fmt.Sprintf("create %stable if not exists %s partition of %s%s %s%s%s%s%s;", unlogged, pqIdent(fq), pqIdent(dt.PartitionOf), withCols, renderPartitionBound(dt.Partition), sub, using, renderStorageParams(dt.With, dt.WithOrder), tablespaceClause(dt.Tablespace)))
                     }
                     for _, cn := range sortedKeys(dt.Columns) {
                         c := dt.Columns[cn]
                         if c == nil { continue }
-                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...)
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil, live.ServerVersion)...)
+                        alters, _ := inheritedOverrideStmts(desired, live, fq, cn, dt, c, nil, true, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
                         if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignColumnOptionStmts(fq, cn, c)...) }
                     }
                     applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
@@ -3556,7 +3572,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     }
                     sort.Strings(cols)
                 }
-                for _, cn := range inherited { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil)...) }
+                for _, cn := range inherited {
+                    if col := inlineInherited(desired, live, dt, cn, dt.Columns[cn]); col != nil { cols = append(cols, renderColumn(cn, col)) }
+                    plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, dt.Columns[cn], nil, live.ServerVersion)...)
+                    alters, _ := inheritedOverrideStmts(desired, live, fq, cn, dt, dt.Columns[cn], nil, true, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                    plan.Alters = append(plan.Alters, alters...)
+                }
                 for _, cn := range sortedKeys(dt.Columns) {
                     if c := dt.Columns[cn]; c != nil && c.NotValid && !c.Nullable && !inheritedColumn(dt, c, nil) {
                         plan.Alters = append(plan.Alters, notValidNotNullStmt(fq, cn, c))
@@ -3614,7 +3635,12 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     for cn := range dt.Columns { colNames = append(colNames, cn) }
                 } else {
                     for _, cn := range sortedKeys(dt.Columns) {
-                        if c, lc := dt.Columns[cn], lt.Columns[cn]; c != nil && lc != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...) }
+                        c, lc := dt.Columns[cn], lt.Columns[cn]
+                        if c == nil { continue }
+                        if lc != nil { plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc, live.ServerVersion)...) }
+                        alters, concurrent := inheritedOverrideStmts(desired, live, fq, cn, dt, c, lc, false, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
+                        plan.Concurrent = append(plan.Concurrent, concurrent...)
                     }
                 }
                 sort.Strings(colNames)
@@ -3623,7 +3649,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     c := dt.Columns[cn]
                     lc, ok := lt.Columns[cn]
                     if (ok && inheritedColumn(dt, c, lc)) || (!ok && inheritedColumn(dt, c, nil)) {
-                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc)...)
+                        plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, lc, live.ServerVersion)...)
+                        alters, concurrent := inheritedOverrideStmts(desired, live, fq, cn, dt, c, lc, false, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                        plan.Alters = append(plan.Alters, alters...)
+                        plan.Concurrent = append(plan.Concurrent, concurrent...)
                         continue
                     }
                     if !ok {
@@ -3640,10 +3669,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         continue
                     }
                     if name := notNullNotValidName(fq, cn, c, lc, lt, dt, pkCols, live.ServerVersion); name != "" {
-                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(name), quoteIdent(cn)))
+                        plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s add constraint %s not null %s%s not valid;", pqIdent(fq), quoteIdent(name), quoteIdent(cn), noInheritClause(c)))
                         if !c.NotValid { plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(name))) }
                         enforced := *lc
-                        enforced.Nullable = false
+                        enforced.Nullable, enforced.NotNullNoInherit = false, c.NotNullNoInherit
                         lc = &enforced
                     } else {
                         pending := lc.NotNullNotValid
@@ -3671,7 +3700,10 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                     plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s set tablespace %s;", pqIdent(fq), quoteIdent(dt.Tablespace)))
                     if !lt.Partitioned { plan.Warnings = append(plan.Warnings, tablespaceMoveWarning("table "+fq, fq)) }
                 }
-                if dt.Foreign == nil { plan.Alters = append(plan.Alters, accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
+                if dt.Foreign == nil {
+                    stmts := accessMethodStmts("table", fq, dt.AccessMethod, lt, live.ServerVersion, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
+                    if lt.Partitioned { plan.Creates = append(plan.Creates, stmts...) } else { plan.Alters = append(plan.Alters, stmts...) }
+                }
                 plan.Creates = append(plan.Creates, typedTableStmts(fq, dt, lt, unsafe, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...)
                 if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignTableAlterStmts(fq, dt, lt, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })...) }
                 plan.Alters = append(plan.Alters, inheritStmts(fq, dt, lt, unsafe)...)
@@ -4249,10 +4281,12 @@ func typedTableUses(live *Live, fq string) bool {
 
 // inheritedColumnStmts sets what a partition or inheritance child declares
 // for column cn it inherits: a default, NOT NULL (only when nullable is
-// written, and only adding it), storage, compression, the statistics
-// target and n_distinct. Settings left out are unmanaged, so the parent's
-// copies stay. lc is the live column, nil for a table this plan creates.
-func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []string {
+// written, and only adding it, NO INHERIT with notNullNoInherit and named
+// with notNullName from PostgreSQL 18 on), storage, compression, the
+// statistics target and n_distinct. Settings left out are unmanaged, so the
+// parent's copies stay. lc is the live column, nil for a table this plan
+// creates.
+func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, serverVersion int) []string {
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
     if lc == nil { lc = &LiveColumn{Nullable: true} }
     out := []string{}
@@ -4260,7 +4294,11 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []str
         out = append(out, fmt.Sprintf("%s set default %s;", target, c.Default))
     }
     if c.NullableSet && !c.Nullable && lc.Nullable {
-        out = append(out, target+" set not null;")
+        if c.NotNullNoInherit || c.NotNullName != "" && serverVersion >= 180000 {
+            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s%s;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c)))
+        } else {
+            out = append(out, target+" set not null;")
+        }
     }
     if c.Storage != "" && c.Storage != lc.Storage {
         out = append(out, fmt.Sprintf("%s set storage %s;", target, c.Storage))
@@ -4274,6 +4312,95 @@ func inheritedColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn) []str
         out = append(out, fmt.Sprintf("%s set statistics %d;", target, *c.StatisticsTarget))
     }
     return append(out, attributeOptionStmts(target, c, lc)...)
+}
+
+// inheritedOverrideStmts sets what a partition or inheritance child fq
+// declares for inherited column cn beyond inheritedColumnStmts: its own
+// generation expression, with ALTER TABLE ONLY ... SET EXPRESSION
+// (PostgreSQL 17+) so the child's own children keep theirs, and, with
+// notValid: false, a validated copy of the parent's NOT VALID NOT NULL.
+// creating is set for a table this plan creates, whose CREATE sets the
+// expression when inlineInherited allows; lc is nil for a column the table
+// doesn't have yet, which gets both right away. An existing column gets a
+// changed expression only under unsafe, as a declared column does, and its
+// copy validated in the no-transaction migration.
+func inheritedOverrideStmts(desired *schema.Database, live *Live, fq, cn string, dt *schema.Table, c *schema.Column, lc *LiveColumn, creating, unsafe bool, warn func(string)) (alters, concurrent []string) {
+    rootFq, root, liveRoot := declaringColumn(desired, live, dt, cn)
+    inline := inlineInherited(desired, live, dt, cn, c)
+    if c.Generated != "" && (lc != nil && lc.Generated != "" || lc == nil && (!creating || inline == nil || inline.Generated == "")) {
+        clobbered := unsafe && root != nil && liveRoot != nil && root.Generated != "" && liveRoot.Generated != "" && !constraintDefsEqual(root.Generated, liveRoot.Generated)
+        switch {
+        case lc != nil && constraintDefsEqual(c.Generated, lc.Generated) && !clobbered, lc != nil && !unsafe:
+        case live.ServerVersion > 0 && live.ServerVersion < 170000:
+            warn(fmt.Sprintf("column %s.%s overrides its parent's generation expression, which needs ALTER COLUMN ... SET EXPRESSION (PostgreSQL 17+), and the server runs PostgreSQL %d; it keeps the parent's", fq, cn, live.ServerVersion/10000))
+        default:
+            alters = append(alters, fmt.Sprintf("alter table only %s alter column %s set expression as (%s);", pqIdent(fq), quoteIdent(cn), c.Generated))
+        }
+    }
+    if name := truncateIdent(c.NotNullName); lc != nil && name != "" && !lc.Nullable && lc.NotNullName != "" && lc.NotNullName != name && live.ServerVersion >= 180000 && root != nil {
+        if root.Nullable || root.NotNullNoInherit {
+            alters = append(alters, fmt.Sprintf("alter table %s rename constraint %s to %s;", pqIdent(fq), quoteIdent(lc.NotNullName), quoteIdent(name)))
+        } else {
+            warn(fmt.Sprintf("column %s.%s: its NOT NULL constraint %s is inherited from %s, and PostgreSQL cannot rename an inherited constraint, so it keeps that name rather than notNullName %s", fq, cn, lc.NotNullName, rootFq, name))
+        }
+    }
+    if c.NotValidSet && !c.NotValid && (!c.NullableSet || !c.Nullable) {
+        switch {
+        case lc != nil && lc.NotNullNotValid != "":
+            concurrent = append(concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(lc.NotNullNotValid)))
+        case lc == nil && root != nil && !root.Nullable && root.NotValid && (liveRoot == nil || liveRoot.Nullable):
+            alters = append(alters, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(notNullConstraintName(rootFq, cn, root))))
+        }
+    }
+    return alters, concurrent
+}
+
+// inlineInherited returns the column a CREATE TABLE of partition or
+// inheritance child dt declares to give inherited column c what it keeps of
+// its own and only CREATE can set: its own generation expression (PostgreSQL
+// 16+), and a name for its copy of the parent's NOT NULL constraint
+// (notNullName, PostgreSQL 18+), which PostgreSQL cannot rename once the copy
+// is inherited. The column has the type, collation and generated kind of
+// the column it inherits, which PostgreSQL merges it with; a partition's
+// CREATE takes only the constraint and the expression. It returns nil when
+// c sets neither or no ancestor declares the column.
+func inlineInherited(desired *schema.Database, live *Live, dt *schema.Table, cn string, c *schema.Column) *schema.Column {
+    if c == nil || dt.Foreign != nil || dt.Of != "" { return nil }
+    _, root, _ := declaringColumn(desired, live, dt, cn)
+    if root == nil || strings.TrimSpace(root.Type) == "" { return nil }
+    col := &schema.Column{Type: root.Type, Collate: root.Collate, Nullable: true}
+    if c.Generated != "" && root.Generated != "" { col.Generated, col.Virtual = c.Generated, root.Virtual }
+    if c.NotNullName != "" && !root.Nullable && !root.NotNullNoInherit && !root.NotValid && (live.ServerVersion == 0 || live.ServerVersion >= 180000) {
+        col.Nullable, col.NotNullName = false, truncateIdent(c.NotNullName)
+    }
+    if col.Generated == "" && col.NotNullName == "" { return nil }
+    return col
+}
+
+// declaringColumn follows partition and inheritance parents up from dt to
+// the table that declares column cn rather than inheriting it, and returns
+// that table, its declared column and its live column (nil when it doesn't
+// exist yet). It returns a nil column when no ancestor declares cn.
+func declaringColumn(desired *schema.Database, live *Live, dt *schema.Table, cn string) (string, *schema.Column, *LiveColumn) {
+    seen := map[string]bool{}
+    parents := func(t *schema.Table) []string {
+        if t.PartitionOf != "" { return []string{t.PartitionOf} }
+        return t.Inherits
+    }
+    queue := parents(dt)
+    for len(queue) > 0 {
+        p := queue[0]
+        queue = queue[1:]
+        pt := desired.Tables[p]
+        if seen[p] || pt == nil { continue }
+        seen[p] = true
+        pc := pt.Columns[cn]
+        var lpc *LiveColumn
+        if lt := live.Tables[p]; lt != nil { lpc = lt.Columns[cn] }
+        if pc != nil && !inheritedColumn(pt, pc, lpc) { return p, pc, lpc }
+        queue = append(queue, parents(pt)...)
+    }
+    return "", nil, nil
 }
 
 // attachesPartition reports whether the plan attaches existing table lt to
@@ -4900,7 +5027,14 @@ func hasForeignPartition(live *Live, fq string) bool {
 // its declared name or PostgreSQL's default one, for a column declared
 // notValid.
 func notValidNotNullStmt(fq, cn string, c *schema.Column) string {
-    return fmt.Sprintf("alter table %s add constraint %s not null %s not valid;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn))
+    return fmt.Sprintf("alter table %s add constraint %s not null %s%s not valid;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c))
+}
+
+// noInheritClause returns " no inherit" for a column whose NOT NULL
+// constraint is declared notNullNoInherit, or "".
+func noInheritClause(c *schema.Column) string {
+    if c.NotNullNoInherit { return " no inherit" }
+    return ""
 }
 
 func notNullNotValidName(fq, cn string, c *schema.Column, lc *LiveColumn, lt *LiveTable, dt *schema.Table, pkCols map[string]bool, serverVersion int) string {
@@ -7207,11 +7341,17 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
     }
 
     if !c.Nullable && lc.Nullable {
-        if c.NotNullName != "" && serverVersion >= 180000 {
-            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s;", pqIdent(fq), quoteIdent(truncateIdent(c.NotNullName)), quoteIdent(cn)))
+        if (c.NotNullName != "" || c.NotNullNoInherit) && serverVersion >= 180000 {
+            out = append(out, fmt.Sprintf("alter table %s add constraint %s not null %s%s;", pqIdent(fq), quoteIdent(notNullConstraintName(fq, cn, c)), quoteIdent(cn), noInheritClause(c)))
         } else {
             out = append(out, target+" set not null;")
         }
+    }
+    if !c.Nullable && !lc.Nullable && lc.NotNullName != "" && c.NotNullNoInherit != lc.NotNullNoInherit && serverVersion >= 180000 {
+        name, inherit := lc.NotNullName, "inherit"
+        if r := notNullRename(c, lc); r != "" { name = r }
+        if c.NotNullNoInherit { inherit = "no inherit" }
+        out = append(out, fmt.Sprintf("alter table %s alter constraint %s %s;", pqIdent(fq), quoteIdent(name), inherit))
     }
     out = append(out, identityAlterStmts(fq, target, c, lc, unsafe)...)
     droppingIdentity := lc.Identity != "" && c.Identity == "" && unsafe && c.Generated == ""
@@ -8065,12 +8205,10 @@ func renderColumn(name string, c *schema.Column) string {
     if c.Collate != "" { parts = append(parts, "collate "+collationIdent(c.Collate)) }
     if !c.Nullable && !c.NotValid {
         if c.NotNullName != "" { parts = append(parts, "constraint "+quoteIdent(c.NotNullName)) }
-        parts = append(parts, "not null")
+        parts = append(parts, "not null"+noInheritClause(c))
     }
     if c.Generated != "" {
-        kind := "stored"
-        if c.Virtual { kind = "virtual" }
-        parts = append(parts, "generated always as ("+c.Generated+") "+kind)
+        parts = append(parts, generatedClause(c))
     } else if c.Identity != "" {
         // identity columns cannot also have a default expression
         parts = append(parts, "generated "+c.Identity+" as identity"+identityOptionsClause(c.IdentityOptions))
@@ -8078,6 +8216,14 @@ func renderColumn(name string, c *schema.Column) string {
         parts = append(parts, "default "+c.Default)
     }
     return strings.Join(parts, " ")
+}
+
+// generatedClause renders GENERATED ALWAYS AS (...) STORED or VIRTUAL for
+// generated column c.
+func generatedClause(c *schema.Column) string {
+    kind := "stored"
+    if c.Virtual { kind = "virtual" }
+    return "generated always as (" + c.Generated + ") " + kind
 }
 
 // pqIdent quotes a name, or a "schema.name" pair split at the first dot,
@@ -8613,6 +8759,9 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
             }
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
                 need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
+            }
+            if c := t.Columns[cn]; c != nil && c.NotNullNoInherit && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || !lt.Columns[cn].NotNullNoInherit) {
+                need(fmt.Sprintf("notNullNoInherit on column %s.%s", fq, cn), 18)
             }
             if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable && v < 180000 {
                 out = append(out, Warning{Message: fmt.Sprintf("notNullName on column %s.%s is ignored: PostgreSQL %d does not record a name for a column's NOT NULL constraint (PostgreSQL 18 does)", fq, cn, v/10000)})

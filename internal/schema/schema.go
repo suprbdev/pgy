@@ -626,6 +626,8 @@ type Column struct {
     Generated string `yaml:"generated"` // GENERATED ALWAYS AS (expr) STORED expression
     Virtual  bool   `yaml:"virtual"`  // generated column is VIRTUAL rather than STORED (PostgreSQL 18+)
     NotValid bool   `yaml:"notValid"` // the NOT NULL constraint is NOT VALID, so existing rows aren't checked (PostgreSQL 18+)
+    NotValidSet bool `yaml:"-"` // notValid was written; notValid: false on a partition's or child's inherited column asks for a validated copy of the parent's NOT VALID NOT NULL
+    NotNullNoInherit bool `yaml:"notNullNoInherit"` // the NOT NULL constraint is NO INHERIT, so children don't get it (PostgreSQL 18+)
     Validate string `yaml:"validate"` // NOT NULL on an existing column: ValidateImmediate or ValidateLater; "" = the table's Validate
     NotNullName string `yaml:"notNullName"` // name of the NOT NULL constraint (PostgreSQL 18+); "" = unmanaged, and PostgreSQL's <table>_<column>_not_null for a new one
     Collate     string `yaml:"collate"`     // COLLATE; "" = type default
@@ -1687,7 +1689,8 @@ func parseColumnSpec(spec any) *Column {
         if id, ok := m["identity"]; ok { c.Identity, c.IdentityOptions = parseIdentity(id), parseIdentityOptions(id) }
         if g, ok := m["generated"].(string); ok { c.Generated = strings.TrimSpace(g) }
         if v, ok := m["virtual"].(bool); ok { c.Virtual = v }
-        if v, ok := m["notValid"].(bool); ok { c.NotValid = v }
+        if v, ok := m["notValid"].(bool); ok { c.NotValid, c.NotValidSet = v, true }
+        if v, ok := m["notNullNoInherit"].(bool); ok { c.NotNullNoInherit = v }
         if v, ok := m["validate"].(string); ok { c.Validate = strings.ToLower(strings.TrimSpace(v)) }
         if v, ok := m["notNullName"].(string); ok { c.NotNullName = strings.TrimSpace(v) }
         if v, ok := m["collate"].(string); ok { c.Collate = strings.TrimSpace(v) }

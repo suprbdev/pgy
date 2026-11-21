@@ -356,16 +356,11 @@ schema app:
       id: {notNullName: t1_id_required}
 `)
 	got := messages(Files([]string{p}))
-	for _, want := range []string{
-		"table app.t: column a sets notNullName but is nullable",
-		"table app.t1: column id: notNullName is ignored on a column of a partition",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in:\n%s", want, got)
-		}
+	if want := "table app.t: column a sets notNullName but is nullable"; !strings.Contains(got, want) {
+		t.Errorf("missing %q in:\n%s", want, got)
 	}
-	if strings.Contains(got, "column id sets notNullName") || strings.Contains(got, "app.t: column id: notNullName") {
-		t.Errorf("a NOT NULL column the table declares takes a name:\n%s", got)
+	if strings.Contains(got, "column id") {
+		t.Errorf("a NOT NULL column the table declares, and a partition's copy of it, take a name:\n%s", got)
 	}
 }
 

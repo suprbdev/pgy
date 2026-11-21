@@ -589,7 +589,10 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             if !c.Nullable { lc.NotNullNotValid = "" }
             if !c.Nullable && c.NotValid { lc.NotNullNotValid = "simulated" }
             if c.Nullable { lc.NotNullName = "" } else if !override && c.NotNullName != "" { lc.NotNullName = truncateIdent(c.NotNullName) }
+            lc.NotNullNoInherit = !c.Nullable && c.NotNullNoInherit
         }
+        if override && c.NotValidSet && !c.NotValid { lc.NotNullNotValid = "" }
+        if override && c.NotNullName != "" && !lc.Nullable { lc.NotNullName = truncateIdent(c.NotNullName) }
         if !override || c.Default != "" { lc.Default = c.Default }
         if c.Identity != "" {
             lc.Identity = c.Identity
@@ -604,7 +607,10 @@ func simulateTable(out *Live, fq string, dt *schema.Table) {
             }
             lc.IdentitySequence = ls
         }
-        if c.Generated != "" { lc.Generated, lc.Default, lc.Virtual = c.Generated, "", c.Virtual }
+        if c.Generated != "" {
+            lc.Generated, lc.Default = c.Generated, ""
+            if !override { lc.Virtual = c.Virtual }
+        }
         if c.Collate != "" { lc.Collation = collationName(c.Collate) }
         if c.Compression == "default" {
             lc.Compression = ""
