@@ -184,6 +184,7 @@ func (l *Live) scoped() *Live {
 	out.ProcedureDefs = rekeyed(l.ProcedureDefs, sc.functionSignature)
 	out.AggregateDefs = rekeyed(l.AggregateDefs, sc.functionSignature)
 	out.FunctionGrants = rekeyed(l.FunctionGrants, sc.functionSignature)
+	out.Grantors = rekeyed(l.Grantors, proc)
 	out.FunctionPublicExec = rekeyed(l.FunctionPublicExec, sc.functionSignature)
 	out.FunctionComments = rekeyed(l.FunctionComments, sc.functionSignature)
 	out.Owners = rekeyed(l.Owners, proc)

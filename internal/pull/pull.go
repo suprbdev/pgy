@@ -103,6 +103,7 @@ func Build(live *diff.Live, opts Options) (*Result, error) {
 	b.aggregates()
 	b.tables()
 	b.views()
+	b.foreignGrants()
 
 	single := newMap()
 	emit := func(name string, doc *node) error {

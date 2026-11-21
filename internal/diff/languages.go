@@ -121,7 +121,7 @@ func planLanguages(plan *PlanDiff, live *Live, desired *schema.Database, mode Pu
 		if reason, ok := publicRevokedByExtension(live, mode, "language:"+name, "usage", desiredG); ok {
 			covers, why = true, reason
 		}
-		revokes, grants := ownedGrantDiff("language "+quoteIdent(name), desiredG, liveG, owner, covers)
+		revokes, grants := ownedGrantDiffBy("language "+quoteIdent(name), desiredG, liveG, owner, covers, live.revoker("language:"+name, "", "language "+quoteIdent(name), owner, &plan.Warnings))
 		if _, listed := desiredG["public"]; !listed {
 			plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, why)...)
 		}

@@ -197,6 +197,8 @@ func (r *renamer) moveRelation(old, new string) {
     moveKey(l.OwnedSequences, old, new)
     moveKey(l.TableGrants, old, new)
     moveKey(l.ColumnGrants, old, new)
+    moveKey(l.Grantors, "rel:"+old, "rel:"+new)
+    moveKey(l.ColumnGrantors, old, new)
     moveKey(l.RelComments, old, new)
     moveKey(l.Owners, "rel:"+old, "rel:"+new)
     moveKey(l.Partitions, old, new)
@@ -317,6 +319,7 @@ func (r *renamer) moveType(old, new string) {
     moveKey(l.EnumLabels, old, new)
     moveKey(l.CompositeAttributes, old, new)
     moveKey(l.TypeGrants, old, new)
+    moveKey(l.Grantors, "type:"+old, "type:"+new)
     moveKey(l.TypeComments, old, new)
     moveKey(l.Owners, "type:"+old, "type:"+new)
     whole := regexp.MustCompile(`^` + relationPattern(old) + `((?:\[\])*)$`)
@@ -412,6 +415,7 @@ func (r *renamer) moveFunction(oldNorm, newNorm, newSig string) {
         }
     }
     moveKey(l.FunctionGrants, oldNorm, newNorm)
+    moveKey(l.Grantors, "proc:"+oldNorm, "proc:"+newNorm)
     moveKey(l.FunctionComments, oldNorm, newNorm)
     moveKey(l.FunctionPublicExec, oldNorm, newNorm)
     moveKey(l.AggregateDefs, oldNorm, newNorm)
@@ -428,6 +432,7 @@ func (r *renamer) moveProcedure(oldNorm, newNorm, newSig string) {
     }
     moveKey(l.Procedures, oldNorm, newNorm)
     moveKey(l.FunctionGrants, oldNorm, newNorm)
+    moveKey(l.Grantors, "proc:"+oldNorm, "proc:"+newNorm)
     moveKey(l.FunctionComments, oldNorm, newNorm)
     moveKey(l.FunctionPublicExec, oldNorm, newNorm)
     moveKey(l.Owners, "proc:"+oldNorm, "proc:"+newNorm)
@@ -443,6 +448,7 @@ func (r *renamer) tableParts(d *schema.Database) {
             r.stmts = append(r.stmts, fmt.Sprintf("alter table %s rename column %s to %s;", pqIdent(k), quoteIdent(c.RenamedFrom), quoteIdent(cn)))
             moveKey(lt.Columns, c.RenamedFrom, cn)
             if g := r.l.ColumnGrants[k]; g != nil { moveKey(g, c.RenamedFrom, cn) }
+            if g := r.l.ColumnGrantors[k]; g != nil { moveKey(g, c.RenamedFrom, cn) }
             r.moveColumnDependents(k, c.RenamedFrom, cn)
             r.rewriteColumnRefs(k, lt, c.RenamedFrom, cn)
         }

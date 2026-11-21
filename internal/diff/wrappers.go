@@ -213,7 +213,7 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 		}
 		if w.Grants != nil {
 			liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
-			revokes, grants := ownedGrantDiff(target, desiredG, liveG, owner, coversPublic(mode, true, desiredG))
+			revokes, grants := ownedGrantDiffBy(target, desiredG, liveG, owner, coversPublic(mode, true, desiredG), live.revoker("fdw:"+name, "", target, owner, &plan.Warnings))
 			if _, listed := desiredG["public"]; !listed {
 				plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, "a grants block on a foreign-data wrapper covers PUBLIC")...)
 			}
