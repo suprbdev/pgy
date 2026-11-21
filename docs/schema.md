@@ -67,7 +67,7 @@ This document describes the structure and format of the YAML schema files used b
 
 ## Overview
 
-Schema files declare the database you want: schemas, tables (with columns, keys, indexes, constraints, triggers, rules, policies, partitions and inheritance), views and materialized views, types, domains, sequences, functions, procedures and aggregates, collations and text search configurations, foreign-data wrappers, servers and foreign tables, roles, grants (including those on procedural languages), ownership and default privileges, publications, event triggers, and the rows of reference tables. `pgy diff` compares them with a live PostgreSQL database (15–18) and writes the SQL that brings the database in line. Anything that could lose data needs `--unsafe`, and dropping whole objects also needs `--prune`.
+Schema files declare the database you want: schemas, tables (with columns, keys, indexes, constraints, triggers, rules, policies, partitions and inheritance), views and materialized views, types, domains, sequences, functions, procedures and aggregates, collations and text search configurations, foreign-data wrappers, servers and foreign tables, roles, grants (including those on procedural languages), ownership and default privileges, publications, event triggers, and the rows of reference tables. `pgy diff` compares them with a live PostgreSQL database (15–19) and writes the SQL that brings the database in line. Anything that could lose data needs `--unsafe`, and dropping whole objects also needs `--prune`.
 
 ## Editor Support
 
