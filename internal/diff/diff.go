@@ -6242,16 +6242,11 @@ func objectOwner(live *Live, key, declared string) string {
     return live.CurrentUser
 }
 
-// ownedGrantDiff is grantDiffStmts with the object owner left out on both
+// ownedGrantDiffBy is grantDiffStmts with the object owner left out on both
 // sides: an owner holds every privilege implicitly, and live ACLs never
 // list it, so a grant to the owner would be re-emitted on every diff. With
 // coversPublic, PUBLIC's privileges desired doesn't list are revoked too.
-func ownedGrantDiff(target string, desired map[string][]string, liveG map[string]map[string]bool, owner string, coversPublic bool) (revokes, grants []string) {
-    return ownedGrantDiffBy(target, desired, liveG, owner, coversPublic, nil)
-}
-
-// ownedGrantDiffBy is ownedGrantDiff with the revokes written by rv (see
-// roleGrantStmtsBy).
+// The revokes are written by rv (see roleGrantStmtsBy).
 func ownedGrantDiffBy(target string, desired map[string][]string, liveG map[string]map[string]bool, owner string, coversPublic bool, rv *grantRevoker) (revokes, grants []string) {
     if owner != "" {
         if _, ok := desired[owner]; ok {
