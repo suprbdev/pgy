@@ -535,6 +535,8 @@ A changed `search_path` under `set` is also set for the session that runs the mi
 
 Database settings are applied after the extensions are created, so a setting an extension defines (`pg_trgm.similarity_threshold`) can be declared together with the extension. A role that is not a superuser may need some help to set it; see the next section.
 
+`pgy diff` looks up each setting name without a dot, wherever settings appear (`database:` `set:` and `roles:`, a role's `set:`, a function's or procedure's `set:`), on the server. One it doesn't know, such as `escape_string_warning` on PostgreSQL 19, which removed it, would fail the migration with `unrecognized configuration parameter`, so it is left out of the plan with a warning. A name with a dot is a placeholder for an extension's or the application's own parameter, which PostgreSQL accepts before it knows it, and is not looked up. `--from-empty` connects to nothing and plans every setting.
+
 ### Parameters an extension defines
 
 A parameter that an extension's library defines (`pg_trgm.similarity_threshold`, pgvector's `hnsw.ef_search` and `ivfflat.probes`) can appear wherever settings do: in the `set:` of a [function](#functions), a [procedure](#procedures) or a [role](#roles), and under `database:` in `set:` and `roles:`. All of them are applied after the extensions are created, so such a setting can be declared together with its extension.
@@ -745,6 +747,8 @@ If `name` is omitted, an auto-name `<schema>_<table>_<cols>_idx` is derived from
 A `columns` entry containing any character outside `[A-Za-z0-9_]` (e.g. `lower(name)`) is treated as an expression: it is emitted verbatim wrapped in parentheses instead of being quoted as an identifier. Use the full expression string as the key in `opclasses` to attach an operator class to it.
 
 Operator class parameters are written after the name, as in `CREATE INDEX`: `opclass: gist_trgm_ops(siglen=32)`, or per column `opclasses: {path: gist_ltree_ops(siglen=100), tags: gist__int_ops(numranges=100)}`. They are compared with the live index column by name and value, so spacing, quotes and the order of several parameters don't matter, and `pgy pull` writes them, including those of a default operator class (`tsvector_ops(siglen=100)`). A changed parameter is a changed index. An entry without parameters means the operator class defaults, so an index that has them in the database and not in the YAML is reported as changed.
+
+A column without an operator class gets the default one for its type, and which class that is can depend on the server version and the installed extensions: btree_gist's `gist_inet_ops` is the GiST default for `inet` before PostgreSQL 19, core's `inet_ops` from 19 on. So `pgy pull` writes the class of every index column and exclusion constraint element whose class belongs to an extension, or that has an extension's class for the same type and access method beside it, even when it is the default, and the YAML builds the same index on every version. Naming the default class compares equal to leaving it out.
 
 `using` takes any index access method the database has. The built-in ones need nothing else; one that an extension adds, such as `bloom`, needs the extension under `extensions:`. Its options go in `with` (`using: bloom`, `with: {length: 80, col1: 2}`).
 

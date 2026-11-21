@@ -1620,7 +1620,7 @@ func (b *builder) constraints(t *node, fq string, lt *diff.LiveTable) {
 					break
 				}
 			}
-			add(c, "expression", str(expr))
+			add(c, "expression", str(diff.ExcludeWithContestedOpclasses(expr, lt.IndexOpclasses[name])))
 			deferral(c, tail)
 			if li := lt.IndexDefs[name]; li != nil {
 				addStr(c, "tablespace", li.Tablespace)
@@ -1676,7 +1676,7 @@ func (b *builder) indexes(t *node, fq string, lt *diff.LiveTable) {
 				col += " nulls first"
 			}
 			cols[i] = col
-			if i < len(opcs) && (!opcs[i].Default || len(opcs[i].Params) > 0) {
+			if i < len(opcs) && (!opcs[i].Default || opcs[i].Contested || len(opcs[i].Params) > 0) {
 				if perCol == nil {
 					perCol = flowMap()
 				}

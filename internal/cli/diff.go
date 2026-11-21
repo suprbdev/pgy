@@ -34,8 +34,10 @@ func cmdDiff() *cobra.Command {
 Statements that lock or rewrite an existing table (an index built without
 concurrently, a foreign key or check added validated or enforced in one step,
 SET NOT NULL, a rewriting type change, SET EXPRESSION, SET LOGGED/UNLOGGED, an
-added column whose value is computed per row) are reported on stderr, as are
-the errors pgy validate would report. Use --no-warnings to silence them.
+added column whose value is computed per row) are reported on stderr. Use
+--no-warnings to silence them. The schema files are checked as pgy validate
+checks them, and an error there fails the diff: it is printed on stderr, and
+nothing is written.
 
 Declared expressions (defaults, checks, index expressions and predicates,
 policies, triggers and the like) are compared as text, and through the server
@@ -51,7 +53,7 @@ buffer file, and status messages go to stderr.
 Exit codes:
   0  No changes detected (schema matches live DB)
   2  Changes detected and written to the buffer file or stdout (not an error)
-  1  Unexpected error`,
+  1  Errors in the schema files, or an unexpected error`,
         Args: cobra.NoArgs,
         RunE: func(cmd *cobra.Command, args []string) error {
             ctx := cmd.Context()
@@ -74,11 +76,7 @@ Exit codes:
                 return err
             }
             issues := make(chan []validate.Issue, 1)
-            if noWarnings && !cfg.failsOn("validate") {
-                issues <- nil
-            } else {
-                go func() { issues <- validate.FilesWith(schemaPaths, cfg.External) }()
-            }
+            go func() { issues <- validate.FilesWith(schemaPaths, cfg.External) }()
             type loaded struct {
                 db  *schema.Database
                 err error
@@ -117,8 +115,15 @@ Exit codes:
                 }
             }
 
-            for _, is := range <-issues {
-                if is.Severity == validate.Error && !noWarnings { fmt.Fprintln(os.Stderr, "warning:", is.String()) }
+            validated := <-issues
+            if validate.HasErrors(validated) {
+                for _, is := range validated {
+                    if is.Severity == validate.Error { fmt.Fprintln(os.Stderr, is.String()) }
+                }
+                cmd.SilenceUsage = true
+                return &exitCodeError{code: 1}
+            }
+            for _, is := range validated {
                 if cfg.failsOn("validate") { strict.add("validate", is.String()) }
             }
             l := <-load
@@ -140,6 +145,9 @@ Exit codes:
             }
             if pool != nil {
                 if err := diff.IntrospectExtensions(ctx, pool, live, compiled, opts); err != nil {
+                    return err
+                }
+                if err := diff.IntrospectSettings(ctx, pool, live, compiled); err != nil {
                     return err
                 }
                 if err := diff.ProbeExtensionObjects(ctx, pool, live, compiled, opts); err != nil && !noWarnings {
