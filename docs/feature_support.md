@@ -4,7 +4,7 @@ This document tracks `pgy`'s support for various PostgreSQL features within its 
 
 Features are grouped by relative complexity and impact on the diffing engine.
 
-Supported servers: PostgreSQL 15, 16, 17, 18 and 19 (the integration suite runs against each in CI). Syntax specific to a newer release is emitted only when the YAML asks for it: `nullsNotDistinct` needs 15+ (the floor anyway), changing a generated expression in place needs 17+ (before, the column is dropped and added again), and `virtual` generated columns, `enforced: false` and temporal `without overlaps`/`period` keys need 18+.
+Supported servers: PostgreSQL 15, 16, 17, 18 and 19 (the integration suite runs against each in CI). Syntax specific to a newer release is emitted only when the YAML asks for it: `nullsNotDistinct` needs 15+ (the floor anyway), changing a generated expression in place needs 17+ (before, the column is dropped and added again), `virtual` generated columns, `enforced: false`, temporal `without overlaps`/`period` keys, `notNullNoInherit` and `largeObjects` default privileges need 18+, and a publication's `allSequences` and `except`, a foreign-data wrapper's `connection` and an aggregate's `support` need 19+. `pgy diff` warns when the server is older than such a key needs. Some changes run in place only on newer servers: `enforced: false` on an existing foreign key on 18+ and on an existing check on 19+, `SET EXPRESSION` on a virtual column of a table with check constraints on 19+, and a switch of a publication to `allTables` or `allSequences` on 19+.
 
 ## Level 1: Basic Schema & Tables
 These are the foundational elements required for almost any relational database application.
