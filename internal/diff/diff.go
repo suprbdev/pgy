@@ -8518,7 +8518,7 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
                 need(fmt.Sprintf("notValid on column %s.%s", fq, cn), 18)
             }
-            if c := t.Columns[cn]; c != nil && v < 180000 && c.NotNullName != "" && !c.Nullable {
+            if c := t.Columns[cn]; c != nil && c.NotNullName != "" && !c.Nullable && v < 180000 {
                 out = append(out, Warning{Message: fmt.Sprintf("notNullName on column %s.%s is ignored: PostgreSQL %d does not record a name for a column's NOT NULL constraint (PostgreSQL 18 does)", fq, cn, v/10000)})
             }
         }
