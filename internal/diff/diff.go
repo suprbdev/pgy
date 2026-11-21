@@ -109,6 +109,10 @@ type Live struct{
     // connected database
     DatabaseRoleConfig map[string]map[string]string
     ServerVersion  int // server_version_num, e.g. 170002; 0 when unknown
+    // UnknownSettings holds the lower-cased names of the settings the YAML
+    // declares that the server does not recognise (see IntrospectSettings);
+    // the plan leaves them out. nil when they were not checked.
+    UnknownSettings map[string]bool
     // Offline marks a Live that stands for an empty database rather than
     // one that was introspected (pgy diff --from-empty), so there is no
     // connected role and no server to report on.
@@ -652,6 +656,12 @@ type LiveIndex struct {
 type LiveIndexOpclass struct {
     Name    string
     Default bool
+    // Contested is true when the operator class belongs to an extension or
+    // an extension has another class for the same type and access method.
+    // Which of those is the default can differ between server versions:
+    // btree_gist's gist_inet_ops is the GiST default for inet before
+    // PostgreSQL 19, core's inet_ops from 19 on.
+    Contested bool
     // Collation is the key column's COLLATE when it differs from the
     // collation of the column or expression itself; "" otherwise.
     Collation string
@@ -1060,6 +1070,8 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         select n.nspname, t.relname, i.relname,
                case when opn.nspname in ('pg_catalog', 'public') then op.opcname::text else quote_ident(opn.nspname) || '.' || quote_ident(op.opcname) end,
                op.opcdefault,
+               exists (select 1 from pg_opclass eo join pg_depend d on d.classid = 'pg_opclass'::regclass and d.objid = eo.oid and d.deptype = 'e'
+                       where eo.opcmethod = op.opcmethod and eo.opcintype = op.opcintype),
                case when x.indcollation[k.ord] = 0 then '' else case when cn.nspname = 'pg_catalog' then '' else cn.nspname || '.' end || co.collname end,
                x.indkey[k.ord] > 0 and x.indcollation[k.ord] <> ta.attcollation,
                case when x.indkey[k.ord] = 0 and x.indcollation[k.ord] <> 0 then pg_get_indexdef(x.indexrelid, 0, true) else '' end,
@@ -1086,16 +1098,16 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
     batch.add(opcQ, func(opcRows pgx.Rows) error {
         for opcRows.Next() {
             var schemaName, tableName, idxName, opcName, keyCollation, indexDef, keyDef, column string
-            var opcDefault, columnCollated bool
+            var opcDefault, opcContested, columnCollated bool
             var ord, target int
             var params []string
-            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
+            if err := opcRows.Scan(&schemaName, &tableName, &idxName, &opcName, &opcDefault, &opcContested, &keyCollation, &columnCollated, &indexDef, &keyDef, &ord, &column, &target, &params); err != nil {
                 return err
             }
             collation := ""
             if columnCollated || (indexDef != "" && indexKeyCollated(indexDef, keyDef, ord)) { collation = keyCollation }
             if t := l.indexedRelation(fmt.Sprintf("%s.%s", schemaName, tableName)); t != nil {
-                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
+                t.IndexOpclasses[idxName] = append(t.IndexOpclasses[idxName], LiveIndexOpclass{Name: opcName, Default: opcDefault, Contested: opcContested, Collation: collation, KeyCollation: keyCollation, Column: column, StatisticsTarget: target, Params: params})
             }
         }
         return nil
@@ -3029,6 +3041,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     unsafe := opts.Unsafe
     live = withExtensionObjects(live, desired)
     desired = withExternal(desired, opts)
+    desired, settingWarnings := withoutUnknownSettings(live, desired)
     desired = withUnmovedExtensions(live, desired)
     live = routinesAfterMoves(live.scoped(), desired)
     base := live
@@ -3058,6 +3071,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     live, typeChangeEarly, typeChangePre, typeChangePost, readdedColumns, dependentWarnings := recreateColumnDependents(live, desired, opts)
     recreateWarnings = append(recreateWarnings, dependentWarnings...)
     recreateWarnings = append(recreateWarnings, attributeOnlyWarnings...)
+    recreateWarnings = append(recreateWarnings, settingWarnings...)
     // Foreign key alters are deferred until all tables are processed so that
     // every PK/unique constraint exists before any FK references it
     // (required for circular FK pairs, which topological sort cannot order).
@@ -3203,6 +3217,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
     memberData, dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
+    dataFirst, dataTriggers := dataFirstTables(live, desired), []string{}
+    triggersOf := func(fq string) *[]string {
+        if dataFirst[fq] { return &dataTriggers }
+        return &deferredTriggers
+    }
     plan.Creates = append(plan.Creates, memberData...)
     planLanguages(plan, live, desired, opts.PublicGrants)
     planWrappers(plan, live, desired, opts.PublicGrants)
@@ -3522,7 +3541,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, alters...)
                         if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignColumnOptionStmts(fq, cn, c)...) }
                     }
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
@@ -3573,7 +3592,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.Foreign != nil {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s)%s server %s%s;", pqIdent(fq), strings.Join(cols, ", "), inherits, quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 unlogged := ""
@@ -3587,7 +3606,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
             } else {
@@ -3720,6 +3739,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, dataWrites...)
+    if len(dataWrites) > 0 && dataDefersEvents(live, desired) { plan.Alters = append(plan.Alters, "set constraints all immediate;") }
+    plan.Alters = append(plan.Alters, dataTriggers...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe, pendingMembers)
     planPublications(plan, live, desired, opts)
@@ -3733,6 +3754,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
+    if len(dataDeletes) > 0 && dataDefersEvents(live, desired) { dataDeletes = append(dataDeletes, "set constraints all immediate;") }
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
         early, late, pruneWarnings := planPrune(live, desired, opts.MigrationsTable, plan.Drops)

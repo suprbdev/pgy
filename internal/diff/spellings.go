@@ -309,6 +309,9 @@ func triggerCallsEqual(desired, live string) (equal, ok bool) {
 type excludeElement struct {
 	key, collation, opclass, ordering, operator string
 	opclassParams                               map[string]string
+	// classAt is the offset in the element's text just after its key and
+	// collation, where an operator class goes.
+	classAt int
 }
 
 // excludeDef is a parsed exclusion constraint definition, without the
@@ -488,9 +491,12 @@ func parseExcludeElement(item string) (excludeElement, bool) {
 		return el, false
 	}
 	el.key = left[:keyEnd]
+	lead := len(item) - len(strings.TrimLeft(item, " \t\r\n"))
+	el.classAt = lead + keyEnd
 	rest := strings.TrimSpace(left[keyEnd:])
 	if m := excludeCollateRe.FindStringSubmatch(rest); m != nil {
 		el.collation = m[1]
+		el.classAt = lead + len(left) - len(rest) + len(strings.TrimRight(m[0], " \t\r\n"))
 		rest = rest[len(m[0]):]
 	}
 	if rest != "" && !excludeOrderingRe.MatchString(rest) {
@@ -511,6 +517,46 @@ func parseExcludeElement(item string) (excludeElement, bool) {
 	}
 	el.ordering = strings.ToLower(strings.Join(strings.Fields(rest), " "))
 	return el, true
+}
+
+// ExcludeWithContestedOpclasses returns def, an exclusion constraint's
+// definition after EXCLUDE as pg_get_constraintdef prints it, with the
+// operator class of each element spelled out where the class is contested
+// (see LiveIndexOpclass). pg_get_constraintdef leaves a default class out,
+// and which contested class is the default can change between server
+// versions. opclasses holds the classes of the constraint's index columns
+// in order. def is returned unchanged when it cannot be parsed.
+func ExcludeWithContestedOpclasses(def string, opclasses []LiveIndexOpclass) string {
+	pos := len(def) - len(strings.TrimLeft(def, " \t\r\n"))
+	if m := excludeUsingRe.FindStringSubmatch(def[pos:]); m != nil {
+		pos += len(m[0])
+	}
+	if pos >= len(def) || def[pos] != '(' {
+		return def
+	}
+	end := closingParen(def, pos)
+	if end < 0 {
+		return def
+	}
+	items := splitTopLevel(def[pos+1 : end])
+	if len(items) != len(opclasses) {
+		return def
+	}
+	changed := false
+	for i, item := range items {
+		el, ok := parseExcludeElement(item)
+		if !ok {
+			return def
+		}
+		if el.opclass == "" && opclasses[i].Contested {
+			items[i] = item[:el.classAt] + " " + opclasses[i].Declaration() + item[el.classAt:]
+			changed = true
+		}
+	}
+	if !changed {
+		return def
+	}
+	return def[:pos+1] + strings.Join(items, ", ") + def[end:]
 }
 
 // parseStorageParams splits the inside of a WITH (name = value, ...) clause
