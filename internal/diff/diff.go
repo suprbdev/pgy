@@ -3168,6 +3168,11 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
         if setsSearchPath(c) { plan.Creates = append(plan.Creates, c+";") }
     }
     memberData, dataWrites, dataDeletes := planData(live, desired, opts.Unsafe && opts.Prune)
+    dataFirst, dataTriggers := dataFirstTables(live, desired), []string{}
+    triggersOf := func(fq string) *[]string {
+        if dataFirst[fq] { return &dataTriggers }
+        return &deferredTriggers
+    }
     plan.Creates = append(plan.Creates, memberData...)
     planLanguages(plan, live, desired, opts.PublicGrants)
     planWrappers(plan, live, desired, opts.PublicGrants)
@@ -3474,7 +3479,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                         plan.Alters = append(plan.Alters, inheritedColumnStmts(fq, cn, c, nil)...)
                         if dt.Foreign != nil { plan.Alters = append(plan.Alters, foreignColumnOptionStmts(fq, cn, c)...) }
                     }
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 cols := make([]string, 0, len(dt.Columns))
@@ -3520,7 +3525,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 if dt.Foreign != nil {
                     plan.Creates = append(plan.Creates, fmt.Sprintf("create foreign table if not exists %s (%s)%s server %s%s;", pqIdent(fq), strings.Join(cols, ", "), inherits, quoteIdent(dt.Foreign.Server), fdwOptionsClause(dt.Foreign.Options)))
                     plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                    applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                     continue
                 }
                 unlogged := ""
@@ -3534,7 +3539,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                 create += accessMethodClause(fq, dt.AccessMethod, dt.PartitionBy != nil, live.ServerVersion, func(msg string) { plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg}) })
                 plan.Creates = append(plan.Creates, create+renderStorageParams(dt.With, dt.WithOrder)+tablespaceClause(dt.Tablespace)+";")
                 plan.Alters = append(plan.Alters, columnStorageStmts(fq, dt)...)
-                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, &deferredTriggers, unsafe)
+                applyTableConstraints(plan, live, fq, dt, nil, &deferredFKs, triggersOf(fq), unsafe)
                 if stmt := replicaIdentityStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
                 if stmt := clusterOnStmt(fq, dt, nil); stmt != "" { plan.Alters = append(plan.Alters, stmt) }
             } else {
@@ -3655,6 +3660,8 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Creates = append(plan.Creates, deferredTriggers...)
     planEventTriggers(plan, live, desired, opts)
     plan.Alters = append(plan.Alters, dataWrites...)
+    if len(dataWrites) > 0 && dataDefersEvents(live, desired) { plan.Alters = append(plan.Alters, "set constraints all immediate;") }
+    plan.Alters = append(plan.Alters, dataTriggers...)
     plan.Alters = append(plan.Alters, deferredFKs...)
     planPolicies(plan, live, desired, unsafe, pendingMembers)
     planPublications(plan, live, desired, opts)
@@ -3668,6 +3675,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
     plan.Alters = append(plan.Alters, typeChangePost...)
+    if len(dataDeletes) > 0 && dataDefersEvents(live, desired) { dataDeletes = append(dataDeletes, "set constraints all immediate;") }
     plan.Drops = append(dataDeletes, plan.Drops...)
     if opts.Unsafe && opts.Prune {
         early, late, pruneWarnings := planPrune(live, desired, opts.MigrationsTable, plan.Drops)

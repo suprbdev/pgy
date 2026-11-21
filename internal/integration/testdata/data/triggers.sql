@@ -1,0 +1,15 @@
+create schema d4;
+create table d4.audit (id bigint generated always as identity primary key, tbl text not null);
+create table d4.account (id int primary key, seats int not null check (seats > 0));
+create table d4.seat (id int primary key, account int not null references d4.account deferrable initially deferred);
+create function d4.check_seats() returns trigger language plpgsql as $$ begin if new.seats > 100 then raise exception 'too many'; end if; return new; end $$;
+create function d4.audit_ins() returns trigger language plpgsql as $$ begin insert into d4.audit (tbl) values (tg_table_name); return new; end $$;
+create constraint trigger account_seats after insert or update on d4.account deferrable initially deferred for each row execute function d4.check_seats();
+create trigger account_audit after insert on d4.account for each row execute function d4.audit_ins();
+create trigger seat_audit after insert on d4.seat for each row execute function d4.audit_ins();
+create rule account_log as on insert to d4.account do also insert into d4.audit (tbl) values ('rule');
+alter table d4.account enable row level security;
+alter table d4.account force row level security;
+insert into d4.account values (1, 3), (2, 5);
+insert into d4.seat values (10, 1), (11, 2);
+truncate d4.audit;
