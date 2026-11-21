@@ -2964,6 +2964,17 @@ type PlanDiff struct{
     // parts coordinates the indexes of partition trees while the plan is
     // built.
     parts *partitionIndexPlan
+    // replaced holds the constraints, as "table\x00name", that the plan
+    // drops and adds again without --unsafe, so their comments are set
+    // again.
+    replaced map[string]bool
+}
+
+// replaceConstraint records that the plan drops constraint name of table fq
+// and adds it again.
+func (p *PlanDiff) replaceConstraint(fq, name string) {
+    if p.replaced == nil { p.replaced = map[string]bool{} }
+    p.replaced[fq+"\x00"+name] = true
 }
 
 func (p *PlanDiff) Summary() map[string]int {
@@ -3605,7 +3616,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
                             plan.Concurrent = append(plan.Concurrent, fmt.Sprintf("alter table %s validate constraint %s;", pqIdent(fq), quoteIdent(pending)))
                         }
                     }
-                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, func(msg string) {
+                    stmts := alterColumnStmts(fq, cn, c, lc, pkCols, unsafe, live.ServerVersion, generatedChangeBlocked(live, fq, c, lc), func(msg string) {
                         plan.Warnings = append(plan.Warnings, Warning{Table: fq, Message: msg})
                     })
                     if len(typeChangePre[fq]) > 0 {
@@ -3663,7 +3674,7 @@ func planWith(live *Live, desired *schema.Database, opts Options) *PlanDiff {
     grantStmts, grantWarnings := planGrantsWarned(live, desired, opts.PublicGrants)
     plan.Alters = append(plan.Alters, grantStmts...)
     plan.Warnings = append(plan.Warnings, grantWarnings...)
-    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe)...)
+    plan.Alters = append(plan.Alters, planComments(live, desired, unsafe, plan.replaced)...)
     plan.Alters = append(plan.Alters, routinePost...)
     plan.Alters = append(plan.Alters, viewPost...)
     plan.Alters = append(plan.Alters, updatePost...)
@@ -5420,8 +5431,10 @@ func ownedByIdent(seq, s string) string {
 
 // planComments emits COMMENT ON for objects whose desired comment is set and
 // differs from live. Empty desired comment = unmanaged (never cleared). An
-// external role that exists keeps its comment, as planRoles warns.
-func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
+// external role that exists keeps its comment, as planRoles warns. A
+// constraint in replaced ("table\x00name"), which the plan drops and adds
+// again, gets its comment again.
+func planComments(live *Live, desired *schema.Database, unsafe bool, replaced map[string]bool) []string {
     stmts := []string{}
     comment := func(target, want, have string) {
         if want != "" && want != have {
@@ -5523,14 +5536,14 @@ func planComments(live *Live, desired *schema.Database, unsafe bool) []string {
             if fk == nil || fk.Comment == "" || len(fk.Columns) == 0 || fk.RefTable == "" { continue }
             fkName := truncateIdent(fk.Name)
             have := ""
-            if lt != nil && !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe) { have = lt.ConstraintComments[fkName] }
+            if lt != nil && (foreignKeyEnforcedOnly(live, lt, fkName, fk) || !constraintRecreated(lt, fkName, renderFKDef(fk), unsafe)) && !replaced[k+"\x00"+fkName] { have = lt.ConstraintComments[fkName] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(fkName), pqIdent(k)), fk.Comment, have)
         }
         for _, ct := range dt.Constraints {
             if ct == nil || ct.Comment == "" || renderConstraintDef(ct) == "" { continue }
             name := truncateIdent(ct.Name)
             have := ""
-            if lt != nil && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct)) { have = lt.ConstraintComments[name] }
+            if lt != nil && !replaced[k+"\x00"+name] && (!unsafe || !lt.Constraints[name] || lt.ConstraintDefs[name] == "" || constraintMatchesLive(lt, name, ct) || checkEnforcedOnly(live, lt, name, ct)) { have = lt.ConstraintComments[name] }
             comment(fmt.Sprintf("constraint %s on %s", quoteIdent(name), pqIdent(k)), ct.Comment, have)
         }
         for _, tr := range dt.Triggers {
@@ -6356,12 +6369,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[fkName] {
             liveDef, ok := liveConstraintDefs[fkName]
+            toggle := foreignKeyEnforcedOnly(live, lt, fkName, fk)
             switch {
+            case toggle && (fk.NotEnforced || immediate && !fk.NotValid):
+                *deferredFKs = append(*deferredFKs, enforcedStmt(fq, fkName, fk.NotEnforced))
+            case toggle:
+                *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, fkName)
             case unsafe && ok && !constraintDefsEqual(def, liveDef):
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef) && immediate:
                 *deferredFKs = append(*deferredFKs, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(fkName)), stmt)
+                plan.replaceConstraint(fq, fkName)
             case !fk.NotValid && !fk.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             }
@@ -6550,12 +6571,20 @@ func applyTableConstraints(plan *PlanDiff, live *Live, fq string, dt *schema.Tab
         }
         if liveConstraints[ctName] {
             liveDef, ok := liveConstraintDefs[ctName]
+            toggle := checkEnforcedOnly(live, lt, ctName, ct)
             switch {
+            case toggle && (live.ServerVersion <= 0 || live.ServerVersion >= 190000) && (ct.NotEnforced || immediate && !ct.NotValid):
+                plan.Alters = append(plan.Alters, enforcedStmt(fq, ctName, ct.NotEnforced))
+            case toggle:
+                plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                if split { plan.Concurrent = append(plan.Concurrent, validate) }
+                plan.replaceConstraint(fq, ctName)
             case unsafe && ok && !constraintMatchesLive(lt, ctName, ct):
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
                 if split { plan.Concurrent = append(plan.Concurrent, validate) }
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef) && immediate:
                 plan.Alters = append(plan.Alters, fmt.Sprintf("alter table %s drop constraint %s;", pqIdent(fq), quoteIdent(ctName)), stmt)
+                plan.replaceConstraint(fq, ctName)
             case !ct.NotValid && !ct.NotEnforced && liveNotValid(liveDef):
                 plan.Concurrent = append(plan.Concurrent, validate)
             default:
@@ -6964,8 +6993,10 @@ func RenderMain(p *PlanDiff) string {
 // default left in place to the new type and gives up when no implicit or
 // assignment cast exists. Identity changes go through identityAlterStmts;
 // identity/serial columns keep their generated defaults and implicit NOT
-// NULL.
-func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, warn func(string)) []string {
+// NULL. A changed generated expression gets SET EXPRESSION under --unsafe,
+// unless blocked (see generatedChangeBlocked) says why the column can't
+// change in place, when recreateColumnDependents drops and adds it instead.
+func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols map[string]bool, unsafe bool, serverVersion int, blocked string, warn func(string)) []string {
     out := []string{}
     target := fmt.Sprintf("alter table %s alter column %s", pqIdent(fq), quoteIdent(cn))
 
@@ -6998,13 +7029,15 @@ func alterColumnStmts(fq, cn string, c *schema.Column, lc *LiveColumn, pkCols ma
 
     if c.Generated != "" || lc.Generated != "" {
         switch {
-        case c.Generated != "" && lc.Generated != "" && !constraintDefsEqual(c.Generated, lc.Generated):
+        case c.Generated != "" && lc.Generated != "" && (blocked != "" || !constraintDefsEqual(c.Generated, lc.Generated)):
             switch {
-            case serverVersion > 0 && serverVersion < 170000:
-                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but PostgreSQL %d has no ALTER COLUMN ... SET EXPRESSION (added in 17); --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, serverVersion/10000)) }
+            case blocked != "":
+                if !unsafe { warn(fmt.Sprintf("generated column %s.%s changed, but %s; --unsafe drops the column and adds it again, along with the indexes and constraints that use it", fq, cn, blocked)) }
             case unsafe:
                 out = append(out, fmt.Sprintf("%s set expression as (%s);", target, c.Generated))
             }
+        case c.Generated == "" && lc.Virtual:
+            warn(fmt.Sprintf("column %s.%s is declared plain but is a virtual generated column, and PostgreSQL has DROP EXPRESSION only for stored ones; add a plain column under another name, copy %s into it and drop %s in a hand-written migration", fq, cn, cn, cn))
         case c.Generated == "" && lc.Generated != "":
             if unsafe { out = append(out, target+" drop expression;") }
         case c.Generated != "" && lc.Generated == "":
@@ -7460,6 +7493,47 @@ func renderFKDef(fk *schema.ForeignKey) string {
 // constraint NOT VALID.
 func liveNotValid(def string) bool {
     return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT VALID")
+}
+
+// liveNotEnforced reports whether a pg_get_constraintdef() output marks the
+// constraint NOT ENFORCED.
+func liveNotEnforced(def string) bool {
+    return strings.HasSuffix(strings.ToUpper(strings.TrimSpace(def)), " NOT ENFORCED")
+}
+
+// foreignKeyEnforcedOnly reports whether foreign key name of lt differs
+// from fk only in being enforced or not, on a server that knows NOT
+// ENFORCED (PostgreSQL 18+).
+func foreignKeyEnforcedOnly(live *Live, lt *LiveTable, name string, fk *schema.ForeignKey) bool {
+    if lt == nil || !enforcedToggled(live, fk.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *fk
+    flipped.NotEnforced = !fk.NotEnforced
+    return constraintDefsEqual(renderFKDef(&flipped), lt.ConstraintDefs[name])
+}
+
+// checkEnforcedOnly is foreignKeyEnforcedOnly for check constraint ct.
+func checkEnforcedOnly(live *Live, lt *LiveTable, name string, ct *schema.Constraint) bool {
+    if lt == nil || !strings.EqualFold(ct.Type, "check") || !enforcedToggled(live, ct.NotEnforced, lt.ConstraintDefs, name) { return false }
+    flipped := *ct
+    flipped.NotEnforced = !ct.NotEnforced
+    return constraintMatchesLive(lt, name, &flipped)
+}
+
+// enforcedToggled reports whether constraint name, declared notEnforced,
+// is enforced the other way in its live definition in defs, on a server
+// that knows NOT ENFORCED.
+func enforcedToggled(live *Live, notEnforced bool, defs map[string]string, name string) bool {
+    def, ok := defs[name]
+    return ok && notEnforced != liveNotEnforced(def) && (live.ServerVersion <= 0 || live.ServerVersion >= 180000)
+}
+
+// enforcedStmt changes constraint name of table fq to NOT ENFORCED, or to
+// ENFORCED, which checks every row under an ACCESS EXCLUSIVE lock.
+// PostgreSQL 18 does this for foreign keys, 19 for check constraints too.
+func enforcedStmt(fq, name string, notEnforced bool) string {
+    state := "enforced"
+    if notEnforced { state = "not enforced" }
+    return fmt.Sprintf("alter table %s alter constraint %s %s;", pqIdent(fq), quoteIdent(name), state)
 }
 
 // validityClause renders NOT VALID / NOT ENFORCED. A constraint that is not
@@ -8383,7 +8457,7 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
         if t == nil { continue }
         lt := live.Tables[fq]
         for _, cn := range sortedKeys(t.Columns) {
-            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil) {
+            if c := t.Columns[cn]; c != nil && c.Virtual && c.Generated != "" && (lt == nil || lt.Columns[cn] == nil || !lt.Columns[cn].Virtual) {
                 need(fmt.Sprintf("virtual generated column %s.%s", fq, cn), 18)
             }
             if c := t.Columns[cn]; c != nil && c.NotValid && !c.Nullable && (lt == nil || lt.Columns[cn] == nil || lt.Columns[cn].Nullable) {
@@ -8394,12 +8468,12 @@ func versionWarnings(live *Live, desired *schema.Database) []Warning {
             }
         }
         for _, ct := range t.Constraints {
-            if ct != nil && ct.NotEnforced && (lt == nil || !lt.Constraints[ct.Name]) {
+            if ct != nil && ct.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(ct.Name)])) {
                 need(fmt.Sprintf("constraint %s on %s (enforced: false)", ct.Name, fq), 18)
             }
         }
         for _, fk := range t.ForeignKeys {
-            if fk != nil && fk.NotEnforced && (lt == nil || !lt.Constraints[fk.Name]) {
+            if fk != nil && fk.NotEnforced && (lt == nil || !liveNotEnforced(lt.ConstraintDefs[truncateIdent(fk.Name)])) {
                 need(fmt.Sprintf("foreign key %s on %s (enforced: false)", fk.Name, fq), 18)
             }
         }
