@@ -46,15 +46,23 @@ func TestIntegrationGrantorRevokesConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reported := strings.Join(res.Warnings, "\n")
+	var pulled strings.Builder
+	for _, f := range res.Files {
+		pulled.Write(f.Content)
+	}
 	for _, want := range []string{
-		fmt.Sprintf("table app.t: %s's select with grant option, granted by %s", reader, grantor),
-		fmt.Sprintf("column c of table app.t: %s's update, granted by %s", reader, grantor),
-		fmt.Sprintf("public's usage, granted by %s", reader),
-		fmt.Sprintf("%s's usage with grant option, granted by %s", reader, grantor),
+		fmt.Sprintf("grantedBy: {%s: {%s: [select with grant option]}}", grantor, reader),
+		fmt.Sprintf("grantedBy: {%s: {%s: [update]}}", grantor, reader),
+		fmt.Sprintf("grantedBy: {%s: {%s: [usage with grant option]}, %s: {public: [usage]}}", grantor, reader, reader),
+		fmt.Sprintf("grantedBy: {%s: {%s: [execute]}}", grantor, reader),
 	} {
-		if !strings.Contains(reported, want) {
-			t.Errorf("pull reports %q:\n%s", want, reported)
+		if !strings.Contains(pulled.String(), want) {
+			t.Errorf("pull writes %q:\n%s", want, pulled.String())
+		}
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "granted by") {
+			t.Errorf("pull warns about a grant its grantedBy blocks write: %s", w)
 		}
 	}
 

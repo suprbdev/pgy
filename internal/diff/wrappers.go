@@ -211,9 +211,9 @@ func planWrappers(plan *PlanDiff, live *Live, desired *schema.Database, mode Pub
 				plan.Creates = append(plan.Creates, fmt.Sprintf("alter %s owner to %s;", target, grantRole(w.Owner)))
 			}
 		}
-		if w.Grants != nil {
+		if w.Grants != nil || w.GrantedBy != nil {
 			liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
-			revokes, grants := ownedGrantDiffBy(target, desiredG, liveG, owner, coversPublic(mode, true, desiredG), live.revoker("fdw:"+name, "", target, owner, &plan.Warnings))
+			revokes, grants := ownedGrantDiffBy(target, desiredG, liveG, owner, coversPublic(mode, true, desiredG), live.grantedByRevoker("fdw:"+name, "", target, owner, w.GrantedBy, &plan.Warnings))
 			if _, listed := desiredG["public"]; !listed {
 				plan.Warnings = append(plan.Warnings, publicRevokeWarnings(revokes, mode, "a grants block on a foreign-data wrapper covers PUBLIC")...)
 			}
@@ -338,6 +338,9 @@ func simulateWrappers(out *Live, desired *schema.Database) {
 		}
 		if w.Grants != nil {
 			lw.Grants = simulateACL(nil, resolveGrantRoles(w.Grants, out.CurrentUser))
+		}
+		if w.GrantedBy != nil {
+			lw.Grants = simulateGrantedBy(out, "fdw:"+name, "", lw.Owner, lw.Grants, w.Grants != nil, w.GrantedBy)
 		}
 		if out.Wrappers == nil {
 			out.Wrappers = map[string]*LiveWrapper{}

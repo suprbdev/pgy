@@ -165,6 +165,7 @@ func Database(d *schema.Database) []Issue {
 	checkRenames(d, add)
 	checkWrappersAndLanguages(d, add)
 	checkOwnerGrants(d, add)
+	checkGrantedBy(d, add)
 	checkNameClashes(d, add)
 	for _, fq := range sortedKeys(d.Views) {
 		if v := d.Views[fq]; v != nil && !v.Materialized && v.Tablespace != "" {

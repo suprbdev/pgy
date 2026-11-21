@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/suprbdev/pgy/internal/schema"
 )
 
 // LiveGrantors holds the grantors of the grants on one object, or on one
@@ -168,26 +170,38 @@ type grantRevoker struct {
 	revoked, revokedOpt map[string]map[string]bool
 	// regranted: grantee -> the privileges regrants gives back.
 	regranted map[string]map[string]bool
+	// by is the object's grantedBy block, its grants of the owner left
+	// out, and ownerBy those, which are the grants block's (see
+	// resolveGrantedBy); nil when it has none.
+	by      grantedByBlock
+	ownerBy map[string][]string
+	// leaveAlone reports a grantee whose grants by the grantors by lists
+	// are left alone unless the grantor's entry names it: an external role.
+	leaveAlone func(string) bool
+	// lost: privilege -> the roles whose grants of it the plan's REVOKE
+	// ... CASCADE statements take away (see grantRevoker.regrants).
+	lost map[string]map[string]bool
+	// revokedBy and revokedOptBy: grantor -> grantee -> the privileges,
+	// and the grant options of privileges, grantedByRevokes takes away.
+	revokedBy, revokedOptBy grantedByBlock
 }
 
-// revoker returns the grantRevoker of the object with Grantors key key, or
-// of its column when column is set, whose owner is owner and which target
-// names, adding its warnings to warns; nil when the object holds no grant
-// of a role other than its owner, and the plain REVOKE is the one to run.
-func (l *Live) revoker(key, column, target, owner string, warns *[]Warning) *grantRevoker {
+// grantedByRevoker returns the grantRevoker of the object with Grantors
+// key key, or of its column when column is set, whose owner is owner,
+// whose grantedBy block is by and which target names, adding its warnings
+// to warns; nil when the object holds no grant of a role other than its
+// owner and by is nil, and the plain REVOKE is the one to run.
+func (l *Live) grantedByRevoker(key, column, target, owner string, by schema.GrantedBy, warns *[]Warning) *grantRevoker {
 	if l == nil {
 		return nil
 	}
-	var g LiveGrantors
-	if column != "" {
-		g = l.ColumnGrantors[strings.TrimPrefix(key, "rel:")][column]
-	} else {
-		g = l.Grantors[key]
-	}
-	if len(g) == 0 {
+	g := l.grantorsOf(key, column)
+	if len(g) == 0 && by == nil {
 		return nil
 	}
-	return &grantRevoker{live: l, target: target, owner: owner, grantors: g, warns: warns}
+	rv := &grantRevoker{live: l, target: target, owner: owner, grantors: g, warns: warns}
+	rv.by, rv.ownerBy = resolveGrantedBy(by, owner, l.CurrentUser)
+	return rv
 }
 
 // plainGrantor returns the role whose grants a REVOKE of privs without
@@ -268,15 +282,42 @@ func (rv *grantRevoker) revoke(on func([]string) string, role string, privs []st
 	if (*done)[role] == nil {
 		(*done)[role] = map[string]bool{}
 	}
-	dependents := map[string]bool{}
 	for _, p := range privs {
 		(*done)[role][p] = true
-		if rv.granted(role, p) {
-			dependents[p] = true
-			if rv.cascaded == nil {
-				rv.cascaded = map[string][]string{}
+	}
+	byGrantor := map[string][]string{}
+	pg := rv.plainGrantor(privs)
+	for _, p := range privs {
+		gs := slices.DeleteFunc(rv.grantorsOf(role, p, option), rv.listed)
+		if len(gs) == 0 {
+			gs = []string{pg}
+		}
+		for _, g := range gs {
+			byGrantor[g] = append(byGrantor[g], p)
+		}
+	}
+	return rv.revokeStmts(on, role, option, byGrantor, pg)
+}
+
+// revokeStmts returns the statements that take away from role the grants
+// of byGrantor, grantor -> privileges (their grant option, with option), pg
+// being the grantor whose grants a REVOKE without GRANTED BY takes away
+// (see grantRevoker.plainGrantor).
+func (rv *grantRevoker) revokeStmts(on func([]string) string, role string, option bool, byGrantor map[string][]string, pg string) []revokeGroup {
+	head := "revoke "
+	if option {
+		head = "revoke grant option for "
+	}
+	dependents := map[string]bool{}
+	for _, ps := range byGrantor {
+		for _, p := range ps {
+			if !dependents[p] && rv.granted(role, p) {
+				dependents[p] = true
+				if rv.cascaded == nil {
+					rv.cascaded = map[string][]string{}
+				}
+				rv.cascaded[role] = append(rv.cascaded[role], p)
 			}
-			rv.cascaded[role] = append(rv.cascaded[role], p)
 		}
 	}
 	stmt := func(ps []string, by string) string {
@@ -288,17 +329,6 @@ func (rv *grantRevoker) revoke(on func([]string) string, role string, privs []st
 			s += " cascade"
 		}
 		return s + ";"
-	}
-	byGrantor := map[string][]string{}
-	pg := rv.plainGrantor(privs)
-	for _, p := range privs {
-		gs := rv.grantorsOf(role, p, option)
-		if len(gs) == 0 {
-			gs = []string{pg}
-		}
-		for _, g := range gs {
-			byGrantor[g] = append(byGrantor[g], p)
-		}
 	}
 	l := rv.live
 	var out []revokeGroup
@@ -363,7 +393,16 @@ func (rv *grantRevoker) regrants(on func([]string) string) []string {
 					}
 				}
 			}
-			isLost := func(g string) bool { return lost[g] }
+			if rv.lost == nil {
+				rv.lost = map[string]map[string]bool{}
+			}
+			if rv.lost[p] == nil {
+				rv.lost[p] = map[string]bool{}
+			}
+			for r := range lost {
+				rv.lost[p][r] = true
+			}
+			isLost := func(g string) bool { return lost[g] && !rv.listed(g) }
 			kept := func(g string) bool { return !lost[g] }
 			for _, grantee := range sortedKeys(rv.grantors) {
 				gs := rv.grantorsOf(grantee, p, false)
@@ -478,7 +517,7 @@ func (rv *grantRevoker) reportKept() {
 			}
 			var others []string
 			for _, g := range rv.grantorsOf(role, priv, false) {
-				if g != rv.owner && g != rv.live.CurrentUser {
+				if g != rv.owner && g != rv.live.CurrentUser && !rv.listed(g) {
 					others = append(others, g)
 				}
 			}
@@ -493,7 +532,7 @@ func (rv *grantRevoker) reportKept() {
 		}
 	}
 	if len(kept) > 0 {
-		*rv.warns = append(*rv.warns, Warning{Message: fmt.Sprintf("%s: %s; grants blocks don't record grantors, so pgy keeps such grants, but a privilege it grants is granted by the owner or the connecting role", rv.target, strings.Join(kept, "; "))})
+		*rv.warns = append(*rv.warns, Warning{Message: fmt.Sprintf("%s: %s; grants blocks don't record grantors, so pgy keeps such grants, but a privilege it grants is granted by the owner or the connecting role; a grantedBy block declares a grant of another role", rv.target, strings.Join(kept, "; "))})
 	}
 }
 
@@ -501,8 +540,9 @@ func (rv *grantRevoker) reportKept() {
 // by a role other than the object's owner (see Live.Grantors).
 type ForeignGrant struct {
 	// Object is the object, as "table s.t", "function s.f(integer)" or
-	// "schema s"; Schema its schema, "" for an object outside schemas.
-	Object, Schema string
+	// "schema s"; Schema its schema, "" for an object outside schemas; Key
+	// its Live.Grantors key.
+	Object, Schema, Key string
 	Column         string
 	Grantee        string
 	// Privilege is lower case, with "*" for the grant option.
@@ -534,7 +574,7 @@ func (l *Live) ForeignGrants() []ForeignGrant {
 					if grantor == "" || grantor == l.CurrentUser {
 						continue
 					}
-					out = append(out, ForeignGrant{Object: object, Schema: nsp, Column: column, Grantee: grantee, Privilege: priv, Grantor: grantor})
+					out = append(out, ForeignGrant{Object: object, Schema: nsp, Key: key, Column: column, Grantee: grantee, Privilege: priv, Grantor: grantor})
 				}
 			}
 		}

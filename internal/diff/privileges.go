@@ -141,8 +141,22 @@ func expandGrantsField[T any](m map[string]*T, field func(*T) *map[string][]stri
 	return out
 }
 
+// expandGrantedByField is expandGrantsField for a grantedBy block.
+func expandGrantedByField[T any](m map[string]*T, field func(*T) *schema.GrantedBy, set []string) map[string]*T {
+	out, _ := rewriteEach(m, func(v *T) *T {
+		g, ok := expandAllGrantedBy(*field(v), set)
+		if !ok {
+			return nil
+		}
+		c := *v
+		*field(&c) = g
+		return &c
+	})
+	return out
+}
+
 // expandAllPrivileges returns desired with ALL and ALL PRIVILEGES in its
-// grants blocks replaced by the privileges they stand for on the object's
+// grants and grantedBy blocks replaced by the privileges they stand for on the object's
 // kind on a server running version, which is how PostgreSQL stores them,
 // so that they compare with live ACLs. Objects it changes are copied;
 // desired is left as it is. With version 0 (no server, as in diff
@@ -161,20 +175,22 @@ func expandAllPrivileges(desired *schema.Database, version int) *schema.Database
 	out := *desired
 	out.Tables, _ = rewriteEach(desired.Tables, func(t *schema.Table) *schema.Table {
 		g, grantsChanged := expandAllGrants(t.Grants, set("table"))
+		gb, byChanged := expandAllGrantedBy(t.GrantedBy, set("table"))
 		cols, colsChanged := rewriteEach(t.Columns, func(c *schema.Column) *schema.Column {
 			cg, ok := expandAllGrants(c.Grants, set("column"))
-			if !ok {
+			cgb, byOk := expandAllGrantedBy(c.GrantedBy, set("column"))
+			if !ok && !byOk {
 				return nil
 			}
 			cc := *c
-			cc.Grants = cg
+			cc.Grants, cc.GrantedBy = cg, cgb
 			return &cc
 		})
-		if !grantsChanged && !colsChanged {
+		if !grantsChanged && !byChanged && !colsChanged {
 			return nil
 		}
 		c := *t
-		c.Grants, c.Columns = g, cols
+		c.Grants, c.GrantedBy, c.Columns = g, gb, cols
 		return &c
 	})
 	out.Views, _ = rewriteEach(desired.Views, func(v *schema.View) *schema.View {
@@ -190,13 +206,28 @@ func expandAllPrivileges(desired *schema.Database, version int) *schema.Database
 			}
 			cols[col] = eg
 		}
-		if !grantsChanged && cols == nil {
+		gb, byChanged := expandAllGrantedBy(v.GrantedBy, set("table"))
+		var colsBy map[string]schema.GrantedBy
+		for col, cg := range v.ColumnGrantedBy {
+			eg, ok := expandAllGrantedBy(cg, set("column"))
+			if !ok {
+				continue
+			}
+			if colsBy == nil {
+				colsBy = cloneMap(v.ColumnGrantedBy, nil)
+			}
+			colsBy[col] = eg
+		}
+		if !grantsChanged && cols == nil && !byChanged && colsBy == nil {
 			return nil
 		}
 		c := *v
-		c.Grants = g
+		c.Grants, c.GrantedBy = g, gb
 		if cols != nil {
 			c.ColumnGrants = cols
+		}
+		if colsBy != nil {
+			c.ColumnGrantedBy = colsBy
 		}
 		return &c
 	})
@@ -209,6 +240,24 @@ func expandAllPrivileges(desired *schema.Database, version int) *schema.Database
 	out.Servers = expandGrantsField(desired.Servers, func(v *schema.Server) *map[string][]string { return &v.Grants }, set("server"))
 	out.ForeignDataWrappers = expandGrantsField(desired.ForeignDataWrappers, func(v *schema.ForeignDataWrapper) *map[string][]string { return &v.Grants }, set("fdw"))
 	out.Languages = expandGrantsField(desired.Languages, func(v *schema.Language) *map[string][]string { return &v.Grants }, set("language"))
+	out.Sequences = expandGrantedByField(out.Sequences, func(v *schema.Sequence) *schema.GrantedBy { return &v.GrantedBy }, set("sequence"))
+	out.Functions = expandGrantedByField(out.Functions, func(v *schema.Function) *schema.GrantedBy { return &v.GrantedBy }, set("routine"))
+	out.Procedures = expandGrantedByField(out.Procedures, func(v *schema.Procedure) *schema.GrantedBy { return &v.GrantedBy }, set("routine"))
+	out.Aggregates = expandGrantedByField(out.Aggregates, func(v *schema.Aggregate) *schema.GrantedBy { return &v.GrantedBy }, set("routine"))
+	out.Types = expandGrantedByField(out.Types, func(v *schema.TypeDef) *schema.GrantedBy { return &v.GrantedBy }, set("type"))
+	out.Domains = expandGrantedByField(out.Domains, func(v *schema.Domain) *schema.GrantedBy { return &v.GrantedBy }, set("type"))
+	out.Servers = expandGrantedByField(out.Servers, func(v *schema.Server) *schema.GrantedBy { return &v.GrantedBy }, set("server"))
+	out.ForeignDataWrappers = expandGrantedByField(out.ForeignDataWrappers, func(v *schema.ForeignDataWrapper) *schema.GrantedBy { return &v.GrantedBy }, set("fdw"))
+	out.Languages = expandGrantedByField(out.Languages, func(v *schema.Language) *schema.GrantedBy { return &v.GrantedBy }, set("language"))
+	byCopied := false
+	for s, g := range desired.SchemaGrantedBy {
+		if eg, ok := expandAllGrantedBy(g, set("schema")); ok {
+			if !byCopied {
+				out.SchemaGrantedBy, byCopied = cloneMap(desired.SchemaGrantedBy, nil), true
+			}
+			out.SchemaGrantedBy[s] = eg
+		}
+	}
 	schemaGrantsCopied := false
 	for s, g := range desired.SchemaGrants {
 		if eg, ok := expandAllGrants(g, set("schema")); ok {

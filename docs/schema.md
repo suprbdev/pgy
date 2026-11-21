@@ -52,6 +52,7 @@ This document describes the structure and format of the YAML schema files used b
 - [Row Level Security](#row-level-security)
 - [Roles](#roles)
 - [Grants](#grants)
+  - [Grants of other roles](#grants-of-other-roles)
   - [Ownership](#ownership)
   - [Objects of other owners](#objects-of-other-owners)
   - [Roles the connecting role can't change](#roles-the-connecting-role-cant-change)
@@ -575,6 +576,7 @@ A table declared without `columns`, `of`, `partitionOf` and `inherits` (nor the 
 | `notNullName` | string | Name of the column's NOT NULL constraint (PostgreSQL 18+, which records one per NOT NULL column). Used when the table or the column is created and when an existing column becomes NOT NULL; a live constraint with another name is renamed in place with `ALTER TABLE ... RENAME CONSTRAINT`. Omitted = unmanaged: a new constraint gets PostgreSQL's `<table>_<column>_not_null`, and `pgy pull` writes the key only for a name that differs from that. Before PostgreSQL 18 the key is ignored and `pgy diff` warns. On a partition's or inheritance child's inherited column it names the table's own NOT NULL constraint (one it adds with `nullable: false`, renamed like a declared column's), or its copy of the parent's: a copy takes the parent's name unless the table was created with another (`PARTITION OF parent (col CONSTRAINT name NOT NULL)`, which `pgy diff` emits for a partition or child it creates) or had its own constraint when it was attached or made a child. PostgreSQL cannot rename such a copy, so on an existing table a different name is only warned about. `pgy pull` writes a copy's name where it differs from the parent's |
 | `using` | string | Cast expression for type changes on existing columns, emitted as `ALTER COLUMN ... TYPE ... USING <expr>`. Only meaningful together with `--unsafe` (see below); ignored at CREATE time |
 | `grants` | map | Role → column privilege list (`select`, `insert`, `update`, `references`). See [Column-Level Grants](#column-level-grants) |
+| `grantedBy` | map | Grantor → role → column privileges: the column grants of roles other than the owner. See [Grants of other roles](#grants-of-other-roles) |
 
 ```yaml
 schema public:
@@ -1237,6 +1239,7 @@ schema public:
 | `columnComments` | map | View column → `COMMENT ON COLUMN` text, diffed against live |
 | `columnDefaults` | map | Views only. View column → `DEFAULT` expression, used by `INSERT`s through the view (`ALTER VIEW ... ALTER COLUMN ... SET DEFAULT`). Diffed against live, [as an expression](#how-expressions-are-compared); columns not listed are unmanaged |
 | `columnGrants` | map | View column → role → column privileges (`select`, `insert`, `update`, `references`), emitted as `GRANT select (col) ON TABLE ...`. Each column listed is authoritative, like a table column's `grants`; columns not listed are unmanaged. See [Column-Level Grants](#column-level-grants) |
+| `columnGrantedBy` | map | View column → grantor → role → column privileges: the column grants of roles other than the owner, like a table column's `grantedBy`. See [Grants of other roles](#grants-of-other-roles) |
 | `dependsOn` | list | See [Dependencies](#dependencies) |
 | `grants` | map | Role → privilege list. Views and materialized views share table ACL semantics (`GRANT ... ON TABLE`). See [Grants](#grants) |
 
@@ -1592,7 +1595,8 @@ languages:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `grants` | map | Required. Role → privileges (`usage`, or `usage with grant option`; `all` stands for `usage`) |
+| `grants` | map | Role → privileges (`usage`, or `usage with grant option`; `all` stands for `usage`). An entry needs `grants` or `grantedBy` |
+| `grantedBy` | map | Grantor → role → privileges: the grants of roles other than the owner. See [Grants of other roles](#grants-of-other-roles) |
 
 - **Privileges only.** pgy never creates or drops a language: `CREATE LANGUAGE` needs handler functions written in C, so languages come from extensions. In the migration that creates or updates an extension, the statements for a language that does not exist yet run after `CREATE EXTENSION`, in a `DO` block that runs them only if the language then exists and is trusted. The extension may be named like the language (`plperl`), or not (`pljava` brings `java` and `javau`, and `bool_plperl` with `cascade: true` brings `plperl`), and an untrusted language (`plsh`) is skipped instead of failing the migration; the next `pgy diff` reports it. A language that does not exist, in a plan that creates or updates no extension, gets no statements, and `pgy diff` warns with the name of the entry.
 - **`PUBLIC`** follows the [grants](#grants) rule for objects with a default privilege, like functions and types: it is left alone unless the block lists it. `public: []` revokes the default `USAGE`, and `public: [usage]` keeps or restores it. On a language whose extension's script took `PUBLIC`'s `USAGE` away (`pljava` does on `java`, as `pg_init_privs` records), the block keeps `PUBLIC` without it all the same, and revokes a `USAGE` granted to `PUBLIC` later, with a `public_revoke` warning; the same holds for the `EXECUTE` of functions, procedures and aggregates and the `USAGE` of types whose extension revoked it (`pg_buffercache_pages()`, `pg_stat_statements_reset()`). Under `policy.public_grants: explicit`, `PUBLIC` is still left alone unless listed. The other roles are exact: `USAGE` held by a role the block does not list is revoked, except for what an extension itself granted on its language (see [Objects an extension owns](#objects-an-extension-owns)).
@@ -1827,7 +1831,31 @@ Behavior:
 - **External roles** (`external.roles` in the config) are left alone the same way on every object: a block that doesn't name one neither revokes nor requires its privileges, and one that names it makes them exact. On an object in an external schema, every grantee the block doesn't name is left alone. See [Hosted platforms](hosted-platforms.md#what-pgy-does-with-external-objects).
 - Grant/revoke statements are emitted after all object creation and FK alters. Those on languages and foreign-data wrappers are the exception: they run right after the extension statements, ahead of the routines and servers that need them.
 - **All `REVOKE`s are emitted before all `GRANT`s.** PostgreSQL's `REVOKE ... ON TABLE` also strips that role's column-level privileges, so narrowing a table-wide grant to per-column grants in a single migration only works if the revoke runs first. Ordering this the other way silently leaves the role with no privileges at all.
-- **Grants made by other roles.** PostgreSQL records who granted each privilege, and a `REVOKE` only takes away the grants of the role it runs as (of the object's owner, when it runs as the owner, a role with the owner's privileges or a superuser). A privilege that a role holding it `WITH GRANT OPTION` passed on, under `SET ROLE` or with `GRANT ... GRANTED BY` on PostgreSQL 19, is revoked once per grantor: `REVOKE ... GRANTED BY <grantor>` on PostgreSQL 19 when the connecting role is a superuser or has the grantor's privileges, otherwise `SET ROLE <grantor>; REVOKE ...; RESET ROLE;` when it may `SET ROLE` to the grantor (on PostgreSQL 15 to 18 a `REVOKE` cannot name another grantor). Those `SET ROLE` revokes run ahead of the plan's other revokes, and the grants that depend on a role's grant option are revoked before it. A role losing a grant option (or the privilege) that grants it made still depend on loses it with `CASCADE`, which PostgreSQL requires, and the dependent grants the plan doesn't revoke are granted again, by the owner or the connecting role. One that the connecting role can do neither for is left out with a `not_owner` warning that gives the statement to run. Grants blocks don't record grantors: `pgy pull` warns about the grants a role other than the owner and the connecting role made, and `pgy diff` about those a grants block keeps, since a database built from the YAML gets those privileges granted by the owner or the connecting role. Default privileges are always granted by the role they are for, which `ALTER DEFAULT PRIVILEGES FOR ROLE` revokes.
+- **Grants made by other roles.** PostgreSQL records who granted each privilege, and a `REVOKE` only takes away the grants of the role it runs as (of the object's owner, when it runs as the owner, a role with the owner's privileges or a superuser). A privilege that a role holding it `WITH GRANT OPTION` passed on, under `SET ROLE` or with `GRANT ... GRANTED BY` on PostgreSQL 19, is revoked once per grantor: `REVOKE ... GRANTED BY <grantor>` on PostgreSQL 19 when the connecting role is a superuser or has the grantor's privileges, otherwise `SET ROLE <grantor>; REVOKE ...; RESET ROLE;` when it may `SET ROLE` to the grantor (on PostgreSQL 15 to 18 a `REVOKE` cannot name another grantor). Those `SET ROLE` revokes run ahead of the plan's other revokes, and the grants that depend on a role's grant option are revoked before it. A role losing a grant option (or the privilege) that grants it made still depend on loses it with `CASCADE`, which PostgreSQL requires, and the dependent grants the plan doesn't revoke are granted again, by the owner or the connecting role. One that the connecting role can do neither for is left out with a `not_owner` warning that gives the statement to run. A grants block doesn't record grantors: what it grants is granted by the owner or the connecting role. To declare the grants of other roles, use a [`grantedBy:` block](#grants-of-other-roles). `pgy diff` warns about the grants of other roles that a grants block keeps and no `grantedBy` block lists. Default privileges are always granted by the role they are for, which `ALTER DEFAULT PRIVILEGES FOR ROLE` revokes.
+
+### Grants of other roles
+
+Every object kind with a `grants:` block (and a view's columns, as `columnGrantedBy:`) also takes a `grantedBy:` block: the grants that roles other than the owner made, grantor → grantee → privileges, each grantor's grants written as in a grants block, `with grant option` and `all` included. PostgreSQL records such a role as the grantor, and only that role's `REVOKE` takes the grant away again.
+
+```yaml
+schema app:
+  grants: {app_admin: [usage with grant option]}
+  grantedBy:
+    app_admin: {app_reader: [usage]}
+  table doc:
+    columns:
+      id: {type: integer}
+      note: {type: text, grantedBy: {app_admin: {app_reader: [update]}}}
+    grants: {app_admin: [select with grant option, update with grant option]}
+    grantedBy:
+      app_admin: {app_lead: [select with grant option]}
+      app_lead: {app_reader: [select]}
+```
+
+- **Authoritative per grantor.** For each grantor it lists, the block is the whole truth: missing grants are made, and that grantor's live grants the block doesn't declare are revoked, or their grant option when the block declares the privilege without it. `app_admin: {}` revokes all of `app_admin`'s grants. The grants of grantors the block doesn't list belong to the grants block as before, so a privilege a grantee holds from both the owner and a listed grantor is in both blocks, and the grants block never revokes or grants again what a listed grantor gave. Without a grants block only the listed grantors' grants are managed. A grantor that is the object's owner is the same as listing the grants under `grants` (`pgy validate` warns).
+- **The grantor needs the grant option** of each privilege it grants, from the grants block or from another grantor's `grantedBy` entry (PostgreSQL grants nothing otherwise, with only a warning; `pgy validate` warns when an object with a grants block doesn't give it). The plan grants a grantor's grants after those that give it its grant options, and those of the grants block first. A column's grantor may hold the grant option on the table.
+- **How a grant runs as its grantor.** On PostgreSQL 19, `GRANT ... GRANTED BY <grantor>`, when the connecting role is a superuser or inherits the grantor's privileges. Before 19, `GRANTED BY` must name the current user, even for a superuser, so the grant runs between `SET ROLE <grantor>;` and `RESET ROLE;`, which needs a superuser or a role that may `SET ROLE` to the grantor. Running as the grantor, the grant needs the grantor's `USAGE` on the object's schema, which the schema's grants (granted ahead of the objects' grants) give. A connecting role that is the grantor itself, neither the owner nor a superuser, runs a plain `GRANT`. One the connecting role can do none of these for is left out with a `not_owner` warning that gives the statement to run. Revokes go the same way (see above). A `REVOKE` on a table also takes the grantor's grants of that privilege on its columns, which a column's `grantedBy` then makes again. Without a database (`diff --from-empty`) the `SET ROLE` form is planned, which runs on every version.
+- **`pgy pull`** writes a `grantedBy` block for the grants that a role other than the owner and the connecting role made, so a database rebuilt from the YAML gets the same grantors, which `pg_dump` shows. A privilege the owner granted too stays in the grants block. Grants of the connecting role are written to the grants block, as a superuser's `GRANT` records the owner as the grantor.
 
 ### Ownership
 
@@ -1917,6 +1945,7 @@ view active_users:
 | Property | Type | Description |
 |----------|------|-------------|
 | `grants` | map | Role name → list of privileges (e.g. `select`, `insert`, `execute`, `usage`, `create`; on columns: `select`, `insert`, `update`, `references`) |
+| `grantedBy` | map | Grantor → role name → list of privileges: the grants of roles other than the owner. See [Grants of other roles](#grants-of-other-roles) |
 | `revokePublic` | boolean | Functions, procedures, types and domains. Revoke `PUBLIC`'s default `EXECUTE` or `USAGE` |
 
 ## Comments

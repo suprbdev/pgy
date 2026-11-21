@@ -43,7 +43,7 @@ func viewsCreatedAsViews(live *Live, desired *schema.Database) *schema.Database 
 			c.Views = maps.Clone(desired.Views)
 			out = &c
 		}
-		out.Views[fq] = &schema.View{Schema: vw.Schema, Name: vw.Name, Comment: vw.Comment, ColumnComments: vw.ColumnComments, Grants: vw.Grants, Owner: vw.Owner, DependsOn: vw.DependsOn}
+		out.Views[fq] = &schema.View{Schema: vw.Schema, Name: vw.Name, Comment: vw.Comment, ColumnComments: vw.ColumnComments, Grants: vw.Grants, GrantedBy: vw.GrantedBy, Owner: vw.Owner, DependsOn: vw.DependsOn}
 	}
 	return out
 }
