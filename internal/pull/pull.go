@@ -167,13 +167,31 @@ func (b *builder) warn(format string, args ...any) {
 	b.res.Warnings = append(b.res.Warnings, fmt.Sprintf(format, args...))
 }
 
-// accessMethod writes the access method of a table or materialized view
-// unless it is the session's default_table_access_method, which CREATE
-// TABLE without USING picks.
-func (b *builder) accessMethod(m *node, lt *diff.LiveTable) {
-	if lt.AccessMethod != "" && lt.AccessMethod != b.live.DefaultAccessMethod {
+// accessMethod writes the access method of a table or materialized view fq
+// unless it is the one CREATE TABLE without USING picks.
+func (b *builder) accessMethod(m *node, fq string, lt *diff.LiveTable) {
+	if lt.AccessMethod != "" && lt.AccessMethod != b.impliedAccessMethod(fq, lt) {
 		add(m, "accessMethod", str(lt.AccessMethod))
 	}
+}
+
+// impliedAccessMethod returns the access method a database rebuilt from the
+// YAML gives table fq when its accessMethod is left out: a partition gets
+// its parent's (PostgreSQL 17+ keeps one for a partitioned table), any
+// other table the session's default_table_access_method, and a partitioned
+// table none.
+func (b *builder) impliedAccessMethod(fq string, lt *diff.LiveTable) string {
+	seen := map[string]bool{fq: true}
+	for parent := b.d.PartitionOf[fq]; parent != "" && !seen[parent]; parent = b.d.PartitionOf[parent] {
+		seen[parent] = true
+		if pt := b.live.Tables[parent]; pt != nil && pt.AccessMethod != "" {
+			return pt.AccessMethod
+		}
+	}
+	if lt.Partitioned {
+		return ""
+	}
+	return b.live.DefaultAccessMethod
 }
 
 func (b *builder) wantSchema(s string) bool {
@@ -1254,7 +1272,7 @@ func (b *builder) tables() {
 		}
 		if lt.Foreign == nil {
 			addStr(t, "tablespace", lt.Tablespace)
-			b.accessMethod(t, lt)
+			b.accessMethod(t, fq, lt)
 		}
 		b.data(t, fq, lt)
 		b.indexes(t, fq, lt)
@@ -1336,7 +1354,7 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 			if lt.OfType != "" {
 				parent = &diff.LiveColumn{Nullable: true, Storage: lc.TypeStorage}
 			}
-			c := inheritedColumnNode(lc, parent)
+			c := inheritedColumnNode(fq, cn, lc, parent)
 			if len(lc.FDWOptions) > 0 {
 				if c == nil {
 					c = flowMap()
@@ -1383,6 +1401,9 @@ func (b *builder) columns(fq string, lt *diff.LiveTable) *node {
 			}
 			if lc.NotNullName != "" && lc.NotNullName != diff.DefaultNotNullName(fq, cn) {
 				add(c, "notNullName", str(lc.NotNullName))
+			}
+			if lc.NotNullNoInherit {
+				add(c, "notNullNoInherit", boolean(true))
 			}
 		}
 		switch {
@@ -1433,10 +1454,12 @@ func (b *builder) parentColumn(fq string, lt *diff.LiveTable, cn string) *diff.L
 
 // inheritedColumnNode returns the settings a partition or inheritance child
 // keeps of an inherited column that it doesn't simply copy from parent: a
-// different default, storage or compression, NOT NULL the parent lacks, and
-// the statistics target, n_distinct and comment, which it never copies. It
-// returns nil when there are none.
-func inheritedColumnNode(lc, parent *diff.LiveColumn) *node {
+// different default, generation expression, storage or compression, NOT
+// NULL the parent lacks (and whether it is NO INHERIT), a name of its own
+// for its NOT NULL constraint, a validated copy of the parent's NOT VALID
+// NOT NULL, and the statistics target, n_distinct and comment, which it
+// never copies. It returns nil when there are none.
+func inheritedColumnNode(fq, cn string, lc, parent *diff.LiveColumn) *node {
 	if parent == nil {
 		parent = &diff.LiveColumn{Nullable: true}
 	}
@@ -1444,8 +1467,22 @@ func inheritedColumnNode(lc, parent *diff.LiveColumn) *node {
 	if lc.Default != "" && lc.Default != parent.Default {
 		add(c, "default", str(lc.Default))
 	}
-	if !lc.Nullable && parent.Nullable {
+	if lc.Generated != "" && parent.Generated != "" && lc.Generated != parent.Generated {
+		add(c, "generated", str(lc.Generated))
+	}
+	if !lc.Nullable && (parent.Nullable || parent.NotNullNoInherit) {
 		add(c, "nullable", boolean(false))
+		if lc.NotNullName != "" && lc.NotNullName != diff.DefaultNotNullName(fq, cn) {
+			add(c, "notNullName", str(lc.NotNullName))
+		}
+		if lc.NotNullNoInherit {
+			add(c, "notNullNoInherit", boolean(true))
+		}
+	} else if !lc.Nullable && lc.NotNullName != "" && parent.NotNullName != "" && lc.NotNullName != parent.NotNullName {
+		add(c, "notNullName", str(lc.NotNullName))
+	}
+	if !lc.Nullable && !parent.Nullable && !parent.NotNullNoInherit && parent.NotNullNotValid != "" && lc.NotNullNotValid == "" {
+		add(c, "notValid", boolean(false))
 	}
 	if lc.Storage != "" && lc.Storage != parent.Storage {
 		add(c, "storage", str(lc.Storage))
@@ -2188,7 +2225,7 @@ func (b *builder) views() {
 					add(m, "with", storageParams(lt.Options, lt.OptionOrder))
 				}
 				addStr(m, "tablespace", lt.Tablespace)
-				b.accessMethod(m, lt)
+				b.accessMethod(m, k, lt)
 				b.indexes(m, k, lt)
 			}
 		} else {

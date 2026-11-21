@@ -83,6 +83,7 @@ schema public:
     inherits: [public.orders]
     columns:
       archived_at: {type: timestamptz}
+      total: {generated: price * qty * 2, notValid: false}
   table orders:
     renamedFrom: old_orders
     owner: app_owner
@@ -95,7 +96,7 @@ schema public:
     with: {fillfactor: 80, autovacuum_enabled: false}
     columns:
       id: {type: int, identity: {generated: by default, start: 1000, increment: 5, cycle: false}}
-      price: {type: numeric, notNullName: orders_price_required}
+      price: {type: numeric, notNullName: orders_price_required, notNullNoInherit: true}
       qty: {type: int, statisticsTarget: 1000, renamedFrom: quantity}
       total: {type: numeric, generated: price * qty}
       doubled: {type: int, generated: qty * 2, virtual: true}
