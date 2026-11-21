@@ -28,7 +28,7 @@ func externalPublication(ext *schema.External, lp *LivePublication) bool {
 	if ext.HasRole(lp.Owner) {
 		return true
 	}
-	if lp.AllTables || len(lp.Tables)+len(lp.Schemas) == 0 {
+	if lp.AllTables || lp.AllSequences || len(lp.Tables)+len(lp.Schemas) == 0 {
 		return false
 	}
 	for t := range lp.Tables {

@@ -1,0 +1,11 @@
+create schema pub19;
+create table pub19.base (id int primary key, note text);
+create table pub19.ext (extra int) inherits (pub19.base);
+create table pub19.other (id int primary key);
+create table pub19.parted (id int) partition by range (id);
+create table pub19.parted_1 partition of pub19.parted for values from (0) to (10);
+create sequence pub19.seq;
+create publication pub19_except for all tables except (table pub19.base, table pub19.parted);
+create publication pub19_only for all tables except (table only pub19.base), all sequences with (publish = 'insert, update');
+create publication pub19_seqs for all sequences;
+create publication pub19_list for table only pub19.base, table pub19.other;

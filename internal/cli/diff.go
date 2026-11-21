@@ -32,11 +32,12 @@ func cmdDiff() *cobra.Command {
         Long: `Generate SQL diff between YAML schema and live DB.
 
 Statements that lock or rewrite an existing table (an index built without
-concurrently, a foreign key or check added without notValid, SET NOT NULL, a
-rewriting type change, SET LOGGED/UNLOGGED, an added column whose value is
-computed per row) are reported on stderr. Use --no-warnings to silence them.
-The schema files are checked as pgy validate checks them, and an error there
-fails the diff: it is printed on stderr, and nothing is written.
+concurrently, a foreign key or check added validated or enforced in one step,
+SET NOT NULL, a rewriting type change, SET EXPRESSION, SET LOGGED/UNLOGGED, an
+added column whose value is computed per row) are reported on stderr. Use
+--no-warnings to silence them. The schema files are checked as pgy validate
+checks them, and an error there fails the diff: it is printed on stderr, and
+nothing is written.
 
 Declared expressions (defaults, checks, index expressions and predicates,
 policies, triggers and the like) are compared as text, and through the server

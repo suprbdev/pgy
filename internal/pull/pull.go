@@ -218,7 +218,7 @@ func (b *builder) externalPublication(lp *diff.LivePublication) bool {
 	if ext.HasRole(lp.Owner) {
 		return true
 	}
-	if lp.AllTables || len(lp.Tables)+len(lp.Schemas) == 0 {
+	if lp.AllTables || lp.AllSequences || len(lp.Tables)+len(lp.Schemas) == 0 {
 		return false
 	}
 	for t := range lp.Tables {
@@ -311,13 +311,13 @@ func (b *builder) keptExtensions(languages, wrappers *node) map[string]bool {
 // one that publishes a table or schema of the pulled schemas and nothing
 // else. A publication of tables in other schemas as well is left out with
 // a warning, since a rebuild could not create it and leaving the other
-// tables out would remove them from it. FOR ALL TABLES publications are
-// database-wide and left out.
+// tables out would remove them from it. FOR ALL TABLES and FOR ALL
+// SEQUENCES publications are database-wide and left out.
 func (b *builder) keptPublication(name string, lp *diff.LivePublication) bool {
 	if !b.limited() {
 		return true
 	}
-	if lp.AllTables {
+	if lp.AllTables || lp.AllSequences {
 		return false
 	}
 	pulled, other := false, []string{}
@@ -2431,6 +2431,23 @@ func (b *builder) database() *node {
 			p := newMap()
 			if lp.AllTables {
 				add(p, "allTables", boolean(true))
+			}
+			if lp.AllTables && len(lp.Except) > 0 {
+				ex := &node{Kind: yaml.SequenceNode}
+				for _, t := range sortedKeys(lp.Except) {
+					if !lp.Except[t] {
+						ex.Content = append(ex.Content, str(schema.QualifiedName(t)))
+						continue
+					}
+					e := flowMap()
+					add(e, "table", str(schema.QualifiedName(t)))
+					add(e, "only", boolean(true))
+					ex.Content = append(ex.Content, e)
+				}
+				add(p, "except", ex)
+			}
+			if lp.AllSequences {
+				add(p, "allSequences", boolean(true))
 			}
 			if len(lp.Tables) > 0 {
 				ts := &node{Kind: yaml.SequenceNode}

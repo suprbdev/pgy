@@ -61,6 +61,31 @@ foreignDataWrappers:
 	}
 }
 
+func TestForeignDataWrapperConnectionParse(t *testing.T) {
+	d, err := parseFlexibleDatabase([]byte(`
+foreignDataWrappers:
+  pg2:
+    handler: postgres_fdw_handler
+    connection: public.postgres_fdw_connection()
+  none:
+    connection: ""
+  unmanaged:
+    handler: postgres_fdw_handler
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := d.ForeignDataWrappers["pg2"]; w.Connection != "public.postgres_fdw_connection" || !w.ConnectionSet || !w.ManagesConnection() {
+		t.Errorf("pg2 = %+v", w)
+	}
+	if w := d.ForeignDataWrappers["none"]; w.Connection != "" || !w.ManagesConnection() || w.ManagesHandler() {
+		t.Errorf("an empty connection declares NO CONNECTION: %+v", w)
+	}
+	if w := d.ForeignDataWrappers["unmanaged"]; w.ManagesConnection() {
+		t.Errorf("a connection left out is unmanaged: %+v", w)
+	}
+}
+
 func TestForeignDataWrappersBlockPresence(t *testing.T) {
 	absent, err := parseFlexibleDatabase([]byte("servers:\n  s: {wrapper: w}\n"))
 	if err != nil {
