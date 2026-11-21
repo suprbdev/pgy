@@ -423,6 +423,7 @@ func forgetColumn(live *Live, fq, cn string) {
     }
     delete(lt.Columns, cn)
     if g := live.ColumnGrants[fq]; g != nil { delete(g, cn) }
+    if g := live.ColumnGrantors[fq]; g != nil { delete(g, cn) }
 }
 
 // restoreColumn returns the statements that give column cn of table fq,
@@ -664,6 +665,8 @@ func recreateView(live, out *Live, desired *schema.Database, v string, prune boo
     delete(out.RelComments, v)
     delete(out.TableGrants, v)
     delete(out.ColumnGrants, v)
+    delete(out.Grantors, "rel:"+v)
+    delete(out.ColumnGrantors, v)
     delete(out.Owners, "rel:"+v)
     return post
 }

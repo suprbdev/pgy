@@ -513,6 +513,7 @@ func simulateRenamedArguments(out *Live, desired *schema.Database) {
         move(out.FunctionComments, "")
         move(out.Owners, "proc:")
         if g, ok := out.FunctionGrants[rr.liveKey]; ok { out.FunctionGrants[rr.key] = g; delete(out.FunctionGrants, rr.liveKey) }
+        moveKey(out.Grantors, "proc:"+rr.liveKey, "proc:"+rr.key)
         if e, ok := out.FunctionPublicExec[rr.liveKey]; ok { out.FunctionPublicExec[rr.key] = e; delete(out.FunctionPublicExec, rr.liveKey) }
     }
 }
@@ -815,6 +816,9 @@ func cloneLive(l *Live) *Live {
         DefaultACLRows:     cloneSet(l.DefaultACLRows),
         CurrentUser:        l.CurrentUser,
         OwnerRoles:         l.OwnerRoles,
+        SetRoles:           l.SetRoles,
+        Grantors:           cloneMap(l.Grantors, nil),
+        ColumnGrantors:     cloneMap(l.ColumnGrantors, func(m map[string]LiveGrantors) map[string]LiveGrantors { return cloneMap(m, nil) }),
         DatabaseOwner:      l.DatabaseOwner,
         DatabaseConfig:     cloneMap(l.DatabaseConfig, nil),
         DatabaseRoleConfig: cloneMap(l.DatabaseRoleConfig, func(m map[string]string) map[string]string { return cloneMap(m, nil) }),

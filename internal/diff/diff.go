@@ -99,6 +99,17 @@ type Live struct{
     // (pg_has_role(current_user, role, 'USAGE'), itself included, every
     // role for a superuser); nil when unknown, and then any owner counts.
     OwnerRoles map[string]bool
+    // SetRoles: the roles the connecting role may SET ROLE to, every role
+    // for a superuser; nil when unknown.
+    SetRoles map[string]bool
+    // Grantors: the grantors of the grants on the objects whose ACL holds
+    // a grant made by a role other than the object's owner, keyed as
+    // Owners, with "srv:name", "fdw:name" and "language:name" besides. An
+    // object it lacks holds only grants of its owner.
+    Grantors map[string]LiveGrantors
+    // ColumnGrantors: "schema.relation" -> column -> the grantors of the
+    // column's grants, as Grantors.
+    ColumnGrantors map[string]map[string]LiveGrantors
     // DatabaseOwner is the role that owns the connected database, which
     // ALTER DATABASE ... SET needs; "" when unknown.
     DatabaseOwner string
@@ -2478,6 +2489,7 @@ func introspectOnce(ctx context.Context, pool *pgxpool.Pool, setup []string) (*L
         }
         return nil
     })
+    l.addGrantorQueries(batch)
 
     extMemQ := `
         select m.key, x.extname::text
@@ -4930,6 +4942,7 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         delete(out.FunctionDefs, norm)
         delete(out.FunctionComments, norm)
         delete(out.FunctionGrants, norm)
+        delete(out.Grantors, "proc:"+norm)
         delete(out.FunctionPublicExec, norm)
         delete(out.Owners, "proc:"+norm)
     }
@@ -4954,6 +4967,7 @@ func recreateChangedFunctions(live *Live, desired *schema.Database, unsafe bool)
         delete(out.ProcedureDefs, norm)
         delete(out.FunctionComments, norm)
         delete(out.FunctionGrants, norm)
+        delete(out.Grantors, "proc:"+norm)
         delete(out.FunctionPublicExec, norm)
         delete(out.Owners, "proc:"+norm)
     }
@@ -5046,6 +5060,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
             blocked[norm] = true
             if c, ok := live.FunctionComments[lnorm]; ok { out.FunctionComments[norm] = c }
             if g, ok := live.FunctionGrants[lnorm]; ok { out.FunctionGrants[norm] = g }
+            if g, ok := live.Grantors["proc:"+lnorm]; ok { out.Grantors["proc:"+norm] = g }
             if e, ok := live.FunctionPublicExec[lnorm]; ok { out.FunctionPublicExec[norm] = e }
             if o, ok := live.Owners["proc:"+lnorm]; ok { out.Owners["proc:"+norm] = o }
             warns = append(warns, Warning{Message: fmt.Sprintf("%s %s%s: the live %s%s has the same argument types under other names or modes, which CREATE OR REPLACE can't change; that drops and recreates it, which needs --unsafe", kind, name, args, name, liveArgs)})
@@ -5061,6 +5076,7 @@ func recreateRenamedArguments(live *Live, desired *schema.Database, unsafe bool)
         delete(out.ProcedureDefs, lnorm)
         delete(out.FunctionComments, lnorm)
         delete(out.FunctionGrants, lnorm)
+        delete(out.Grantors, "proc:"+lnorm)
         delete(out.FunctionPublicExec, lnorm)
         delete(out.Owners, "proc:"+lnorm)
     }
@@ -5802,6 +5818,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         warns = append(warns, publicRevokeWarnings(rv, mode, "grants blocks cover PUBLIC on tables, views, sequences, columns, servers and schemas since v0.43.0")...)
         add(rv, gr)
     }
+    by := func(key, column, target, owner string) *grantRevoker { return live.revoker(key, column, target, owner, &warns) }
     listsPublic := func(g map[string][]string) bool { _, ok := g["public"]; return ok }
     covers := func(byKind bool, g map[string][]string) bool { return coversPublic(mode, byKind, g) }
     addFor := func(g map[string][]string) func(rv, gr []string) {
@@ -5838,7 +5855,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         if s.Owner != "" { owner = resolveRole(s.Owner, live.CurrentUser) }
         desiredG := resolveGrantRoles(s.Grants, live.CurrentUser)
         liveG = withoutExternalGrantees(desired.External, false, liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff("foreign server "+quoteIdent(name), desiredG, liveG, owner, covers(true, desiredG)))
+        target := "foreign server " + quoteIdent(name)
+        addFor(desiredG)(ownedGrantDiffBy(target, desiredG, liveG, owner, covers(true, desiredG), by("srv:"+name, "", target, owner)))
     }
 
     schemaNames := make([]string, 0, len(desired.SchemaGrants))
@@ -5849,7 +5867,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         liveG := live.SchemaGrants[s]
         if !live.Schemas[s] { liveG = pendingGrants(liveG, desiredG) }
         liveG = member("schema:"+s, "", liveG, desiredG)
-        addFor(desiredG)(ownedGrantDiff("schema "+quoteIdent(s), desiredG, liveG, objectOwner(live, "schema:"+s, desired.SchemaOwners[s]), covers(s != "public", desiredG)))
+        target, owner := "schema "+quoteIdent(s), objectOwner(live, "schema:"+s, desired.SchemaOwners[s])
+        addFor(desiredG)(ownedGrantDiffBy(target, desiredG, liveG, owner, covers(s != "public", desiredG), by("schema:"+s, "", target, owner)))
     }
 
     tableNames := make([]string, 0, len(desired.Tables))
@@ -5867,7 +5886,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if attributeOnly(desired, "table", k) { liveG = pendingGrants(liveG, desiredG) }
             }
             liveG = member("rel:"+k, "", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
+            addFor(desiredG)(ownedGrantDiffBy("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG), by("rel:"+k, "", "table "+pqIdent(k), owner)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
         }
         colNames := make([]string, 0, len(dt.Columns))
@@ -5878,7 +5897,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             if c == nil || c.Grants == nil { continue }
             colG := resolveGrantRoles(c.Grants, live.CurrentUser)
             colLive := withoutExternalGrantees(desired.External, desired.External.InSchema(k), live.ColumnGrants[k][cn], colG)
-            addFor(colG)(columnGrantDiffStmts(k, cn, colG, withoutPrivileges(colLive, revoked), covers(true, colG)))
+            addFor(colG)(columnGrantDiffStmtsBy(k, cn, colG, withoutPrivileges(colLive, revoked), covers(true, colG), by("rel:"+k, cn, "column "+quoteIdent(cn)+" of table "+pqIdent(k), objectOwner(live, "rel:"+k, dt.Owner))))
         }
     }
 
@@ -5891,7 +5910,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
                 if !sq.DeclaresOptions() { liveG = pendingGrants(liveG, desiredG) }
             }
             liveG = member("rel:"+k, "", liveG, desiredG)
-            addFor(desiredG)(ownedGrantDiff("sequence "+pqIdent(k), desiredG, liveG, objectOwner(live, "rel:"+k, sq.Owner), covers(true, desiredG)))
+            owner := objectOwner(live, "rel:"+k, sq.Owner)
+            addFor(desiredG)(ownedGrantDiffBy("sequence "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG), by("rel:"+k, "", "sequence "+pqIdent(k), owner)))
         }
     }
     typeGrants := func(kind, k string, grantsBlock map[string][]string, revokePublic, isLive, attributeOnly bool, owner string) {
@@ -5908,7 +5928,7 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
         }
         liveG = member("type:"+k, "usage", liveG, desiredG)
         cv, addTo := coversMember("type:"+k, "usage", desiredG)
-        addTo(ownedGrantDiff(kind+" "+pqIdent(k), desiredG, liveG, owner, cv))
+        addTo(ownedGrantDiffBy(kind+" "+pqIdent(k), desiredG, liveG, owner, cv, by("type:"+k, "", kind+" "+pqIdent(k), owner)))
     }
     for _, k := range sortedKeys(desired.Types) {
         if td := desired.Types[k]; td != nil {
@@ -5940,13 +5960,13 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             }
             liveG = member("rel:"+k, "", liveG, desiredG)
             owner := objectOwner(live, "rel:"+k, vw.Owner)
-            addFor(desiredG)(ownedGrantDiff("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG)))
+            addFor(desiredG)(ownedGrantDiffBy("table "+pqIdent(k), desiredG, liveG, owner, covers(true, desiredG), by("rel:"+k, "", "table "+pqIdent(k), owner)))
             revoked = revokedPrivileges(desiredG, liveG, owner, covers(true, desiredG))
         }
         for _, col := range sortedKeys(vw.ColumnGrants) {
             if vw.ColumnGrants[col] == nil { continue }
             colG := resolveGrantRoles(vw.ColumnGrants[col], live.CurrentUser)
-            addFor(colG)(columnGrantDiffStmts(k, col, colG, withoutPrivileges(live.ColumnGrants[k][col], revoked), covers(true, colG)))
+            addFor(colG)(columnGrantDiffStmtsBy(k, col, colG, withoutPrivileges(live.ColumnGrants[k][col], revoked), covers(true, colG), by("rel:"+k, col, "column "+quoteIdent(col)+" of table "+pqIdent(k), objectOwner(live, "rel:"+k, vw.Owner))))
         }
     }
 
@@ -5972,7 +5992,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
             cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
-            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, f.Owner), cv))
+            owner := objectOwner(live, "proc:"+norm, f.Owner)
+            addTo(ownedGrantDiffBy(target, desiredG, liveG, owner, cv, by("proc:"+norm, "", target, owner)))
         }
     }
 
@@ -5999,7 +6020,8 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
             cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
-            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, pr.Owner), cv))
+            owner := objectOwner(live, "proc:"+norm, pr.Owner)
+            addTo(ownedGrantDiffBy(target, desiredG, liveG, owner, cv, by("proc:"+norm, "", target, owner)))
         }
     }
 
@@ -6023,10 +6045,11 @@ func planGrantsWarned(live *Live, desired *schema.Database, mode PublicGrants) (
             }
             liveG = member("proc:"+norm, "execute", liveG, desiredG)
             cv, addTo := coversMember("proc:"+norm, "execute", desiredG)
-            addTo(ownedGrantDiff(target, desiredG, liveG, objectOwner(live, "proc:"+norm, ag.Owner), cv))
+            owner := objectOwner(live, "proc:"+norm, ag.Owner)
+            addTo(ownedGrantDiffBy(target, desiredG, liveG, owner, cv, by("proc:"+norm, "", target, owner)))
         }
     }
-    return append(revokes, grants...), warns
+    return append(setRoleRevokesFirst(revokes), grants...), warns
 }
 
 // aggregateGrantArgs returns the argument types of an aggregate declared
@@ -6094,6 +6117,14 @@ func roleGrantStmts(desired map[string][]string, liveG map[string]map[string]boo
 // roleGrantStmtsCovering is roleGrantStmts that also revokes PUBLIC's live
 // privileges desired doesn't list when coversPublic is set.
 func roleGrantStmtsCovering(desired map[string][]string, liveG map[string]map[string]bool, on func([]string) string, coversPublic bool) (revokes, grants []string) {
+    return roleGrantStmtsBy(desired, liveG, on, coversPublic, nil)
+}
+
+// roleGrantStmtsBy is roleGrantStmtsCovering with the revokes written by
+// rv, one per grantor of the grants they take away (see grantRevoker);
+// with a nil rv, each is a plain REVOKE.
+func roleGrantStmtsBy(desired map[string][]string, liveG map[string]map[string]bool, on func([]string) string, coversPublic bool, rv *grantRevoker) (revokes, grants []string) {
+    var groups []revokeGroup
     parse := func(privs map[string]bool) map[string]bool {
         out := map[string]bool{}
         for p := range privs {
@@ -6122,15 +6153,20 @@ func roleGrantStmtsCovering(desired map[string][]string, liveG map[string]map[st
             case !want[p] && opt:
                 revokeOpt = append(revokeOpt, p)
             }
+            if ok { rv.keep(role, p, want[p]) }
         }
         for _, p := range sortedKeys(have) {
             if _, ok := want[p]; !ok && (coversPublic || role != "public") { revoke = append(revoke, p) }
         }
-        if len(revoke) > 0 { revokes = append(revokes, fmt.Sprintf("revoke %s from %s;", on(revoke), grantRole(role))) }
-        if len(revokeOpt) > 0 { revokes = append(revokes, fmt.Sprintf("revoke grant option for %s from %s;", on(revokeOpt), grantRole(role))) }
+        if len(revoke) > 0 { groups = append(groups, rv.revoke(on, role, revoke, false)...) }
+        if len(revokeOpt) > 0 { groups = append(groups, rv.revoke(on, role, revokeOpt, true)...) }
         if len(grant) > 0 { grants = append(grants, fmt.Sprintf("grant %s to %s;", on(grant), grantRole(role))) }
         if len(grantOpt) > 0 { grants = append(grants, fmt.Sprintf("grant %s to %s with grant option;", on(grantOpt), grantRole(role))) }
     }
+    sort.SliceStable(groups, func(i, j int) bool { return groups[i].rank > groups[j].rank })
+    for _, g := range groups { revokes = append(revokes, g.stmts...) }
+    grants = append(grants, rv.regrants(on)...)
+    rv.reportKept()
     return revokes, grants
 }
 
@@ -6175,13 +6211,19 @@ func withoutPrivileges(liveG map[string]map[string]bool, revoked map[string]map[
 // revoked, PUBLIC is never auto-revoked. Emits column-list grant syntax:
 // grant select ("email") on table "s"."t" to "role";
 func columnGrantDiffStmts(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool, coversPublic bool) (revokes, grants []string) {
+    return columnGrantDiffStmtsBy(tableKey, col, desired, liveG, coversPublic, nil)
+}
+
+// columnGrantDiffStmtsBy is columnGrantDiffStmts with the revokes written
+// by rv (see roleGrantStmtsBy).
+func columnGrantDiffStmtsBy(tableKey, col string, desired map[string][]string, liveG map[string]map[string]bool, coversPublic bool, rv *grantRevoker) (revokes, grants []string) {
     target := "table " + pqIdent(tableKey)
     colIdent := quoteIdent(col)
-    return roleGrantStmtsCovering(desired, liveG, func(privs []string) string {
+    return roleGrantStmtsBy(desired, liveG, func(privs []string) string {
         parts := make([]string, len(privs))
         for i, p := range privs { parts[i] = p + " (" + colIdent + ")" }
         return strings.Join(parts, ", ") + " on " + target
-    }, coversPublic)
+    }, coversPublic, rv)
 }
 
 // grantRole quotes a role name, leaving the PUBLIC pseudo-role bare.
@@ -6205,6 +6247,12 @@ func objectOwner(live *Live, key, declared string) string {
 // list it, so a grant to the owner would be re-emitted on every diff. With
 // coversPublic, PUBLIC's privileges desired doesn't list are revoked too.
 func ownedGrantDiff(target string, desired map[string][]string, liveG map[string]map[string]bool, owner string, coversPublic bool) (revokes, grants []string) {
+    return ownedGrantDiffBy(target, desired, liveG, owner, coversPublic, nil)
+}
+
+// ownedGrantDiffBy is ownedGrantDiff with the revokes written by rv (see
+// roleGrantStmtsBy).
+func ownedGrantDiffBy(target string, desired map[string][]string, liveG map[string]map[string]bool, owner string, coversPublic bool, rv *grantRevoker) (revokes, grants []string) {
     if owner != "" {
         if _, ok := desired[owner]; ok {
             d := make(map[string][]string, len(desired))
@@ -6221,7 +6269,7 @@ func ownedGrantDiff(target string, desired map[string][]string, liveG map[string
             liveG = l
         }
     }
-    return roleGrantStmtsCovering(desired, liveG, func(privs []string) string { return strings.Join(privs, ", ") + " on " + target }, coversPublic)
+    return roleGrantStmtsBy(desired, liveG, func(privs []string) string { return strings.Join(privs, ", ") + " on " + target }, coversPublic, rv)
 }
 
 // isRoleKeyword reports whether role is CURRENT_USER, CURRENT_ROLE or

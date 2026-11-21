@@ -250,7 +250,7 @@ func coversPublic(mode PublicGrants, byKind bool, grants map[string][]string) bo
 func publicRevokeWarnings(revokes []string, mode PublicGrants, byKind string) []Warning {
 	var out []Warning
 	for _, s := range revokes {
-		if !strings.HasSuffix(s, " from public;") {
+		if !strings.HasSuffix(s, " from public;") && !strings.Contains(s, " from public granted by ") {
 			continue
 		}
 		why := byKind
