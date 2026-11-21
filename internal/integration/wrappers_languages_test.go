@@ -432,20 +432,27 @@ func TestIntegrationWrappersPulled(t *testing.T) {
 		}
 	}
 	y := string(res.Files[0].Content)
-	wantYAML := strings.NewReplacer("APP", app, "BOSS", boss).Replace(`foreignDataWrappers:
+	connection := ""
+	if live.ServerVersion >= 190000 {
+		connection = "    connection: \"\"\n"
+	}
+	wantYAML := strings.NewReplacer("APP", app, "BOSS", boss, "CONNECTION\n", connection).Replace(`foreignDataWrappers:
   checked:
     handler: ""
     validator: postgresql_fdw_validator
+CONNECTION
     options: {}
   dblink_fdw:
     comment: links
   legacy:
     handler: ""
     validator: ""
+CONNECTION
     options: {debug: "true", level: "03"}
   pg2:
     handler: public.postgres_fdw_handler
     validator: public.postgres_fdw_validator
+CONNECTION
     options: {}
     owner: BOSS
     grants: {APP: [usage with grant option]}
